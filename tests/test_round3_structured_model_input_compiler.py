@@ -3848,11 +3848,11 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # Frozen target v9 includes the canonical context allowance in the binding.
-        # Source content, budget decision, and token estimate remain unchanged.
-        "sha256:00c9cf10ff6ac09ddc8f45dbbd2ad71c7802eabbf6f7fe361f354743380b2437"
+        # V3 changes the estimator identity and tool JSON quote. Source and
+        # budget decisions stay the same; the target-bound identity changes.
+        "sha256:449f69c07fd3bf261d2cac32d133d4d5b8c83e7219876191bc9c3c99fd6e3354"
     )
-    assert compiled.final_estimate.total_input_tokens == 268
+    assert compiled.final_estimate.total_input_tokens == 237
 
 
 def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> None:

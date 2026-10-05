@@ -307,7 +307,7 @@ def read_fork_historical_material(
             kinds = {
                 "USER_MESSAGE": (
                     FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE if initial["scheduled_input"] is None else CanonicalInputOriginKind.SCHEDULED_TASK,
                 ),
                 "USER_STEER": (
                     FrozenProviderInputItemKind.USER,
@@ -338,7 +338,8 @@ def read_fork_historical_material(
                     "Fork retained request origin is invalid"
                 )
             kind, origin = kinds[initial["entry_kind"]]
-            if kind is not active.item_kind or origin is not active.input_origin:
+            if (kind is not active.item_kind or origin is not active.input_origin
+                or initial["scheduled_input"] != (None if active.scheduled_input is None else active.scheduled_input.to_dict())):
                 raise ConversationKernelConflict(
                     "Fork snapshot active request attribution drifted"
                 )
@@ -348,6 +349,7 @@ def read_fork_historical_material(
                 FrozenRetainedHistoricalRequest(
                     item_kind=kind,
                     input_origin=origin,
+                    scheduled_input=active.scheduled_input,
                     content=active.content,
                 ),
             )

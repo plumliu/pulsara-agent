@@ -867,6 +867,7 @@ class _RepositoryKernel:
         source_plan_workflow_id: str | None = None,
         source_plan_interaction_id: str | None = None,
         source_plan_handoff_kind: PlanHandoffKind | None = None,
+        scheduled_input=None,
     ) -> None:
         connection.execute(
             """
@@ -877,12 +878,12 @@ class _RepositoryKernel:
                 source_subagent_task_id,
                 source_inter_agent_tool_attempt_id,
                 source_plan_workflow_id, source_plan_interaction_id,
-                source_plan_handoff_kind,
+                source_plan_handoff_kind, scheduled_input,
                 inline_content, blob_id, content_digest, content_size,
                 content_media_type, content_codec
             ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s)
             """,
             (
                 entry_id,
@@ -904,6 +905,7 @@ class _RepositoryKernel:
                     if source_plan_handoff_kind is None
                     else source_plan_handoff_kind.value
                 ),
+                None if scheduled_input is None else Jsonb(scheduled_input.to_dict()),
                 *_content_columns(content),
             ),
         )

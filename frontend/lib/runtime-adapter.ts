@@ -285,6 +285,7 @@ export interface QueuedPrompt {
   commandId: string;
   sequence: number;
   status: 'pending';
+  inputOrigin?: string;
   deliveryMode: 'new-turn' | 'steer';
   targetTurnId?: string;
   content: CanonicalPromptContent;
@@ -551,7 +552,7 @@ export interface RuntimeAdapter {
     publicCode?: string;
   }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
-  createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
+  createSession(selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload): Promise<SessionSummary>;
   pickWorkspaceDirectory(initialPath: string, signal?: AbortSignal): Promise<string | null>;
   completeWorkspacePaths(sessionId: string, prefix: string, cursor: string | null, signal: AbortSignal): Promise<import('./file-reference').WorkspacePathPage>;
   forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome>;
@@ -1008,6 +1009,7 @@ interface ProtocolEntry {
     source_coverage_reason?: string; artifact_unavailability_reason?: string;
   };
   input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string };
+  scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string };
   visualizations?: Array<{
     ordinal: string | number; state: string; visualization_ref?: string;
     content_size?: string | number; failure_code?: string; failure_detail?: string;
@@ -1086,7 +1088,7 @@ export interface ProtocolCanonicalControl {
   active_turns?: ProtocolActiveTurn[];
   prompt_queue?: Array<{
     queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
-    status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string;
+    status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string; input_origin?: string;
     content?: ProtocolContent; permission?: { requested_mode?: string; effective_mode?: string };
   }>;
   prompt_queue_total_count?: string | number;
@@ -2038,12 +2040,14 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return result.path;
   }
 
-  async createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary> {
+  async createSession(selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload): Promise<SessionSummary> {
     const payload = await apiRequest<{ session: Record<string, unknown> }>('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify(selection.kind === 'quick'
+      body: JSON.stringify({ ...(selection.kind === 'quick'
         ? { workspace_kind: 'quick' }
         : { workspace_kind: 'project', workspace_path: selection.path }),
+        ...(modelCallBinding ? { model_call_binding: modelCallBinding } : {}),
+      }),
     });
     return projectSessionSummary(payload.session);
   }
@@ -4199,7 +4203,7 @@ function projectEntries(
         ? 'steer'
         : entry.entry_kind === 'PLAN_CONTINUATION'
           ? 'plan-continuation'
-          : 'prompt';
+          : entry.scheduled_input ? 'scheduled' : 'prompt';
       const promptContent = entry.entry_kind === 'PLAN_CONTINUATION'
         ? undefined
         : decodePromptContent(entry.content, { kind: 'entry', entryId: entry.entry_id });
@@ -4209,6 +4213,7 @@ function projectEntries(
         entrySequence: numeric(entry.entry_sequence),
         role: 'user',
         userKind,
+        scheduledInput: entry.scheduled_input ? { taskId: entry.scheduled_input.task_id, taskRevision: numeric(entry.scheduled_input.task_revision), dueAtUtc: entry.scheduled_input.due_at_utc } : undefined,
         time: formatTime(entry.accepted_at_utc),
         body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? projectPlanContinuation(decodeContent(entry.content))
@@ -4685,6 +4690,7 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
         commandId: item.command_id!,
         sequence: numeric(item.queue_sequence),
         status: 'pending' as const,
+        inputOrigin: item.input_origin,
         deliveryMode: deliveryMode(item.delivery_mode),
         targetTurnId: item.target_turn_id || undefined,
         content: decodePromptContent(item.content, { kind: 'queue', queueItemId }),

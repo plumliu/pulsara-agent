@@ -56,7 +56,7 @@ def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
 
     observed = {
         descriptor.event_type: descriptor
@@ -72,7 +72,7 @@ def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
 
 def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> None:
     baseline = BASELINE.read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 29
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 30
     assert set(CONVERSATION_KERNEL_RELATIONS) >= {
         "plan_workflows",
         "plan_interactions",
@@ -158,7 +158,7 @@ def test_round4_every_turn_creator_installs_frozen_permission_columns() -> None:
         'id', 'session_id', 'workspace_id', 'queue_sequence', 'command_id',
         'client_submission_id', 'delivery_mode', 'target_turn_id', 'status',
         'inline_content', 'blob_id', 'content_digest', 'content_size',
-        'content_media_type', 'content_codec',
+        'content_media_type', 'content_codec', 'input_origin',
     }
 
 

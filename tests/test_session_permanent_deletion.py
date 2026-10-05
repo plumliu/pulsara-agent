@@ -27,6 +27,7 @@ from tests.test_direct_advisory_memory import _open_direct_memory_session
 
 
 DIRECT = {
+    "scheduled_tasks",
     "context_snapshots",
     "subagent_tasks",
     "turns",
@@ -71,7 +72,7 @@ def exists(repo, sid, domain="u_local"):
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     fks = rows(
         repo,
         """SELECT c.conrelid::regclass::text AS child,

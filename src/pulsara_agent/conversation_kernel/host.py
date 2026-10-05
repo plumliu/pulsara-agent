@@ -6,6 +6,7 @@ acquires a new writer generation and rehydrates canonical rows only.
 """
 
 from __future__ import annotations
+from pulsara_agent.scheduling.contracts import ScheduledAdmission
 
 from pulsara_agent.conversation_kernel.annotations import AnnotationSourceInvalid
 
@@ -549,6 +550,7 @@ class _IngressHookReservationKey:
     canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
     requested_permission_mode: PermissionMode | None
     queue_item_id: str | None
+    scheduled: ScheduledAdmission | None = None
 
 
 @dataclass(slots=True)
@@ -632,6 +634,7 @@ class KernelHostSession:
         | None = None,
         local_mcp_configs: tuple[McpServerConfig, ...] = (),
         mcp_configs: tuple[McpServerConfig, ...] = (),
+        scheduled_tasks=None,
         control_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._model_runtime = model_runtime
@@ -697,6 +700,7 @@ class KernelHostSession:
         self._launch_permission_mode = launch_permission_mode
         self._monitor_wake = asyncio.Event()
         self._hook_diagnostics = LoggingHookDiagnosticAdapter()
+        self._scheduled_tasks = scheduled_tasks
         self._hook_context = HookContextOwner(self._hook_diagnostics)
         self._hook_root_scope = HookDispatchScopeRef(
             self,
@@ -746,6 +750,7 @@ class KernelHostSession:
                 workspace_id=workspace.workspace_key,
             ),
             terminal_monitor_wake_scheduler=wake_terminal_monitor_scheduler,
+            scheduled_tasks=scheduled_tasks,
             deadline_factory=self._deadlines,
             pulsara_home_resolution=pulsara_home_resolution,
             user_home_resolution=user_home_resolution,
@@ -2467,6 +2472,8 @@ class KernelHostSession:
         self._active_root_phase = None
         self._queue_wake.set()
         self._monitor_wake.set()
+        if self._scheduled_tasks is not None:
+            self._scheduled_tasks.wake()
 
     def _admit_plan_resolution_write_locked(
         self, *, creates_turn: bool
@@ -2673,6 +2680,37 @@ class KernelHostSession:
             raise RuntimeError("Plan continuation owner returned an invalid result")
         return result
 
+    def wake_queued_inputs(self) -> None:
+        self._queue_wake.set()
+
+    async def apply_scheduled_management(self, method: str, arguments: dict):
+        """Compose configuration/queue management with this Host's canonical writer."""
+        if method not in {"create_scheduled_task", "mutate_scheduled_task", "observe_scheduled_due", "merge_scheduled_manual"}:
+            raise ValueError("unsupported scheduled management operation")
+        async with self._lock:
+            self._require_open()
+            reservation = self._reserve_compaction_write_locked(
+                scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None)
+        cancelled: list[QueuedPromptAction] = []
+        if method == "mutate_scheduled_task":
+            arguments = {**arguments, "cancelled_candidates": cancelled}
+        try:
+            result = await self._io.run(getattr(self.repository, method),
+                guard=self._lease.guard, **arguments)
+            self._queue_wake.set()
+            return result
+        finally:
+            try:
+                # The I/O owner drains admitted physical writes even on cancellation.
+                # Confirm existing queue actions after an unknown COMMIT ACK; do not
+                # mint a receipt or repeat configuration/queue mutations.
+                for candidate in cancelled:
+                    row = await self._query_command_row(candidate.command_id)
+                    if row is not None and row["command_kind"] == candidate.command_kind and row["semantic_digest"] == candidate.semantic_digest and row["target_queue_item_id"] == candidate.target_queue_item_id:
+                        self._hook_context.retire_prompt_candidate(scope=self._hook_root_scope, prompt_candidate_id=candidate.source_queue_item_id)
+            finally:
+                await self._release_compaction_write_reservation(reservation)
+
     async def submit_prompt(
         self,
         *,
@@ -2681,6 +2719,7 @@ class KernelHostSession:
         delivery_mode: PromptDeliveryMode = PromptDeliveryMode.NEW_TURN,
         target_turn_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
+        _scheduled: ScheduledAdmission | None = None,
     ) -> KernelCommandOutcome:
         if not command_id:
             return KernelCommandOutcome(
@@ -2704,6 +2743,14 @@ class KernelHostSession:
             return KernelCommandOutcome(
                 command_id, "REJECTED", "", "INVALID_PROMPT", str(exc)
             )
+        if _scheduled is not None and (
+            delivery_mode is not PromptDeliveryMode.NEW_TURN
+            or _scheduled.session_id != self.session_id
+            or canonical_prompt.content.parts != (LLMTextPart(_scheduled.prompt),)
+            or requested_permission_mode != _scheduled.permission_mode
+            or (_scheduled.manual and _scheduled.client_command_id != command_id)
+        ):
+            return KernelCommandOutcome(command_id, "REJECTED", "", "INVALID_REQUEST", "定时输入身份无效。")
         if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
             return await self._submit_prompt_owner(
                 command_id=command_id,
@@ -2711,6 +2758,7 @@ class KernelHostSession:
                 delivery_mode=delivery_mode,
                 target_turn_id=target_turn_id,
                 requested_permission_mode=requested_permission_mode,
+                _scheduled=_scheduled,
             )
         self.workspace_gate.require_available()
         queue_item_id = _stable_id("queue-item", self.session_id, command_id)
@@ -2720,6 +2768,7 @@ class KernelHostSession:
             canonical_prompt,
             requested_permission_mode,
             queue_item_id,
+            _scheduled,
         )
         try:
             attempt, owner = await self._claim_ingress_hook_attempt(key)
@@ -2743,6 +2792,7 @@ class KernelHostSession:
                 delivery_mode=delivery_mode,
                 target_turn_id=target_turn_id,
                 requested_permission_mode=requested_permission_mode,
+                _scheduled=_scheduled,
                 hook_attempt=attempt,
             )
         except BaseException as exc:
@@ -2759,6 +2809,7 @@ class KernelHostSession:
         delivery_mode: PromptDeliveryMode = PromptDeliveryMode.NEW_TURN,
         target_turn_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
+        _scheduled: ScheduledAdmission | None = None,
         hook_attempt: _IngressHookAttempt | None = None,
     ) -> KernelCommandOutcome:
         if not isinstance(canonical_prompt, FrozenCanonicalPrompt):
@@ -2785,6 +2836,7 @@ class KernelHostSession:
             permission_snapshot_id=permission_snapshot_id,
             requested_permission_mode=effective_requested_permission,
             canonical_prompt=canonical_prompt,
+            scheduled=_scheduled,
         )
         confirmation = await self._io.run(
             self.repository.confirm_prompt_ingress,
@@ -3032,8 +3084,14 @@ class KernelHostSession:
                 deadline_monotonic=self._canonical_deadline(),
             )
             if confirmation.kind is PromptIngressConfirmationKind.FULL_COMPATIBLE:
+                existing = await self.query_command(command_id)
+                if existing is None:
+                    raise RuntimeError("compatible prompt command has no canonical outcome")
                 if hook_context_reservation is not None:
-                    hook_context_reservation.commit_prompt_bound(queue_item_id)
+                    if existing.target_id == queue_item_id:
+                        hook_context_reservation.commit_prompt_bound(queue_item_id)
+                    else:
+                        hook_context_reservation.retire()
                 self._queue_wake.set()
                 if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
                     await self._subagents.notify_root_input_activity()
@@ -3054,6 +3112,11 @@ class KernelHostSession:
                     "The command identity names a different prompt.",
                 )
             raise
+        if accepted.queue_item_id is not None and accepted.queue_item_id != queue_item_id:
+            queue_item_id = accepted.queue_item_id
+            if hook_context_reservation is not None:
+                hook_context_reservation.retire()
+                hook_context_reservation = None
         if hook_context_reservation is not None:
             hook_context_reservation.commit_prompt_bound(queue_item_id)
         self._queue_wake.set()
@@ -3151,6 +3214,7 @@ class KernelHostSession:
                     {
                         "COMMAND_CONFLICT": "该操作身份已经用于另一项操作。",
                         "PROMPT_NOT_PENDING": "这条输入已不在等待队列中。",
+                        "SCHEDULED_INPUT_CANNOT_STEER": "定时输入只能按队列顺序处理。",
                         "PROMPT_ALREADY_CONSUMED": "这条输入已开始处理。",
                         "STEER_TARGET_CLOSED": "当前任务已结束；输入仍按队列顺序处理。",
                         "PROMPT_HAS_PLAN_HANDOFF": "这条输入关联规划交接，暂时不能改为引导。",
@@ -4235,6 +4299,8 @@ class KernelHostSession:
             raise RuntimeError("queued ROOT admission has an invalid disposition")
         accepted = confirmation.accepted
         assert accepted is not None
+        if self._scheduled_tasks is not None:
+            self._scheduled_tasks.wake()
         closed: FrozenTodoCloseProjection | None = None
         finalization_failed = False
         async with self._lock:
@@ -7608,6 +7674,7 @@ class KernelHostCore:
         )
         self._bundled_skill_binding = BundledSkillDistributionBindingOwner()
         self._credential_boundary = credential_boundary or ProcessCredentialBoundary()
+        self.scheduled_tasks = None
         self.mcp_management = LocalMcpManagementService(
             model_runtime.settings, credential_boundary=self._credential_boundary
         )
@@ -7815,6 +7882,7 @@ class KernelHostCore:
         system_prompt: str | None = None,
         active_skill_names: frozenset[str] = frozenset(),
         restore_missing_workspace: bool = False,
+        scheduled: bool = False,
     ) -> KernelHostSession:
         return await self._open(
             workspace_input,
@@ -7824,6 +7892,7 @@ class KernelHostCore:
             active_skill_names=active_skill_names,
             session_start_source="resume",
             restore_missing_workspace=restore_missing_workspace,
+            scheduled=scheduled,
         )
 
     async def resume_most_recent_session(
@@ -7850,6 +7919,7 @@ class KernelHostCore:
         active_skill_names: frozenset[str],
         session_start_source: str,
         restore_missing_workspace: bool = False,
+        scheduled: bool = False,
     ) -> KernelHostSession:
         settlement = await self._admit_session_open(session_id)
         try:
@@ -7861,6 +7931,7 @@ class KernelHostCore:
                 active_skill_names=active_skill_names,
                 session_start_source=session_start_source,
                 restore_missing_workspace=restore_missing_workspace,
+            scheduled=scheduled,
             )
         finally:
             await self._settle_session_open(settlement)
@@ -7891,6 +7962,7 @@ class KernelHostCore:
         active_skill_names: frozenset[str],
         session_start_source: str,
         restore_missing_workspace: bool = False,
+        scheduled: bool = False,
     ) -> KernelHostSession:
         workspace = resolve_workspace(
             workspace_input,
@@ -7906,6 +7978,7 @@ class KernelHostCore:
             writer_lease = await io_owner.run(
                 repository.acquire_host_writer,
                 intent="RESTORE" if restore_missing_workspace else
+                       "SCHEDULED" if scheduled else
                        "NEW" if session_start_source == "startup" else "EXISTING",
                 session_id=session_id, workspace_id=workspace.workspace_key,
                 workspace_kind=workspace.workspace_kind,
@@ -8072,6 +8145,7 @@ class KernelHostCore:
                 image_validator=self._image_validator,
                 local_mcp_configs=local_mcp_configs,
                 mcp_configs=mcp_configs,
+                scheduled_tasks=self.scheduled_tasks,
             )
             await session.start_mcp()
             await self._register_prepared_session(session, capability_baseline)

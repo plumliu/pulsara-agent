@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalMemoryApi } from '../../frontend/lib/memory-api';
+import { LocalScheduledTasksApi } from '../../frontend/lib/scheduled-tasks-api';
 import { promptContentTextProjection } from '../../frontend/lib/prompt-content';
 import { RuntimeApiError } from '../../frontend/lib/runtime-adapter';
 import type {
@@ -21,6 +22,7 @@ import type {
   CanonicalPromptContent,
   CanonicalPromptImagePart,
   EditablePromptContent,
+  ModelCallBindingPayload,
 } from '../../frontend/lib/runtime-adapter';
 import type {
   AgentTask,
@@ -533,7 +535,7 @@ class FakeAdapter implements RuntimeAdapter {
   connectCalls: Array<{ sessionId: string; takeover: boolean }> = [];
   pickWorkspaceDirectory = vi.fn(async (): Promise<string | null> => '/tmp/project');
   completeWorkspacePaths = vi.fn(async () => ({ directory: '/tmp/project', items: [], next_cursor: null }));
-  createSession = vi.fn(async (selection: SessionWorkspaceSelection) => {
+  createSession = vi.fn(async (selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload) => {
     const created: SessionSummary = {
       id: 'session-2',
       title: '新会话',
@@ -541,6 +543,7 @@ class FakeAdapter implements RuntimeAdapter {
       status: 'waiting',
       updatedAt: '刚刚',
       live: true,
+      ...(modelCallBinding ? { modelCallBinding } : {}),
       workspace: selection.kind === 'quick'
         ? { id: 'quick-workspace', name: '快速开始', path: '/tmp/pulsara-quick', kind: 'quick' }
         : { id: 'project-workspace', name: 'project', path: selection.path, kind: 'project' },
@@ -2317,6 +2320,7 @@ describe('PulsaraApp', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: '归档会话' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: '归档会话' }));
     await screen.findByText('会话已归档');
+    expect(screen.getByText('可在设置中取消归档；绑定的定时任务已删除，需要重新创建。')).toBeTruthy();
     expect(adapter.archiveSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
     expect(adapter.createSession).not.toHaveBeenCalled();
     expect(adapter.lastConnection?.closed).toBe(true);
@@ -2346,7 +2350,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '删除会话…' }));
     const dialog = screen.getByRole('dialog', { name: '删除这条会话？' });
     expect(dialog.getAttribute('aria-describedby')).toBe('session-delete-description');
-    expect(dialog.textContent).toContain('会话及其记录将永久删除，无法撤销');
+    expect(dialog.textContent).toContain('会话、记录及绑定的定时任务将永久删除，无法撤销');
     const preserved = within(dialog).getByRole('list', { name: '仍会保留的内容' });
     expect(within(preserved).getAllByRole('listitem').map(item => item.textContent)).toEqual(['已保存的记忆', '其他分支会话', '工作目录']);
     fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
@@ -3343,6 +3347,33 @@ describe('PulsaraApp', () => {
     expect(within(directoryTree).queryByText('快速排查')).toBeNull();
     expect(within(directoryTree).getByRole('button', { name: '从目录中打开' })).toBeTruthy();
     expect(within(directoryTree).getByRole('button', { name: '快速开始' })).toBeTruthy();
+  });
+
+  it('creates a scheduled quick session with its selected model while retaining the current chat connection', async () => {
+    const adapter = new FakeAdapter();
+    const list = vi.spyOn(LocalScheduledTasksApi.prototype, 'list').mockResolvedValue({tasks:[], next_cursor:null});
+    const preview = vi.spyOn(LocalScheduledTasksApi.prototype, 'preview').mockResolvedValue({next_run_at:'2026-10-06T00:00:00Z', local_time_fold:null});
+    const create = vi.spyOn(LocalScheduledTasksApi.prototype, 'create').mockImplementation(async (session_id, values) => ({...values, session_id, id:'scheduled:test', revision:1, status:'ACTIVE', next_run_at:'2026-10-06T00:00:00Z'}));
+    try {
+      render(<PulsaraApp adapter={adapter} />);
+      await screen.findByRole('heading', {name:'准备发布'});
+      const connection = adapter.lastConnection;
+      const connectCount = adapter.connectCalls.length;
+      fireEvent.click(screen.getByRole('button', {name:'定时任务'}));
+      fireEvent.click(await screen.findByRole('button', {name:'新建任务'}));
+      fireEvent.change(screen.getByRole('combobox', {name:'供应商 / 模型'}), {target:{value:bootstrap.model_configurations[0].id}});
+      fireEvent.change(screen.getByRole('combobox', {name:'推理强度'}), {target:{value:JSON.stringify({kind:'effort', value:'high'})}});
+      fireEvent.change(screen.getByRole('textbox', {name:'名称'}), {target:{value:'每日检查'}});
+      fireEvent.change(screen.getByRole('textbox', {name:'提示词'}), {target:{value:'检查工作区并报告'}});
+      fireEvent.click(screen.getByRole('button', {name:'保存任务'}));
+      await waitFor(() => expect(create).toHaveBeenCalledOnce());
+      expect(adapter.createSession).toHaveBeenCalledExactlyOnceWith({kind:'quick'}, {connection_id:bootstrap.model_configurations[0].id, reasoning:{kind:'effort', value:'high'}});
+      expect(create).toHaveBeenCalledWith('session-2', expect.objectContaining({timezone:'Asia/Shanghai', permission_mode:'bypass-permissions'}));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(screen.getByRole('heading', {name:'定时任务'})).toBeTruthy();
+      expect(adapter.connectCalls).toHaveLength(connectCount);
+      expect(adapter.lastConnection).toBe(connection);
+    } finally {list.mockRestore(); preview.mockRestore(); create.mockRestore();}
   });
 
   it('creates a quick-start session before asking for the first task', async () => {

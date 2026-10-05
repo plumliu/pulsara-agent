@@ -10,7 +10,7 @@ from pulsara_agent.llm.errors import (
     ModelTargetBindingMismatch,
     ModelTransportUnavailable,
 )
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2, TokenEstimator
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3, TokenEstimator
 from pulsara_agent.llm.model_catalog import SelectableModelCatalog
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
@@ -109,7 +109,7 @@ def resolve_model_target(
         safety_margin_tokens=limits.input_safety_margin_tokens,
         input_budget_tokens=input_budget,
     )
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     canonical_endpoint = contract.canonical_endpoint_base_url
     target_payload = {
         "route_id": contract.key.route_id,

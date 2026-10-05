@@ -51,7 +51,7 @@ export function ContextUsageIndicator({ sessionId, binding, revision, isRunning,
   const percentage = known ? Math.round(used / budget * 100) : undefined;
   const needsCompaction = Boolean(known && value?.compaction_expected);
   const tone = needsCompaction ? 'danger' : known ? 'normal' : 'unknown';
-  const label = percentage === undefined ? '上下文占用' : `上下文约占 ${percentage}%${needsCompaction ? '，需要压缩' : ''}`;
+  const label = percentage === undefined ? '上下文占用' : `上下文占用 ${percentage}%${needsCompaction ? '，需要压缩' : ''}`;
 
   const inspect = () => {
     if (!expanded) setInspectionRevision(current => current + 1);
@@ -90,10 +90,9 @@ export function ContextUsageIndicator({ sessionId, binding, revision, isRunning,
     </button>
     {expanded && createPortal(<div ref={details} id={id} className="context-usage__tooltip" role="tooltip"
       data-tone={tone} style={{ visibility: 'hidden' }}>
-      <div className="context-usage__heading"><strong>上下文占用</strong><span>{percentage === undefined ? '—' : `约 ${percentage}%`}</span></div>
+      <div className="context-usage__heading"><strong>上下文占用</strong><span>{percentage === undefined ? '—' : `${percentage}%`}</span></div>
       {known && <p className="context-usage__amount">
-        <span>已用约 {used.toLocaleString('zh-CN')} tokens</span>
-        <span>可用输入额度 {budget.toLocaleString('zh-CN')} tokens</span>
+        <span>已用 {used.toLocaleString('zh-CN')} / {budget.toLocaleString('zh-CN')}</span>
       </p>}
     </div>, document.body)}
   </div>;

@@ -1027,7 +1027,14 @@ def test_file_tool_descriptions_explain_line_locators_without_changing_edit_sema
     assert "Do not copy the display prefix" in combined
     assert "1|2|预算=360" in combined
     assert "replace_file" in edit_description
-    assert "does not require the full file" in edit_description
+    assert "not display of the full file" in edit_description
+
+    operations_description = edit_descriptor.input_schema["properties"]["operations"][
+        "description"
+    ]
+    assert "without read_file's N| display locators unless intended content" in operations_description
+    assert "displayed 1|2|预算=360 means file text 2|预算=360" in operations_description
+    assert "without the first 1|" in operations_description
 
     variants = edit_descriptor.input_schema["properties"]["operations"]["items"][
         "oneOf"
@@ -1038,9 +1045,9 @@ def test_file_tool_descriptions_explain_line_locators_without_changing_edit_sema
         if item["properties"]["kind"].get("const") == "replace_lines"
     )
     logical_lines = replace_lines["properties"]["lines"]
-    assert "display locator" in logical_lines["description"]
-    assert "Do not copy" in logical_lines["items"]["description"]
-    assert "1|2|预算=360" in logical_lines["description"]
+    assert "Complete replacement/insertion lines" in logical_lines["description"]
+    assert "an empty string is a blank line" in logical_lines["description"]
+    assert "without CR, LF or NUL" in logical_lines["items"]["description"]
 
     replace_file = next(
         item
@@ -1048,9 +1055,9 @@ def test_file_tool_descriptions_explain_line_locators_without_changing_edit_sema
         if item["properties"]["kind"].get("const") == "replace_file"
     )
     replace_content = replace_file["properties"]["content"]["description"]
-    assert "complete original target text" in replace_content
-    assert "display locator" in replace_content
-    assert "does not require the full file to have been displayed" in replace_content
+    assert "Complete UTF-8 file text" in replace_content
+    assert "only replace_file can replace or empty the entire file" in replace_content
+    assert "replace_file must be the sole operation" in edit_description
 
 
 def test_filesystem_state_has_no_timestamp_or_revision_registry() -> None:

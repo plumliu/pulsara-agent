@@ -104,8 +104,9 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
                 _seed_completed_history,
             )
 
+            # Preserve handover pressure under the v3 ASCII /4 wire estimate.
             await _seed_completed_history(
-                session, segments=3, repetitions=50 if tier == 1 else 3500
+                session, segments=3, repetitions=50 if tier == 1 else 7000
             )
             await session.run_turn(
                 PromptContent.text("start"),
@@ -325,7 +326,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
                 if manual or final_reject
                 else 50
                 if tier == 1
-                else 3500,
+                else 7000,
             )
             if final_reject:
                 from pulsara_agent.conversation_kernel.provider_dispatch import (

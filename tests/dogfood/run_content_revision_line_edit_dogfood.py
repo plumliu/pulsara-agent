@@ -295,9 +295,7 @@ async def _run(model_id: str) -> dict[str, object]:
                 }
             finally:
                 if session is not None:
-                    await core.close_session(
-                        session.host_session_id, close_conversation=True
-                    )
+                    await core.close_session(session.host_session_id)
                 await core.shutdown()
     finally:
         _drop_database(saved, database_name)

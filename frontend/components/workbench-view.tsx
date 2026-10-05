@@ -1027,7 +1027,7 @@ function UserMessage({
   return (
     <article className="user-turn">
       <header className="user-heading">
-        <strong>{label}</strong>
+        <strong>{message.userKind === 'scheduled' ? '定时任务' : label}</strong>
         <span className="user-avatar"><UserRound size={14} /></span>
       </header>
       {content
@@ -1821,11 +1821,12 @@ export function WorkbenchView({
         return <AnimatedQueueItem key={item.commandId}><article
           data-queue-item-id={queued?.queueItemId} data-command-id={item.commandId} aria-busy={busy}>
           <CornerDownRight size={13} aria-hidden="true" />
+          {queued?.inputOrigin === 'SCHEDULED_TASK' && <small>定时任务</small>}
           {local?.contentUnavailable || !item.content
             ? <p>正文未能在队列终止前完成读取。</p>
             : <PromptContentView content={item.content} variant="queue" onReadImage={onReadPromptImage} />}
           {!isObserver && <div className="composer-queue__actions">
-            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || busy || editingQueue || !canControl || !isRunning}
+            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || !isRunning}
               onClick={() => { if (queued) void queueAction(queued, 'send'); }}><CornerDownRight size={13} />发送</button>
             <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || busy || editingQueue || !canControl}
               onClick={() => { if (queued) void queueAction(queued, 'edit'); }}><Pencil size={13} />编辑</button>

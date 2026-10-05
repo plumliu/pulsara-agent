@@ -362,9 +362,12 @@ def _assert_typed_budget_rejection(coordinator, decision):
 def test_actual_wire_degrades_large_skill_catalog_and_preserves_mandatory_input(
     api, cold, mixed
 ):
+    # Keep semantic input below the budget and escaped final-wire JSON above it.
+    budget = 78_000 if mixed else 64_000
     coordinator, candidate, view, image = _prepare_case(
         api,
         _skill_source(),
+        budget=budget,
         cold=cold,
         mixed=mixed,
         initial_catalog=None if cold else _skill_source(1),
@@ -377,8 +380,8 @@ def test_actual_wire_degrades_large_skill_catalog_and_preserves_mandatory_input(
         semantic_input=original,
         replay_hydration=None,
     )
-    assert original.final_estimate.total_input_tokens < 100_000
-    assert raw.quote.raw_final_wire_estimated_input_tokens > 100_000
+    assert original.final_estimate.total_input_tokens < budget
+    assert raw.quote.raw_final_wire_estimated_input_tokens > budget
     raw.discard_materialization_to_quote()
 
     decision = _measure(coordinator, candidate)
@@ -392,7 +395,7 @@ def test_actual_wire_degrades_large_skill_catalog_and_preserves_mandatory_input(
     assert selected.sources is candidate.sources
     assert selected.canonical_read is candidate.canonical_read
     assert selected.planning is candidate.planning
-    assert decision.quote.raw_final_wire_estimated_input_tokens <= 100_000
+    assert decision.quote.raw_final_wire_estimated_input_tokens <= budget
     if view is not None:
         assert selected.semantic_input.system_prompt == view.system_prompt
         assert selected.semantic_input.tools == view.tools
@@ -446,7 +449,7 @@ def test_catalog_that_fits_actual_wire_keeps_full_and_original_candidate(api):
 @pytest.mark.parametrize("api", _WIRE_APIS)
 @pytest.mark.parametrize(
     "budget,expected",
-    ((12_000, ContextRenderMode.COMPACT), (4_000, ContextRenderMode.REF_ONLY)),
+    ((6_000, ContextRenderMode.COMPACT), (2_000, ContextRenderMode.REF_ONLY)),
 )
 def test_mcp_catalog_follows_existing_full_compact_reference_variants(
     api, budget, expected
@@ -464,12 +467,13 @@ def test_mcp_catalog_follows_existing_full_compact_reference_variants(
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
 def test_smallest_catalog_cannot_hide_mandatory_final_wire_exhaustion(api):
+    # Newlines fit semantic text but expand when serialized into final-wire JSON.
     coordinator, candidate, _, _ = _prepare_case(
         api,
         _skill_source(),
         cold=True,
         budget=100_000,
-        user_text="u" * 220_000,
+        user_text="\n" * 220_000,
     )
 
     decision = _measure(coordinator, candidate)
@@ -484,7 +488,7 @@ def test_smallest_catalog_cannot_hide_mandatory_final_wire_exhaustion(api):
 
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
-@pytest.mark.parametrize("user_bytes,admitted", ((24_000, True), (40_000, False)))
+@pytest.mark.parametrize("user_bytes,admitted", ((28_000, True), (40_000, False)))
 def test_mcp_remeasures_each_legal_variant_and_rejects_if_reference_cannot_fit(
     api, user_bytes, admitted
 ):
@@ -493,7 +497,7 @@ def test_mcp_remeasures_each_legal_variant_and_rejects_if_reference_cannot_fit(
         _mcp_source(),
         cold=True,
         budget=16_000,
-        user_text="u" * user_bytes,
+        user_text="\n" * user_bytes,
     )
     observed_modes = []
 
@@ -631,6 +635,7 @@ def test_catalog_selection_failure_consumes_real_measurement_exactly_once(
         "openai_chat_completions",
         _skill_source(),
         cold=cold,
+        budget=64_000,
     )
     measurements = []
     discard_counts = []

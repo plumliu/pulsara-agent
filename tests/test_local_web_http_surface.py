@@ -133,6 +133,8 @@ class _Sessions:
         return {"candidates": []}
 
     def __init__(self) -> None:
+        self.create_model_bindings: list[object] = []
+        self.create_model_error: Exception | None = None
         self.task_page_calls: list[tuple[str, int, str | None, str | None]] = []
         self.task_group_calls: list[tuple[str, int, str | None]] = []
         self.task_activity_calls: list[tuple[str, str, int, str | None]] = []
@@ -159,10 +161,13 @@ class _Sessions:
         ]
 
     async def create_session(
-        self, *, workspace_kind: str, workspace_path: str | None
+        self, *, workspace_kind: str, workspace_path: str | None, model_call_binding=None
     ) -> SimpleNamespace:
         assert workspace_kind == "quick"
         assert workspace_path is None
+        self.create_model_bindings.append(model_call_binding)
+        if self.create_model_error is not None:
+            raise self.create_model_error
         return SimpleNamespace(session_id="session-1")
 
     async def list_session_tasks(
@@ -430,6 +435,57 @@ class _Bridge:
             ("read-background-process-log", connection_id, body)
         )
         return {"background_process_log": {"output": "exact output"}}
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_subagent_capacity_preserves_body_after_admission_read(
+    tmp_path: Path, monkeypatch, read_only: bool,
+) -> None:
+    async def exercise() -> None:
+        (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
+        bridge = _Bridge()
+        body = {
+            "expected_session_id": "session:capacity",
+            "expected_host_session_id": "host:capacity",
+            "read_only": read_only,
+            "target": 0 if read_only else 4,
+        }
+        capacity = {"subagent_capacity": {"target": 4, "occupied": 0}}
+
+        async def read_capacity(connection_id, received):
+            if "target" not in received:
+                raise ValueError("missing capacity target")
+            return capacity
+
+        operation = AsyncMock(side_effect=read_capacity)
+        admission = AsyncMock()
+        monkeypatch.setattr(bridge, "subagent_capacity", operation, raising=False)
+        monkeypatch.setattr(bridge, "require_chat_controller", admission)
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(LocalBrowserBridge, bridge), static_root=tmp_path,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+                async with client.post(
+                    f"{server.origin}/api/connections/connection-1/subagent-capacity",
+                    json=body,
+                    headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+                ) as response:
+                    assert response.status == 200, await response.text()
+                    assert await response.json() == capacity
+            operation.assert_awaited_once_with("connection-1", body)
+            if read_only:
+                admission.assert_not_awaited()
+            else:
+                admission.assert_awaited_once_with("connection-1", 1)
+        finally:
+            await server.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_u2_http_prompt_body_enforces_actual_eight_mib_transport_boundary(
@@ -1229,6 +1285,42 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             ) as response:
                 assert response.status == 201
                 assert (await response.json())["session"]["id"] == "session-1"
+
+            initial_binding = {
+                "connection_id": "model-connection:00000000000000000000000000000000",
+                "reasoning": {"kind": "effort", "value": "high"},
+            }
+            async with client.post(
+                f"{server.origin}/api/sessions",
+                json={"workspace_kind": "quick", "model_call_binding": initial_binding},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 201
+            from pulsara_agent.llm.model_connections import model_call_binding_to_dict
+
+            assert model_call_binding_to_dict(sessions.create_model_bindings[-1]) == initial_binding
+            create_count = len(sessions.create_model_bindings)
+            for invalid_binding in (None, {"connection_id": "untyped-model"}, {**initial_binding, "extra": True}):
+                async with client.post(
+                    f"{server.origin}/api/sessions",
+                    json={"workspace_kind": "quick", "model_call_binding": invalid_binding},
+                    headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+                ) as response:
+                    assert response.status == 400
+                    assert (await response.json())["error"]["code"] == "MODEL_BINDING_INVALID"
+            assert len(sessions.create_model_bindings) == create_count
+
+            sessions.create_model_error = session_controller_module.SessionControlRejected(
+                "MODEL_BINDING_INVALID", "model connection metadata is unavailable"
+            )
+            async with client.post(
+                f"{server.origin}/api/sessions",
+                json={"workspace_kind": "quick", "model_call_binding": initial_binding},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 400
+                assert (await response.json())["error"]["code"] == "MODEL_BINDING_INVALID"
+            sessions.create_model_error = None
 
             async with client.post(
                 f"{server.origin}/api/sessions/session-1/connections",

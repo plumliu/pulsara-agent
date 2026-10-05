@@ -22,7 +22,7 @@ from pulsara_agent.conversation_kernel.runner import (
 )
 from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
 from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
@@ -76,7 +76,7 @@ def _wire(message, api):
 
 def _charge(messages, api):
     items = tuple(item for message in messages for item in _wire(message, api))
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     return len(canonical_json_bytes(items)), sum(
         estimator.estimate_wire_json_component(item) for item in items
     )
@@ -266,12 +266,13 @@ def _results(body, *, provenance=(), full=False, plan=False):
 def test_actual_wire_feedback_degrades_only_uninstalled_ordinary_results(
     api, cold, provenance
 ):
+    # JSON uses /4 in v3; keep the existing escaped body above admission.
     items = _results("\\" * 8000, provenance=provenance)
     coordinator, candidate, view, _ = _prepare_case(
         api,
         _skill_source(1),
         cold=cold,
-        budget=22000 if provenance else 16000,
+        budget=11000 if provenance else 8000,
         tool_items=items,
         tool_names=("read_file", "artifact_read"),
     )
@@ -332,7 +333,7 @@ def test_final_wire_feedback_excludes_full_and_plan_results(api, full, plan):
         api,
         _skill_source(1),
         cold=True,
-        budget=16000,
+        budget=8000,
         tool_items=items,
         tool_names=("read_file", "artifact_read"),
     )
@@ -443,7 +444,7 @@ def test_pre_effect_full_and_plan_keep_existing_carriers(monkeypatch, api, name,
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("budget,admitted", ((64000, True), (32000, False)))
+@pytest.mark.parametrize("budget,admitted", ((32000, True), (16000, False)))
 def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
     stage2_migrated_postgres_database, budget, admitted
 ):
@@ -577,7 +578,7 @@ def test_wire_floor_scan_deadline_releases_measurement_and_runs_off_loop(monkeyp
         _WIRE_APIS[0],
         _skill_source(1),
         cold=True,
-        budget=16000,
+        budget=8000,
         tool_items=_results("\\" * 8000),
         tool_names=("read_file", "artifact_read"),
     )

@@ -18,7 +18,7 @@ from pulsara_agent.hooks.contracts import (
     HookScopeKind,
     HookSecretScrubber,
 )
-from pulsara_agent.llm.estimator import TEXT_CHARS_PER_TOKEN
+from pulsara_agent.llm.estimator import TEXT_UTF8_BYTES_PER_TOKEN
 from pulsara_agent.model_input.contracts import ModelInputTokenEstimator
 
 
@@ -519,9 +519,9 @@ def maximum_hook_context_provider_body_bytes(
     """Bound Hook context that can be accepted before the next provider call.
 
     Each selected command can contribute at most one text value per event
-    occurrence.  The v2 estimator admits at most four code points per configured
-    context token; C0 code points maximize both layers of JSON escaping.  Stop
-    continuations use the existing default limit regardless of the definition's
+    occurrence. The v3 estimator admits at most four UTF-8 bytes per configured
+    context token. Stop continuations use the existing default limit regardless
+    of the definition's
     ignored ``additionalContextLimit``.  The Hook owner still applies its one
     aggregate rendered-body bound after dropping oldest complete contributions.
     """
@@ -555,7 +555,7 @@ def maximum_hook_context_provider_body_bytes(
                 len(compact_wrapper.encode("utf-8")),
             )
             total += occurrence_count * (
-                wrapper_bytes + threshold * TEXT_CHARS_PER_TOKEN
+                wrapper_bytes + threshold * TEXT_UTF8_BYTES_PER_TOKEN
             )
             if total >= MAXIMUM_HOOK_CONTEXT_VARIANT_BYTES:
                 return MAXIMUM_HOOK_CONTEXT_VARIANT_BYTES

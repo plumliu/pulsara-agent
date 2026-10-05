@@ -115,122 +115,128 @@ class _PromptOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            existing = connection.execute(
-                """SELECT command_kind, request_schema_version, semantic_digest,
-                          target_queue_item_id
-                   FROM pulsara_v3.session_commands
-                   WHERE session_id=%s AND command_id=%s""",
-                (guard.session_id, candidate.command_id),
-            ).fetchone()
-            if existing is not None:
-                if (
-                    existing["command_kind"] != candidate.command_kind
-                    or existing["request_schema_version"] != "queued_prompt_action.v1"
-                    or existing["semantic_digest"] != candidate.semantic_digest
-                    or existing["target_queue_item_id"] != candidate.target_queue_item_id
-                ):
-                    raise QueuedPromptActionRejected("COMMAND_CONFLICT")
-                return
-            source = connection.execute(
-                """SELECT * FROM pulsara_v3.prompt_queue_items
-                   WHERE session_id=%s AND id=%s FOR UPDATE""",
-                (guard.session_id, candidate.source_queue_item_id),
-            ).fetchone()
-            if source is not None and source["status"] == "CONSUMED":
-                raise QueuedPromptActionRejected("PROMPT_ALREADY_CONSUMED")
+            return self._apply_queued_prompt_action_in_connection(connection, guard, candidate=candidate, occurred_at=occurred_at, actor_id=actor_id)
+
+    def _apply_queued_prompt_action_in_connection(self, connection, guard, *, candidate, occurred_at, actor_id):
+        existing = connection.execute(
+            """SELECT command_kind, request_schema_version, semantic_digest,
+                      target_queue_item_id
+               FROM pulsara_v3.session_commands
+               WHERE session_id=%s AND command_id=%s""",
+            (candidate.session_id, candidate.command_id),
+        ).fetchone()
+        if existing is not None:
             if (
-                source is None or source["status"] != "PENDING"
-                or source["delivery_mode"] != "NEW_TURN"
+                existing["command_kind"] != candidate.command_kind
+                or existing["request_schema_version"] != "queued_prompt_action.v1"
+                or existing["semantic_digest"] != candidate.semantic_digest
+                or existing["target_queue_item_id"] != candidate.target_queue_item_id
             ):
-                raise QueuedPromptActionRejected("PROMPT_NOT_PENDING")
-            replacement_id = candidate.replacement_queue_item_id
-            if replacement_id is not None:
-                validate_canonical_prompt_owner_metadata(
-                    connection,
-                    row=source,
-                    queue_item_id=candidate.source_queue_item_id,
-                )
-                target = connection.execute(
-                    """SELECT conversation_scope_kind, status FROM pulsara_v3.turns
-                       WHERE session_id=%s AND id=%s FOR UPDATE""",
-                    (guard.session_id, candidate.target_turn_id),
-                ).fetchone()
-                if target is None or target["conversation_scope_kind"] != "ROOT" or target["status"] != "RUNNING":
-                    raise QueuedPromptActionRejected("STEER_TARGET_CLOSED")
-                if any(source[key] is not None for key in (
-                    "pending_plan_handoff_workflow_id",
-                    "pending_plan_handoff_interaction_id", "pending_plan_handoff_kind",
-                )):
-                    raise QueuedPromptActionRejected("PROMPT_HAS_PLAN_HANDOFF")
-            connection.execute(
-                """INSERT INTO pulsara_v3.session_commands (
-                       session_id, command_id, command_kind, request_schema_version,
-                       semantic_digest, target_kind, target_queue_item_id
-                   ) VALUES (%s, %s, %s, 'queued_prompt_action.v1', %s, 'QUEUE_ITEM', %s)""",
-                (guard.session_id, candidate.command_id, candidate.command_kind,
-                 candidate.semantic_digest, candidate.target_queue_item_id),
+                raise QueuedPromptActionRejected("COMMAND_CONFLICT")
+            return
+        source = connection.execute(
+            """SELECT * FROM pulsara_v3.prompt_queue_items
+               WHERE session_id=%s AND id=%s FOR UPDATE""",
+            (candidate.session_id, candidate.source_queue_item_id),
+        ).fetchone()
+        if source is not None and source["status"] == "CONSUMED":
+            raise QueuedPromptActionRejected("PROMPT_ALREADY_CONSUMED")
+        if (
+            source is None or source["status"] != "PENDING"
+            or source["delivery_mode"] != "NEW_TURN"
+        ):
+            raise QueuedPromptActionRejected("PROMPT_NOT_PENDING")
+        replacement_id = candidate.replacement_queue_item_id
+        if replacement_id is not None and source['input_origin'] == 'SCHEDULED_TASK':
+            raise QueuedPromptActionRejected('SCHEDULED_INPUT_CANNOT_STEER')
+        if replacement_id is not None:
+            validate_canonical_prompt_owner_metadata(
+                connection,
+                row=source,
+                queue_item_id=candidate.source_queue_item_id,
             )
-            reason = "USER_REDIRECTED_TO_STEER" if replacement_id else "USER_CANCELLED"
-            changed = connection.execute(
-                """UPDATE pulsara_v3.prompt_queue_items
-                   SET status='CANCELLED', terminal_reason=%s, terminal_at=clock_timestamp()
-                   WHERE session_id=%s AND id=%s AND status='PENDING'
-                   RETURNING id""",
-                (reason, guard.session_id, candidate.source_queue_item_id),
+            target = connection.execute(
+                """SELECT conversation_scope_kind, status FROM pulsara_v3.turns
+                   WHERE session_id=%s AND id=%s FOR UPDATE""",
+                (candidate.session_id, candidate.target_turn_id),
             ).fetchone()
-            if changed is None:
-                raise ConversationKernelConflict("queue action lost its source CAS")
-            payload = {"reason": reason}
-            if replacement_id is not None:
-                payload["redirected_to_queue_item_id"] = replacement_id
-            drafts = [self._event(
-                CommittedEventType.PROMPT_CANCELLED, SubjectSlot.QUEUE_ITEM,
-                candidate.source_queue_item_id, occurred_at=occurred_at,
-                actor_kind="human", actor_id=actor_id, payload=payload,
-            )]
-            if replacement_id is not None:
-                sequence = connection.execute(
-                    """UPDATE pulsara_v3.sessions
-                       SET latest_prompt_queue_sequence=latest_prompt_queue_sequence+1,
-                           updated_at=clock_timestamp()
-                       WHERE id=%s RETURNING latest_prompt_queue_sequence""",
-                    (guard.session_id,),
-                ).fetchone()["latest_prompt_queue_sequence"]
-                # Omitted NEW_TURN binding, permission and handoff columns are
-                # NULL. The target's existing permission owner governs steer.
-                connection.execute(
-                    """INSERT INTO pulsara_v3.prompt_queue_items (
-                           id, session_id, workspace_id, queue_sequence, command_id,
-                           client_submission_id, delivery_mode, target_turn_id, status,
-                           inline_content, blob_id, content_digest, content_size,
-                           content_media_type, content_codec
-                       ) SELECT %s, session_id, workspace_id, %s, %s, %s,
-                                'STEER_ACTIVE_TURN', %s, 'PENDING',
-                                inline_content, blob_id, content_digest, content_size,
-                                content_media_type, content_codec
-                         FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s""",
-                    (replacement_id, sequence, candidate.command_id, candidate.command_id,
-                     candidate.target_turn_id, guard.session_id, candidate.source_queue_item_id),
-                )
-                copy_canonical_prompt_refs(
-                    connection,
-                    session_id=guard.session_id,
-                    workspace_id=str(source["workspace_id"]),
-                    source_queue_item_id=candidate.source_queue_item_id,
-                    target_queue_item_id=replacement_id,
-                )
-                drafts.append(self._event(
-                    CommittedEventType.PROMPT_QUEUED, SubjectSlot.QUEUE_ITEM,
-                    replacement_id, occurred_at=occurred_at, actor_kind="human",
-                    actor_id=actor_id, payload={
-                        "queue_sequence": int(sequence), "delivery_mode": "STEER_ACTIVE_TURN",
-                        "redirected_from_queue_item_id": candidate.source_queue_item_id,
-                    },
-                ))
-            self._append_events(
-                connection, guard, workspace_id=str(source["workspace_id"]),
-                drafts=tuple(drafts),
+            if target is None or target["conversation_scope_kind"] != "ROOT" or target["status"] != "RUNNING":
+                raise QueuedPromptActionRejected("STEER_TARGET_CLOSED")
+            if any(source[key] is not None for key in (
+                "pending_plan_handoff_workflow_id",
+                "pending_plan_handoff_interaction_id", "pending_plan_handoff_kind",
+            )):
+                raise QueuedPromptActionRejected("PROMPT_HAS_PLAN_HANDOFF")
+        connection.execute(
+            """INSERT INTO pulsara_v3.session_commands (
+                   session_id, command_id, command_kind, request_schema_version,
+                   semantic_digest, target_kind, target_queue_item_id
+               ) VALUES (%s, %s, %s, 'queued_prompt_action.v1', %s, 'QUEUE_ITEM', %s)""",
+            (candidate.session_id, candidate.command_id, candidate.command_kind,
+             candidate.semantic_digest, candidate.target_queue_item_id),
+        )
+        reason = "USER_REDIRECTED_TO_STEER" if replacement_id else "USER_CANCELLED"
+        changed = connection.execute(
+            """UPDATE pulsara_v3.prompt_queue_items
+               SET status='CANCELLED', terminal_reason=%s, terminal_at=clock_timestamp()
+               WHERE session_id=%s AND id=%s AND status='PENDING'
+               RETURNING id""",
+            (reason, candidate.session_id, candidate.source_queue_item_id),
+        ).fetchone()
+        if changed is None:
+            raise ConversationKernelConflict("queue action lost its source CAS")
+        payload = {"reason": reason}
+        if replacement_id is not None:
+            payload["redirected_to_queue_item_id"] = replacement_id
+        drafts = [self._event(
+            CommittedEventType.PROMPT_CANCELLED, SubjectSlot.QUEUE_ITEM,
+            candidate.source_queue_item_id, occurred_at=occurred_at,
+            actor_kind="human", actor_id=actor_id, payload=payload,
+        )]
+        if replacement_id is not None:
+            sequence = connection.execute(
+                """UPDATE pulsara_v3.sessions
+                   SET latest_prompt_queue_sequence=latest_prompt_queue_sequence+1,
+                       updated_at=clock_timestamp()
+                   WHERE id=%s RETURNING latest_prompt_queue_sequence""",
+                (candidate.session_id,),
+            ).fetchone()["latest_prompt_queue_sequence"]
+            # Omitted NEW_TURN binding, permission and handoff columns are
+            # NULL. The target's existing permission owner governs steer.
+            connection.execute(
+                """INSERT INTO pulsara_v3.prompt_queue_items (
+                       id, session_id, workspace_id, queue_sequence, command_id,
+                       client_submission_id, delivery_mode, input_origin, target_turn_id, status,
+                       inline_content, blob_id, content_digest, content_size,
+                       content_media_type, content_codec
+                   ) SELECT %s, session_id, workspace_id, %s, %s, %s,
+                            'STEER_ACTIVE_TURN', 'HUMAN_STEER', %s, 'PENDING',
+                            inline_content, blob_id, content_digest, content_size,
+                            content_media_type, content_codec
+                     FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s""",
+                (replacement_id, sequence, candidate.command_id, candidate.command_id,
+                 candidate.target_turn_id, candidate.session_id, candidate.source_queue_item_id),
             )
+            copy_canonical_prompt_refs(
+                connection,
+                session_id=candidate.session_id,
+                workspace_id=str(source["workspace_id"]),
+                source_queue_item_id=candidate.source_queue_item_id,
+                target_queue_item_id=replacement_id,
+            )
+            drafts.append(self._event(
+                CommittedEventType.PROMPT_QUEUED, SubjectSlot.QUEUE_ITEM,
+                replacement_id, occurred_at=occurred_at, actor_kind="human",
+                actor_id=actor_id, payload={
+                    "queue_sequence": int(sequence), "delivery_mode": "STEER_ACTIVE_TURN",
+                    "redirected_from_queue_item_id": candidate.source_queue_item_id,
+                },
+            ))
+        self._append_queue_management_events(
+            connection, guard, session_id=candidate.session_id, workspace_id=str(source["workspace_id"]),
+            drafts=tuple(drafts),
+        )
+
 
     def interrupt_prepared_steer_plan_conflict(
         self,
@@ -373,6 +379,8 @@ class _PromptOperations:
                 """,
                 (candidate.session_id, candidate.command_id),
             ).fetchone()
+            if candidate.scheduled is not None and candidate.scheduled.manual and command is not None:
+                return self._confirm_manual_ingress_in_connection(connection, candidate, command)
             queue = connection.execute(
                 """
                 SELECT session_id, workspace_id, queue_sequence,
@@ -380,7 +388,7 @@ class _PromptOperations:
                        delivery_mode, target_turn_id, permission_snapshot_id,
                        requested_permission_mode, model_call_binding, status,
                        inline_content, blob_id, content_digest, content_size,
-                       content_media_type, content_codec
+                       content_media_type, content_codec, input_origin, scheduled_task_id, scheduled_task_revision, scheduled_due_at
                 FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND id = %s
                 """,
@@ -412,8 +420,8 @@ class _PromptOperations:
         compatible = (
             command is not None
             and queue is not None
-            and str(command["command_kind"]) == "QUEUE_PROMPT"
-            and str(command["request_schema_version"]) == "queue_prompt.v3"
+            and str(command["command_kind"]) == candidate.command_kind
+            and str(command["request_schema_version"]) == candidate.schema_version
             and str(command["semantic_digest"]) == expected_semantic_digest
             and str(command["target_queue_item_id"]) == candidate.queue_item_id
             and str(queue["command_id"]) == candidate.command_id
@@ -442,6 +450,7 @@ class _PromptOperations:
                 else candidate.requested_permission_mode.value
             )
             and content_exact
+            and self._scheduled_queue_matches(queue, candidate)
             and (
                 (candidate.delivery_mode is PromptDeliveryMode.NEW_TURN)
                 == (observed_binding is not None)
@@ -479,290 +488,316 @@ class _PromptOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            session = self._require_writer(connection, guard, lock=False)
-            existing = connection.execute(
-                """
-                SELECT command_kind, request_schema_version, semantic_digest,
-                       target_queue_item_id
-                FROM pulsara_v3.session_commands
-                WHERE session_id = %s AND command_id = %s
-                """,
-                (guard.session_id, candidate.command_id),
-            ).fetchone()
-            if existing is not None:
-                row = connection.execute(
-                    """
-                    SELECT * FROM pulsara_v3.prompt_queue_items
-                    WHERE session_id = %s AND id = %s
-                    """,
-                    (guard.session_id, candidate.queue_item_id),
-                ).fetchone()
-                try:
-                    frozen_binding = (
-                        None
-                        if row is None
-                        else model_call_binding_from_dict(row["model_call_binding"])
-                    )
-                    digest = prompt_ingress_semantic_digest(candidate, frozen_binding)
-                except (TypeError, ValueError):
-                    digest = ""
-                    frozen_binding = None
-                if (
-                    existing["command_kind"] != "QUEUE_PROMPT"
-                    or existing["request_schema_version"] != "queue_prompt.v3"
-                    or existing["semantic_digest"] != digest
-                    or existing["target_queue_item_id"] != candidate.queue_item_id
-                ):
-                    raise PromptIngressRejected(
-                        PromptIngressWriteRejection.COMMAND_CONFLICT
-                    )
-                if (
-                    row is None
-                    or str(row["command_id"]) != candidate.command_id
-                    or str(row["client_submission_id"])
-                    != candidate.client_submission_id
-                    or str(row["delivery_mode"]) != candidate.delivery_mode.value
-                    or (
-                        None
-                        if row["target_turn_id"] is None
-                        else str(row["target_turn_id"])
-                    )
-                    != candidate.target_turn_id
-                    or (
-                        None
-                        if row["permission_snapshot_id"] is None
-                        else str(row["permission_snapshot_id"])
-                    )
-                    != candidate.permission_snapshot_id
-                    or (
-                        None
-                        if row["requested_permission_mode"] is None
-                        else str(row["requested_permission_mode"])
-                    )
-                    != (
-                        None
-                        if candidate.requested_permission_mode is None
-                        else candidate.requested_permission_mode.value
-                    )
-                    or not canonical_prompt_owner_is_exact(
-                        connection,
-                        row=row,
-                        expected=candidate.canonical_prompt,
-                        queue_item_id=candidate.queue_item_id,
-                    )
-                    or (new_turn != (frozen_binding is not None))
-                ):
-                    raise PromptIngressRejected(
-                        PromptIngressWriteRejection.COMMAND_CONFLICT
-                    )
-                return PromptIngressAccepted(int(row["queue_sequence"]), frozen_binding)
+            return self._enqueue_prompt_in_connection(connection, guard, candidate=candidate, model_resolution_snapshot=model_resolution_snapshot, occurred_at=occurred_at, actor_id=actor_id, _expected_permission_snapshot=_expected_permission_snapshot)
 
-            model_call_binding: ModelCallBinding | None = None
-            reasoning_preference_reset = False
-            if new_turn:
-                model_call_binding = model_call_binding_from_dict(
-                    session["model_call_binding"]
-                )
-                if model_call_binding is None:
-                    raise PromptIngressRejected(
-                        PromptIngressWriteRejection.MODEL_CONFIGURATION_REQUIRED
-                    )
-                assert model_resolution_snapshot is not None
-                try:
-                    (
-                        model_call_binding,
-                        _resolved,
-                        reasoning_preference_reset,
-                    ) = model_resolution_snapshot.reconcile(model_call_binding)
-                except (KeyError, ValueError):
-                    raise PromptIngressRejected(
-                        PromptIngressWriteRejection.MODEL_CONFIGURATION_UNAVAILABLE
-                    ) from None
-                if reasoning_preference_reset:
-                    connection.execute(
-                        """
-                        UPDATE pulsara_v3.sessions
-                        SET model_call_binding=%s, updated_at=clock_timestamp()
-                        WHERE id=%s
-                        """,
-                        (
-                            Jsonb(model_call_binding_to_dict(model_call_binding)),
-                            guard.session_id,
-                        ),
-                    )
-            digest = prompt_ingress_semantic_digest(candidate, model_call_binding)
+    def _enqueue_prompt_in_connection(self, connection, guard, *, candidate, model_resolution_snapshot, occurred_at, actor_id, _expected_permission_snapshot):
+        new_turn = candidate.delivery_mode is PromptDeliveryMode.NEW_TURN
+        session = self._require_writer(connection, guard, lock=False)
+        existing = connection.execute(
+            """
+            SELECT command_kind, request_schema_version, semantic_digest,
+                   target_queue_item_id
+            FROM pulsara_v3.session_commands
+            WHERE session_id = %s AND command_id = %s
+            """,
+            (guard.session_id, candidate.command_id),
+        ).fetchone()
+        if existing is not None:
+            if candidate.scheduled is not None and candidate.scheduled.manual:
+                confirmed = self._confirm_manual_ingress_in_connection(connection, candidate, existing)
+                if confirmed.kind is not PromptIngressConfirmationKind.FULL_COMPATIBLE:
+                    raise PromptIngressRejected(PromptIngressWriteRejection.COMMAND_CONFLICT)
+                target = connection.execute("SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s", (candidate.session_id, existing['target_queue_item_id'])).fetchone()
+                return PromptIngressAccepted(int(target['queue_sequence']), model_call_binding_from_dict(target['model_call_binding']), queue_item_id=target['id'])
 
-            if candidate.target_turn_id is not None:
-                target = connection.execute(
-                    """
-                    SELECT conversation_scope_kind, status
-                    FROM pulsara_v3.turns
-                    WHERE session_id = %s AND id = %s
-                    FOR UPDATE
-                    """,
-                    (guard.session_id, candidate.target_turn_id),
-                ).fetchone()
-                if target is None or target["conversation_scope_kind"] != "ROOT":
-                    raise PromptIngressRejected(
-                        PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
-                    )
-                if target["status"] != "RUNNING":
-                    raise PromptIngressRejected(
-                        PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
-                    )
-            pending = connection.execute(
-                """SELECT count(*) AS total
-                   FROM pulsara_v3.prompt_queue_items
-                   WHERE session_id = %s AND status = 'PENDING'""",
-                (guard.session_id,),
-            ).fetchone()
-            if int(pending["total"]) >= STAGE2_LIMITS.pending_prompt_hard_items:
-                raise PromptIngressRejected(
-                    PromptIngressWriteRejection.CAPACITY_EXHAUSTED
-                )
             row = connection.execute(
                 """
-                UPDATE pulsara_v3.sessions
-                SET latest_prompt_queue_sequence = latest_prompt_queue_sequence + 1,
-                    updated_at = clock_timestamp()
-                WHERE id = %s
-                RETURNING workspace_id, latest_prompt_queue_sequence
+                SELECT * FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND id = %s
                 """,
-                (guard.session_id,),
+                (guard.session_id, candidate.queue_item_id),
             ).fetchone()
-            assert row is not None
-            workspace_id = str(row["workspace_id"])
-            queue_sequence = int(row["latest_prompt_queue_sequence"])
-            permission = (
-                None
-                if candidate.requested_permission_mode is None
-                else self._freeze_root_permission_snapshot(
-                    connection,
-                    session_id=guard.session_id,
-                    snapshot_id=str(candidate.permission_snapshot_id),
-                    requested_mode=candidate.requested_permission_mode,
-                    admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+            try:
+                frozen_binding = (
+                    None
+                    if row is None
+                    else model_call_binding_from_dict(row["model_call_binding"])
                 )
-            )
+                digest = prompt_ingress_semantic_digest(candidate, frozen_binding)
+            except (TypeError, ValueError):
+                digest = ""
+                frozen_binding = None
             if (
-                _expected_permission_snapshot is not None
-                and permission != _expected_permission_snapshot
+                existing["command_kind"] != candidate.command_kind
+                or existing["request_schema_version"] != candidate.schema_version
+                or existing["semantic_digest"] != digest
+                or existing["target_queue_item_id"] != candidate.queue_item_id
             ):
                 raise PromptIngressRejected(
-                    PromptIngressWriteRejection.INGRESS_PRECONDITION_CHANGED
+                    PromptIngressWriteRejection.COMMAND_CONFLICT
                 )
-            handoff = (
-                None
-                if candidate.delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
-                else self._eligible_plan_handoff(
-                    connection, session_id=guard.session_id
+            if (
+                row is None
+                or str(row["command_id"]) != candidate.command_id
+                or str(row["client_submission_id"])
+                != candidate.client_submission_id
+                or str(row["delivery_mode"]) != candidate.delivery_mode.value
+                or (
+                    None
+                    if row["target_turn_id"] is None
+                    else str(row["target_turn_id"])
                 )
+                != candidate.target_turn_id
+                or (
+                    None
+                    if row["permission_snapshot_id"] is None
+                    else str(row["permission_snapshot_id"])
+                )
+                != candidate.permission_snapshot_id
+                or (
+                    None
+                    if row["requested_permission_mode"] is None
+                    else str(row["requested_permission_mode"])
+                )
+                != (
+                    None
+                    if candidate.requested_permission_mode is None
+                    else candidate.requested_permission_mode.value
+                )
+                or not canonical_prompt_owner_is_exact(
+                    connection,
+                    row=row,
+                    expected=candidate.canonical_prompt,
+                    queue_item_id=candidate.queue_item_id,
+                )
+                or (new_turn != (frozen_binding is not None))
+            ):
+                raise PromptIngressRejected(
+                    PromptIngressWriteRejection.COMMAND_CONFLICT
+                )
+            return PromptIngressAccepted(int(row["queue_sequence"]), frozen_binding)
+
+        if candidate.scheduled is not None:
+            merged = self._prepare_scheduled_dispatch_in_connection(connection, guard, candidate)
+            if merged is not None:
+                return merged
+
+        model_call_binding: ModelCallBinding | None = None
+        reasoning_preference_reset = False
+        if new_turn:
+            model_call_binding = model_call_binding_from_dict(
+                session["model_call_binding"]
             )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_queue_item_id
-                ) VALUES (%s, %s, 'QUEUE_PROMPT', 'queue_prompt.v3',
-                          %s, 'QUEUE_ITEM', %s)
-                """,
+            if model_call_binding is None:
+                raise PromptIngressRejected(
+                    PromptIngressWriteRejection.MODEL_CONFIGURATION_REQUIRED
+                )
+            assert model_resolution_snapshot is not None
+            try:
                 (
-                    guard.session_id,
-                    candidate.command_id,
-                    digest,
-                    candidate.queue_item_id,
-                ),
-            )
-            validate_annotation_sources(connection, session_id=guard.session_id,
-                                        content=candidate.canonical_prompt.content)
-            publication = materialize_canonical_prompt(
-                connection,
-                publisher=self._canonical_content_publisher,
-                workspace_id=workspace_id,
-                prompt=candidate.canonical_prompt,
-            )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.prompt_queue_items (
-                    id, session_id, workspace_id, queue_sequence,
-                    command_id, client_submission_id, delivery_mode,
-                    model_call_binding, target_turn_id, status, inline_content, blob_id,
-                    content_digest, content_size, content_media_type,
-                    content_codec, permission_snapshot_id,
-                    requested_permission_mode, effective_permission_mode,
-                    permission_admission_source, permission_overlay,
-                    permission_plan_context_ordinal,
-                    permission_plan_workflow_id,
-                    permission_plan_revision_at_admission,
-                    permission_inherited_from_turn_id,
-                    permission_contract_id,
-                    permission_contract_fingerprint,
-                    permission_snapshot_fingerprint,
-                    pending_plan_handoff_workflow_id,
-                    pending_plan_handoff_interaction_id,
-                    pending_plan_handoff_kind
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING',
-                          %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s)
-                """,
-                (
-                    candidate.queue_item_id,
-                    guard.session_id,
-                    workspace_id,
-                    queue_sequence,
-                    candidate.command_id,
-                    candidate.client_submission_id,
-                    candidate.delivery_mode.value,
+                    model_call_binding,
+                    _resolved,
+                    reasoning_preference_reset,
+                ) = model_resolution_snapshot.reconcile(model_call_binding)
+            except (KeyError, ValueError):
+                raise PromptIngressRejected(
+                    PromptIngressWriteRejection.MODEL_CONFIGURATION_UNAVAILABLE
+                ) from None
+            if reasoning_preference_reset:
+                connection.execute(
+                    """
+                    UPDATE pulsara_v3.sessions
+                    SET model_call_binding=%s, updated_at=clock_timestamp()
+                    WHERE id=%s
+                    """,
                     (
-                        None
-                        if model_call_binding is None
-                        else Jsonb(model_call_binding_to_dict(model_call_binding))
+                        Jsonb(model_call_binding_to_dict(model_call_binding)),
+                        guard.session_id,
                     ),
-                    candidate.target_turn_id,
-                    *_content_columns(publication.body),
-                    *(
-                        (None,) * 12
-                        if permission is None
-                        else self._permission_columns(permission)
-                    ),
-                    None if handoff is None else handoff.workflow_id,
-                    None if handoff is None else handoff.interaction_id,
-                    None if handoff is None else handoff.kind.value,
-                ),
+                )
+        digest = prompt_ingress_semantic_digest(candidate, model_call_binding)
+
+        if candidate.target_turn_id is not None:
+            target = connection.execute(
+                """
+                SELECT conversation_scope_kind, status
+                FROM pulsara_v3.turns
+                WHERE session_id = %s AND id = %s
+                FOR UPDATE
+                """,
+                (guard.session_id, candidate.target_turn_id),
+            ).fetchone()
+            if target is None or target["conversation_scope_kind"] != "ROOT":
+                raise PromptIngressRejected(
+                    PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
+                )
+            if target["status"] != "RUNNING":
+                raise PromptIngressRejected(
+                    PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
+                )
+        pending = connection.execute(
+            """SELECT count(*) AS total
+               FROM pulsara_v3.prompt_queue_items
+               WHERE session_id = %s AND status = 'PENDING'""",
+            (guard.session_id,),
+        ).fetchone()
+        if int(pending["total"]) >= STAGE2_LIMITS.pending_prompt_hard_items:
+            raise PromptIngressRejected(
+                PromptIngressWriteRejection.CAPACITY_EXHAUSTED
             )
-            insert_canonical_prompt_refs(
+        row = connection.execute(
+            """
+            UPDATE pulsara_v3.sessions
+            SET latest_prompt_queue_sequence = latest_prompt_queue_sequence + 1,
+                updated_at = clock_timestamp()
+            WHERE id = %s
+            RETURNING workspace_id, latest_prompt_queue_sequence
+            """,
+            (guard.session_id,),
+        ).fetchone()
+        assert row is not None
+        workspace_id = str(row["workspace_id"])
+        queue_sequence = int(row["latest_prompt_queue_sequence"])
+        permission = (
+            None
+            if candidate.requested_permission_mode is None
+            else self._freeze_root_permission_snapshot(
                 connection,
                 session_id=guard.session_id,
-                workspace_id=workspace_id,
-                queue_item_id=candidate.queue_item_id,
-                image_blob_ids=publication.image_blob_ids,
+                snapshot_id=str(candidate.permission_snapshot_id),
+                requested_mode=candidate.requested_permission_mode,
+                admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
             )
-            self._append_events(
-                connection,
-                guard,
-                workspace_id=workspace_id,
-                drafts=(
-                    self._event(
-                        CommittedEventType.PROMPT_QUEUED,
-                        SubjectSlot.QUEUE_ITEM,
-                        candidate.queue_item_id,
-                        occurred_at=occurred_at,
-                        actor_kind="human",
-                        actor_id=actor_id,
-                        payload={
-                            "queue_sequence": queue_sequence,
-                            "delivery_mode": candidate.delivery_mode.value,
-                        },
-                    ),
-                ),
+        )
+        if (
+            _expected_permission_snapshot is not None
+            and permission != _expected_permission_snapshot
+        ):
+            raise PromptIngressRejected(
+                PromptIngressWriteRejection.INGRESS_PRECONDITION_CHANGED
             )
-            return PromptIngressAccepted(
+        handoff = (
+            None
+            if candidate.delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
+            else self._eligible_plan_handoff(
+                connection, session_id=guard.session_id
+            )
+        )
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.session_commands (
+                session_id, command_id, command_kind,
+                request_schema_version, semantic_digest,
+                target_kind, target_queue_item_id
+            ) VALUES (%s, %s, %s, %s, %s, 'QUEUE_ITEM', %s)
+            """,
+            (
+                guard.session_id,
+                candidate.command_id,
+                candidate.command_kind,
+                candidate.schema_version,
+                digest,
+                candidate.queue_item_id,
+            ),
+        )
+        validate_annotation_sources(connection, session_id=guard.session_id,
+                                    content=candidate.canonical_prompt.content)
+        publication = materialize_canonical_prompt(
+            connection,
+            publisher=self._canonical_content_publisher,
+            workspace_id=workspace_id,
+            prompt=candidate.canonical_prompt,
+        )
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.prompt_queue_items (
+                id, session_id, workspace_id, queue_sequence,
+                command_id, client_submission_id, delivery_mode, input_origin, scheduled_task_id, scheduled_task_revision, scheduled_due_at,
+                model_call_binding, target_turn_id, status, inline_content, blob_id,
+                content_digest, content_size, content_media_type,
+                content_codec, permission_snapshot_id,
+                requested_permission_mode, effective_permission_mode,
+                permission_admission_source, permission_overlay,
+                permission_plan_context_ordinal,
+                permission_plan_workflow_id,
+                permission_plan_revision_at_admission,
+                permission_inherited_from_turn_id,
+                permission_contract_id,
+                permission_contract_fingerprint,
+                permission_snapshot_fingerprint,
+                pending_plan_handoff_workflow_id,
+                pending_plan_handoff_interaction_id,
+                pending_plan_handoff_kind
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING',
+                      %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s)
+            """,
+            (
+                candidate.queue_item_id,
+                guard.session_id,
+                workspace_id,
                 queue_sequence,
-                model_call_binding,
-                reasoning_preference_reset,
-            )
+                candidate.command_id,
+                candidate.client_submission_id,
+                candidate.delivery_mode.value,
+                candidate.input_origin.value,
+                None if candidate.scheduled is None else candidate.scheduled.task_id,
+                None if candidate.scheduled is None else candidate.scheduled.revision,
+                None if candidate.scheduled is None else candidate.scheduled.due_at,
+                (
+                    None
+                    if model_call_binding is None
+                    else Jsonb(model_call_binding_to_dict(model_call_binding))
+                ),
+                candidate.target_turn_id,
+                *_content_columns(publication.body),
+                *(
+                    (None,) * 12
+                    if permission is None
+                    else self._permission_columns(permission)
+                ),
+                None if handoff is None else handoff.workflow_id,
+                None if handoff is None else handoff.interaction_id,
+                None if handoff is None else handoff.kind.value,
+            ),
+        )
+        insert_canonical_prompt_refs(
+            connection,
+            session_id=guard.session_id,
+            workspace_id=workspace_id,
+            queue_item_id=candidate.queue_item_id,
+            image_blob_ids=publication.image_blob_ids,
+        )
+        self._append_events(
+            connection,
+            guard,
+            workspace_id=workspace_id,
+            drafts=(
+                self._event(
+                    CommittedEventType.PROMPT_QUEUED,
+                    SubjectSlot.QUEUE_ITEM,
+                    candidate.queue_item_id,
+                    occurred_at=occurred_at,
+                    actor_kind="runtime" if candidate.scheduled is not None else "human",
+                    actor_id=actor_id,
+                    payload={
+                        "queue_sequence": queue_sequence,
+                        "delivery_mode": candidate.delivery_mode.value,
+                        "input_origin": candidate.input_origin.value,
+                        "scheduled_input": None if candidate.scheduled is None else candidate.scheduled.provenance(),
+                    },
+                ),
+            ),
+        )
+        if candidate.scheduled is not None and not candidate.scheduled.manual:
+            self._advance_scheduled_in_connection(connection, candidate.scheduled.task_id)
+        return PromptIngressAccepted(
+            queue_sequence,
+            model_call_binding,
+            reasoning_preference_reset,
+        )
+
 
     def prepare_prompt_head_consumption(
         self,
@@ -852,7 +887,8 @@ class _PromptOperations:
                         source_entry_sequence=latest_sequence + 1,
                         source_turn_id=identity.turn_id,
                         content=canonical_prompt.content.parts,
-                        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+                        input_origin=CanonicalInputOriginKind(item["input_origin"]),
+                        scheduled_input=self._queue_scheduled_provenance(item),
                     ),
                 ),
                 unpublished_item_canonical_expanded_bytes=(
@@ -884,6 +920,8 @@ class _PromptOperations:
                 unpublished_approved_plan_fact=None,
             )
         return build_queued_root_turn_admission(
+            input_origin=CanonicalInputOriginKind(item["input_origin"]),
+            scheduled_input=self._queue_scheduled_provenance(item),
             session_id=session_id,
             workspace_id=str(item["workspace_id"]),
             queue_item_id=str(item["id"]),
@@ -1100,6 +1138,7 @@ class _PromptOperations:
             )
             self._insert_entry(
                 connection,
+                scheduled_input=candidate.scheduled_input,
                 session_id=guard.session_id,
                 workspace_id=candidate.workspace_id,
                 turn_id=candidate.exact_turn_id,
@@ -1406,6 +1445,8 @@ class _PromptOperations:
                 and str(row["command_id"]) == candidate.command_id
                 and str(row["client_submission_id"]) == candidate.client_submission_id
                 and str(row["delivery_mode"]) == PromptDeliveryMode.NEW_TURN.value
+                and str(row["input_origin"]) == candidate.input_origin.value
+                and self._queue_scheduled_provenance(row) == candidate.scheduled_input
                 and row["target_turn_id"] is None
                 and self._content_from_row(row) == candidate.body_storage
                 and canonical_prompt_owner_is_exact(
@@ -1506,6 +1547,7 @@ class _PromptOperations:
                 and str(row["entry_kind"]) == EntryKind.USER_MESSAGE.value
                 and str(row["conversation_scope_kind"])
                 == ConversationScopeKind.ROOT.value
+                and row["scheduled_input"] == (None if candidate.scheduled_input is None else candidate.scheduled_input.to_dict())
                 and row["scope_subagent_task_id"] is None
                 and self._content_from_row(row) == candidate.body_storage
                 and canonical_prompt_owner_is_exact(

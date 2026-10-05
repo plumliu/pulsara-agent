@@ -296,6 +296,7 @@ RuntimeReopenHostOutcome = (
 @dataclass(slots=True)
 class _ResumeInFlight:
     task: asyncio.Task[HostSessionHandle]
+    scheduled: bool = False
 
 
 @dataclass(slots=True)
@@ -1703,10 +1704,20 @@ class LocalSessionController:
         *,
         workspace_kind: SessionWorkspaceKind,
         workspace_path: str | None = None,
+        model_call_binding: ModelCallBinding | None = None,
     ) -> HostSessionHandle:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Local Web application is draining")
+        if model_call_binding is not None:
+            # Initial selection uses the ordinary model owner, before allocating
+            # a quick workspace. It grants no control over an existing session.
+            try:
+                self.core._model_runtime.freeze_resolution_snapshot().reconcile(
+                    model_call_binding
+                )
+            except ValueError as exc:
+                raise SessionControlRejected("MODEL_BINDING_INVALID", str(exc)) from exc
         workspace_input = self._workspace_input_for_create(
             workspace_kind=workspace_kind,
             workspace_path=workspace_path,
@@ -1718,6 +1729,11 @@ class LocalSessionController:
         )
         handle = HostSessionHandle(session, workspace_input)
         try:
+            if model_call_binding is not None:
+                try:
+                    await session.update_model_call_binding(model_call_binding)
+                except ValueError as exc:
+                    raise SessionControlRejected("MODEL_BINDING_INVALID", str(exc)) from exc
             async with self._lock:
                 if self._closing:
                     raise KernelHostCoreClosing("Local Web application is draining")
@@ -1878,6 +1894,7 @@ class LocalSessionController:
         session_id: str,
         *,
         no_live_observation: StableNoLiveHostObservation | None = None,
+        scheduled: bool = False,
     ) -> HostSessionHandle:
         if not session_id:
             raise ValueError("session_id is required")
@@ -1904,6 +1921,8 @@ class LocalSessionController:
                     raise RuntimeError("Session has another current operation")
                 return live
             if isinstance(current, _ResumeInFlight):
+                if scheduled and not current.scheduled:
+                    raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在打开或恢复，请稍后再试。")
                 if no_live_observation is not None:
                     raise RuntimeError("runtime reopen observation raced with resume")
                 task = current.task
@@ -1922,13 +1941,13 @@ class LocalSessionController:
                         raise RuntimeError("Session has another current operation")
                     self._issue_no_live_observation_locked(session_id)._consume(self)
                 task = asyncio.create_task(
-                    self._resume_owner(session_id),
+                    self._resume_owner(session_id, scheduled=scheduled),
                     name=f"local-web-resume:{session_id}",
                 )
-                self._operations[session_id] = _ResumeInFlight(task)
+                self._operations[session_id] = _ResumeInFlight(task, scheduled=scheduled)
         return await asyncio.shield(task)
 
-    async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False) -> HostSessionHandle:
+    async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False, scheduled: bool = False) -> HostSessionHandle:
         task = asyncio.current_task()
         try:
             summary = await self.core.read_resumable_session(
@@ -1959,6 +1978,7 @@ class LocalSessionController:
                 permission_policy=self.permission_policy,
                 active_skill_names=self.active_skill_names,
                 restore_missing_workspace=restore_missing_workspace,
+                scheduled=scheduled,
             )
             handle = HostSessionHandle(session, workspace_input)
             try:
@@ -1995,6 +2015,16 @@ class LocalSessionController:
                 current = self._operations.get(session_id)
                 if isinstance(current, _ResumeInFlight) and current.task is task:
                     self._operations.pop(session_id, None)
+
+    async def scheduled_management_host(self, session_id: str) -> KernelHostSession | None:
+        """Independent management uses the same lifecycle/cache owner, without opening it."""
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Local Web application is draining")
+            if session_id in self._operations:
+                raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
+            handle = self._by_session.get(session_id)
+            return None if handle is None else handle.session
 
     def _issue_no_live_observation_locked(
         self, session_id: str

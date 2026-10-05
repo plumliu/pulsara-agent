@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
 import { CapabilityView } from '../components/capability-view';
 import { DatabaseSetupGuide } from '../components/database-setup-guide';
+import { LocalScheduledTasksApi } from '../lib/scheduled-tasks-api';
+import { ScheduledTasksView } from '../components/scheduled-tasks-view';
 import { MemoryView } from '../components/memory-view';
 import { InspectorPanel } from '../components/inspector-panel';
 import { NewSessionDialog, ToastStack } from '../components/overlays';
@@ -183,6 +185,7 @@ type ToolDecisionIntent = {
 
 export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps) {
   const [promptDraftStore] = useState(() => new PromptDraftStore());
+  const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
   const [activeView, setActiveView] = useState<AppView>('workbench');
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>();
   const [settingsHighlightHome, setSettingsHighlightHome] = useState(false);
@@ -745,7 +748,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       if (result.status !== 'ARCHIVED' || result.session_id !== target.id) throw new Error('尚未确认归档结果，请刷新查看。');
       forgetSession(target.id);
       setSessionRevision(value => value + 1);
-      notify('会话已归档', '可在设置 → 已归档会话中取消归档。', 'success');
+      notify('会话已归档', '可在设置中取消归档；绑定的定时任务已删除，需要重新创建。', 'success');
       try { setSessionList(await adapter.listSessions()); }
       catch { notify('会话已归档', '列表暂时未能刷新，请稍后刷新页面。', 'warning'); }
     } catch (error) {
@@ -1434,6 +1437,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       notify('无法创建会话', productMessage(error instanceof Error ? error.message : undefined, '请检查工作目录后重试。'), 'warning');
       return false;
     }
+  };
+
+  const createScheduledSession = async (binding: ModelCallBindingPayload): Promise<string> => {
+    if (!canCreateSession) throw new Error('请先连接本地服务和数据库。');
+    const created = await adapter.createSession({kind:'quick'}, binding);
+    setSessionList(current => [created, ...current.filter(item=>item.id!==created.id)]);
+    return created.id;
   };
 
   const forkConversation = async (entryId: string): Promise<void> => {
@@ -2768,6 +2778,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         />
       )}
 
+      {activeView === 'scheduled' && <ScheduledTasksView modelConfigurations={bootstrap?.model_configurations ?? []} onCreateSession={createScheduledSession} api={scheduledApi} sessions={sessionList} ready={!databaseBlocked && runtimeStatus === 'online'} onOpenSettings={() => navigate('settings')} onOpenSession={(id, entryId) => { if (entryId) setFocusSourceEntry({ sessionId: id, entryId }); openSession(id); }} />}
       {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={runtimeStatus} onReconnect={reconnect} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusSourceEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
 
       {searchOpen && <SessionSearchDialog adapter={adapter} available={databaseState === 'ready' && Boolean(bootstrap)}

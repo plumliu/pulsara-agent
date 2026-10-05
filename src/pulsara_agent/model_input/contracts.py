@@ -6,6 +6,7 @@ is immutable and finite before the compiler is invoked.
 """
 
 from __future__ import annotations
+from pulsara_agent.scheduling.contracts import ScheduledProvenance
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -91,6 +92,7 @@ class CapabilityActivationSubjectKind(StrEnum):
 
 class CanonicalInputOriginKind(StrEnum):
     HUMAN_MESSAGE = "HUMAN_MESSAGE"
+    SCHEDULED_TASK = "SCHEDULED_TASK"
     HUMAN_STEER = "HUMAN_STEER"
     SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
@@ -773,7 +775,11 @@ class FrozenCompactionActiveRequest:
     input_origin: CanonicalInputOriginKind | None
     content: FrozenPromptContent | None = field(default=None, repr=False)
 
+    scheduled_input: ScheduledProvenance | None = None
+
     def __post_init__(self) -> None:
+        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (self.scheduled_input is not None):
+            raise ValueError("scheduled request provenance is incomplete")
         if not self.entry_id or self.entry_sequence < 0:
             raise ValueError("compaction active request identity is incomplete")
         snapshot_exact = self.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
@@ -807,6 +813,7 @@ class FrozenCompactionActiveRequest:
             "input_origin": (
                 None if self.input_origin is None else self.input_origin.value
             ),
+            "scheduled_input": None if self.scheduled_input is None else self.scheduled_input.to_dict(),
             "content": (
                 None
                 if self.content is None
@@ -823,7 +830,11 @@ class FrozenRetainedHistoricalRequest:
     input_origin: CanonicalInputOriginKind | None
     content: FrozenPromptContent = field(repr=False)
 
+    scheduled_input: ScheduledProvenance | None = None
+
     def __post_init__(self) -> None:
+        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (self.scheduled_input is not None):
+            raise ValueError("scheduled request provenance is incomplete")
         if not isinstance(self.content, FrozenPromptContent):
             raise TypeError("retained historical request content must be frozen")
         if self.content is not None and any(isinstance(part, PromptAnnotationPart) for part in self.content.parts) and (
@@ -845,6 +856,7 @@ class FrozenRetainedHistoricalRequest:
             "input_origin": (
                 None if self.input_origin is None else self.input_origin.value
             ),
+            "scheduled_input": None if self.scheduled_input is None else self.scheduled_input.to_dict(),
             "content": frozen_prompt_content_canonical_value(self.content),
         }
 
@@ -861,6 +873,7 @@ def validate_compaction_request_shape(
     origins = {
         FrozenProviderInputItemKind.USER: {
             CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.SCHEDULED_TASK,
             CanonicalInputOriginKind.HUMAN_STEER,
             CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
             CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
@@ -1016,6 +1029,7 @@ class FrozenProviderInputItem:
         repr=False
     )
     input_origin: CanonicalInputOriginKind | None = None
+    scheduled_input: ScheduledProvenance | None = None
     tool_calls: tuple[ProviderToolCall, ...] = field(default=(), repr=False)
     tool_call_id: str | None = None
     tool_request_entry_id: str | None = None
@@ -1075,6 +1089,8 @@ class FrozenProviderInputItem:
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
             FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
         }
+        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (self.scheduled_input is not None):
+            raise ValueError("scheduled origin/provenance union is invalid")
         if has_origin != (self.input_origin is not None):
             raise ValueError("provider input origin union is invalid")
         if not snapshot_kind and any(isinstance(part, PromptAnnotationPart) for part in self.content) and self.input_origin not in {
@@ -1968,6 +1984,7 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
         "input_origin": (
             None if item.input_origin is None else item.input_origin.value
         ),
+        "scheduled_input": None if item.scheduled_input is None else item.scheduled_input.to_dict(),
         "content": llm_content_identity_value(content),
         "calls": tuple(
             (call.tool_call_id, call.tool_name, call.arguments)

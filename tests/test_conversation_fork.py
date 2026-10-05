@@ -165,7 +165,7 @@ def assert_session_aggregate_deleted(repo, guard):
     ) == 'DELETED'
     independent = {'workspaces', 'blobs', 'memory_facts', 'memory_relations', 'memory_embeddings'}
     children = set(CONVERSATION_KERNEL_RELATIONS) - independent - {'sessions'}
-    assert len(children) == 23
+    assert len(children) == 24  # Scheduled tasks add one session-owned relation (§13).
     for table in children:
         assert rows(repo, sql.SQL('SELECT 1 FROM pulsara_v3.{} WHERE session_id=%s').format(
             sql.Identifier(table)), (guard.session_id,)) == [], table

@@ -93,7 +93,7 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     LIVE_EVENT_TYPES,
     SUBJECT_SLOTS,
 )
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMImagePart,
@@ -177,7 +177,7 @@ def _wire_quote(
         wire_api=wire_api,
         estimator_fingerprint=(
             estimator_fingerprint
-            or PulsaraHeuristicTokenEstimatorV2().fact.estimator_fingerprint
+            or PulsaraHeuristicTokenEstimatorV3().fact.estimator_fingerprint
         ),
         effective_input_budget_tokens=budget_tokens,
         semantic_estimated_input_tokens=semantic_tokens,
@@ -195,6 +195,7 @@ def _wire_quote(
 
 def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> None:
     host = object.__new__(KernelHostSession)
+    host._scheduled_tasks = None
     host._manual_compaction_command_attempts = {}
     host._compaction = HostCompactionRuntimeOwner()
     started = asyncio.Event()
@@ -1375,7 +1376,7 @@ def test_compaction_summary_wire_proof_rejects_installed_prefix_truncation() -> 
 def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     source_target_fact = SimpleNamespace(model_id="model-a")
     source_profile = SimpleNamespace(
         route_wire_profile=SimpleNamespace(wire_api="openai_chat_completions")
@@ -1569,7 +1570,7 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
     monkeypatch: pytest.MonkeyPatch,
     drift: str,
 ) -> None:
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     estimator_fingerprint = estimator.fact.estimator_fingerprint
     source_profile = SimpleNamespace(
         route_wire_profile=SimpleNamespace(wire_api="openai_chat_completions")
@@ -1989,6 +1990,7 @@ def test_round5b_resource_headroom_exact_boundaries() -> None:
 @pytest.mark.parametrize("force", [False, True])
 def test_round5b_empty_session_manual_compaction_never_starts_summary(force: bool) -> None:
     host = object.__new__(KernelHostSession)
+    host._scheduled_tasks = None
     host._lock = asyncio.Lock()
     host._closing = False
     host._active_task = None
@@ -2018,6 +2020,7 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
         policy=ResolvedCompactionPolicy(automatic_enabled=False)
     )
     host = object.__new__(KernelHostSession)
+    host._scheduled_tasks = None
     host.session_id = "session:test"
     host._lock = asyncio.Lock()
     host._closing = False
@@ -2339,7 +2342,7 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
             )
         }
     ).decode("utf-8")
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     tokens = estimator.estimate_text(body)
     selection = FrozenRetainedSkillContextSelection(
         ordered_items=(item,),
@@ -2683,7 +2686,7 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     assert "canonical_image_refs" in CONVERSATION_KERNEL_RELATIONS
     assert not {
         "durable_jobs",

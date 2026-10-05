@@ -96,7 +96,7 @@ class _AuthorityOperations:
     def acquire_host_writer(
         self,
         *,
-        intent: Literal["NEW", "EXISTING", "RESTORE"],
+        intent: Literal["NEW", "EXISTING", "RESTORE", "SCHEDULED"],
         session_id: str,
         workspace_id: str,
         workspace_kind: str = "project",
@@ -107,7 +107,7 @@ class _AuthorityOperations:
         lease_seconds: float,
         deadline_monotonic: float,
     ) -> WriterLease:
-        if intent not in {"NEW", "EXISTING", "RESTORE"}:
+        if intent not in {"NEW", "EXISTING", "RESTORE", "SCHEDULED"}:
             raise ValueError("explicit Host writer acquisition intent is required")
         if lease_seconds <= 0:
             raise ValueError("writer lease must be finite and positive")
@@ -221,7 +221,7 @@ class _AuthorityOperations:
                         and row["writer_lease_expires_at"] is not None
                         and row["writer_lease_expires_at"] > _utcnow()
                     )
-                    if (intent == "RESTORE" and not same_live_owner
+                    if (intent in {"RESTORE", "SCHEDULED"} and not same_live_owner
                         and row["writer_lease_owner_id"] is not None
                         and row["writer_lease_expires_at"] is not None
                         and row["writer_lease_expires_at"] > _utcnow()):

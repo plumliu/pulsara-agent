@@ -1,4 +1,5 @@
 import {
+  CalendarClock,
   Blocks,
   Brain,
   Gauge,
@@ -13,6 +14,7 @@ const navigation = [
   { id: 'workbench' as const, label: '会话', icon: MessageCircle },
   { id: 'capabilities' as const, label: '能力', icon: Blocks },
   { id: 'memory' as const, label: '记忆', icon: Brain },
+  { id: 'scheduled' as const, label: '定时任务', icon: CalendarClock },
 ];
 
 interface ActivityRailProps {

@@ -685,6 +685,7 @@ class DirectKernelToolPort:
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
         user_home_resolution: UserHomeResolution | None = None,
         image_validator: HostPromptImageValidator | None = None,
+        scheduled_tasks=None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
         frozen_user_home = user_home_resolution or resolve_user_home()
@@ -774,6 +775,9 @@ class DirectKernelToolPort:
                     artifact_read_port=artifact_read_port,
                 ),
             )
+        self._scheduled_tasks = scheduled_tasks
+        if scheduled_tasks is not None:
+            tools = (*tools, _DirectCapabilityControlTool("scheduled_tasks"))
         self._tools = {tool.name: tool for tool in tools}
         self._authorization_policy = authorization_policy
         self._close_lock = Lock()
@@ -957,6 +961,7 @@ class DirectKernelToolPort:
                     for item in bindings
                     if item.tool_name
                     not in {
+                        "scheduled_tasks",
                         "remember",
                         "mark_memory_relation",
                         "terminal_monitor",
@@ -2900,6 +2905,28 @@ class DirectKernelToolPort:
             raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
         invocation_started = monotonic()
         observation_origin = tool_observation_origin_for_binding(binding)
+        if tool_name == "scheduled_tasks":
+            if self._scheduled_tasks is None or invocation_context.conversation_scope_kind != "ROOT":
+                raise RuntimeError("scheduled management lost its ROOT owner")
+            async def manage():
+                from pulsara_agent.scheduling.contracts import ScheduledTaskError
+                try:
+                    value = await self._scheduled_tasks.invoke(arguments,
+                        default_session_id=self._session_id,
+                        permission_mode=invocation_context.effective_permission_mode)
+                    return "SUCCESS", value
+                except (ScheduledTaskError, KeyError, ValueError) as exc:
+                    return "APPLICATION_ERROR", {"error": getattr(exc, "code", "INVALID_REQUEST"), "message": str(exc)}
+            # Reuse the existing admitted-async-operation settlement: cancellation
+            # waits for the management transaction and retains its actual result.
+            operation = asyncio.create_task(manage(), name=f"scheduled-management:{tool_call_id}")
+            known, cancelled = await _await_mcp_operation(operation)
+            state, value = known
+            return KernelToolResult(state=state,
+                content=json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(),
+                caller_cancelled_while_running=cancelled,
+                effect_class="read_only" if arguments.get("action") in {"list", "get"} else "unknown_effect",
+                physical_observation=_freeze_physical_observation(invocation_started, observation_origin))
         if tool_name == "manage_capability":
             call = invocation_context.capability_call
             if (

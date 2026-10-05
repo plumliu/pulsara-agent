@@ -104,6 +104,7 @@ from ._repository.tools import _ToolOperations
 from ._repository.fork import _ForkOperations
 from ._repository.deletion import _SessionDeletionOperations
 from ._repository.archive import _SessionArchiveOperations
+from ._repository.scheduling import _ScheduledTaskOperations
 from ._repository.provider_usage import (
     ProviderCallUsageObservation,
     ProviderCallUsageWriteDisposition,
@@ -114,6 +115,7 @@ from ._repository.provider_usage_storage import _ProviderUsageOperations
 class ConversationKernelRepository(
     _SessionDeletionOperations,
     _SessionArchiveOperations,
+    _ScheduledTaskOperations,
     _ForkOperations,
     _MatchingOperations,
     _AuthorityOperations,

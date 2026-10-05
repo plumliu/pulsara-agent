@@ -493,7 +493,7 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     assert TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT.endswith(".v3")
 
     production = ROOT / "src/pulsara_agent"

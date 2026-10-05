@@ -280,7 +280,7 @@ def test_direct_chat_output_budget_quotes_actual_merged_tool_messages(near_admis
         # assistant message would exceed admission despite the merged request
         # fitting, so this must still produce a valid request.
         room = payload["max_completion_tokens"]
-        messages += (LLMMessage.user("x" * (2 * (room - 50))),)
+        messages += (LLMMessage.user("x" * (4 * (room - 50))),)
         payload = build_chat_completions_payload(
             call=call, context=replace(context, messages=messages),
         )

@@ -20,7 +20,7 @@ from pulsara_agent.memory.scope import (
     MemoryDomainContext,
     freeze_memory_read_context_binding,
 )
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.model_input.lowering import source_variant_message
 from pulsara_agent.retrieval.config import (
     AdvisoryMemoryFeatureConfig,
@@ -115,7 +115,7 @@ def test_five_recalled_facts_keep_source_variants_monotone(tmp_path, monkeypatch
             await io.aclose(deadline_monotonic=monotonic() + 10)
 
     source = asyncio.run(exercise())
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     costs = tuple(
         estimator.estimate_message(
             source_variant_message(source, variant.text, mode=variant.mode)

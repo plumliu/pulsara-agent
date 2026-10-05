@@ -873,6 +873,8 @@ class CanonicalProtocolReader:
             accepted_at_utc=_utc(row["accepted_at"]),
             source_subagent_task_id=str(row["source_subagent_task_id"] or ""),
         )
+        if row["scheduled_input"] is not None:
+            result.scheduled_input.CopyFrom(wire.ScheduledInputProvenance(**row["scheduled_input"]))
         if row["entry_kind"] == "TOOL_RESULT":
             tool_result = connection.execute(
                 """SELECT tool_call_entry_id, tool_call_id, result_state,
@@ -1246,12 +1248,17 @@ class CanonicalProtocolReader:
                 queue_item_id=str(row["id"]),
                 queue_sequence=int(row["queue_sequence"]),
                 status=str(row["status"]),
+                input_origin=str(row["input_origin"]),
                 delivery_mode=str(row["delivery_mode"]),
                 target_turn_id=str(row["target_turn_id"] or ""),
                 content=_content_reference(row),
                 command_id=str(row["command_id"]),
                 accepted_at_utc=_utc(row["accepted_at"]),
             )
+            if row["input_origin"] == "SCHEDULED_TASK":
+                target.scheduled_input.CopyFrom(wire.ScheduledInputProvenance(
+                    task_id=str(row["scheduled_task_id"]), task_revision=int(row["scheduled_task_revision"]),
+                    due_at_utc=_utc(row["scheduled_due_at"])))
             if row["permission_snapshot_id"] is not None:
                 target.permission.CopyFrom(_permission_projection(row))
         for row in attempts:

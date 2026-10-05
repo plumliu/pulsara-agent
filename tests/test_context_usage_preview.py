@@ -75,7 +75,8 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             empty = await read_preview()
             assert empty['state'] == 'empty' and empty['input_tokens'] is None
             assert not requests and session._input_continuity._slots == slots_before
-            await session.run_turn(PromptContent.text('context demonstration. ' * 25000), command_id='command:preview:' + uuid4().hex)
+            # Exceed the small model's token budget within the prompt byte bound.
+            await session.run_turn(PromptContent.text('上下文演示。' * 45000), command_id='command:preview:' + uuid4().hex)
             scope = next(iter(session._input_continuity._slots))
             cohort = session._input_continuity.current_cohort(scope)
             anchor = session._input_continuity.current_usage_anchor(scope)

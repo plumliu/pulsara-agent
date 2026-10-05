@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:4ff5fe8133159b59aa816289a9f6fcb66b23cc0d2947b83896d5b475e8376d7e",
+  "observed_catalog_fingerprint": "sha256:5346cb0126a1fa19b8cb9f1a1e17a51161260fc17f70c661740061ff5bd62b1e",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -29,6 +29,7 @@
     "tool_execution_attempts",
     "tool_results",
     "prompt_queue_items",
+    "scheduled_tasks",
     "canonical_image_refs",
     "interaction_decisions",
     "plan_workflows",

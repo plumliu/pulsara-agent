@@ -18,11 +18,10 @@ const props = { sessionId: 'session-a', binding: { connection_id: 'model-a' }, r
 describe('context usage indicator', () => {
   it('shows usage and opens the tooltip by keyboard or click', async () => {
     render(<ContextUsageIndicator {...props} readUsage={vi.fn(async () => ready)} />);
-    const button = await screen.findByRole('button', { name: '上下文约占 58%' });
+    const button = await screen.findByRole('button', { name: '上下文占用 58%' });
     fireEvent.click(button);
     expect(button.getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getByText('已用约 58,000 tokens')).toBeTruthy();
-    expect(screen.getByText('可用输入额度 100,000 tokens')).toBeTruthy();
+    expect(screen.getByText('已用 58,000 / 100,000')).toBeTruthy();
     fireEvent.keyDown(button, { key: 'Escape' });
     expect(button.getAttribute('aria-expanded')).toBe('false');
   });
@@ -31,7 +30,7 @@ describe('context usage indicator', () => {
     const view = render(<ContextUsageIndicator {...props} readUsage={vi.fn(async () => ({
       ...ready, input_tokens: 110000, model_switch_pending: true, compaction_expected: true,
     }))} />);
-    fireEvent.click(await screen.findByRole('button', { name: '上下文约占 110%，需要压缩' }));
+    fireEvent.click(await screen.findByRole('button', { name: '上下文占用 110%，需要压缩' }));
     expect(view.container.firstElementChild?.getAttribute('data-tone')).toBe('danger');
     expect(view.container.querySelector('.context-usage__fill')?.getAttribute('stroke-dasharray')).toBe('100 100');
   });
@@ -69,11 +68,11 @@ describe('context usage indicator', () => {
     const readNew = vi.fn(async () => ({ ...ready, connection_id: 'model-b', input_tokens: 32000, budget_source: 'heuristic' as const }));
     view.rerender(<ContextUsageIndicator {...props} binding={{ connection_id: 'model-b' }} readUsage={readNew} />);
     expect(oldSignal.aborted).toBe(true);
-    await screen.findByRole('button', { name: '上下文约占 32%' });
+    await screen.findByRole('button', { name: '上下文占用 32%' });
     await act(async () => resolveOld(ready));
-    expect(screen.queryByRole('button', { name: '上下文约占 58%' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '上下文约占 32%' }));
-    expect(screen.getByText('已用约 32,000 tokens')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '上下文占用 58%' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '上下文占用 32%' }));
+    expect(screen.getByText('已用 32,000 / 100,000')).toBeTruthy();
   });
 
   it.each(['empty', 'updating', 'compacting', 'unavailable'] as const)('represents %s as unknown, never zero percent', async state => {
@@ -82,7 +81,7 @@ describe('context usage indicator', () => {
     await waitFor(() => expect(screen.getByText('—')).toBeTruthy());
     expect(view.container.firstElementChild?.getAttribute('data-tone')).toBe('unknown');
     expect(view.container.querySelector('.context-usage__fill')).toBeNull();
-    expect(screen.queryByText(/约 0%/)).toBeNull();
+    expect(screen.queryByText(/0%/)).toBeNull();
   });
 
   it('refreshes after turn completion and compaction revisions', async () => {
@@ -101,6 +100,6 @@ describe('context usage indicator', () => {
     const button = await screen.findByRole('button', { name: /58%/ });
     fireEvent.mouseEnter(button);
     await screen.findByRole('button', { name: /60%/ });
-    expect(screen.getByText('已用约 60,000 tokens')).toBeTruthy();
+    expect(screen.getByText('已用 60,000 / 100,000')).toBeTruthy();
   });
 });

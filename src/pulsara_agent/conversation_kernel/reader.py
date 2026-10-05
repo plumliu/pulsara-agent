@@ -7,6 +7,7 @@ authorize a retry.
 """
 
 from __future__ import annotations
+from pulsara_agent.scheduling.contracts import ScheduledProvenance
 
 from pulsara_agent.conversation_kernel.interruption import (
     read_executed_notices,
@@ -978,7 +979,7 @@ class CanonicalProviderInputReader:
                        e.entry_owner_kind, e.imported_history_group_id,
                        CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
                             WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS turn_id,
-                       e.entry_sequence, e.entry_kind,
+                       e.entry_sequence, e.entry_kind, e.scheduled_input,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
                        e.source_subagent_task_id,
@@ -1214,6 +1215,7 @@ class CanonicalProviderInputReader:
                     if scope_kind == "ROOT" and origin in {
                         CanonicalInputOriginKind.HUMAN_MESSAGE,
                         CanonicalInputOriginKind.HUMAN_STEER,
+                        CanonicalInputOriginKind.SCHEDULED_TASK,
                     }:
                         if str(row["content_media_type"]) != PROMPT_BODY_MEDIA_TYPE:
                             raise ConversationKernelConflict(
@@ -1253,6 +1255,7 @@ class CanonicalProviderInputReader:
                             source_turn_id=str(row["turn_id"]),
                             content=prompt_parts,
                             input_origin=origin,
+                            scheduled_input=None if row.get("scheduled_input") is None else ScheduledProvenance.from_dict(row["scheduled_input"]),
                         )
                     )
                     continue
@@ -3314,6 +3317,8 @@ def _canonical_input_origin(
 ) -> CanonicalInputOriginKind:
     if scope_kind == ModelInputScopeKind.SUBAGENT_TASK.value:
         return CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
+    if row.get("scheduled_input") is not None:
+        return CanonicalInputOriginKind.SCHEDULED_TASK
     if row.get("source_plan_workflow_id") is not None:
         return CanonicalInputOriginKind.PLAN_CONTINUATION
     if row["entry_kind"] == "USER_STEER":

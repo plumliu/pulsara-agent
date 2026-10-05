@@ -204,6 +204,12 @@ message CanonicalVisualization {
   string source_filename = 7;
 }
 
+message ScheduledInputProvenance {
+  string task_id = 1;
+  uint64 task_revision = 2;
+  string due_at_utc = 3;
+}
+
 message CanonicalEntry {
   string entry_id = 1;
   string turn_id = 2;
@@ -224,6 +230,7 @@ message CanonicalEntry {
   CanonicalInputSource input_source = 17;
   repeated CanonicalVisualization visualizations = 18;
   bool root_final = 19;
+  ScheduledInputProvenance scheduled_input = 20;
 }
 
 message ActiveTurnControl {
@@ -245,6 +252,8 @@ message PromptQueueControl {
   RunPermissionProjection permission = 7;
   string command_id = 8;
   string accepted_at_utc = 9;
+  string input_origin = 10;
+  ScheduledInputProvenance scheduled_input = 11;
 }
 
 message PlanWorkflowControl {

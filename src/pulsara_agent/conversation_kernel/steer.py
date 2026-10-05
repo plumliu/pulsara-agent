@@ -6,6 +6,7 @@ authority: PostgreSQL remains the sole truth for queue, entry, and event rows.
 """
 
 from __future__ import annotations
+from pulsara_agent.scheduling.contracts import ScheduledAdmission, ScheduledProvenance
 
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
 
@@ -158,6 +159,7 @@ class PreparedRootProviderInputCandidate:
                     FrozenProviderInputItemKind.USER,
                     CanonicalInputOriginKind.HUMAN_MESSAGE,
                 ),
+                (FrozenProviderInputItemKind.USER, CanonicalInputOriginKind.SCHEDULED_TASK),
                 (
                     FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
                     CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
@@ -466,12 +468,15 @@ class PreparedPromptIngressCommand:
     permission_snapshot_id: str | None
     requested_permission_mode: PermissionMode | None
     canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
+    scheduled: ScheduledAdmission | None = None
 
     def __post_init__(self) -> None:
         if not all((self.session_id, self.command_id, self.queue_item_id)):
             raise ValueError("prompt ingress identity is incomplete")
         if not isinstance(self.canonical_prompt, FrozenCanonicalPrompt):
             raise TypeError("prompt ingress content must be canonical and frozen")
+        if self.scheduled is not None and (self.delivery_mode is not PromptDeliveryMode.NEW_TURN or self.scheduled.session_id != self.session_id or self.scheduled.permission_mode != self.requested_permission_mode):
+            raise ValueError("scheduled admission does not join prompt ingress")
         new_turn = self.delivery_mode is PromptDeliveryMode.NEW_TURN
         new_turn_shape = (
             self.target_turn_id is None
@@ -486,12 +491,25 @@ class PreparedPromptIngressCommand:
         if (new_turn and not new_turn_shape) or (not new_turn and not steer_shape):
             raise ValueError("prompt ingress delivery union is invalid")
 
+    @property
+    def command_kind(self):
+        return "RUN_SCHEDULED_TASK" if self.scheduled is not None and self.scheduled.manual else "QUEUE_PROMPT"
+
+    @property
+    def schema_version(self):
+        return "run_scheduled_task.v1" if self.command_kind == "RUN_SCHEDULED_TASK" else "queue_prompt.v3"
+
+    @property
+    def input_origin(self):
+        return CanonicalInputOriginKind.SCHEDULED_TASK if self.scheduled is not None else (CanonicalInputOriginKind.HUMAN_MESSAGE if self.delivery_mode is PromptDeliveryMode.NEW_TURN else CanonicalInputOriginKind.HUMAN_STEER)
+
 
 @dataclass(frozen=True, slots=True)
 class PromptIngressAccepted:
     queue_sequence: int
     model_call_binding: ModelCallBinding | None
     reasoning_preference_reset: bool = False
+    queue_item_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.queue_sequence < 1:
@@ -558,6 +576,8 @@ class PreparedQueuedRootTurnAdmission:
     actor_id: str
     prompt_consumed_occurrence: CommittedEventDraft
     user_message_accepted_occurrence: CommittedEventDraft
+    input_origin: CanonicalInputOriginKind = CanonicalInputOriginKind.HUMAN_MESSAGE
+    scheduled_input: ScheduledProvenance | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -595,7 +615,8 @@ class PreparedQueuedRootTurnAdmission:
                 source_entry_sequence=prospective.exact_initial_entry_sequence,
                 source_turn_id=self.exact_turn_id,
                 content=self.canonical_prompt.content.parts,
-                input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+                input_origin=self.input_origin,
+                scheduled_input=self.scheduled_input,
                 ),
             )
             or prospective.unpublished_item_canonical_expanded_bytes
@@ -643,6 +664,8 @@ def build_queued_root_turn_admission(
     pending_plan_handoff_kind: str | None,
     occurred_at: datetime,
     actor_id: str,
+    input_origin: CanonicalInputOriginKind = CanonicalInputOriginKind.HUMAN_MESSAGE,
+    scheduled_input: ScheduledProvenance | None = None,
 ) -> PreparedQueuedRootTurnAdmission:
     identity = build_queued_root_turn_identity(session_id, queue_item_id)
     turn_id = identity.turn_id
@@ -667,14 +690,16 @@ def build_queued_root_turn_admission(
         ),
         event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
-        actor_kind="human",
+        actor_kind="runtime" if scheduled_input is not None else "human",
         actor_id=actor_id,
         sensitivity_class="PUBLIC",
         projection_profile="DEFAULT",
         occurred_at=occurred_at,
-        payload={"source": "PROMPT_QUEUE"},
+        payload={"source": "PROMPT_QUEUE", "input_origin": input_origin.value, "scheduled_input": None if scheduled_input is None else scheduled_input.to_dict()},
     )
     return PreparedQueuedRootTurnAdmission(
+        input_origin=input_origin,
+        scheduled_input=scheduled_input,
         session_id=session_id,
         workspace_id=workspace_id,
         queue_item_id=queue_item_id,
@@ -736,6 +761,7 @@ def build_prompt_ingress_command(
     permission_snapshot_id: str | None,
     requested_permission_mode: PermissionMode | None,
     canonical_prompt: FrozenCanonicalPrompt,
+    scheduled: ScheduledAdmission | None = None,
 ) -> PreparedPromptIngressCommand:
     return PreparedPromptIngressCommand(
         session_id=session_id,
@@ -747,6 +773,7 @@ def build_prompt_ingress_command(
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
         canonical_prompt=canonical_prompt,
+        scheduled=scheduled,
     )
 
 
@@ -754,6 +781,8 @@ def prompt_ingress_semantic_digest(
     candidate: PreparedPromptIngressCommand,
     model_call_binding: ModelCallBinding | None,
 ) -> str:
+    if candidate.scheduled is not None and candidate.scheduled.manual:
+        return context_fingerprint("pulsara:run-scheduled-task:v1", candidate.scheduled.action_value())
     if (candidate.delivery_mode is PromptDeliveryMode.NEW_TURN) != (
         model_call_binding is not None
     ):
@@ -761,6 +790,8 @@ def prompt_ingress_semantic_digest(
     return context_fingerprint(
         "pulsara:queue-prompt-command:v3",
         {
+            "input_origin": candidate.input_origin.value,
+            "scheduled_input": None if candidate.scheduled is None else candidate.scheduled.provenance(),
             "queue_item_id": candidate.queue_item_id,
             "client_submission_id": candidate.client_submission_id,
             "delivery_mode": candidate.delivery_mode.value,

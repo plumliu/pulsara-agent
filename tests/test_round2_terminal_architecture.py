@@ -112,7 +112,7 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority(
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     terminal_names = {
         "terminal",
         "terminal_process",
@@ -265,15 +265,15 @@ def test_round2_three_terminal_prompts_teach_the_closed_lifecycle_roles() -> Non
     assert "Prefer file tools for file reads and edits" in TERMINAL_TOOL_DESCRIPTION
 
     assert "Follow commands started by terminal" in TERMINAL_PROCESS_TOOL_DESCRIPTION
-    assert "poll checks current status and output without waiting" in TERMINAL_PROCESS_TOOL_DESCRIPTION
-    assert "yield_time_ms waits up to 1000 ms by default" in TERMINAL_PROCESS_TOOL_DESCRIPTION
-    assert "since_cursor may be copied" in TERMINAL_PROCESS_TOOL_DESCRIPTION
-    assert "do not send another update later" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "poll reads status/output now" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "up to 1000 ms by default" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "copy since_cursor from the same process's output_cursor" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "poll/wait arrange no later update" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "Avoid repeated polling" in TERMINAL_PROCESS_TOOL_DESCRIPTION
-    assert "stopped by the user outside a tool call" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "Users may stop background commands outside tool calls" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "empty terminal_monitor list does not prove" in TERMINAL_PROCESS_TOOL_DESCRIPTION
-    assert "not authorization to restart" in TERMINAL_PROCESS_TOOL_DESCRIPTION
-    assert "environment closes or is replaced" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "User termination does not authorize restart" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "until it closes or is replaced" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "wait once" not in TERMINAL_PROCESS_TOOL_DESCRIPTION
 
     assert TERMINAL_MONITOR_TOOL_DESCRIPTION.startswith(

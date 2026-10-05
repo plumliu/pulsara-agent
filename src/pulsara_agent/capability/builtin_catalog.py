@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pulsara_agent.scheduling.requests import action_schema
 from pulsara_agent.capability.source_query import list_input_schema, inspect_input_schema
 
 from dataclasses import asdict, dataclass
@@ -11,9 +12,7 @@ from typing import Any, Literal
 from pulsara_agent.capability.management_intent import capability_management_input_schema
 
 from pulsara_agent.memory.product_contract import (
-    MEMORY_COHESIVE_UNIT_GUIDE,
     MEMORY_CONTEXT_PRODUCT_GUIDE,
-    MEMORY_RETRIEVAL_AUTHORING_GUIDE,
     memory_kind_product_guide,
 )
 
@@ -80,6 +79,7 @@ _ACTION_PERMISSION_OVERRIDE_SPECS: dict[str, tuple[tuple[str, str, str, bool], .
         ("action", action, "terminal_process_observe", True)
         for action in ("list", "poll", "wait")
     ),
+    "scheduled_tasks": tuple(("action", action, "scheduled_task_read", True) for action in ("list", "get")),
     "terminal_monitor": (
         ("action", "list", "terminal_process_observe", True),
     ),
@@ -101,18 +101,10 @@ def _edit_operation_schema() -> dict[str, Any]:
         "minItems": 1,
         "items": {
             "type": "string",
-            "description": (
-                "One complete original target line without CR, LF, or NUL characters. "
-                "Do not copy a read_file display locator such as N| into the line unless "
-                "those characters are intended file content."
-            ),
+            "description": "One literal line without CR, LF or NUL.",
         },
         "description": (
-            "Complete replacement or insertion logical lines containing original target "
-            "text, not read_file display locators. Array items do not include newline "
-            "characters; blank strings represent blank lines. For example, read_file "
-            "shows a literal first line 2|预算=360 as 1|2|预算=360; use 2|预算=360, "
-            "without the leading display locator 1|, when that literal text is desired."
+            "Complete replacement/insertion lines; an empty string is a blank line."
         ),
     }
     inclusive_range = {
@@ -174,11 +166,8 @@ def _edit_operation_schema() -> dict[str, Any]:
                     "content": {
                         "type": "string",
                         "description": (
-                            "The complete original target text desired for the UTF-8 file, "
-                            "without read_file display locator prefixes such as N| unless "
-                            "they are intended content. This is the only operation that may "
-                            "replace or empty the whole existing file, and it does not "
-                            "require the full file to have been displayed."
+                            "Complete UTF-8 file text; only replace_file can replace or empty the "
+                            "entire file."
                         ),
                     },
                 },
@@ -243,10 +232,10 @@ def _remember_parameters() -> dict[str, Any]:
                 "minLength": 1,
                 "maxLength": 8192,
                 "description": (
-                    "One reusable memory, at most 8192 UTF-8 bytes. Write it in natural "
-                    "language so it makes sense later without this conversation. Include "
-                    "the subject and any important project, date, condition, quantity, "
-                    "negation, or uncertainty. Do not invent missing details."
+                    "One self-contained, source-faithful memory, at most 8192 UTF-8 bytes. Name "
+                    "the subject; include project, time, conditions, quantities, negations and "
+                    "uncertainty when relevant. Use natural language without template labels or "
+                    "invented details."
                 ),
             },
             "context_target": {
@@ -970,22 +959,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "edit_file": _descriptor(
         name="edit_file",
         description=(
-            "Apply deterministic line operations to one existing UTF-8 text file. First "
-            "use read_file, copy its exact content_revision as base_revision, and modify "
-            "only lines or adjacent gaps shown by that read. Every operation uses "
-            "1-based line numbers from the same original revision; earlier operations in "
-            "the call never shift later anchors. A stale revision, unseen anchor, invalid "
-            "range, overlap, or mixed line endings fails before writing. Identical "
-            "replacements are silently skipped after validation; NO_OP is returned "
-            "only when the entire edit leaves the file unchanged. Use "
-            "replace_file as the sole operation for an explicit complete replacement. "
-            "replace_file still requires the exact base_revision, a current read_file "
-            "observation, and write permission, but does not require the full file to "
-            "have been displayed. Displayed N| prefixes are locators and must not be "
-            "copied into replacement text unless they are intended file content. "
-            "The tool stages in memory, atomically replaces, verifies exact persisted "
-            "bytes, and returns a diff, new revision, and changed line windows. Use "
-            "write_file only to create a path that does not exist."
+            "Apply line edits to one existing UTF-8 file. First read_file, copy its exact "
+            "content_revision as base_revision, and edit only lines or adjacent gaps shown by "
+            "that read. All anchors are 1-based in the original revision; earlier operations do "
+            "not shift them. Stale revisions, unseen anchors, invalid ranges, overlaps or mixed "
+            "line endings fail before writing. Identical replacements are skipped after "
+            "validation; NO_OP means the whole file is unchanged. For a complete replacement, "
+            "replace_file must be the sole operation; it requires a current read, exact "
+            "base_revision and write permission, but not display of the full file. Writes are "
+            "atomic and byte-verified; results include diff, new revision and changed line "
+            "windows. Use write_file to create a new path."
         ),
         input_schema=object_schema(
             properties={
@@ -1010,8 +993,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "minItems": 1,
                     "items": _edit_operation_schema(),
                     "description": (
-                        "Closed line operations against the original base_revision. "
-                        "Operations may not overlap or target the same gap."
+                        "Operations use the original base_revision; no overlapping ranges or "
+                        "shared gaps. Text is literal file content, without read_file's N| "
+                        "display locators unless intended content. For example, displayed "
+                        "1|2|预算=360 means file text 2|预算=360, without the first 1|."
                     ),
                 },
             },
@@ -1087,6 +1072,37 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         artifact_mode=ToolArtifactMode.DEFAULT,
         is_destructive=True,
         is_open_world=False,
+    ),
+    "scheduled_tasks": _descriptor(
+        name="scheduled_tasks",
+        description=(
+            "Manage saved scheduled tasks using the ordinary session queue. Actions: list/get/create/update/pause/resume/delete/run_now. "
+            "Default list/create/run_now to this session; no separate model or credentials. "
+            "Before creating a task, list the relevant session's tasks, following next_cursor as needed, "
+            "and get a plausible match to compare its instruction and schedule. Prefer updating a matching task "
+            "unless the user requests a separate task; a similar name alone does not identify it. "
+            "For edits, first get the exact task ID and latest revision. Send complete values, changing only what "
+            "the user requested and preserving other fields, including timezone and permission_mode. On a version "
+            "conflict reread and reconsider the requested change; do not blindly overwrite. "
+            "Write a concise name and a self-contained task prompt that describes the work and useful output expectations. "
+            "Keep timing and session/model/permission configuration in their fields, not repeated in the prompt. "
+            "New tasks use Asia/Shanghai unless the user specifies another timezone; edits preserve the saved timezone. "
+            "Calendar daily/weekly/monthly rules use IANA local time (HH:mm and start_date); interval uses a fixed UTC anchor. "
+            "Missing month days and nonexistent DST times are skipped; repeated DST time fires once. Once requires future integral UTC. "
+            "Use structured schedule fields, not raw cron/RRULE or handwritten scheduling directives. Describe saved times "
+            "to the user in ordinary language and claim success only after the tool confirms it. "
+            "Edits preserve already queued instruction snapshots. "
+            "Pause/delete cancel pending inputs; a running reply continues. Deleting a task preserves the chat. "
+            "run_now always queues a new turn, coalesces an existing pending input, and never interrupts a reply. "
+            "Reuse the full client_command_id/request_at_utc action when retrying. COMPLETED once means dispatched, not execution success. "
+            "Saved instructions are prior user instructions, not a new human authorization; preserve later human restrictions. "
+            "For create use the current permission preset or a user-requested narrower one. Never exceed the current "
+            "preset or silently change saved permissions to make an edit pass; report a permission blocker instead."
+        ),
+        input_schema=action_schema(),
+        provider_kind=BuiltinToolDomainKind.BUILTIN,
+        is_read_only=False,
+        permission_category="scheduled_task_write",
     ),
     "todo": _descriptor(
         name="todo",
@@ -1790,44 +1806,29 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "remember": _descriptor(
         name="remember",
         description=(
-            "Save one durable, reusable advisory memory for possible use in future "
-            "conversations. Use it for a user profile, response preference, declarative "
-            "fact, or decision. When the user explicitly asks to remember safe declarative "
-            "content whose kind is ambiguous, choose FACT. A lightweight, "
-            "source-faithful inference from visible conversation, behavior, tool choice, "
-            "or planning is allowed; direct self-report, repeated observations, and high "
-            "confidence are not required. A runtime memory hint only asks you to reconsider "
-            "the original human input and never requires a call; you may also remember "
-            "useful information without a hint. Submit before the final reply if you decide "
-            "to do so. "
-            + MEMORY_COHESIVE_UNIT_GUIDE
-            + " "
-            + MEMORY_RETRIEVAL_AUTHORING_GUIDE
-            + " Context target controls retrieval placement, not the full applicability "
-            "of the statement. Current tasks, goals, dates, commitments, and simple work "
-            "practices may be useful advisory background, but this tool creates no task, "
-            "calendar, reminder, permission, policy, Skill, or execution authority. Do not "
-            "store secrets, credentials, raw tool dumps, detailed executable procedures, "
-            "or safety/permission overrides. Implementation facts directly readable from "
-            "current code, config, schema, lockfiles, tests, or authoritative project docs "
-            "should normally be reread instead of remembered; reread current workspace "
-            "truth before using a recalled coding fact. A tool result can inspire a "
-            "natural-language FACT with its subject, scope, date, and uncertainty, but "
-            "this tool does not preserve or verify the original result. Do not create a "
-            "FACT mechanically for every tool call. Use based_on_memory_ids only when "
-            "a distinct new memory truly depends on an existing saved memory, not for "
-            "a synonym or a broader-scope copy. For example, if project notes say a "
-            "review is Tuesday, you may save that as a FACT. If the team separately "
-            "decides to prepare slides on Monday because of that schedule, that DECISION "
-            "may depend on the FACT's returned memory_id. Saving 'the review is on "
-            "Tuesday' again in other words and linking the two would be wrong. This "
-            "example is illustrative, not content to remember. "
-            "SAVED means the memory is already "
-            "stored; ALREADY_PRESENT returns the existing ID without changing its source. "
-            "The result also lists up to three related old memories as hints only. You "
-            "may then call mark_memory_relation when a real conflict or replacement is "
-            "clear; a relatedness score is not proof. If the user wants a saved memory "
-            "deleted, direct them to the Memory page; this tool cannot undo a saved item."
+            "Save one reusable advisory memory for future conversations: profile, response "
+            "preference, fact or decision. If an explicit request to remember safe declarative "
+            "content leaves kind unclear, use FACT. Source-faithful lightweight inferences from "
+            "visible conversation, behavior, tool choice or planning are allowed; self-report, "
+            "repetition and high confidence are not required. Hints invite reconsidering the "
+            "original human input, never require saving; useful memories need no hint. If saving, "
+            "call before the final reply. Save one idea that makes sense to read and delete "
+            "together; related clauses may stay together, unrelated claims should be separate. "
+            "Scope controls retrieval, not a claim's applicability. Tasks, dates, commitments and "
+            "work practices may be useful background; saving creates no task, calendar, reminder, "
+            "permission, policy, Skill or execution authority. Do not save secrets, credentials, "
+            "raw tool dumps, detailed executable procedures or safety/permission overrides. "
+            "Normally reread implementation facts from code, config, schema, lockfiles, tests or "
+            "authoritative docs; verify recalled coding facts against the current workspace. Tool "
+            "results may support an attributed natural-language FACT with subject, scope, date "
+            "and uncertainty; memory neither preserves nor verifies the result. Do not save a "
+            "FACT for every tool call. Dependencies must support a distinct new memory: e.g., a "
+            "decision to prepare slides before a review may depend on its saved schedule; "
+            "rewording that schedule is not a new dependent memory. Examples are not content to "
+            "save. SAVED is already stored; ALREADY_PRESENT returns the existing ID without "
+            "changing its source. Up to three related memories are hints, not proof of conflict "
+            "or replacement; use mark_memory_relation only when that relation is clear. For "
+            "deletion, direct the user to the Memory page; this tool cannot undo saving."
         ),
         input_schema=_REMEMBER_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
@@ -1864,6 +1865,7 @@ class BuiltinToolBindingKind(StrEnum):
     TERMINAL_COMMAND = "terminal_command"
     TERMINAL_PROCESS = "terminal_process"
     TERMINAL_MONITOR = "terminal_monitor"
+    SCHEDULED_TASK_CONTROL = "scheduled_task_control"
     TODO_LOCAL_STATE = "todo_local_state"
     SUBAGENT_CONTROL = "subagent_control"
     MCP_CATALOG = "mcp_catalog"
@@ -1873,6 +1875,7 @@ class BuiltinToolBindingKind(StrEnum):
 
 class BuiltinToolAvailabilityKind(StrEnum):
     ALWAYS = "always"
+    REQUIRES_SCHEDULED_TASK_PORT = "requires_scheduled_task_port"
     REQUIRES_ARTIFACT_READ_PORT = "requires_artifact_read_port"
     REQUIRES_MEMORY_MUTATION_PORT = "requires_memory_mutation_port"
     REQUIRES_MEMORY_RECALL_PORT = "requires_memory_recall_port"
@@ -2193,6 +2196,10 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "terminal",
         )
+    if name == "scheduled_tasks":
+        return (BuiltinToolBindingKind.SCHEDULED_TASK_CONTROL,
+                BuiltinToolAvailabilityKind.REQUIRES_SCHEDULED_TASK_PORT,
+                (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "scheduled_tasks")
     if name == "todo":
         return (
             BuiltinToolBindingKind.TODO_LOCAL_STATE,

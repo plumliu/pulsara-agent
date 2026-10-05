@@ -26,7 +26,7 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     hydrate_canonical_prompt_body,
 )
 from pulsara_agent.llm.estimator import (
-    PulsaraHeuristicTokenEstimatorV2,
+    PulsaraHeuristicTokenEstimatorV3,
     estimate_image_visual_tokens,
 )
 from pulsara_agent.llm.input import (
@@ -323,7 +323,7 @@ def test_d1_visual_token_formula_is_frozen(
 
 def test_v2_semantic_estimator_charges_each_image_occurrence() -> None:
     message = LLMMessage.user_content(FrozenPromptContent((_validated_image(),)))
-    assert PulsaraHeuristicTokenEstimatorV2().estimate_message(message) == 4 + 256
+    assert PulsaraHeuristicTokenEstimatorV3().estimate_message(message) == 4 + 256
 
 
 def test_d2_minimum_service_headroom_is_distinct_and_exact() -> None:

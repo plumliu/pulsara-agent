@@ -1,6 +1,7 @@
 """Pure one-cut planning for Round 5B context compaction."""
 
 from __future__ import annotations
+from pulsara_agent.scheduling.contracts import ScheduledProvenance
 
 from dataclasses import dataclass, replace
 from time import monotonic
@@ -128,6 +129,7 @@ class DestinationDialogueEntry:
     input_origin: CanonicalInputOriginKind | None
     content: tuple[FrozenPromptPart, ...]
     requested_tools: tuple[DestinationToolEvidence, ...] = ()
+    scheduled_input: ScheduledProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,7 +585,7 @@ def freeze_destination_dialogue_projection_plan(
             if item.item_kind in request_kinds:
                 entries.append(
                     DestinationDialogueEntry(
-                        "user", item.item_kind, item.input_origin, item.content
+                        "user", item.item_kind, item.input_origin, item.content, scheduled_input=item.scheduled_input
                     )
                 )
             elif item.item_kind is FrozenProviderInputItemKind.ASSISTANT:
@@ -767,6 +769,7 @@ def _render_destination_projection(
                 request = FrozenRetainedHistoricalRequest(
                     item_kind=entry.item_kind,
                     input_origin=entry.input_origin,
+                    scheduled_input=entry.scheduled_input,
                     content=FrozenPromptContent(entry.content),
                 )
                 content = lower_retained_request_content(request)
@@ -1661,6 +1664,7 @@ def freeze_compaction_continuation(
             and item.input_origin
             in {
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.SCHEDULED_TASK,
                 CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
             }
         ) or item.item_kind in {
@@ -1683,6 +1687,7 @@ def freeze_compaction_continuation(
                 location=location,
                 item_kind=item.item_kind,
                 input_origin=item.input_origin,
+                scheduled_input=item.scheduled_input,
                 content=(
                     FrozenPromptContent(item.content)
                     if location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
@@ -1714,6 +1719,7 @@ def freeze_compaction_continuation(
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
             item_kind=active.item_kind,
             input_origin=active.input_origin,
+                    scheduled_input=active.scheduled_input,
             content=active.content,
         ),
     )

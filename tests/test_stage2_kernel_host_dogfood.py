@@ -39,7 +39,7 @@ from pulsara_agent.llm.input import (
     PromptContent,
     PromptImagePart,
 )
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.model_input.contracts import CapabilityActivationSubjectKind
 from pulsara_agent.model_input.lowering import image_reference_part
 from pulsara_agent.primitives.context import context_fingerprint
@@ -329,7 +329,7 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
     model = _K2ImageCompileProbe()
     compiled_messages = []
     activation_projections = []
-    original_estimate_message = PulsaraHeuristicTokenEstimatorV2.estimate_message
+    original_estimate_message = PulsaraHeuristicTokenEstimatorV3.estimate_message
     original_activation = provider_dispatch._activation_subject_for_anchor
 
     def estimate_message(estimator, message):
@@ -343,7 +343,7 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
         return result
 
     monkeypatch.setattr(
-        PulsaraHeuristicTokenEstimatorV2,
+        PulsaraHeuristicTokenEstimatorV3,
         "estimate_message",
         estimate_message,
     )

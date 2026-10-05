@@ -228,7 +228,9 @@ def test_cancellation_during_observation_preserves_original_execution_outcome(fi
 def test_anchored_dispatch_keeps_full_sources_when_raw_quote_overestimates(api):
     from tests.test_catalog_final_wire_resources import _prepare_case, _skill_source, _measure, _mode
     from pulsara_agent.model_input.contracts import ContextRenderMode, ContextSourceKind
-    coordinator, candidate, view, _ = _prepare_case(api, _skill_source(), budget=150_000, user_text='u'*148_000)
+    # V3 folds ASCII at four bytes/token. Keep the raw quote above the
+    # budget while the same measured prefix plus suffix remains admissible.
+    coordinator, candidate, view, _ = _prepare_case(api, _skill_source(), budget=150_000, user_text='u'*400_000)
     plan = view.wire_input_plan
     call = candidate.call
     anchor = ProviderInputUsageAnchor(call.resolved_model_call_id, view.epoch_nonce, view.epoch_revision,
@@ -362,7 +364,7 @@ def test_cold_successor_may_omit_optional_source_despite_old_epoch_head():
     kind = ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
     source = _candidate(kind, ('p' * 100_000,))
     coordinator, candidate, view, _ = _prepare_case('openai_chat_completions', source,
-        initial_catalog=_candidate(kind, ('old preference',)), budget=50_000, user_text='u' * 70_000)
+        initial_catalog=_candidate(kind, ('old preference',)), budget=50_000, user_text='u' * 140_000)
     assert any(head.source_kind is kind for head in view.source_heads)
     _, template, _, _ = _prepare_case('openai_chat_completions', source, cold=True, budget=100_000)
     append = coordinator._compiler.compile_new_epoch(candidate.compile_request, planning=candidate.planning)

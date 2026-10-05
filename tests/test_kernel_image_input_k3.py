@@ -81,7 +81,7 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
 )
 from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
 from pulsara_agent.llm.estimator import (
-    PulsaraHeuristicTokenEstimatorV2,
+    PulsaraHeuristicTokenEstimatorV3,
     estimate_image_visual_tokens,
 )
 from pulsara_agent.llm.input import (
@@ -151,7 +151,7 @@ def _assert_source_variant_wire_upper(candidate, upper, *, wire_api: str) -> Non
             return chat_semantic_wire_group(message)[0]
         return responses_semantic_wire_group(message)[0]
 
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     upper_wire = wire(upper)
     for variant in candidate.variants:
         actual = encode_runtime_observation(
@@ -279,7 +279,7 @@ def test_hook_upper_bounds_actual_accepted_context_and_continuation(
         call_count=0 if stop else 2, scope_kind=ModelInputScopeKind.ROOT
     )
     assert upper is not None
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     threshold = DEFAULT_ADDITIONAL_CONTEXT_LIMIT if stop else context_limit
     repeats = 65536 if threshold == 0 else threshold * 4
     while threshold and estimator.estimate_text(character * repeats) > threshold:
@@ -689,7 +689,7 @@ def test_v2_final_wire_quote_elides_only_formal_payload_and_adds_d1(
     wire_kind: str,
     counted_content: list[dict[str, object]],
 ) -> None:
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     image = _image()
     source = _message(LLMTextPart("caption"), image)
     if wire_kind == "chat":
@@ -716,7 +716,7 @@ def test_v2_final_wire_quote_elides_only_formal_payload_and_adds_d1(
 
 
 def test_v2_estimator_counts_repeated_images_and_does_not_scan_text() -> None:
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     image = _image(width=1_024, height=1_024)
     repeated = _message(image, image, image)
     item = responses_semantic_wire_group(repeated)[0]
@@ -743,7 +743,7 @@ def test_v2_estimator_counts_repeated_images_and_does_not_scan_text() -> None:
 
 
 def test_v2_final_wire_traversal_rejects_source_or_payload_drift() -> None:
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     source = _message(_image(b"abc"))
     item = responses_semantic_wire_group(source)[0]
 
@@ -779,10 +779,10 @@ def test_v2_final_wire_traversal_rejects_source_or_payload_drift() -> None:
         )
 
 
-def test_v2_fact_freezes_d1_and_formal_wire_accounting() -> None:
-    fact = PulsaraHeuristicTokenEstimatorV2().fact
+def test_v3_fact_preserves_d1_and_formal_wire_accounting() -> None:
+    fact = PulsaraHeuristicTokenEstimatorV3().fact
     assert fact.estimator_id == "pulsara_heuristic"
-    assert fact.estimator_version == "v2"
+    assert fact.estimator_version == "v3"
     assert fact.image_grid_pixels == 28
     assert fact.image_scale_numerator == 7
     assert fact.image_scale_denominator == 8
@@ -1218,7 +1218,7 @@ def test_tool_result_full_upper_bounds_escaping_body_wire_and_d1(
         actual_item = responses_semantic_wire_group(actual.message)[0]
         upper_item = responses_semantic_wire_group(upper.message)[0]
 
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     assert actual.logical_utf8_bytes <= upper.logical_utf8_bytes
     assert len(canonical_json_bytes(actual_item)) <= len(
         canonical_json_bytes(upper_item)
@@ -1275,7 +1275,7 @@ def test_root_completion_batch_upper_bounds_every_closed_projection(
             result_summary=control_fill * MAXIMUM_RESULT_SUMMARY_UTF8_BYTES,
         )
     )
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     if wire_api == "chat":
         upper_wire = chat_semantic_wire_group(upper_message)[0]
     else:
@@ -1390,7 +1390,7 @@ def test_serialized_catalog_quote_bounds_real_owner_json_escaping(wire_api, sour
     raw_upper = _runtime_source_message_upper(source_kind=source_kind, trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION, lifecycle=SourceObservationLifecycle.SNAPSHOT, maximum_body_utf8_bytes=len(body.encode()))
     group = chat_semantic_wire_group if wire_api == 'chat' else responses_semantic_wire_group
     actual_wire, upper_wire, raw_wire = (group(message)[0] for message in (actual, upper, raw_upper))
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     assert len(canonical_json_bytes(actual_wire)) <= len(canonical_json_bytes(upper_wire)) < len(canonical_json_bytes(raw_wire))
     assert estimator.estimate_wire_json_component(actual_wire) <= estimator.estimate_wire_json_component(upper_wire) < estimator.estimate_wire_json_component(raw_wire)
 
@@ -1398,8 +1398,8 @@ def test_serialized_catalog_quote_bounds_real_owner_json_escaping(wire_api, sour
 def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(monkeypatch):
     from types import SimpleNamespace
     from pulsara_agent.conversation_kernel import runner as module
-    from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     wire_plan = SimpleNamespace(quote=SimpleNamespace(effective_input_budget_tokens=200_000))
     identity = SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)
     canonical = SimpleNamespace(identity=identity, canonical_expanded_bytes=0, items=())

@@ -47,7 +47,9 @@ async def run() -> dict[str, object]:
     original_home = os.environ.get('PULSARA_HOME')
     try:
         with TemporaryDirectory(prefix='pulsara-usage-budget-') as tmp:
-            root = Path(tmp)
+            # Existing-workspace admission requires the saved canonical path;
+            # macOS temporary paths may begin with the /var symlink.
+            root = Path(tmp).resolve()
             home = root / 'home'
             workspace = root / 'workspace'
             home.mkdir()

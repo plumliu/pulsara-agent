@@ -59,10 +59,11 @@ logs/
 .pulsara/
 
 # Local experiment and generated output
+/experiments/
 /output/
 /.benchmarks/
 /dogfood_evidence/
-/.playwright-cli/
+.playwright-cli/
 
 # Browser test reports and traces
 test-results/

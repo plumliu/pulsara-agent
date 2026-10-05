@@ -5,6 +5,7 @@ export type AppView =
   | 'workbench'
   | 'capabilities'
   | 'memory'
+  | 'scheduled'
   | 'settings';
 
 export type RuntimeStatus =
@@ -383,7 +384,8 @@ export interface Message {
   turnId?: string;
   entrySequence?: number;
   role: 'user' | 'assistant';
-  userKind?: 'prompt' | 'steer' | 'plan-continuation' | 'subagent-completion';
+  userKind?: 'prompt' | 'scheduled' | 'steer' | 'plan-continuation' | 'subagent-completion';
+  scheduledInput?: { taskId: string; taskRevision: number; dueAtUtc: string };
   inputSource?: {
     queueItemId: string;
     commandId: string;

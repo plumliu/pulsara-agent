@@ -79,6 +79,7 @@ def _fixture(reasoning: str) -> tuple[dict[str, object], dict[str, object]]:
         "turn_id": "turn:test",
         "entry_sequence": 1,
         "entry_kind": "ASSISTANT_MESSAGE",
+        "scheduled_input": None,
         "conversation_scope_kind": "ROOT",
         "scope_subagent_task_id": None,
         "source_subagent_task_id": None,

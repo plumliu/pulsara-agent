@@ -56,7 +56,7 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolResult,
 )
 from pulsara_agent.memory.scope import CTX_GLOBAL, FrozenMemoryReadContextBinding
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.model_input.contracts import (
     ContextSourceAbsentFact,
     ContextSourceCandidate,
@@ -1363,7 +1363,7 @@ def _json_result(
 
 
 def _prepare_rerank_projection(query: str, facts) -> tuple[str, tuple[str, ...]] | None:
-    estimator = PulsaraHeuristicTokenEstimatorV2()
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     query_bytes = query.encode("utf-8")
     query_tokens = estimator.estimate_text(query)
     if (

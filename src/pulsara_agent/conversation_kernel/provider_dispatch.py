@@ -6607,6 +6607,7 @@ def _prepare_subagent_parent_context_call_subject(
             in {
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
                 CanonicalInputOriginKind.HUMAN_STEER,
+                CanonicalInputOriginKind.SCHEDULED_TASK,
             }
         ):
             # Several ordinary USER_MESSAGE values can enter one installed
@@ -6616,11 +6617,11 @@ def _prepare_subagent_parent_context_call_subject(
             # preceding one.  Canonical turn ids therefore cannot be used as
             # the grouping key.
             if (
-                item.input_origin is CanonicalInputOriginKind.HUMAN_MESSAGE
+                item.input_origin in {CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.SCHEDULED_TASK}
                 and current_has_assistant
             ):
                 finish_current_unit()
-            rendered = "USER: " + _parent_context_user_projection(message.content)
+            rendered = ("SCHEDULED REQUEST: " if item.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK else "USER: ") + _parent_context_user_projection(message.content)
         elif (
             message.role is MessageRole.ASSISTANT
             and item.item_kind

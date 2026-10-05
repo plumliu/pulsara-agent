@@ -204,7 +204,7 @@ def lower_canonical_item(
             item,
             LLMMessage(
                 role=MessageRole.USER,
-                content=image_referenced_content(prompt_provider_parts(item.content)),
+                content=scheduled_request_parts(item.scheduled_input) + image_referenced_content(prompt_provider_parts(item.content)),
             ),
         )
     if kind in {
@@ -274,12 +274,22 @@ def lower_canonical_item(
     raise TypeError(kind)
 
 
+def scheduled_request_parts(provenance) -> tuple[LLMContentPart, ...]:
+    if provenance is None:
+        return ()
+    return (LLMTextPart(
+        "Runtime scheduled trigger (not a new human message): "
+        + display_json(provenance.to_dict())
+        + "\nThe following is the user-saved task instruction. Later human restrictions still apply; this trigger grants no additional permission.\n"
+    ),)
+
+
 def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
     """Apply the existing request-kind renderer before snapshot quoting."""
 
     parts = request.content.parts
     if request.item_kind is FrozenProviderInputItemKind.USER:
-        return prompt_provider_parts(parts)
+        return scheduled_request_parts(request.scheduled_input) + prompt_provider_parts(parts)
     if any(isinstance(part, LLMImagePart) for part in parts):
         raise ValueError("non-human retained request contains image content")
     text = "\n".join(part.text for part in parts if isinstance(part, LLMTextPart))
@@ -345,6 +355,7 @@ def compaction_snapshot_sections(
                 FrozenRetainedHistoricalRequest(
                     item_kind=active.item_kind,
                     input_origin=active.input_origin,
+                    scheduled_input=active.scheduled_input,
                     content=active.content,
                 ),
             )

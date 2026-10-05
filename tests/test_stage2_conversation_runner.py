@@ -1682,8 +1682,9 @@ def _large_native_replay_script(
     api: str,
     *,
     ordinal: int,
+    opaque_chars: int = 50_000,
 ) -> tuple[dict[str, object], ...]:
-    opaque = f"opaque-{ordinal}:" + "r" * 50_000
+    opaque = f"opaque-{ordinal}:" + "r" * opaque_chars
     public = f"native replay answer {ordinal}:" + "p" * 12_000
     if api == "openai_chat_completions":
         return (
@@ -2012,11 +2013,11 @@ def test_k3_active_feedback_compacts_before_atomic_publication(
         lease.guard,
         cut=source_cut,
         entry_id=_name("entry:assistant"),
-        parent_content=InlineContent.from_bytes(b"x" * 60_000),
+        parent_content=InlineContent.from_bytes(b"\n" * 60_000),
         blocks=(
             AssistantTextBlock(
                 block_id=_name("block"),
-                text=InlineContent.from_bytes(b"x" * 60_000),
+                text=InlineContent.from_bytes(b"\n" * 60_000),
             ),
         ),
         complete_turn=False,
@@ -4075,8 +4076,8 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
             limits=limits,
         ),
         scripts=(
-            _large_native_replay_script(api, ordinal=1),
-            _large_native_replay_script(api, ordinal=2),
+            _large_native_replay_script(api, ordinal=1, opaque_chars=100_000),
+            _large_native_replay_script(api, ordinal=2, opaque_chars=100_000),
         ),
         summary="A concise checkpoint after exact final-wire prefix admission.",
     )
@@ -4214,8 +4215,8 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
             input_modalities=("text", "image"),
         ),
         scripts=(
-            _large_native_replay_script(api, ordinal=1),
-            _large_native_replay_script(api, ordinal=2),
+            _large_native_replay_script(api, ordinal=1, opaque_chars=100_000),
+            _large_native_replay_script(api, ordinal=2, opaque_chars=100_000),
             final_script,
         ),
         summary="A concise checkpoint before the large visual suffix.",
@@ -4532,7 +4533,8 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
         default_output_tokens=200,
         input_safety_margin_tokens=0,
     )
-    first_text = "history:" + "h" * 400
+    # Keep the 1,000-token effective budget between soft trigger and hard gate.
+    first_text = "history:" + "h" * 1_600
     scripts = (
         (
             {
@@ -5413,7 +5415,7 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     summary = "A concise free-form handoff for the mid-turn continuation."
     first_response = (
         _text_stream(
-            "accepted assistant context " + "a" * 460_000,
+            "accepted assistant context " + "a" * 920_000,
             block="text:large-before-tool",
         )
         + _tool_stream()
@@ -6062,11 +6064,11 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     summary = "A concise free-form handoff for the pending manual request."
     model = _LimitedCompactionScriptedModel(
         [
-            # The final-wire estimator traverses JSON at two characters per
-            # token.  Keep the combined source over budget while allowing the
+            # The v3 final-wire estimator traverses ASCII JSON at four bytes
+            # per token.  Keep the combined source over budget while allowing the
             # historical prefix and the post-compaction active request to fit
             # independently.
-            _text_stream("historical " + "x" * 60_000),
+            _text_stream("historical " + "x" * 120_000),
             _text_stream("automatic compaction final"),
         ],
         summary,
@@ -6207,7 +6209,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         source_wire_quotes.clear()
         input_reader.operations.clear()
         second = await runner.run_turn(
-            frozen_test_prompt("y" * 40_000),
+            frozen_test_prompt("y" * 80_000),
             command_id=second_command_id,
         )
         await owner.aclose()
@@ -6245,7 +6247,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert successor_snapshot["continuation"]["active_request"] is None
     assert (
         sum(
-            message.content == (LLMTextPart("y" * 40_000),)
+            message.content == (LLMTextPart("y" * 80_000),)
             for message in model.requests[1].compiled_input.messages
         )
         == 1

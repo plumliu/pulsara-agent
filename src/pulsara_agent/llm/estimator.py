@@ -1,9 +1,11 @@
-"""The single v2 model-input and final-wire token estimator."""
+"""The single v3 model-input and final-wire token estimator."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
+import re
+import unicodedata
 from typing import TYPE_CHECKING, Callable, Protocol
 
 from pulsara_agent.llm.input import (
@@ -24,8 +26,19 @@ from pulsara_agent.primitives.model_call import (
 if TYPE_CHECKING:
     from pulsara_agent.model_input.contracts import FrozenToolSpec
 
-TEXT_CHARS_PER_TOKEN = 4
-JSON_CHARS_PER_TOKEN = 2
+TEXT_UTF8_BYTES_PER_TOKEN = 4
+_NON_ASCII = re.compile(r"[^\x00-\x7f]")
+_CJK_NAME_PREFIXES = (
+    "CJK ",
+    "IDEOGRAPHIC ",
+    "HIRAGANA ",
+    "KATAKANA ",
+    "KATAKANA-HIRAGANA ",
+    "HANGUL ",
+    "BOPOMOFO ",
+    "HALFWIDTH KATAKANA ",
+    "HALFWIDTH HANGUL ",
+)
 REQUEST_ENVELOPE_TOKENS = 3
 SYSTEM_MESSAGE_FRAMING_TOKENS = 4
 MESSAGE_FRAMING_TOKENS = 4
@@ -147,27 +160,29 @@ def estimate_image_visual_tokens(*, width: int, height: int) -> int:
     )
 
 
-class PulsaraHeuristicTokenEstimatorV2:
+class PulsaraHeuristicTokenEstimatorV3:
     def __init__(self) -> None:
         payload = {
             "estimator_id": "pulsara_heuristic",
-            "estimator_version": "v2",
+            "estimator_version": "v3",
             "constants": {
-                "text_chars_per_token": TEXT_CHARS_PER_TOKEN,
-                "json_chars_per_token": JSON_CHARS_PER_TOKEN,
+                "text_utf8_bytes_per_token": TEXT_UTF8_BYTES_PER_TOKEN,
                 "request_envelope_tokens": REQUEST_ENVELOPE_TOKENS,
                 "system_message_framing_tokens": SYSTEM_MESSAGE_FRAMING_TOKENS,
                 "message_framing_tokens": MESSAGE_FRAMING_TOKENS,
                 "tool_call_framing_tokens": TOOL_CALL_FRAMING_TOKENS,
                 "tool_spec_framing_tokens": TOOL_SPEC_FRAMING_TOKENS,
             },
-            "unicode_counting": "python_code_points",
+            "unicode_counting": {
+                "formula": "ceil(non_cjk_utf8_bytes/4+cjk_code_points)",
+                "cjk_name_prefixes": _CJK_NAME_PREFIXES,
+                "wide_punctuation": "category:P*,east_asian_width:W|F",
+                "unicode_data_version": unicodedata.unidata_version,
+                "json_text_rule": "same_as_plain_text",
+            },
             "canonical_json": "sort_keys,compact,utf8,finite",
             "message_fields": [
                 "content",
-                # Retain the established estimator identity after removing
-                # the superseded semantic-thinking DTO slot.
-                "thinking",
                 "tool_calls.id",
                 "tool_calls.name",
                 "tool_calls.arguments",
@@ -192,7 +207,7 @@ class PulsaraHeuristicTokenEstimatorV2:
         }
         self.fact = TokenEstimatorFact(
             estimator_id="pulsara_heuristic",
-            estimator_version="v2",
+            estimator_version="v3",
             image_grid_pixels=IMAGE_GRID_PIXELS,
             image_scale_numerator=IMAGE_SCALE_NUMERATOR,
             image_scale_denominator=IMAGE_SCALE_DENOMINATOR,
@@ -200,15 +215,28 @@ class PulsaraHeuristicTokenEstimatorV2:
             image_wire_accounting_contract=(
                 "formal_user_image_parts:v1-payload-elided-per-item-rounding"
             ),
-            estimator_fingerprint=sha256_fingerprint("token-estimator:v2", payload),
+            estimator_fingerprint=sha256_fingerprint("token-estimator:v3", payload),
         )
 
     def estimate_text(self, text: str) -> int:
-        return 0 if text == "" else _ceil_div(len(text), TEXT_CHARS_PER_TOKEN)
+        # Python owns the Unicode names/categories. Pulsara counts CJK text
+        # and wide punctuation as one token per code point; all other text
+        # contributes its UTF-8 bytes divided by four, rounded once per item.
+        weighted_bytes = len(text.encode("utf-8"))
+        for match in _NON_ASCII.finditer(text):
+            character = match.group()
+            if unicodedata.name(character, "").startswith(_CJK_NAME_PREFIXES) or (
+                unicodedata.category(character).startswith("P")
+                and unicodedata.east_asian_width(character) in {"W", "F"}
+            ):
+                weighted_bytes += TEXT_UTF8_BYTES_PER_TOKEN - len(
+                    character.encode("utf-8")
+                )
+        return _ceil_div(weighted_bytes, TEXT_UTF8_BYTES_PER_TOKEN)
 
     def estimate_json(self, value: object) -> int:
         rendered = canonical_json_bytes(value).decode("utf-8")
-        return 0 if rendered == "" else _ceil_div(len(rendered), JSON_CHARS_PER_TOKEN)
+        return self.estimate_text(rendered)
 
     def estimate_wire_json_component(self, value: object) -> int:
         """Estimate one already-lowered ordered provider input item.

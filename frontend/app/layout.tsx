@@ -1,3 +1,4 @@
+import './styles/scheduled.css';
 import type { Metadata } from 'next';
 import 'katex/dist/katex.min.css';
 import 'yet-another-react-lightbox/styles.css';

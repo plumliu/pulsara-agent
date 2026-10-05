@@ -100,6 +100,7 @@ def test_compaction_metadata_decoder_rejects_nonhuman_image_before_hydration() -
                 {
                     "item_kind": FrozenProviderInputItemKind.USER.value,
                     "input_origin": CanonicalInputOriginKind.SUBAGENT_OBJECTIVE.value,
+                    "scheduled_input": None,
                     "content": {
                         "schema": "pulsara.prompt/v1",
                         "parts": (

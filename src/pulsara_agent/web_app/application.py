@@ -33,6 +33,7 @@ from pulsara_agent.tool_permission import EffectivePermissionPolicy
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.http_server import LocalHttpServer
 from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.scheduling.service import ScheduledTaskService
 
 
 class LocalWebApplicationState(StrEnum):
@@ -96,6 +97,8 @@ class LocalWebApplication:
             permission_policy=permission_policy,
             active_skill_names=active_skill_names,
         )
+        self.scheduled_tasks = ScheduledTaskService(self.sessions)
+        self.core.scheduled_tasks = self.scheduled_tasks
         self.protocol_server: TerminalKernelProtocolServer | None = None
         self.bridge: LocalBrowserBridge | None = None
         self.http: LocalHttpServer | None = None
@@ -150,6 +153,7 @@ class LocalWebApplication:
                 self.bridge = bridge
                 http = LocalHttpServer(
                     sessions=self.sessions,
+                    scheduled_tasks=self.scheduled_tasks,
                     bridge=bridge,
                     static_root=self.static_root,
                     requested_port=self.requested_port,
@@ -213,6 +217,7 @@ class LocalWebApplication:
             self.database_state = DatabaseDataPlaneState.UNAVAILABLE
         else:
             self.database_state = DatabaseDataPlaneState.READY
+            await self.scheduled_tasks.start()
         return self.database_state
 
     def postgres_settings_saved(self) -> DatabaseDataPlaneState:
@@ -248,6 +253,7 @@ class LocalWebApplication:
                         await self.bridge.aclose()
                     if self.protocol_server is not None:
                         await self.protocol_server.close()
+                    await self.scheduled_tasks.aclose()
                     await self.sessions.aclose()
                     await self.core.shutdown()
                 work = asyncio.create_task(
@@ -323,6 +329,7 @@ class LocalWebApplication:
             if self.protocol_server is not None:
                 await close(self.protocol_server.close)
                 self.protocol_server = None
+            await close(self.scheduled_tasks.aclose)
             await close(self.sessions.aclose)
             await close(self.core.shutdown)
         if self.http is not None:

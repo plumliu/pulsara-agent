@@ -835,8 +835,8 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
     # Fork spec §7.6 adds groups, genesis, and irreducible historical closures.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 30
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11

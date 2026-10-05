@@ -104,6 +104,7 @@ class _SessionArchiveOperations:
                 raise SessionDeletionBusy("session has unfinished work")
             if check_only:
                 return "OPEN"
+            connection.execute("DELETE FROM pulsara_v3.scheduled_tasks WHERE session_id=%s", (session_id,))
             connection.execute(
                 """UPDATE pulsara_v3.sessions SET lifecycle='ARCHIVED', writer_lease_owner_id=NULL,
                    writer_lease_expires_at=NULL, updated_at=clock_timestamp() WHERE id=%s""",

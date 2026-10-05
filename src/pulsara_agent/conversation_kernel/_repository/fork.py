@@ -238,6 +238,7 @@ class _ForkOperations:
                         ],
                         entry_sequence=sequence_map[source_id],
                         entry_kind=entry["entry_kind"],
+                        scheduled_input=None if entry["scheduled_input"] is None else Jsonb(entry["scheduled_input"]),
                         conversation_scope_kind="ROOT",
                         accepted_at=entry["accepted_at"],
                     )

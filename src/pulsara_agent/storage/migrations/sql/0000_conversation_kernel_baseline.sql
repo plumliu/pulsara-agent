@@ -407,7 +407,7 @@ CREATE TABLE pulsara_v3.session_commands (
     session_id text NOT NULL,
     command_id text NOT NULL,
     command_kind text NOT NULL CHECK (command_kind IN (
-        'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT',
+        'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'RUN_SCHEDULED_TASK', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT',
         'RESOLVE_INTERACTION', 'ACCEPT_SUBAGENT_COMPLETION',
         'ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN',
         'RESOLVE_PLAN_INTERACTION', 'COMPACT_CONTEXT'
@@ -443,7 +443,7 @@ CREATE TABLE pulsara_v3.session_commands (
     CHECK (
         (command_kind = 'SUBMIT_PROMPT' AND target_kind = 'TURN') OR
         (command_kind = 'STEER' AND target_kind = 'ENTRY') OR
-        (command_kind IN ('QUEUE_PROMPT', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT') AND target_kind = 'QUEUE_ITEM') OR
+        (command_kind IN ('QUEUE_PROMPT', 'RUN_SCHEDULED_TASK', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT') AND target_kind = 'QUEUE_ITEM') OR
         (command_kind = 'RESOLVE_INTERACTION' AND target_kind = 'INTERACTION_DECISION') OR
         (command_kind = 'ACCEPT_SUBAGENT_COMPLETION' AND target_kind = 'ENTRY') OR
         (command_kind IN ('ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN')
@@ -477,6 +477,8 @@ CREATE TABLE pulsara_v3.transcript_entries (
     turn_id text,
     imported_history_group_id text,
     entry_sequence bigint NOT NULL CHECK (entry_sequence >= 1),
+    scheduled_input jsonb,
+    CHECK (scheduled_input IS NULL OR (entry_kind = 'USER_MESSAGE' AND conversation_scope_kind = 'ROOT' AND jsonb_typeof(scheduled_input) = 'object')),
     entry_kind text NOT NULL CHECK (entry_kind IN (
         'USER_MESSAGE', 'USER_STEER', 'ASSISTANT_MESSAGE',
         'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT', 'TERMINAL_OBSERVATION',
@@ -974,6 +976,17 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     command_id text NOT NULL,
     client_submission_id text NOT NULL,
     delivery_mode text NOT NULL CHECK (delivery_mode IN ('NEW_TURN', 'STEER_ACTIVE_TURN')),
+    input_origin text NOT NULL CHECK (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'SCHEDULED_TASK')),
+    scheduled_task_id text,
+    scheduled_task_revision bigint,
+    scheduled_due_at timestamptz,
+    CHECK (
+        (input_origin = 'SCHEDULED_TASK' AND delivery_mode = 'NEW_TURN'
+         AND scheduled_task_id IS NOT NULL AND scheduled_task_revision >= 1 AND scheduled_due_at IS NOT NULL) OR
+        (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER') AND scheduled_task_id IS NULL
+         AND scheduled_task_revision IS NULL AND scheduled_due_at IS NULL
+         AND input_origin = CASE delivery_mode WHEN 'NEW_TURN' THEN 'HUMAN_MESSAGE' ELSE 'HUMAN_STEER' END)
+    ),
     model_call_binding jsonb,
     target_turn_id text,
     permission_snapshot_id text,
@@ -1090,6 +1103,26 @@ CREATE UNIQUE INDEX uq_pulsara_v3_queue_plan_handoff_claim
     ON pulsara_v3.prompt_queue_items (
         session_id, pending_plan_handoff_workflow_id
     ) WHERE pending_plan_handoff_workflow_id IS NOT NULL;
+
+CREATE TABLE pulsara_v3.scheduled_tasks (
+    id text PRIMARY KEY,
+    session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
+    name text NOT NULL CHECK (length(btrim(name)) > 0),
+    prompt text NOT NULL CHECK (length(btrim(prompt)) > 0),
+    schedule jsonb NOT NULL CHECK (jsonb_typeof(schedule) = 'object'),
+    timezone text NOT NULL CHECK (length(timezone) > 0),
+    permission_mode text NOT NULL CHECK (permission_mode IN ('read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions')),
+    status text NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED')),
+    next_run_at timestamptz,
+    revision bigint NOT NULL CHECK (revision >= 1),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((status = 'ACTIVE') = (next_run_at IS NOT NULL)),
+    CHECK (status <> 'COMPLETED' OR schedule->>'kind' = 'once')
+);
+CREATE INDEX scheduled_tasks_session ON pulsara_v3.scheduled_tasks(session_id, id);
+CREATE INDEX scheduled_tasks_due ON pulsara_v3.scheduled_tasks(next_run_at, id) WHERE status = 'ACTIVE';
+CREATE INDEX prompt_queue_scheduled_status ON pulsara_v3.prompt_queue_items(session_id, scheduled_task_id, status);
 
 CREATE TABLE pulsara_v3.canonical_image_refs (
     session_id text NOT NULL,

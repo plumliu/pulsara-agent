@@ -17,10 +17,9 @@ def test_memory_prompt_explains_write_basis_and_relation_semantics() -> None:
     assert "Up to three related items" in DEFAULT_SYSTEM_PROMPT
     assert "memory page" in DEFAULT_SYSTEM_PROMPT
 
-    assert "review is Tuesday" in remember.description
-    assert "prepare slides on Monday" in remember.description
-    assert "linking the two would be wrong" in remember.description
-    assert "This example is illustrative" in remember.description
+    assert "decision to prepare slides before a review" in remember.description
+    assert "rewording that schedule is not a new dependent memory" in remember.description
+    assert "Examples are not content to save" in remember.description
     assert "ALREADY_PRESENT" in remember.description
     assert "mark_memory_relation" in remember.description
     assert "cited_tool_result_handles" not in remember.input_schema["properties"]

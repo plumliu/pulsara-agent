@@ -37,7 +37,7 @@ export function SessionDeletionDialog({ session, busy, error, onConfirm, onClose
         <span className="session-delete-icon"><Trash2 size={20} aria-hidden="true" /></span>
         <div className="session-delete-heading">
           <h2 id="session-delete-title">删除这条会话？</h2>
-          <p id="session-delete-description">会话及其记录将永久删除，无法撤销。</p>
+          <p id="session-delete-description">会话、记录及绑定的定时任务将永久删除，无法撤销。</p>
         </div>
         <button aria-label="关闭删除确认" disabled={busy} onClick={onClose}><X size={17} /></button>
       </header>

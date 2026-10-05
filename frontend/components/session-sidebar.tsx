@@ -117,7 +117,7 @@ function SessionItem({
         menu?.removeAttribute('open'); menu?.querySelector('summary')?.focus();
         onRenameSession(session);
       }}><Pencil size={13} />重命名</button>
-      <button type="button" disabled={!session.canArchive} title={session.canArchive ? undefined : '会话仍有任务或待处理事项，暂时无法归档'} onClick={event => {
+      <button type="button" disabled={!session.canArchive} title={session.canArchive ? '归档会删除绑定的定时任务，取消归档后需重新创建' : '会话仍有任务或待处理事项，暂时无法归档'} onClick={event => {
         event.currentTarget.closest('details')?.removeAttribute('open');
         onArchiveSession(session);
       }}><Archive size={13} />归档会话</button>

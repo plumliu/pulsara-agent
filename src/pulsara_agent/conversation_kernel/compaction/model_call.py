@@ -729,6 +729,7 @@ def _active_request_message(
     request = FrozenRetainedHistoricalRequest(
         item_kind=active_request.item_kind,
         input_origin=active_request.input_origin,
+        scheduled_input=active_request.scheduled_input,
         content=active_request.content,
     )
     return LLMMessage(

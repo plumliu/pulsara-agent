@@ -16,6 +16,8 @@ from uuid import UUID
 from aiohttp import web
 from psycopg.errors import QueryCanceled
 from pulsara_agent.web_app.memory_controller import LocalMemoryController
+from pulsara_agent.web_app.scheduled_controller import ScheduledTaskController
+from pulsara_agent.scheduling.contracts import ScheduledTaskError
 from pulsara_agent.conversation_kernel.memory.management import MemoryManagementError
 
 from pulsara_agent.conversation_kernel.host import KernelHostCoreClosing
@@ -314,8 +316,10 @@ class LocalHttpServer:
         refresh_database_state: Callable[[], Awaitable[object]],
         postgres_settings_saved: Callable[[], object],
         reset_postgres: Callable[[LocalPostgresConfig], Awaitable[dict[str, object]]],
+        scheduled_tasks=None,
     ) -> None:
         self.sessions = sessions
+        self.scheduled_tasks = scheduled_tasks
         self.bridge = bridge
         self.static_root = static_root.resolve()
         self.requested_port = requested_port
@@ -393,6 +397,8 @@ class LocalHttpServer:
             await runner.cleanup()
 
     def _install_routes(self) -> None:
+        if self.scheduled_tasks is not None:
+            ScheduledTaskController(self.scheduled_tasks).install(self._app.router)
         memory = LocalMemoryController(self.sessions)
         self._app.router.add_get("/api/memories/projects", memory.projects)
         self._app.router.add_get("/api/memories", memory.catalog)
@@ -679,6 +685,8 @@ class LocalHttpServer:
                 status=exc.status,
                 retryable=exc.retryable,
             )
+        except ScheduledTaskError as exc:
+            return self._error_response(exc.code, str(exc), status=409 if exc.code in {"REVISION_CONFLICT", "COMMAND_CONFLICT", "TASK_CUT_CHANGED"} else 400, retryable=False)
         except WorkspaceUnavailable as exc:
             return self._error_response("WORKSPACE_UNAVAILABLE", str(exc), status=409, retryable=False)
         except SessionWriterConflict as exc:
@@ -853,7 +861,7 @@ class LocalHttpServer:
         if request.path.startswith("/api/") and request.path != "/api/healthz":
             if (
                 request.path.startswith(
-                    ("/api/sessions", "/api/connections", "/api/memories")
+                    ("/api/sessions", "/api/connections", "/api/memories", "/api/scheduled-tasks")
                 )
                 and self._database_state() != "ready"
             ):
@@ -2127,14 +2135,22 @@ class LocalHttpServer:
 
     async def _create_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"workspace_kind", "workspace_path"}:
+        if set(body) - {"workspace_kind", "workspace_path", "model_call_binding"}:
             raise HttpPublicError(
                 "WORKSPACE_REQUEST_INVALID",
-                "新建会话只需要选择工作目录。",
+                "新建会话配置字段无效。",
                 status=400,
             )
         workspace_kind = body.get("workspace_kind")
         workspace_path = body.get("workspace_path")
+        binding = None
+        if "model_call_binding" in body:
+            try:
+                binding = model_call_binding_from_dict(body["model_call_binding"])
+                if binding is None:
+                    raise ValueError("请选择模型。")
+            except (ValueError, TypeError) as exc:
+                raise HttpPublicError("MODEL_BINDING_INVALID", "模型或推理选项无效。", status=400) from exc
         if workspace_kind not in {"quick", "project"}:
             raise HttpPublicError(
                 "WORKSPACE_KIND_REQUIRED",
@@ -2151,7 +2167,14 @@ class LocalHttpServer:
             handle = await self.sessions.create_session(
                 workspace_kind=cast(SessionWorkspaceKind, workspace_kind),
                 workspace_path=workspace_path,
+                **({"model_call_binding": binding} if binding is not None else {}),
             )
+        except SessionControlRejected as exc:
+            raise HttpPublicError(
+                exc.public_code,
+                "模型配置已不可用，请刷新或检查设置。",
+                status=400,
+            ) from exc
         except (OSError, ValueError) as exc:
             raise HttpPublicError(
                 "WORKSPACE_UNAVAILABLE",
@@ -2544,9 +2567,11 @@ class LocalHttpServer:
 
     @staticmethod
     async def _json_body(request: web.Request) -> dict[str, object]:
-        if not request.can_read_body or request.content_length == 0:
-            return {}
         try:
+            # Admission may have consumed the stream; aiohttp retains the body
+            # in its read cache, whereas can_read_body only describes the stream.
+            if not await request.read():
+                return {}
             value = await request.json()
         except web.HTTPException:
             raise

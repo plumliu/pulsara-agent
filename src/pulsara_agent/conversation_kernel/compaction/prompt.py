@@ -23,6 +23,7 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     decode_canonical_prompt_body,
     hydrate_canonical_prompt_body,
 )
+from pulsara_agent.scheduling.contracts import ScheduledProvenance
 from pulsara_agent.llm.input import (
     LLMImagePart,
 )
@@ -294,6 +295,7 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 class _DecodedRequest:
     item_kind: FrozenProviderInputItemKind
     input_origin: CanonicalInputOriginKind | None
+    scheduled_input: ScheduledProvenance | None
     body: CanonicalPromptBody
     encoded_body: bytes
 
@@ -305,6 +307,7 @@ class _DecodedActiveRequest:
     location: CompactionActiveRequestLocation
     item_kind: FrozenProviderInputItemKind
     input_origin: CanonicalInputOriginKind | None
+    scheduled_input: ScheduledProvenance | None
     request: _DecodedRequest | None
 
 
@@ -323,6 +326,7 @@ def _decode_request(value: object, *, active: bool) -> _DecodedRequest:
     if not isinstance(value, Mapping) or set(value) != {
         "item_kind",
         "input_origin",
+        "scheduled_input",
         "content",
     }:
         raise ValueError("snapshot request fields do not match its contract")
@@ -335,6 +339,9 @@ def _decode_request(value: object, *, active: bool) -> _DecodedRequest:
         )
     except (TypeError, ValueError) as error:
         raise ValueError("snapshot request kind/origin is invalid") from error
+    scheduled = None if value["scheduled_input"] is None else ScheduledProvenance.from_dict(value["scheduled_input"])
+    if (input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (scheduled is not None):
+        raise ValueError("scheduled snapshot request provenance is incomplete")
     encoded_body = canonical_json_bytes(value["content"])
     body = decode_canonical_prompt_body(encoded_body)
     validate_compaction_request_shape(
@@ -345,7 +352,7 @@ def _decode_request(value: object, *, active: bool) -> _DecodedRequest:
             isinstance(part, CanonicalPromptImageDescriptor) for part in body.parts
         ),
     )
-    return _DecodedRequest(item_kind, input_origin, body, encoded_body)
+    return _DecodedRequest(item_kind, input_origin, scheduled, body, encoded_body)
 
 
 def _decode_compaction_snapshot_carrier(value: str | bytes) -> _DecodedCarrier:
@@ -385,6 +392,7 @@ def _decode_compaction_snapshot_carrier(value: str | bytes) -> _DecodedCarrier:
             "location",
             "item_kind",
             "input_origin",
+            "scheduled_input",
             "content",
         }:
             raise ValueError("snapshot active-request fields do not match its contract")
@@ -407,6 +415,9 @@ def _decode_compaction_snapshot_carrier(value: str | bytes) -> _DecodedCarrier:
             )
         except (TypeError, ValueError) as error:
             raise ValueError("snapshot active-request kind/origin is invalid") from error
+        scheduled = None if active_value["scheduled_input"] is None else ScheduledProvenance.from_dict(active_value["scheduled_input"])
+        if (input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (scheduled is not None):
+            raise ValueError("active scheduled snapshot provenance is incomplete")
         content_value = active_value["content"]
         decoded_request = (
             None
@@ -417,6 +428,7 @@ def _decode_compaction_snapshot_carrier(value: str | bytes) -> _DecodedCarrier:
                     "input_origin": (
                         None if input_origin is None else input_origin.value
                     ),
+                    "scheduled_input": active_value["scheduled_input"],
                     "content": content_value,
                 },
                 active=True,
@@ -444,6 +456,7 @@ def _decode_compaction_snapshot_carrier(value: str | bytes) -> _DecodedCarrier:
             location=location,
             item_kind=item_kind,
             input_origin=input_origin,
+            scheduled_input=scheduled,
             request=decoded_request,
         )
     instruction = continuation["instruction"]
@@ -553,6 +566,7 @@ def _hydrate_request(
         FrozenRetainedHistoricalRequest(
             item_kind=request.item_kind,
             input_origin=request.input_origin,
+            scheduled_input=request.scheduled_input,
             content=prompt.content,
         ),
         offset + count,
@@ -593,6 +607,7 @@ def parse_compaction_snapshot_carrier(
             location=decoded.active.location,
             item_kind=decoded.active.item_kind,
             input_origin=decoded.active.input_origin,
+            scheduled_input=decoded.active.scheduled_input,
             content=active_content,
         )
     recent: list[FrozenRetainedHistoricalRequest] = []
