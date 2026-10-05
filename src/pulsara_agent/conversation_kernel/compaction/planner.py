@@ -424,9 +424,7 @@ def project_compaction_read_for_text_only_handover(
             old_facts.approved_plan_materialization_fact
         ),
         "previous_turn_outcome_fact": old_facts.previous_turn_outcome_fact,
-        "tool_observation_freshness_fact": (
-            old_facts.tool_observation_freshness_fact
-        ),
+        "tool_observation_freshness_fact": (old_facts.tool_observation_freshness_fact),
     }
     provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
         FrozenCanonicalCompileSnapshot
@@ -457,9 +455,7 @@ def project_compaction_read_for_text_only_handover(
         effective_materialization_lineage_floor=(
             canonical_read.lineage_base.effective_materialization_lineage_floor
         ),
-        source_through_sequence=(
-            old_input.identity.provider_input_through_sequence
-        ),
+        source_through_sequence=(old_input.identity.provider_input_through_sequence),
         ordered_items=projected_items,
         closures=old_input.closures,
         late_outcomes=old_input.late_outcomes,
@@ -470,6 +466,8 @@ def project_compaction_read_for_text_only_handover(
         dispatch_read=projected_dispatch,
         lineage_base=canonical_read.lineage_base,
         safe_head_range=projected_range,
+        source_interruption=canonical_read.source_interruption,
+        imported_interruptions=tuple(n for n in canonical_read.imported_interruptions if projected_range.effective_materialization_lineage_floor < n.display_after_entry_sequence <= projected_range.source_through_sequence),
     )
 
 

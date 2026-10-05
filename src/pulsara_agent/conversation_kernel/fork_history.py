@@ -6,6 +6,12 @@ captures permission, inventory, writer, or executable continuation state.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import (
+    TurnInterruptionNotice,
+    read_executed_notices,
+    parse_imported_notice,
+)
+
 from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
@@ -85,6 +91,7 @@ class FrozenForkGroup:
     accepted_at: datetime
     terminal_at: datetime | None
     copied_final_source_entry_id: str | None
+    interruption_outcome: TurnInterruptionNotice | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,9 +235,13 @@ def read_fork_historical_material(
             "Fork requires its single READ COMMITTED transaction with source row lock"
         )
     _deadline(deadline_monotonic)
-    if connection.execute(
-        "SELECT 1 FROM pulsara_v3.sessions WHERE id=%s AND lifecycle='OPEN' FOR UPDATE", (source_session_id,)
-    ).fetchone() is None:
+    if (
+        connection.execute(
+            "SELECT 1 FROM pulsara_v3.sessions WHERE id=%s AND lifecycle='OPEN' FOR UPDATE",
+            (source_session_id,),
+        ).fetchone()
+        is None
+    ):
         raise ConversationKernelConflict("Fork source session is absent")
     anchor = read_fork_anchor(connection, source_session_id, anchor_entry_id)
     if anchor is None:
@@ -341,6 +352,16 @@ def read_fork_historical_material(
                 ),
             )
 
+    anchor_event = connection.execute(
+        """SELECT event_sequence FROM pulsara_v3.agent_events
+           WHERE session_id=%s AND subject_entry_id=%s""",
+        (source_session_id, anchor_entry_id),
+    ).fetchone()
+    if anchor.owner_kind == "EXECUTED_TURN" and anchor_event is None:
+        raise ConversationKernelConflict("Fork anchor lacks its accepted occurrence")
+    anchor_event_cut = (
+        0 if anchor_event is None else int(anchor_event["event_sequence"]) - 1
+    )
     entries = []
     blocks = []
     visualizations = []
@@ -357,7 +378,8 @@ def read_fork_historical_material(
             """SELECT e.*, t.status AS executed_status, t.accepted_at AS executed_accepted,
                       t.terminal_at AS executed_terminal, t.final_entry_id AS executed_final,
                       g.status AS imported_status, g.accepted_at AS imported_accepted,
-                      g.terminal_at AS imported_terminal, g.final_entry_id AS imported_final
+                      g.terminal_at AS imported_terminal, g.final_entry_id AS imported_final,
+                      g.interruption_outcome AS imported_outcome
                FROM pulsara_v3.transcript_entries AS e
                LEFT JOIN pulsara_v3.turns AS t ON e.entry_owner_kind = 'EXECUTED_TURN'
                  AND t.session_id = e.session_id AND t.id = e.turn_id
@@ -401,7 +423,9 @@ def read_fork_historical_material(
             next_ordinal[owner] = ordinal + 1
             if row["state"] == "READY":
                 if row["logical_digest"] is None or row["logical_size"] is None:
-                    raise ConversationKernelConflict("Fork visualization blob is absent")
+                    raise ConversationKernelConflict(
+                        "Fork visualization blob is absent"
+                    )
                 PostgresCanonicalBlobStore.read_exact_in_connection(
                     connection,
                     blob_id=str(row["blob_id"]),
@@ -439,12 +463,46 @@ def read_fork_historical_material(
                 raise ConversationKernelConflict(
                     "Fork effective history contains an unsettled group"
                 )
+            outcome = None
+            if group_key in groups:
+                outcome = groups[group_key].interruption_outcome
+            elif prefix == "executed":
+                facts = read_executed_notices(
+                    connection,
+                    session_id=source_session_id,
+                    event_cut=anchor_event_cut,
+                    turn_id=group_key,
+                )
+                if (
+                    facts
+                    and anchor.source_through_sequence
+                    < facts[0].display_after_entry_sequence
+                    < anchor.source_entry_sequence
+                ):
+                    outcome = facts[0]
+            else:
+                outcome = parse_imported_notice(
+                    {
+                        "id": group_key,
+                        "status": raw["imported_status"],
+                        "terminal_at": raw["imported_terminal"],
+                        "interruption_outcome": raw["imported_outcome"],
+                    }
+                )
+                if (
+                    outcome is not None
+                    and not anchor.source_through_sequence
+                    < outcome.display_after_entry_sequence
+                    < anchor.source_entry_sequence
+                ):
+                    outcome = None
             groups[group_key] = FrozenForkGroup(
                 group_key,
                 str(raw[prefix + "_status"]),
                 raw[prefix + "_accepted"],
                 raw[prefix + "_terminal"],
                 raw[prefix + "_final"],
+                outcome,
             )
             # Validate original content too: assistant manifests remain storage
             # data and are never used in place of their ordered blocks.
@@ -713,6 +771,7 @@ def read_fork_historical_material(
             g.copied_final_source_entry_id
             if g.copied_final_source_entry_id in actual_ids
             else None,
+            g.interruption_outcome,
         )
         for key, g in groups.items()
         if key in actual_groups

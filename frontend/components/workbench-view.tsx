@@ -60,6 +60,8 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
+import { TurnInterruptionHistoryNotice } from './turn-interruption-notice';
+import type { TurnInterruptionNotice } from '../lib/runtime-adapter';
 import { ContextUsageIndicator } from './context-usage-indicator';
 import type {
   ContextUsagePreview,
@@ -100,6 +102,7 @@ interface WorkbenchViewProps {
   workspace: Workspace;
   session: SessionSummary;
   messages: Message[];
+  interruptionNotices?: TurnInterruptionNotice[];
   contextCompaction?: ContextCompactionBoundary;
   initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
   onFork: (entryId: string) => Promise<void>;
@@ -1260,6 +1263,7 @@ function findToolChainConnections(messages: Message[], contextCompactionIndex = 
 
 export function ConversationMessages({
   messages,
+  interruptionNotices = [],
   skills = [],
   artifactOwnerKey,
   onReadToolArtifact,
@@ -1280,6 +1284,7 @@ export function ConversationMessages({
   focusSourceEntry,
 }: {
   messages: Message[];
+  interruptionNotices?: TurnInterruptionNotice[];
   skills?: SkillCapability[];
   artifactOwnerKey: string;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
@@ -1320,7 +1325,8 @@ export function ConversationMessages({
     </div>
   );
   const completedTurns = new Set(messages.filter(message => isCompleteAnswer(message, taskFinalAnswerId)).map(message => message.turnId).filter(Boolean));
-  const content: ReactNode[] = [];
+  const content: ReactNode[] = interruptionNotices.filter(notice => !notice.displayAfterMessageId).map(notice =>
+    <TurnInterruptionHistoryNotice key={`${notice.ownerKind}:${notice.ownerId}`} notice={notice} />);
   let run: Message[] = [];
   const flush = () => {
     if (!run.length) return;
@@ -1345,6 +1351,10 @@ export function ConversationMessages({
     if (message.role === 'user' && message.userKind !== 'subagent-completion' && !run.length) content.push(renderMessage(message, false));
     else run.push(message);
     if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
+    for (const notice of interruptionNotices.filter(n => n.displayAfterMessageId === message.id)) {
+      flush();
+      content.push(<TurnInterruptionHistoryNotice key={`${notice.ownerKind}:${notice.ownerId}`} notice={notice} />);
+    }
   });
   flush();
   if (contextCompactionIndex === messages.length) content.push(<ContextCompactionDivider key="compaction" />);
@@ -1566,6 +1576,7 @@ export function WorkbenchView({
   workspace,
   session,
   messages,
+  interruptionNotices,
   contextCompaction,
   initialContextBase,
   onFork,
@@ -2260,16 +2271,13 @@ export function WorkbenchView({
             </div>
           )}
           {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
-          <ConversationMessages messages={messages} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
+          <ConversationMessages messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             onNotify={onNotify} onFork={onFork} canFork={canControl} contextCompactionIndex={contextCompactionIndex}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={focusSourceEntry} />
-          {session.status === 'interrupted' && !isRunning && (
-            <p className="conversation-interruption" role="status">本轮回复已中断。</p>
-          )}
           {conversationSubmissions.map(item => (
             <div key={item.commandId} data-pending-message={item.commandId}
               aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>

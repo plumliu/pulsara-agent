@@ -7,6 +7,8 @@ authority: PostgreSQL remains the sole truth for queue, entry, and event rows.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import interruption_payload
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -1294,7 +1296,7 @@ def build_steer_resource_rejection(
         sensitivity_class="PUBLIC",
         projection_profile="DEFAULT",
         occurred_at=occurred_at,
-        payload={"reason": turn_reason},
+        payload=interruption_payload(turn_reason),
     )
     return PreparedSteerResourceRejection(
         session_id=fact.session_id,
@@ -1347,7 +1349,7 @@ class PreparedSteerPlanConflictInterruption:
             event.event_type is not CommittedEventType.TURN_INTERRUPTED
             or event.subject.slot is not SubjectSlot.TURN
             or event.subject.subject_id != self.exact_target_turn_id
-            or event.payload != {"reason": "PROVIDER_INPUT_PLAN_CONFLICT"}
+            or event.payload != interruption_payload("PROVIDER_INPUT_PLAN_CONFLICT")
         ):
             raise ValueError("steer plan-conflict interruption event is invalid")
 
@@ -1387,7 +1389,7 @@ def build_steer_plan_conflict_interruption(
         sensitivity_class="PUBLIC",
         projection_profile="DEFAULT",
         occurred_at=occurred_at,
-        payload={"reason": reason},
+        payload=interruption_payload(reason),
     )
     return PreparedSteerPlanConflictInterruption(
         session_id=session_id,

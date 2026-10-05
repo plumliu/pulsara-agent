@@ -1008,9 +1008,10 @@ describe('PulsaraApp', () => {
         terminal_reason: 'FOREGROUND_EXECUTION_INTERRUPTED',
       } },
     };
+    adapter.connectionValue.interruptionNotices = [{ownerKind: "EXECUTED_TURN", ownerId: "turn-interrupted", reason: "FOREGROUND_EXECUTION_INTERRUPTED", terminalAtUtc: "2026-10-05T00:00:00Z", displayAfterEntrySequence: 1, displayAfterMessageId: adapter.connectionValue.messages[0].id}];
     render(<PulsaraApp adapter={adapter} />);
     const notice = await screen.findByText('本轮回复已中断。');
-    expect(notice.classList.contains('conversation-interruption')).toBe(true);
+    expect(notice.closest('.conversation-interruption')).toBeTruthy();
     expect(notice.closest('.runtime-banner')).toBeNull();
     const workbench = screen.getByRole('region', { name: '会话工作台' });
     expect(within(workbench).getByText('已中断')).toBeTruthy();

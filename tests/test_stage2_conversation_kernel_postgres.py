@@ -9,6 +9,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 
@@ -911,21 +912,18 @@ def test_stage2_snapshot_and_history_page_are_bounded_by_final_wire_bytes(
     assert not snapshot.control.active_turns
     assert len(snapshot.SerializeToString(deterministic=True)) <= 140_000
     assert snapshot.HasField("older_history_cursor")
-    entries, cursor, has_more = reader.history_page(
+    page = reader.history_page(
         session_id=lease.guard.session_id,
         cut_sequence=snapshot.older_history_cursor.cut_sequence,
+        event_sequence_cut=snapshot.older_history_cursor.event_sequence_cut,
         before_entry_sequence=snapshot.older_history_cursor.entry_sequence,
         maximum_entries=256,
         maximum_serialized_bytes=140_000,
         deadline_monotonic=monotonic() + 30,
     )
-    assert entries
-    assert (
-        sum(len(item.SerializeToString(deterministic=True)) + 8 for item in entries)
-        + 512
-        <= 140_000
-    )
-    assert has_more == (cursor is not None)
+    assert page.entries
+    assert len(wire.ServerFrame(history_page=page).SerializeToString(deterministic=True)) <= 140_000
+    assert page.has_more == page.HasField("older_history_cursor")
 
 
 def test_stage2_text_turn_is_canonical_and_sequences_rollback_without_gaps(

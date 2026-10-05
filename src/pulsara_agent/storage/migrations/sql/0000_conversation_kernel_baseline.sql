@@ -246,6 +246,7 @@ CREATE TABLE pulsara_v3.turns (
     permission_snapshot_fingerprint text NOT NULL CHECK (
         permission_snapshot_fingerprint ~ '^sha256:[0-9a-f]{64}$'
     ),
+    terminal_public_detail text,
     terminal_reason text,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     terminal_at timestamptz,
@@ -461,6 +462,8 @@ CREATE TABLE pulsara_v3.imported_history_groups (
     final_entry_id text,
     accepted_at timestamptz NOT NULL,
     terminal_at timestamptz,
+    interruption_outcome jsonb,
+    CHECK (interruption_outcome IS NULL OR (status = 'INTERRUPTED' AND terminal_at IS NOT NULL AND jsonb_typeof(interruption_outcome) = 'object')),
     UNIQUE (session_id, id),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE

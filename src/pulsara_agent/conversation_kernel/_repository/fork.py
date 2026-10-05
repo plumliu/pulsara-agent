@@ -34,7 +34,10 @@ from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from .contracts import ConversationKernelConflict, _id, _content_columns
 from pulsara_agent.conversation_kernel.annotations import remap_annotation_sources
-from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE, freeze_canonical_prompt
+from pulsara_agent.conversation_kernel.prompt_content import (
+    PROMPT_BODY_MEDIA_TYPE,
+    freeze_canonical_prompt,
+)
 from pulsara_agent.llm.input import PromptAnnotationPart
 from .locking import lock_canonical_identities
 
@@ -194,6 +197,15 @@ class _ForkOperations:
                             "status": group.settled_status,
                             "accepted_at": group.accepted_at,
                             "terminal_at": group.terminal_at,
+                            "interruption_outcome": None
+                            if group.interruption_outcome is None
+                            else Jsonb(
+                                group.interruption_outcome.imported_value(
+                                    local_cut(
+                                        group.interruption_outcome.display_after_entry_sequence
+                                    )
+                                )
+                            ),
                             "final_entry_id": entry_map.get(
                                 group.copied_final_source_entry_id
                             ),
@@ -251,21 +263,37 @@ class _ForkOperations:
                             ),
                         )
                     publication = None
-                    if entry["entry_kind"] in {"USER_MESSAGE", "USER_STEER"} and entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
+                    if (
+                        entry["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}
+                        and entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE
+                    ):
                         original = hydrate_canonical_prompt_owner(
-                            connection, row=entry, transcript_entry_id=source_id,
+                            connection,
+                            row=entry,
+                            transcript_entry_id=source_id,
                         ).content
-                        if any(isinstance(part, PromptAnnotationPart) for part in original.parts):
+                        if any(
+                            isinstance(part, PromptAnnotationPart)
+                            for part in original.parts
+                        ):
                             publication = materialize_canonical_prompt(
-                                connection, publisher=self._canonical_content_publisher,
+                                connection,
+                                publisher=self._canonical_content_publisher,
                                 workspace_id=material.workspace_id,
-                                prompt=freeze_canonical_prompt(remap_annotation_sources(original, entry_map)),
+                                prompt=freeze_canonical_prompt(
+                                    remap_annotation_sources(original, entry_map)
+                                ),
                             )
-                            values.update(zip(_CONTENT_COLUMNS, _content_columns(publication.body)))
+                            values.update(
+                                zip(
+                                    _CONTENT_COLUMNS, _content_columns(publication.body)
+                                )
+                            )
                     _insert(connection, "transcript_entries", values)
                     if publication is not None:
                         insert_canonical_prompt_refs(
-                            connection, session_id=child_session_id,
+                            connection,
+                            session_id=child_session_id,
                             workspace_id=material.workspace_id,
                             transcript_entry_id=entry_map[source_id],
                             image_blob_ids=publication.image_blob_ids,
@@ -399,12 +427,26 @@ class _ForkOperations:
                     )
                     carrier = build_compaction_snapshot_carrier(
                         summary=summary,
-                        recent_human_requests=tuple(replace(request, content=remap_annotation_sources(request.content, entry_map))
-                                                    for request in old.recent_human_requests),
+                        recent_human_requests=tuple(
+                            replace(
+                                request,
+                                content=remap_annotation_sources(
+                                    request.content, entry_map
+                                ),
+                            )
+                            for request in old.recent_human_requests
+                        ),
                         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
                         active_request=None,
-                        retained_historical_requests=tuple(replace(request, content=remap_annotation_sources(request.content, entry_map))
-                                                          for request in material.retained_historical_requests),
+                        retained_historical_requests=tuple(
+                            replace(
+                                request,
+                                content=remap_annotation_sources(
+                                    request.content, entry_map
+                                ),
+                            )
+                            for request in material.retained_historical_requests
+                        ),
                     )
                     snapshot_id = _id("context-snapshot")
                     source = material.snapshot

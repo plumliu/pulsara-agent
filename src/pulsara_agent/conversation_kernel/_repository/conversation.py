@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import interruption_payload
+
 from pulsara_agent.conversation_kernel.annotations import validate_annotation_sources
 
 from datetime import datetime
@@ -3034,6 +3036,7 @@ class _ConversationOperations:
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
+        public_detail: str | None = None,
     ) -> bool:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
@@ -3080,7 +3083,7 @@ class _ConversationOperations:
                         occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id=actor_id,
-                        payload={"reason": reason},
+                        payload=interruption_payload(reason, public_detail),
                     ),
                 ),
             )
@@ -3129,7 +3132,7 @@ class _ConversationOperations:
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             row = connection.execute(
-                """SELECT status, terminal_reason, terminal_at
+                """SELECT status, terminal_reason, terminal_public_detail, terminal_at
                    FROM pulsara_v3.turns
                    WHERE session_id = %s AND id = %s""",
                 (session_id, turn_id),
@@ -3147,13 +3150,16 @@ class _ConversationOperations:
                          AND subject_turn_id = %s""",
                     (session_id, turn_id),
                 ).fetchall()
-                if len(events) != 1 or events[0]["payload"] != {"reason": reason}:
+                if len(events) != 1 or events[0]["payload"] != interruption_payload(
+                    reason, row["terminal_public_detail"]
+                ):
                     raise ConversationKernelConflict(
                         "turn interruption winner lacks its exact occurrence"
                     )
             return {
                 "status": status,
                 "terminal_reason": reason,
+                "terminal_public_detail": row["terminal_public_detail"],
                 "terminal_at": row["terminal_at"],
             }
 

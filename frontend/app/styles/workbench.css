@@ -863,3 +863,10 @@
 
 .readonly-dock__path { overflow-wrap: anywhere; }
 .observer-dock > button:last-child:nth-of-type(2) { grid-column: 3; justify-self: start; }
+
+.conversation-interruption { display: flex; align-items: center; gap: 4px; }
+.conversation-interruption > button { border: 0; background: none; color: inherit; display: inline-flex; padding: 3px; cursor: pointer; }
+.conversation-interruption > button:focus-visible { outline: 2px solid var(--blue); border-radius: 50%; }
+.interruption-details { z-index: 1000; max-width: min(360px, calc(100vw - 16px)); padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-solid); color: var(--ink-soft); box-shadow: 0 8px 28px #0002; font-size: 12px; overflow-wrap: anywhere; }
+.interruption-details p { margin: 0 0 8px; white-space: pre-wrap; }
+.interruption-details time { color: var(--muted); }

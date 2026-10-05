@@ -8,6 +8,11 @@ authorize a retry.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import (
+    read_executed_notices,
+    read_imported_notices,
+)
+
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from hashlib import sha256
@@ -667,12 +672,36 @@ class CanonicalProviderInputReader:
                 closures=canonical.closures,
                 late_outcomes=canonical.late_outcomes,
             )
+            event_cut = int(
+                connection.execute(
+                    "SELECT latest_event_sequence FROM pulsara_v3.sessions WHERE id=%s",
+                    (cut.session_id,),
+                ).fetchone()["latest_event_sequence"]
+            )
+            endings = read_executed_notices(
+                connection,
+                session_id=cut.session_id,
+                event_cut=event_cut,
+                turn_id=cut.turn_id,
+                root_only=False,
+            )
+            imported_endings = read_imported_notices(
+                connection,
+                session_id=cut.session_id,
+                entry_sequences=tuple(
+                    item.source_entry_sequence
+                    for item in canonical_range.ordered_items
+                    if item.source_entry_sequence is not None
+                ),
+            )
             return freeze_compaction_canonical_read(
                 scope=scope,
                 turn_status=str(row["status"]),
                 dispatch_read=dispatch,
                 lineage_base=lineage,
                 safe_head_range=canonical_range,
+                source_interruption=endings[0] if endings else None,
+                imported_interruptions=imported_endings,
             )
 
     def read_prospective_root_dispatch(
@@ -2739,7 +2768,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         predecessor = connection.execute(
             """
             SELECT e.turn_id, e.entry_sequence, t.workspace_id, t.status,
-                   t.terminal_reason, t.terminal_at,
+                   t.terminal_reason, t.terminal_public_detail, t.terminal_at,
                    t.conversation_scope_kind, t.scope_subagent_task_id
             FROM pulsara_v3.transcript_entries AS e
             JOIN pulsara_v3.turns AS t
@@ -2923,6 +2952,8 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 predecessor["terminal_at"]
             ),
             "outcome_kind": outcome_kind,
+            "terminal_reason": raw_reason,
+            "terminal_public_detail": predecessor["terminal_public_detail"],
             "accepted_assistant_disposition": (
                 AcceptedAssistantDisposition.ACCEPTED_PREFIX_PRESENT
                 if assistant_count
@@ -3383,6 +3414,7 @@ def visible_tool_result_at_cut(
 
 def _previous_turn_outcome_kind(raw_reason: str) -> PreviousTurnOutcomeKind:
     return {
+        "PROVIDER_REQUEST_FAILED": PreviousTurnOutcomeKind.EXECUTION_FAILED,
         "USER_STOPPED": PreviousTurnOutcomeKind.USER_STOPPED,
         "FOREGROUND_EXECUTION_INTERRUPTED": PreviousTurnOutcomeKind.EXECUTION_FAILED,
         "MODEL_OUTPUT_TOKEN_LIMIT_REACHED": PreviousTurnOutcomeKind.EXECUTION_FAILED,

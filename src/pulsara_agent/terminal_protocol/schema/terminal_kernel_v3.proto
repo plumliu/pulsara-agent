@@ -338,6 +338,16 @@ message HistoryCursor {
   string session_id = 1;
   uint64 cut_sequence = 2;
   uint64 entry_sequence = 3;
+  optional uint64 event_sequence_cut = 4;
+}
+
+message TurnInterruptionNotice {
+  string owner_kind = 1;
+  string owner_id = 2;
+  string reason = 3;
+  optional string public_detail = 4;
+  string terminal_at_utc = 5;
+  uint64 display_after_entry_sequence = 6;
 }
 
 message CanonicalSessionSnapshot {
@@ -350,6 +360,7 @@ message CanonicalSessionSnapshot {
   HistoryCursor older_history_cursor = 7;
   CanonicalControl control = 8;
   string snapshot_fingerprint = 9;
+  repeated TurnInterruptionNotice interruption_notices = 10;
 }
 
 message HelloRequest {
@@ -404,6 +415,7 @@ message HistoryPageResponse {
   repeated CanonicalEntry entries = 2;
   HistoryCursor older_history_cursor = 3;
   bool has_more = 4;
+  repeated TurnInterruptionNotice interruption_notices = 5;
 }
 
 enum ObservationProjectionKind {
@@ -425,6 +437,7 @@ message CommittedObservationProjection {
   string affected_subagent_task_id = 9;
   string affected_subagent_batch_id = 11;
   uint64 control_read_event_sequence = 10;
+  TurnInterruptionNotice interruption_notice = 12;
 }
 
 enum LiveChannelKind {

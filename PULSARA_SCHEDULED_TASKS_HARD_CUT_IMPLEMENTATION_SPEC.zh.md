@@ -6,6 +6,8 @@
 
 实施前置为 [会话统一只读与工作目录恢复规格](PULSARA_SESSION_READ_ONLY_WORKSPACE_RECOVERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)：普通会话已落地冷历史、显式目录恢复与具体非抢占 writer 接缝，代码验收见其 §15。定时入口复用这些 owner，不静默 mkdir、不另写恢复路径。本次仅更新前置依赖说明，定时任务尚未实现。
 
+第二项前置为 [逐轮中断历史提示规格](PULSARA_TURN_INTERRUPTION_HISTORY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)，须在定时任务实现前完成。它让普通 turn 的 runtime 中断事实持久投影到历史，并继续由现有 compiler 在下次请求提供通知；定时触发复用同一路径，不人工插入 final assistant answer，不另建 scheduled 结果历史。实施顺序为：已完成的统一只读/目录恢复 → 逐轮中断历史提示 → 定时任务。第二项前置已在 main 落地并通过主代理与 Workspace readonly spec critic（GPT-6 Astra / high）的代码复审；实现冻结和验收证据见该规格 §12。定时任务尚未实施。
+
 ## 1. 产品目标与明确范围
 
 定时任务是一份“何时向哪个普通会话提交什么提示词”的持久配置。每个任务绑定一个会话，一个会话允许绑定多个任务。用户既能选已有会话，也能先通过普通创建入口新建会话，再绑定任务。后续触发始终进入该会话，不为每次触发另开会话。
@@ -254,6 +256,8 @@ UI、HTTP、模型工具都调用同一 owner；建议 HTTP `/api/scheduled-task
 变更清单至少精确记录：新表 1、task→session FK 1；既有 queue 来源扩展及索引、task due 索引；新增 canonical origin 1；既有 session_commands 增加 RUN_SCHEDULED_TASK closed kind/schema 与对应 CHECK。event kind / subject slot / append guard / durable job 数保持不变。FK/index/command CHECK 是否算入 repository oracle 的 relation/guard 项按实际工具定义列出，不用“只有一张表”掩盖约束差异。
 
 ## 14. 实施顺序
+
+先完成开篇两项普通会话前置及其各自验收，再开始以下步骤。普通 ROOT 的中断提示不改变任务配置状态；尚未接受 scheduled 输入的准备失败仍按本规格处理，不生成人工回复或伪造 turn。
 
 1. 时间 DTO、dateutil/ZoneInfo 最小适配、冻结行为测试；模型与 UI 用同一 next occurrence 预览。
 2. clean-v0 表、queue provenance、repository 事务接缝与 codec；证明入队/游标和暂停/消费线性化。

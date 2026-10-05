@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import TurnInterruptionNotice
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -742,8 +744,26 @@ class FrozenCompactionCanonicalRead:
     dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
     lineage_base: CompactionSourceLineageBase
     safe_head_range: FrozenCompactionCanonicalRange = field(repr=False)
+    source_interruption: TurnInterruptionNotice | None = None
+    imported_interruptions: tuple[TurnInterruptionNotice, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.source_interruption is not None and (
+            self.source_interruption.owner_kind != "EXECUTED_TURN"
+            or self.source_interruption.owner_id != self.scope.turn_id
+            or self.turn_status != "INTERRUPTED"
+        ):
+            raise ValueError("compaction source interruption does not exact-join")
+        if any(
+            n.owner_kind != "IMPORTED_HISTORY"
+            or not self.safe_head_range.effective_materialization_lineage_floor
+            < n.display_after_entry_sequence
+            <= self.safe_head_range.source_through_sequence
+            for n in self.imported_interruptions
+        ):
+            raise ValueError(
+                "compaction imported interruption lies outside source range"
+            )
         identity = self.dispatch_read.compile_snapshot.canonical_input.identity
         if (
             identity.session_id != self.scope.session_id
@@ -756,9 +776,7 @@ class FrozenCompactionCanonicalRead:
             != identity.provider_input_through_sequence
             or self.safe_head_range.effective_materialization_lineage_floor
             != self.lineage_base.effective_materialization_lineage_floor
-            or (
-                self.lineage_base.kind is CompactionLineageBaseKind.CURRENT_SNAPSHOT
-            )
+            or (self.lineage_base.kind is CompactionLineageBaseKind.CURRENT_SNAPSHOT)
             != (self.snapshot_carrier is not None)
         ):
             raise ValueError("compaction canonical read does not exact-join")
@@ -795,6 +813,8 @@ def freeze_compaction_canonical_read(
     dispatch_read: FrozenCanonicalProviderDispatchRead,
     lineage_base: CompactionSourceLineageBase,
     safe_head_range: FrozenCompactionCanonicalRange,
+    source_interruption: TurnInterruptionNotice | None = None,
+    imported_interruptions: tuple[TurnInterruptionNotice, ...] = (),
 ) -> FrozenCompactionCanonicalRead:
     return FrozenCompactionCanonicalRead(
         scope=scope,
@@ -802,6 +822,8 @@ def freeze_compaction_canonical_read(
         dispatch_read=dispatch_read,
         lineage_base=lineage_base,
         safe_head_range=safe_head_range,
+        source_interruption=source_interruption,
+        imported_interruptions=imported_interruptions,
     )
 
 

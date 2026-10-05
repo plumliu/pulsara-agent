@@ -584,6 +584,10 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
             deadline_monotonic=monotonic() + 30,
         )
         turn(repo, lease.guard, "bridge before late result")
+    from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
+    protocol_reader = CanonicalProtocolReader(repo.connection_provider)
+    notice_before = protocol_reader.snapshot(session_id=lease.guard.session_id,
+        maximum_entries=256, maximum_control_items=128, deadline_monotonic=monotonic()+30).interruption_notices
     result_id = identity("entry")
     source = "large historical artifact\n" * 4000
     projection = ToolOutputArtifactProcessor(repo.connection_provider).prepare(
@@ -621,6 +625,15 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
     repo.accept_tool_result(
         lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
     )
+    notice_after = protocol_reader.snapshot(session_id=lease.guard.session_id,
+        maximum_entries=256, maximum_control_items=128, deadline_monotonic=monotonic()+30).interruption_notices
+    assert list(notice_after) == list(notice_before)
+    if late:
+        assert len(notice_after) == 1
+        assert notice_after[0].display_after_entry_sequence < rows(repo,
+            "SELECT entry_sequence FROM pulsara_v3.transcript_entries WHERE id=%s", (result_id,))[0]["entry_sequence"]
+    else:
+        assert not notice_after
     anchor = (
         turn(repo, lease.guard, "after late result")[2]
         if late

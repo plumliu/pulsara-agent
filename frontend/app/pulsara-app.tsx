@@ -2550,6 +2550,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           workspace={activeWorkspace}
           session={activeSession}
           messages={renderedMessages}
+          interruptionNotices={mergedProjection.interruptionNotices}
           contextCompaction={mergedProjection.contextCompaction}
           initialContextBase={mergedProjection.initialContextBase}
           onFork={forkConversation}

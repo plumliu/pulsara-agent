@@ -226,6 +226,25 @@ export interface LocalSettingsReadModel {
   database_state: DatabaseDataPlaneState;
 }
 
+export interface TurnInterruptionNotice {
+  ownerKind: 'EXECUTED_TURN' | 'IMPORTED_HISTORY';
+  ownerId: string;
+  reason: string;
+  publicDetail?: string;
+  terminalAtUtc: string;
+  displayAfterEntrySequence: number;
+  /** Disposable render position for entries presented inside an existing tool trace. */
+  displayAfterMessageId?: string;
+}
+interface ProtocolTurnInterruptionNotice {
+  owner_kind: TurnInterruptionNotice['ownerKind'];
+  owner_id: string;
+  reason: string;
+  public_detail?: string;
+  terminal_at_utc: string;
+  display_after_entry_sequence: string | number;
+}
+
 export interface RuntimeProjection {
   /** Derived from the retained transcript/live window, joined to task pages on demand. */
   subagentRuns?: SubagentRun[];
@@ -234,6 +253,7 @@ export interface RuntimeProjection {
   /** Canonical ROOT admission order, before lossy transcript presentation. */
   canonicalRootTurnIds?: readonly string[];
   messages: Message[];
+  interruptionNotices?: TurnInterruptionNotice[];
   presentationNotices?: string[];
   contextCompaction?: ContextCompactionBoundary;
   initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
@@ -1148,6 +1168,7 @@ interface ProtocolCanonicalSnapshot {
   writer_generation?: string | number;
   event_sequence_cut?: string | number;
   entries?: ProtocolEntry[];
+  interruption_notices?: ProtocolTurnInterruptionNotice[];
   older_history_cursor?: ProtocolHistoryCursor;
   control?: ProtocolCanonicalControl;
 }
@@ -1155,11 +1176,13 @@ interface ProtocolCanonicalSnapshot {
 interface ProtocolHistoryCursor {
   session_id: string;
   cut_sequence: string | number;
+  event_sequence_cut: string | number;
   entry_sequence: string | number;
 }
 
 interface ProtocolHistoryPage {
   entries?: ProtocolEntry[];
+  interruption_notices?: ProtocolTurnInterruptionNotice[];
   older_history_cursor?: ProtocolHistoryCursor;
   has_more?: boolean;
 }
@@ -1184,6 +1207,7 @@ interface ObservationPayload {
     projection_kind: string;
     entry?: ProtocolEntry;
     current_control?: ProtocolCanonicalControl;
+    interruption_notice?: ProtocolTurnInterruptionNotice;
     affected_subagent_task_id?: string;
     affected_subagent_batch_id?: string;
     control_read_event_sequence?: string | number;
@@ -2054,6 +2078,36 @@ abstract class CanonicalHistoryReader {
   protected control: ProtocolCanonicalControl = {};
   protected eventSequence = 0;
   protected writerGeneration = 0;
+  protected interruptionNotices = new Map<string, ProtocolTurnInterruptionNotice>();
+  protected mergeInterruptionNotices(notices: ProtocolTurnInterruptionNotice[]) {
+    for (const notice of notices) {
+      if (!['EXECUTED_TURN', 'IMPORTED_HISTORY'].includes(notice.owner_kind) || !notice.owner_id || !notice.reason
+        || !Number.isSafeInteger(numeric(notice.display_after_entry_sequence)) || numeric(notice.display_after_entry_sequence) < 1
+        || !Number.isFinite(Date.parse(notice.terminal_at_utc))) {
+        throw new RuntimeApiError('INTERRUPTION_NOTICE_INVALID', '中断详情暂时无法读取。', true);
+      }
+      const key = `${notice.owner_kind}:${notice.owner_id}`;
+      const previous = this.interruptionNotices.get(key);
+      if (previous && (previous.reason !== notice.reason || previous.public_detail !== notice.public_detail
+        || previous.terminal_at_utc !== notice.terminal_at_utc
+        || numeric(previous.display_after_entry_sequence) !== numeric(notice.display_after_entry_sequence))) {
+        throw new RuntimeApiError('INTERRUPTION_NOTICE_CONFLICT', '中断历史返回了不一致的事实。', true);
+      }
+      this.interruptionNotices.set(key, notice);
+    }
+  }
+  protected projectInterruptionNotices(messages: Message[]): TurnInterruptionNotice[] {
+    const mounted: TurnInterruptionNotice[] = [];
+    for (const notice of this.interruptionNotices.values()) {
+      const sequence = numeric(notice.display_after_entry_sequence);
+      if (![...this.entries.values()].some(entry => numeric(entry.entry_sequence) === sequence)) continue;
+      const message = messages.filter(m => m.entrySequence !== undefined && m.entrySequence <= sequence).at(-1);
+      mounted.push({ownerKind: notice.owner_kind, ownerId: notice.owner_id, reason: notice.reason,
+        publicDetail: notice.public_detail, terminalAtUtc: notice.terminal_at_utc,
+        displayAfterEntrySequence: sequence, displayAfterMessageId: message?.id});
+    }
+    return mounted.sort((a,b) => a.displayAfterEntrySequence-b.displayAfterEntrySequence || a.ownerId.localeCompare(b.ownerId));
+  }
   protected olderHistoryCursor?: ProtocolHistoryCursor;
   protected historyPageRead?: { promise: Promise<void>; signal?: AbortSignal };
   abstract readonly sessionId: string;
@@ -2187,9 +2241,11 @@ abstract class CanonicalHistoryReader {
       const next = page.older_history_cursor;
       if (page.has_more && (!next || next.session_id !== cursor.session_id
         || numeric(next.cut_sequence) !== numeric(cursor.cut_sequence)
+        || numeric(next.event_sequence_cut) !== numeric(cursor.event_sequence_cut)
         || numeric(next.entry_sequence) >= numeric(cursor.entry_sequence))) {
         throw new RuntimeApiError('HISTORY_CURSOR_INVALID', '较早的会话内容无法继续加载。', true);
       }
+      this.mergeInterruptionNotices(page.interruption_notices ?? []);
       for (const entry of page.entries ?? []) this.entries.set(entry.entry_id, entry);
       this.olderHistoryCursor = page.has_more ? next : undefined;
     })();
@@ -2336,6 +2392,7 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
               snapshot: ProtocolCanonicalSnapshot) {
     super();
     this.entries = new Map((snapshot.entries ?? []).map(entry => [entry.entry_id, entry]));
+    this.mergeInterruptionNotices(snapshot.interruption_notices ?? []);
     this.control = snapshot.control ?? {};
     this.olderHistoryCursor = snapshot.older_history_cursor;
     this.eventSequence = numeric(snapshot.event_sequence_cut);
@@ -2369,7 +2426,7 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
     annotateSubagentCompletionSources(messages, agentTasks, canonicalRootTurnIds);
     const subagentRuns = projectSubagentRuns(canonical, agentTasks, []);
     attachSubagentRuns(messages, subagentRuns);
-    return {messages, canonicalRootTurnIds, subagentRuns, agentTasks, subagentProgress: {},
+    return {messages, interruptionNotices: this.projectInterruptionNotices(messages), canonicalRootTurnIds, subagentRuns, agentTasks, subagentProgress: {},
       presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base, isRunning: false,
       queuedCount: numeric(this.control.prompt_queue_total_count), queuedPrompts: projectQueuedPrompts(this.control),
@@ -2541,6 +2598,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       .map((item) => item.affected_subagent_batch_id)
       .filter((item): item is string => Boolean(item)))];
     for (const committed of observation.committed ?? []) {
+      if (committed.interruption_notice) this.mergeInterruptionNotices([committed.interruption_notice]);
       if (committed.projection_kind === 'IMMUTABLE_ENTRY' && committed.entry) {
         this.entries.set(committed.entry.entry_id, committed.entry);
       }
@@ -3064,7 +3122,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
 
   private replaceSnapshot(snapshot: ProtocolCanonicalSnapshot) {
+    if (numeric(snapshot.event_sequence_cut) < this.eventSequence) return;
     this.entries = new Map((snapshot.entries ?? []).map((entry) => [entry.entry_id, entry]));
+    this.mergeInterruptionNotices(snapshot.interruption_notices ?? []);
     this.olderHistoryCursor = snapshot.older_history_cursor;
     this.control = snapshot.control ?? {};
     this.taskInvalidations = [];
@@ -3569,6 +3629,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const interaction = projectInteraction(this.liveControl, this.control);
     return {
       messages,
+      interruptionNotices: this.projectInterruptionNotices(messages),
       canonicalRootTurnIds,
       subagentRuns,
       subagentProgress: Object.fromEntries([...this.taskProgress].map(([id, progress]) => [id, progress.summary])),

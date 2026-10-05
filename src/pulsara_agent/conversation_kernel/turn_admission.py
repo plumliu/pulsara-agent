@@ -362,16 +362,20 @@ class TurnAdmissionCoordinator:
             )
             raise
 
-    async def interrupt_turn(self, turn_id: str, *, reason: str) -> None:
+    async def interrupt_turn(
+        self, turn_id: str, *, reason: str, public_detail: str | None = None
+    ) -> None:
         """Join the exact terminal winner before releasing its foreground owner."""
 
         task = asyncio.create_task(
-            self._interrupt_turn_worker(turn_id, reason),
+            self._interrupt_turn_worker(turn_id, reason, public_detail),
             name=f"kernel-turn-terminalization:{turn_id}",
         )
         await _await_shielded(task)
 
-    async def _interrupt_turn_worker(self, turn_id: str, reason: str) -> None:
+    async def _interrupt_turn_worker(
+        self, turn_id: str, reason: str, public_detail: str | None
+    ) -> None:
         while True:
             try:
                 changed = await self._io.run(
@@ -379,6 +383,7 @@ class TurnAdmissionCoordinator:
                     self._writer_lease.guard,
                     turn_id=turn_id,
                     reason=reason,
+                    public_detail=public_detail,
                     occurred_at=datetime.now(timezone.utc),
                     actor_id="foreground-runner",
                     deadline_monotonic=self._deadline(),

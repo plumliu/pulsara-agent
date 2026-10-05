@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import summary_interruption_suffix
+
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 
 import asyncio
@@ -2173,6 +2175,29 @@ class CompactionCoordinator:
                         None if active_request is None else active_request.entry_id
                     ),
                 )
+                sequence_by_entry = {
+                    item.source_entry_id: item.source_entry_sequence
+                    for item in canonical.items
+                }
+                selected_sequences = set()
+                for placement in dispatch.projection.projected_input.message_placements[
+                    : prefix.summary_prefix_message_count
+                ]:
+                    sequence = sequence_by_entry.get(placement.origin_entry_id)
+                    if sequence is not None:
+                        selected_sequences.add(sequence)
+                    attachment = getattr(placement, "tool_attachment_source", None)
+                    if attachment is not None:
+                        selected_sequences.update(
+                            member.source.source_entry_sequence
+                            for member in attachment.members
+                        )
+                selected_interruptions = tuple(
+                    n
+                    for n in compaction_read.imported_interruptions
+                    if n.display_after_entry_sequence in selected_sequences
+                    and n.display_after_entry_sequence <= prefix.source_through_sequence
+                )
                 semantic = prepare_compaction_summary_semantic(
                     call=summary_call,
                     source_view=source_view,
@@ -2181,7 +2206,10 @@ class CompactionCoordinator:
                     native_projection_set=(
                         dispatch.tool_exposure_plan.direct_projection_set
                     ),
-                    summary_request=summary_request,
+                    summary_request=summary_request
+                    + summary_interruption_suffix(
+                        compaction_read.source_interruption, selected_interruptions
+                    ),
                 )
                 decision = (
                     await self._provider_dispatch.measure_prepared_wire_candidate(
@@ -2290,7 +2318,19 @@ class CompactionCoordinator:
                 source_projection=dispatch.projection.projected_input,
                 projection=projection,
                 active_request=active_request,
-                summary_request=summary_request,
+                summary_request=summary_request
+                + summary_interruption_suffix(
+                    compaction_read.source_interruption,
+                    tuple(
+                        n
+                        for n in compaction_read.imported_interruptions
+                        if any(
+                            n.display_after_entry_sequence
+                            in unit.source_entry_sequences
+                            for unit in projection.units
+                        )
+                    ),
+                ),
                 resolved_trigger_tokens=trigger_tokens,
             )
             decision = await self._provider_dispatch.measure_prepared_wire_candidate(
@@ -2348,8 +2388,7 @@ class CompactionCoordinator:
                 semantic, decision = await measure(projection)
                 if (
                     decision.wire_input_plan is None
-                    or decision.quote.budget_input_tokens
-                    >= trigger_tokens
+                    or decision.quote.budget_input_tokens >= trigger_tokens
                 ):
                     continue
                 challengers.append(

@@ -2,20 +2,44 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import interruption_payload
+
 from datetime import datetime
 from threading import local
 from typing import Callable, Mapping, Sequence
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pulsara_agent.conversation_kernel.contracts import AssistantBlockKind, CanonicalContent, CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, StoredCommittedEvent
+from pulsara_agent.conversation_kernel.contracts import (
+    AssistantBlockKind,
+    CanonicalContent,
+    CommittedEventDraft,
+    CommittedEventSubject,
+    ConversationScopeKind,
+    EntryKind,
+    HostWriterGuard,
+    StoredCommittedEvent,
+)
 from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot, RunPermissionAdmissionSource, RunPermissionOverlay, build_run_permission_snapshot
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionAdmissionSource,
+    RunPermissionOverlay,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.primitives.plan_workflow import PlanHandoffKind, PlanInteractionKind
-from pulsara_agent.conversation_kernel.vocabulary import DESCRIPTOR_BY_TYPE, AppendGuardKind, CommittedEventType, SubjectSlot
-from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane, VerifiedPostgresConnectionProviderProtocol
+from pulsara_agent.conversation_kernel.vocabulary import (
+    DESCRIPTOR_BY_TYPE,
+    AppendGuardKind,
+    CommittedEventType,
+    SubjectSlot,
+)
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 from .contracts import (
     AcceptedEntry,
@@ -28,6 +52,7 @@ from .contracts import (
     _id,
     _utcnow,
 )
+
 
 class _RepositoryKernel:
     def __init__(
@@ -284,7 +309,7 @@ class _RepositoryKernel:
                         occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id=guard.writer_owner_id,
-                        payload={"reason": "HOST_TAKEOVER"},
+                        payload=interruption_payload("HOST_TAKEOVER"),
                     )
                     for turn_id in turn_ids
                 )
@@ -645,6 +670,27 @@ class _RepositoryKernel:
         draft: CommittedEventDraft,
         turn_id: str | None,
     ) -> StoredCommittedEvent:
+        if draft.event_type is CommittedEventType.TURN_INTERRUPTED:
+            if draft.payload != interruption_payload(draft.payload["reason"], draft.payload["public_detail"]):
+                raise ConversationKernelConflict("interruption occurrence payload is not closed")
+            # All terminal owners already transition the turn in this same writer
+            # transaction. Store the occurrence's closed detail alongside that
+            # winner, without a second notification transaction or event.
+            changed = connection.execute(
+                """UPDATE pulsara_v3.turns SET terminal_public_detail = %s
+                   WHERE session_id=%s AND id=%s AND status='INTERRUPTED'
+                     AND terminal_reason=%s RETURNING id""",
+                (
+                    draft.payload["public_detail"],
+                    session_id,
+                    draft.subject.subject_id,
+                    draft.payload["reason"],
+                ),
+            ).fetchone()
+            if changed is None:
+                raise ConversationKernelConflict(
+                    "interruption occurrence lacks its terminal winner"
+                )
         slots = {slot.value: None for slot in SubjectSlot}
         slots[draft.subject.slot.value] = draft.subject.subject_id
         ordered_slots = tuple(slots[slot.value] for slot in SubjectSlot)
@@ -1054,6 +1100,7 @@ class _RepositoryKernel:
             == expected_snapshot
             and int(row["source_through_sequence"]) == expected_through
         )
+
     @staticmethod
     def _accepted_entry(
         connection: Connection, session_id: str, entry_id: str

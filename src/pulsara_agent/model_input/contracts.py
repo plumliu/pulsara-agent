@@ -1542,6 +1542,8 @@ class FrozenPreviousTurnOutcomeCompileFact:
     user_input_preserved: Literal[True]
     canonical_entries_preserved: Literal[True]
     fact_fingerprint: str
+    terminal_reason: str
+    terminal_public_detail: str | None
 
     def __post_init__(self) -> None:
         if not all(
@@ -1606,6 +1608,8 @@ def previous_turn_outcome_fingerprint(
                 fact.predecessor_initial_entry_sequence
             ),
             "predecessor_terminal_at_utc": fact.predecessor_terminal_at_utc,
+            "terminal_reason": fact.terminal_reason,
+            "terminal_public_detail": fact.terminal_public_detail,
             "outcome_kind": fact.outcome_kind.value,
             "accepted_assistant_disposition": (
                 fact.accepted_assistant_disposition.value

@@ -1359,6 +1359,8 @@ def _round7_previous_fact(
         "bounded_tool_name_samples": (),
         "user_input_preserved": True,
         "canonical_entries_preserved": True,
+        "terminal_reason": "FOREGROUND_EXECUTION_INTERRUPTED",
+        "terminal_public_detail": None,
     }
     provisional = FrozenPreviousTurnOutcomeCompileFact.__new__(
         FrozenPreviousTurnOutcomeCompileFact

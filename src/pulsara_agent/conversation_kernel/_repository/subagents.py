@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import interruption_payload
+
 from datetime import datetime
 import json
 from typing import Mapping
@@ -61,9 +63,13 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
 from pulsara_agent.llm.model_connections import (
-    ModelCallBinding, model_call_binding_from_dict, model_call_binding_to_dict,
+    ModelCallBinding,
+    model_call_binding_from_dict,
+    model_call_binding_to_dict,
 )
-from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+from pulsara_agent.conversation_kernel.subagents.model_target import (
+    FrozenSubagentModelTarget,
+)
 from pulsara_agent.conversation_kernel.subagents.history import (
     validate_worker_history_source,
 )
@@ -1718,7 +1724,7 @@ class _SubagentOperations:
                 ),
                 event_type=CommittedEventType.TURN_INTERRUPTED,
                 subject=CommittedEventSubject(SubjectSlot.TURN, turn_id),
-                payload={"reason": turn_reason},
+                payload=interruption_payload(turn_reason, terminal_public_detail),
                 **common,
             ),
             CommittedEventDraft(

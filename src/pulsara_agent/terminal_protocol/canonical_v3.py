@@ -7,6 +7,13 @@ subjects; the subject relation is loaded and validated independently.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import (
+    read_executed_notices,
+    read_imported_notices,
+    TurnInterruptionNotice,
+)
+from dataclasses import asdict
+
 import codecs
 from dataclasses import dataclass
 from datetime import datetime
@@ -176,124 +183,184 @@ class CanonicalProtocolReader:
                 """,
                 (session_id, cut, maximum_entries + 1),
             ).fetchall()
-            initial_floor = (
-                int(rows[min(maximum_entries, len(rows)) - 1]["entry_sequence"])
-                if rows
-                else cut + 1
-            )
-            control = self._control(
-                connection,
-                session_id=session_id,
-                lifecycle=str(session["lifecycle"]),
-                maximum_items=maximum_control_items,
-                entry_sequence_floor=initial_floor,
-            )
+            event_cut = int(session["latest_event_sequence"])
             selected_desc: list[wire.CanonicalEntry] = []
+            notices: list[wire.TurnInterruptionNotice] = []
             snapshot = self._snapshot_value(
                 session=session,
                 session_id=session_id,
                 cut=cut,
                 entries=(),
-                control=control,
+                control=self._control(
+                    connection,
+                    session_id=session_id,
+                    lifecycle=str(session["lifecycle"]),
+                    maximum_items=maximum_control_items,
+                    entry_sequence_floor=cut + 1,
+                ),
                 has_older=bool(rows),
+                notices=(),
             )
             if _wire_size(snapshot) > maximum_serialized_bytes:
                 raise CanonicalProtocolResourceExhausted(
-                    "canonical control cannot fit the snapshot byte bound"
+                    "canonical control cannot fit snapshot"
                 )
             for row in rows[:maximum_entries]:
                 entry = self._entry(connection, row)
-                candidate_entries = tuple(reversed((*selected_desc, entry)))
-                candidate = self._snapshot_value(
-                    session=session,
-                    session_id=session_id,
-                    cut=cut,
-                    entries=candidate_entries,
-                    control=control,
-                    has_older=len(selected_desc) + 1 < len(rows),
+                mounted = self._notices(
+                    connection, session_id, event_cut, (entry.entry_sequence,)
                 )
-                if _wire_size(candidate) > maximum_serialized_bytes:
-                    break
-                selected_desc.append(entry)
-                snapshot = candidate
-            final_floor = (
-                snapshot.entries[0].entry_sequence if snapshot.entries else cut + 1
-            )
-            if final_floor != initial_floor:
+                entries = tuple(reversed((*selected_desc, entry)))
                 control = self._control(
                     connection,
                     session_id=session_id,
                     lifecycle=str(session["lifecycle"]),
                     maximum_items=maximum_control_items,
-                    entry_sequence_floor=final_floor,
+                    entry_sequence_floor=entry.entry_sequence,
                 )
-                snapshot = self._snapshot_value(
+                candidate = self._snapshot_value(
                     session=session,
                     session_id=session_id,
                     cut=cut,
-                    entries=tuple(snapshot.entries),
+                    entries=entries,
                     control=control,
-                    has_older=snapshot.HasField("older_history_cursor"),
+                    has_older=len(selected_desc) + 1 < len(rows),
+                    notices=tuple((*notices, *mounted)),
                 )
-                if _wire_size(snapshot) > maximum_serialized_bytes:
-                    raise CanonicalProtocolResourceExhausted(
-                        "canonical snapshot exceeds its final byte bound"
-                    )
+                if _wire_size(candidate) > maximum_serialized_bytes:
+                    if not selected_desc:
+                        raise CanonicalProtocolResourceExhausted(
+                            "one entry and its notices cannot fit snapshot"
+                        )
+                    break
+                selected_desc.append(entry)
+                notices.extend(mounted)
+                snapshot = candidate
             return snapshot
+
+    @staticmethod
+    def _notice_wire(notice: TurnInterruptionNotice) -> wire.TurnInterruptionNotice:
+        values = asdict(notice)
+        if values["public_detail"] is None:
+            del values["public_detail"]
+        return wire.TurnInterruptionNotice(**values)
+
+    def _notices(
+        self, connection, session_id: str, event_cut: int, sequences: tuple[int, ...]
+    ) -> tuple[wire.TurnInterruptionNotice, ...]:
+        facts = (
+            *read_executed_notices(
+                connection,
+                session_id=session_id,
+                event_cut=event_cut,
+                entry_sequences=sequences,
+            ),
+            *read_imported_notices(
+                connection, session_id=session_id, entry_sequences=sequences
+            ),
+        )
+        return tuple(
+            self._notice_wire(n)
+            for n in sorted(
+                facts,
+                key=lambda n: (
+                    n.display_after_entry_sequence,
+                    n.owner_kind,
+                    n.owner_id,
+                ),
+            )
+        )
 
     def history_page(
         self,
         *,
         session_id: str,
         cut_sequence: int,
+        event_sequence_cut: int,
         before_entry_sequence: int,
         maximum_entries: int,
         deadline_monotonic: float,
         maximum_serialized_bytes: int = MAXIMUM_HISTORY_PAGE_BYTES,
-    ) -> tuple[tuple[wire.CanonicalEntry, ...], wire.HistoryCursor | None, bool]:
+        request_id: str = "",
+    ) -> wire.HistoryPageResponse:
         _bounded(maximum_entries, MAXIMUM_SNAPSHOT_ENTRIES, "history entries")
         _bounded_bytes(
-            maximum_serialized_bytes,
-            MAXIMUM_HISTORY_PAGE_BYTES,
-            "history page bytes",
+            maximum_serialized_bytes, MAXIMUM_HISTORY_PAGE_BYTES, "history page bytes"
         )
-        if cut_sequence < 0 or before_entry_sequence < 1:
+        if (
+            cut_sequence < 0
+            or event_sequence_cut < 0
+            or before_entry_sequence < 1
+            or before_entry_sequence > cut_sequence + 1
+        ):
             raise ValueError("history cursor is invalid")
         with self._connection(deadline_monotonic) as connection:
             session = self._session(connection, session_id)
-            if int(session["latest_entry_sequence"]) < cut_sequence:
+            if (
+                int(session["latest_entry_sequence"]) < cut_sequence
+                or int(session["latest_event_sequence"]) < event_sequence_cut
+            ):
                 raise CanonicalProtocolGap("history cut is ahead of canonical head")
+            mixed_cut = connection.execute(
+                """SELECT 1 FROM pulsara_v3.transcript_entries e
+                   JOIN pulsara_v3.agent_events ev ON ev.session_id=e.session_id
+                     AND ev.subject_entry_id=e.id
+                   WHERE e.session_id=%s AND e.entry_sequence<=%s
+                     AND ev.event_sequence>%s LIMIT 1""",
+                (session_id, cut_sequence, event_sequence_cut),
+            ).fetchone()
+            if mixed_cut is not None:
+                raise CanonicalProtocolGap("history entry and event cuts disagree")
             rows = connection.execute(
-                """
-                SELECT * FROM pulsara_v3.transcript_entries
-                WHERE session_id = %s
-                  AND entry_sequence <= %s
-                  AND entry_sequence < %s
-                ORDER BY entry_sequence DESC LIMIT %s
-                """,
+                """SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s
+                   AND entry_sequence<=%s AND entry_sequence<%s
+                   ORDER BY entry_sequence DESC LIMIT %s""",
                 (session_id, cut_sequence, before_entry_sequence, maximum_entries + 1),
             ).fetchall()
-            selected_desc: list[wire.CanonicalEntry] = []
+            selected_desc = []
+            notices = []
+            response = wire.HistoryPageResponse(request_id=request_id)
+            if (
+                _wire_size(wire.ServerFrame(history_page=response))
+                > maximum_serialized_bytes
+            ):
+                raise CanonicalProtocolResourceExhausted(
+                    "history envelope cannot fit its byte bound"
+                )
             for row in rows[:maximum_entries]:
                 entry = self._entry(connection, row)
-                candidate = tuple(reversed((*selected_desc, entry)))
-                if _entries_wire_size(candidate) > maximum_serialized_bytes:
+                mounted = self._notices(
+                    connection, session_id, event_sequence_cut, (entry.entry_sequence,)
+                )
+                candidate = wire.HistoryPageResponse(
+                    request_id=request_id,
+                    entries=tuple(reversed((*selected_desc, entry))),
+                    interruption_notices=tuple((*notices, *mounted)),
+                    has_more=len(selected_desc) + 1 < len(rows),
+                )
+                if candidate.has_more:
+                    candidate.older_history_cursor.CopyFrom(
+                        wire.HistoryCursor(
+                            session_id=session_id,
+                            cut_sequence=cut_sequence,
+                            event_sequence_cut=event_sequence_cut,
+                            entry_sequence=entry.entry_sequence,
+                        )
+                    )
+                # Quote the full envelope, including cursor and all mounted notices.
+                if (
+                    _wire_size(wire.ServerFrame(history_page=candidate))
+                    > maximum_serialized_bytes
+                ):
+                    if not selected_desc:
+                        raise CanonicalProtocolResourceExhausted(
+                            "one entry and its notices cannot fit history page"
+                        )
                     break
                 selected_desc.append(entry)
-            entries = tuple(reversed(selected_desc))
-            if rows and not entries:
-                raise CanonicalProtocolResourceExhausted(
-                    "one canonical entry exceeds the history page byte bound"
-                )
-            has_more = len(selected_desc) < len(rows)
-            cursor = None
-            if has_more and entries:
-                cursor = wire.HistoryCursor(
-                    session_id=session_id,
-                    cut_sequence=cut_sequence,
-                    entry_sequence=entries[0].entry_sequence,
-                )
-            return entries, cursor, has_more
+                notices.extend(mounted)
+                response = candidate
+            return response
 
     def subagent_activity_page(
         self,
@@ -339,6 +406,7 @@ class CanonicalProtocolReader:
         entries: tuple[wire.CanonicalEntry, ...],
         control: wire.CanonicalControl,
         has_older: bool,
+        notices: tuple[wire.TurnInterruptionNotice, ...],
     ) -> wire.CanonicalSessionSnapshot:
         snapshot = wire.CanonicalSessionSnapshot(
             session_id=session_id,
@@ -348,12 +416,14 @@ class CanonicalProtocolReader:
             event_sequence_cut=int(session["latest_event_sequence"]),
             entries=entries,
             control=control,
+            interruption_notices=notices,
         )
         if has_older:
             snapshot.older_history_cursor.CopyFrom(
                 wire.HistoryCursor(
                     session_id=session_id,
                     cut_sequence=cut,
+                    event_sequence_cut=int(session["latest_event_sequence"]),
                     entry_sequence=(entries[0].entry_sequence if entries else cut + 1),
                 )
             )
@@ -434,14 +504,19 @@ class CanonicalProtocolReader:
                         raise RuntimeError("committed entry subject is missing")
                     projection.projection_kind = wire.IMMUTABLE_ENTRY
                     projection.entry.CopyFrom(self._entry(connection, row))
-                    if event_type == CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.value:
+                    if (
+                        event_type
+                        == CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.value
+                    ):
                         task_id = (
                             row["source_subagent_task_id"]
                             if row["conversation_scope_kind"] == "ROOT"
                             else row["scope_subagent_task_id"]
                         )
                         if task_id is None:
-                            raise RuntimeError("accepted inter-agent message lacks task identity")
+                            raise RuntimeError(
+                                "accepted inter-agent message lacks task identity"
+                            )
                         projection.affected_subagent_task_id = str(task_id)
                 elif event_type in _CONTROL_TYPES:
                     if control is None:
@@ -466,7 +541,22 @@ class CanonicalProtocolReader:
                         projection.projection_kind = wire.CURRENT_CONTROL
                 else:
                     projection.projection_kind = wire.EVENT_ONLY
-                if projection.affected_subagent_task_id and not projection.HasField("current_control"):
+                if event_type == CommittedEventType.TURN_INTERRUPTED.value:
+                    facts = read_executed_notices(
+                        connection,
+                        session_id=session_id,
+                        event_cut=int(event["event_sequence"]),
+                        turn_id=subject_id,
+                    )
+                    if facts:
+                        if len(facts) != 1:
+                            raise RuntimeError("interruption occurrence is not unique")
+                        projection.interruption_notice.CopyFrom(
+                            self._notice_wire(facts[0])
+                        )
+                if projection.affected_subagent_task_id and not projection.HasField(
+                    "current_control"
+                ):
                     if control is None:
                         control = self._control(
                             connection,
@@ -476,7 +566,8 @@ class CanonicalProtocolReader:
                             entry_sequence_floor=max(
                                 1,
                                 int(session["latest_entry_sequence"])
-                                - MAXIMUM_SNAPSHOT_ENTRIES + 1,
+                                - MAXIMUM_SNAPSHOT_ENTRIES
+                                + 1,
                             ),
                         )
                     if not any(item.HasField("current_control") for item in result):

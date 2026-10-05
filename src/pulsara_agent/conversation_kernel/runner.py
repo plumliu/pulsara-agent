@@ -104,7 +104,9 @@ from pulsara_agent.llm.request import (
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
 )
-from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+from pulsara_agent.conversation_kernel.subagents.model_target import (
+    FrozenSubagentModelTarget,
+)
 from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
@@ -217,7 +219,9 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
 from pulsara_agent.conversation_kernel.steer_consumption import (
     PreparedSteerPlanStale,
 )
-from pulsara_agent.conversation_kernel.repository_errors import PreparedCompletionSuffixStale
+from pulsara_agent.conversation_kernel.repository_errors import (
+    PreparedCompletionSuffixStale,
+)
 from pulsara_agent.conversation_kernel.steer import (
     PreparedActiveRootInputCandidate,
     PreparedRootProviderInputCandidate,
@@ -1807,10 +1811,12 @@ class ConversationKernelRunner:
                 wire_decision = successor_wire_decision
                 successor_wire_decision = None
                 if dispatch is None:
-                    headroom_admission = await self.compaction.prepare_precompile_admission(
-                        turn_id=turn_id,
-                        model_call_index=model_call_count,
-                        deadline=planning_deadline,
+                    headroom_admission = (
+                        await self.compaction.prepare_precompile_admission(
+                            turn_id=turn_id,
+                            model_call_index=model_call_count,
+                            deadline=planning_deadline,
+                        )
                     )
                     try:
                         allow_model_switch = (
@@ -2038,7 +2044,8 @@ class ConversationKernelRunner:
                         and FrozenSubagentModelTarget.freeze(
                             dispatch.prepared_call.call.target.fact,
                             dispatch.prepared_call.epoch_call_target.target_bundle.reasoning_contract,
-                        ) != expected_first_model_target_fact
+                        )
+                        != expected_first_model_target_fact
                     ):
                         if reusable_wire_observation is not None:
                             reusable_wire_observation.discard()
@@ -2064,7 +2071,9 @@ class ConversationKernelRunner:
                         reusable_wire_observation = None
                     if direct_switch_candidate is not None:
                         if wire_decision is None:
-                            raise RuntimeError("direct switch lost its final wire decision")
+                            raise RuntimeError(
+                                "direct switch lost its final wire decision"
+                            )
                         if self.compaction.direct_switch_wire_admitted(wire_decision):
                             direct_switch_admission, _ = (
                                 self._provider_dispatch.freeze_direct_switch_admission(
@@ -2082,17 +2091,25 @@ class ConversationKernelRunner:
                                 scope_kind=intent.scope_kind,
                                 scope_subagent_task_id=intent.scope_subagent_task_id,
                                 hook_scope=self._hook_scope,
-                                session_start_compact_port=self._compact_session_start_port(intent),
-                                session_start_boundary_port=self._compact_session_start_boundary_port(intent),
+                                session_start_compact_port=self._compact_session_start_port(
+                                    intent
+                                ),
+                                session_start_boundary_port=self._compact_session_start_boundary_port(
+                                    intent
+                                ),
                             )
                             self._require_active_compaction_continuation(compaction)
                             if compaction.successor_dispatch is None:
-                                raise RuntimeError("model switch did not prepare its successor")
+                                raise RuntimeError(
+                                    "model switch did not prepare its successor"
+                                )
                             if (
                                 compaction.model_switch_tier == 3
                                 and self._presentation_notice_sink is not None
                             ):
-                                self._presentation_notice_sink(_MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE)
+                                self._presentation_notice_sink(
+                                    _MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE
+                                )
                             model_call_count -= 1
                             successor_dispatch = compaction.successor_dispatch
                             completed_tool_batch = False
@@ -2285,7 +2302,8 @@ class ConversationKernelRunner:
                                 canonical_facts=canonical_facts,
                                 root_completion_followup_items=count,
                                 pending_root_dynamic_followup=(
-                                    pending_control_feedback or pending_steer_before_settlement
+                                    pending_control_feedback
+                                    or pending_steer_before_settlement
                                 ),
                             )
                             try:
@@ -2301,7 +2319,11 @@ class ConversationKernelRunner:
                                 raise
                             root_completion_followup_items = count
                             break
-                        if calls and root_completion_followup_items and self._subagent_runtime is not None:
+                        if (
+                            calls
+                            and root_completion_followup_items
+                            and self._subagent_runtime is not None
+                        ):
                             await self._subagent_runtime.set_root_completion_delivery_limit(
                                 turn_id, root_completion_followup_items
                             )
@@ -2453,7 +2475,8 @@ class ConversationKernelRunner:
                         )
                     visualization_batch = (
                         self._tools.visualization_subscriptions(turn_id)
-                        if not calls else ()
+                        if not calls
+                        else ()
                     )
                     frozen_visualizations = []
                     if visualization_batch:
@@ -2752,16 +2775,23 @@ class ConversationKernelRunner:
             ):
                 # The child manager owns the atomic turn+task settlement.
                 raise
-            reason = _provider_incomplete_terminal_reason(error)
+            # The installed logical stop/close cause remains the ROOT winner
+            # even if physical cancellation surfaces a typed provider error.
+            reason = root_cancellation_terminal_reason(intent) if cause is not None else _provider_incomplete_terminal_reason(error)
             if reason is None:
                 reason = _model_input_terminal_reason(error)
             if reason is None:
-                reason = (
-                    root_cancellation_terminal_reason(intent)
-                    if isinstance(error, asyncio.CancelledError) and cause is not None
-                    else "FOREGROUND_EXECUTION_INTERRUPTED"
+                reason = "FOREGROUND_EXECUTION_INTERRUPTED"
+            public_detail = None
+            if isinstance(error, ProviderModelExecutionFailed) and cause is None:
+                reason = "PROVIDER_REQUEST_FAILED"
+                public_detail = f"{error.error.code.value}: {error.error.message}"
+            if public_detail is None:
+                await self._turn_admission.interrupt_turn(turn_id, reason=reason)
+            else:
+                await self._turn_admission.interrupt_turn(
+                    turn_id, reason=reason, public_detail=public_detail
                 )
-            await self._turn_admission.interrupt_turn(turn_id, reason=reason)
             raise
         finally:
             self._tools.discard_visualization_subscriptions(turn_id)

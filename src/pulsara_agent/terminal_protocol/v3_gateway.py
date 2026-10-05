@@ -109,7 +109,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:fa79420a390032845b66c3f50e5cac4de5aead56bde3f15835d85928d9102e72"
+    "sha256:465f2f8542637da38567f9e6b668ed78dcb035473b58f4922a75a28e805ab326"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -427,13 +427,17 @@ class TerminalKernelProtocolServer:
     async def _history(
         self, state: _Connection, request: wire.HistoryPageRequest
     ) -> wire.ServerFrame:
+        if not request.cursor.HasField("event_sequence_cut"):
+            return _error(request.request_id, "HISTORY_CURSOR_INVALID")
         if request.cursor.session_id != state.host_session.session_id:
             return _error(request.request_id, "HISTORY_CURSOR_SCOPE_MISMATCH")
         if not 1 <= request.maximum_serialized_bytes <= MAXIMUM_HISTORY_PAGE_BYTES:
             return _error(request.request_id, "HISTORY_RESOURCE_EXHAUSTED")
         try:
-            entries, cursor, has_more = await asyncio.to_thread(
+            response = await asyncio.to_thread(
                 state.protocol_reader.history_page,
+                request_id=request.request_id,
+                event_sequence_cut=request.cursor.event_sequence_cut,
                 session_id=state.host_session.session_id,
                 cut_sequence=request.cursor.cut_sequence,
                 before_entry_sequence=request.cursor.entry_sequence,
@@ -449,11 +453,6 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "HISTORY_GAP")
         except CanonicalProtocolResourceExhausted:
             return _error(request.request_id, "HISTORY_RESOURCE_EXHAUSTED")
-        response = wire.HistoryPageResponse(
-            request_id=request.request_id, entries=entries, has_more=has_more
-        )
-        if cursor is not None:
-            response.older_history_cursor.CopyFrom(cursor)
         result = wire.ServerFrame(history_page=response)
         return (
             result

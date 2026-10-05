@@ -272,6 +272,8 @@ def _previous_fact(
         "bounded_tool_name_samples": ("terminal",) if not_dispatched or unknown else (),
         "user_input_preserved": True,
         "canonical_entries_preserved": True,
+        "terminal_reason": "FOREGROUND_EXECUTION_INTERRUPTED",
+        "terminal_public_detail": None,
     }
     provisional = FrozenPreviousTurnOutcomeCompileFact.__new__(
         FrozenPreviousTurnOutcomeCompileFact

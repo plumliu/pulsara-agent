@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createUserControlCommandRef,
   LocalHttpRuntimeAdapter,
+  CanonicalHistoryView,
   mergeRuntimeTaskInventory,
   type RuntimeProjection,
 } from '../../frontend/lib/runtime-adapter';
@@ -2922,4 +2923,31 @@ it.each(['live', 'history'])('keeps the current write owner when an earlier %s c
   await (await pending).close();
   await adapter.updateModelCallBinding('B', {connection_id:'model', reasoning:null});
   expect(writes).toEqual(['connection-B']);
+});
+
+it('retains deduplicated interruption history across continued turns and an older snapshot', async () => {
+  const notice={owner_kind:'EXECUTED_TURN',owner_id:'old-turn',reason:'USER_STOPPED',terminal_at_utc:'2026-10-05T00:00:00Z',display_after_entry_sequence:'1'};
+  const oldEntry={entry_id:'old-input',turn_id:'old-turn',entry_sequence:'1',entry_kind:'USER_MESSAGE',content:inlinePrompt('stopped question')};
+  const snapshot={session_id:'session-1',event_sequence_cut:'2',entries:[oldEntry],control:{}};
+  const responses=[{connection_id:'connection-1',connection_generation:1,session_id:'session-1',role:'observer',
+    live_hello:{live_owner_epoch:'1',live_revision:'0',live_snapshot:{}},snapshot:{snapshot},live_control_snapshot:{snapshot:{}}},
+    {observation:{through_event_sequence:'3',committed:[{projection_kind:'CURRENT_CONTROL',interruption_notice:notice},{projection_kind:'CURRENT_CONTROL',interruption_notice:notice}]}},
+    {snapshot:{snapshot}}];
+  vi.stubGlobal('fetch',vi.fn(async () => new Response(JSON.stringify(responses.shift()),{status:200})));
+  const connection=await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().interruptionNotices).toEqual([]);
+  await connection.observe();
+  expect(connection.current().interruptionNotices).toHaveLength(1);
+  await connection.snapshot();
+  expect(connection.current().interruptionNotices).toHaveLength(1);
+  expect(connection.current().interruptionNotices![0].displayAfterMessageId).toBe('old-input');
+});
+
+it('projects a notice from a cold feedback-only page without requiring a visible message', async () => {
+  const view=new CanonicalHistoryView('cold',{path:'/missing',outcome:'MISSING',reason:null},{session_id:'cold',event_sequence_cut:'4',
+    entries:[{entry_id:'feedback',entry_sequence:'3',turn_id:'stopped',entry_kind:'USER_CONTROL_FEEDBACK'}],
+    interruption_notices:[{owner_kind:'EXECUTED_TURN',owner_id:'stopped',reason:'USER_STOPPED',terminal_at_utc:'2026-10-05T00:00:00Z',display_after_entry_sequence:'3'}]});
+  expect(view.current().messages).toEqual([]);
+  expect(view.current().interruptionNotices).toHaveLength(1);
+  expect(view.current().interruptionNotices![0].displayAfterMessageId).toBeUndefined();
 });

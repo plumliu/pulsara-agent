@@ -1822,15 +1822,15 @@ class LocalSessionController:
     async def history_page(self, session_id: str, cursor: dict, maximum_entries: int):
         if cursor.get("session_id") != session_id:
             raise ValueError("history cursor session conflicts")
+        if "event_sequence_cut" not in cursor:
+            raise ValueError("history cursor lacks its event cut")
         reader = await self._history_reader(session_id)
-        entries, next_cursor, has_more = await asyncio.to_thread(
+        response = await asyncio.to_thread(
             reader.history_page, session_id=session_id,
+            event_sequence_cut=int(cursor["event_sequence_cut"]),
             cut_sequence=int(cursor["cut_sequence"]),
             before_entry_sequence=int(cursor["entry_sequence"]),
             maximum_entries=maximum_entries, deadline_monotonic=self.core._canonical_deadline())
-        response = wire.HistoryPageResponse(entries=entries, has_more=has_more)
-        if next_cursor is not None:
-            response.older_history_cursor.CopyFrom(next_cursor)
         return wire.ServerFrame(history_page=response)
 
     async def history_content(self, session_id: str, request, *, artifact: bool = False):

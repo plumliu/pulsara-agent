@@ -2,16 +2,54 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.interruption import interruption_payload
+
 from datetime import datetime
 from typing import Mapping
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pulsara_agent.conversation_kernel.contracts import CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, canonical_digest
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, canonical_json_bytes, freeze_json, thaw_json
-from pulsara_agent.primitives.permission import PERMISSION_PRESET_CONTRACT_FINGERPRINT, PERMISSION_PRESET_CONTRACT_ID, PermissionMode
-from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot, RunPermissionAdmissionSource, RunPermissionOverlay, build_run_permission_snapshot
-from pulsara_agent.primitives.plan_workflow import ExtractedPlanDraft, PlanDraftTextChunk, PlanDraftDecision, PlanHandoffKind, PlanInteractionBinding, PlanInteractionKind, PlanQuestionAnswerKind, PlanQuestionContent, PlanWorkflowStatus, extract_plan_entry_reason, extract_plan_draft, extract_plan_question, read_plan_draft_chunk
+from pulsara_agent.conversation_kernel.contracts import (
+    CommittedEventDraft,
+    CommittedEventSubject,
+    ConversationScopeKind,
+    EntryKind,
+    HostWriterGuard,
+    InlineContent,
+    canonical_digest,
+)
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    canonical_json_bytes,
+    freeze_json,
+    thaw_json,
+)
+from pulsara_agent.primitives.permission import (
+    PERMISSION_PRESET_CONTRACT_FINGERPRINT,
+    PERMISSION_PRESET_CONTRACT_ID,
+    PermissionMode,
+)
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionAdmissionSource,
+    RunPermissionOverlay,
+    build_run_permission_snapshot,
+)
+from pulsara_agent.primitives.plan_workflow import (
+    ExtractedPlanDraft,
+    PlanDraftTextChunk,
+    PlanDraftDecision,
+    PlanHandoffKind,
+    PlanInteractionBinding,
+    PlanInteractionKind,
+    PlanQuestionAnswerKind,
+    PlanQuestionContent,
+    PlanWorkflowStatus,
+    extract_plan_entry_reason,
+    extract_plan_draft,
+    extract_plan_question,
+    read_plan_draft_chunk,
+)
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
@@ -1930,7 +1968,7 @@ class _PlanOperations:
                             sensitivity_class="PUBLIC",
                             projection_profile="DEFAULT",
                             occurred_at=occurred_at,
-                            payload={"reason": terminal_reason},
+                            payload=interruption_payload(terminal_reason),
                         ),
                     ),
                 )
