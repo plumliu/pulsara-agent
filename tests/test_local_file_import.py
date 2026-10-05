@@ -25,7 +25,12 @@ async def surface(tmp_path, monkeypatch):
     static = root / "static"
     static.mkdir(exist_ok=True)
     (static / "index.html").write_text("test")
-    bridge = LocalBrowserBridge(sessions=SimpleNamespace(), protocol_server=object())
+    async def workspace_availability(session_id):
+        assert session_id == "session"
+        return {"path": str(root), "outcome": "AVAILABLE"}
+    sessions = SimpleNamespace(workspace_availability=workspace_availability,
+                               _lock=asyncio.Lock(), _operations={})
+    bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
     owner = SimpleNamespace(
         session_id="session", role="controller", generation=7, is_open=True
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.llm.input import annotation_from_value
+from pulsara_agent.workspace_identity import WorkspaceUnavailable, require_workspace
 
 import asyncio
 import base64
@@ -232,7 +233,16 @@ class LocalBrowserBridge:
                 self.file_previews.revoke(old.connection_id)
                 await old.aclose()
 
-            handle = await self.sessions.resume_session(session_id)
+            try:
+                handle = await self.sessions.resume_session(session_id)
+            except WorkspaceUnavailable as exc:
+                # There is no Host/attachment to observe or take over. Expired
+                # browser roles cannot survive this cold, scoped read boundary.
+                await self._disconnect_session_under_gate(session_id)
+                return {"view": "history", "session_id": session_id,
+                        "workspace_availability": exc.observation.to_dict(),
+                        "snapshot": protobuf_json(await self.sessions.history_snapshot(session_id))}
+
             async with self._lock:
                 if self._closing:
                     raise RuntimeError("Local Web application is draining")
@@ -503,8 +513,35 @@ class LocalBrowserBridge:
         await self._connection(item.connection_id)
         return self.file_previews.current(item.connection_id, token)
 
-    async def require_import_controller(self, connection_id: str, generation: int) -> None:
-        """Validate the existing browser owner without adding a protocol command."""
+    async def require_chat_controller(self, connection_id: str, generation: int, *, session_id: str | None = None, require_directory: bool = True) -> None:
+        await self._require_browser_controller(connection_id, generation)
+        connection = await self._connection(connection_id)
+        if session_id is not None and connection.session_id != session_id:
+            raise ProtocolBridgeError("CHAT_SESSION_CONFLICT", "当前窗口与目标会话不一致。")
+        if require_directory:
+            availability = await self.sessions.workspace_availability(connection.session_id)
+            require_workspace(availability["path"])
+        async with self.sessions._lock:
+            if self.sessions._operations.get(connection.session_id) is not None:
+                raise ProtocolBridgeError("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
+        # The completed original browser-owner check is the action admission
+        # point. Directory/database reads above can yield to a takeover.
+        await self._require_browser_controller(connection_id, generation)
+
+    async def restore_workspace(self, session_id: str, connection_id: str | None, generation: int):
+        async with self._session_gate(session_id):
+            async with self._lock:
+                controller = self._controller_by_session.get(session_id)
+            if controller is not None or connection_id is not None:
+                if connection_id is None:
+                    raise ProtocolBridgeError("CHAT_CONTROLLER_REQUIRED", "请先在此窗口继续。")
+                await self.require_chat_controller(connection_id, generation, session_id=session_id, require_directory=False)
+            await self.sessions.restore_missing_workspace(session_id)
+            return await self.sessions.workspace_availability(session_id)
+
+    async def _require_browser_controller(self, connection_id: str, generation: int) -> None:
+        if not connection_id:
+            raise ProtocolBridgeError("CHAT_CONTROLLER_REQUIRED", "当前窗口没有会话控制权，请重新连接。")
         connection = await self._connection(connection_id)
         async with self._lock:
             if (self._closing or not connection.is_open
@@ -514,6 +551,8 @@ class LocalBrowserBridge:
                     or self._controller_by_session.get(connection.session_id) != connection_id
                     or connection.session_id in self._quarantined_sessions):
                 raise ProtocolBridgeError("IMPORT_CONTROLLER_REQUIRED", "当前页面没有文件导入控制权，请重新连接。")
+    async def require_import_controller(self, connection_id: str, generation: int) -> None:
+        await self.require_chat_controller(connection_id, generation)
 
     async def snapshot(self, connection_id: str) -> dict[str, object]:
         connection = await self._connection(connection_id)

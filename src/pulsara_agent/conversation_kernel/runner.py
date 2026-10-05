@@ -176,6 +176,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_subagent_completion_storage_body,
     project_subagent_completion_for_provider,
 )
+from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSource,
@@ -955,6 +956,7 @@ class ConversationKernelRunner:
         input_reader: CanonicalProviderInputReader | None = None,
         safe_point: ProviderSafePointCoordinator | None = None,
         before_provider_preparation: Callable[[], Awaitable[bool]] | None = None,
+        workspace_gate: WorkspaceExecutionGate | None = None,
         root_control_preparation_barrier: (
             Callable[[str], Awaitable[None]] | None
         ) = None,
@@ -1010,6 +1012,7 @@ class ConversationKernelRunner:
             blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
         )
         blob_store = PostgresCanonicalBlobStore(repository.connection_provider)
+        self._workspace_gate = workspace_gate
         self._before_provider_preparation = before_provider_preparation
         self._root_control_preparation_barrier = root_control_preparation_barrier
         self._root_control_completion_fence = root_control_completion_fence
@@ -1071,6 +1074,7 @@ class ConversationKernelRunner:
         )
         self._root_memory_use_policy = MemoryUsePolicy.ENABLED
         self._turn_admission = TurnAdmissionCoordinator(
+            workspace_gate=workspace_gate,
             repository=repository,
             io_owner=self._io,
             writer_lease=writer_lease,
@@ -1110,6 +1114,7 @@ class ConversationKernelRunner:
             subagent_runtime=subagent_runtime,
         )
         self.compaction = CompactionCoordinator(
+            workspace_gate=workspace_gate,
             owner=compaction_owner,
             repository=repository,
             writer_lease=writer_lease,
@@ -1128,6 +1133,7 @@ class ConversationKernelRunner:
             hook_root_scope=hook_scope,
         )
         self._tool_batches = ToolBatchExecutor(
+            workspace_gate=workspace_gate,
             repository=repository,
             writer_lease=writer_lease,
             tools=tools,
@@ -1402,6 +1408,8 @@ class ConversationKernelRunner:
             and self._root_control_preparation_barrier is not None
         ):
             await self._root_control_preparation_barrier(candidate.exact_turn_id)
+        if self._workspace_gate is not None:
+            await self._workspace_gate.wait_available()
         if self._before_provider_preparation is not None:
             await self._before_provider_preparation()
         intent = cancellation_intent or ActiveTurnCancellationIntent(
@@ -1584,6 +1592,8 @@ class ConversationKernelRunner:
 
         if self._root_control_preparation_barrier is not None:
             await self._root_control_preparation_barrier(candidate.exact_turn_id)
+        if self._workspace_gate is not None:
+            await self._workspace_gate.wait_available()
         if self._before_provider_preparation is not None:
             await self._before_provider_preparation()
         prepared = await self._provider_dispatch.prepare_prospective_root_input(
@@ -1705,6 +1715,8 @@ class ConversationKernelRunner:
                     pending_prospective_root_dispatch.close()
                     raise ValueError("prospective ROOT input was given to a child turn")
             while True:
+                if self._workspace_gate is not None:
+                    await self._workspace_gate.wait_available()
                 if (
                     successor_dispatch is None
                     and pending_prospective_root_dispatch is None
@@ -2199,6 +2211,8 @@ class ConversationKernelRunner:
                     execution = provider_open.execution
                     permit = provider_open.permit
                     entry_id = _id("entry")
+                    if self._workspace_gate is not None:
+                        await self._workspace_gate.wait_available()
                     collected = await self._collect_model(
                         request,
                         execution=execution,

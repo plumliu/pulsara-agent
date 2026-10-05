@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+
 import asyncio
 
 from dataclasses import dataclass, replace
@@ -367,7 +369,9 @@ class ToolBatchExecutor:
         deadline_factory: KernelExecutionDeadlineFactory,
         hook_dispatcher: KernelHookDispatcher | None = None,
         hook_context_owner: HookContextOwner | None = None,
+        workspace_gate: WorkspaceExecutionGate | None = None,
     ) -> None:
+        self._workspace_gate = workspace_gate
         self._repository = repository
         self._writer_lease = writer_lease
         self._tools = tools
@@ -746,6 +750,8 @@ class ToolBatchExecutor:
         pending_hook_context_reservations = []
         pending_completion_permit: object | None = None
         try:
+            if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE":
+                _partition_batch = False
             if _partition_batch:
                 self._validate_image_call_allowances(
                     calls=calls,
@@ -852,6 +858,13 @@ class ToolBatchExecutor:
             for call_ordinal, call in enumerate(
                 calls, start=_call_ordinal_offset
             ):
+                call_preauthorization = _preauthorization
+                workspace_blocked = self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE"
+                if workspace_blocked:
+                    call_preauthorization = (
+                        PreparedResolvedToolInvocation(call.tool_name, call.tool_name, call.arguments),
+                        KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                                               "workspace:unavailable", "工作目录不可用，此工具未执行。"))
                 tool_call_count += 1
                 observation_origin = ToolObservationOrigin.POLICY
                 invocation_arguments = thaw_json(call.arguments)
@@ -866,12 +879,12 @@ class ToolBatchExecutor:
                 binding = surface_borrow.execution_binding(call.tool_name)
                 hook_view = (
                     self._hooks.capture_view()
-                    if self._hooks is not None and hook_scope is not None
+                    if not workspace_blocked and self._hooks is not None and hook_scope is not None
                     else None
                 )
                 prepared_invocation = (
-                    _preauthorization[0]
-                    if _preauthorization is not None
+                    call_preauthorization[0]
+                    if call_preauthorization is not None
                     else
                     self._tools.prepare_resolved_invocation(
                         tool_name=call.tool_name,
@@ -887,8 +900,8 @@ class ToolBatchExecutor:
                 )
                 pre_context_reservation = None
                 hook_blocked = False
-                if _preauthorization is not None:
-                    authorization = _preauthorization[1]
+                if call_preauthorization is not None:
+                    authorization = call_preauthorization[1]
                     if (
                         prepared_invocation.requested_tool_name != call.tool_name
                         or (
@@ -1114,6 +1127,10 @@ class ToolBatchExecutor:
                             "tool-surface:revoked",
                             f"tool unavailable: {call.tool_name}",
                         )
+                if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE" and authorization.accepted_result_entry_id is None:
+                    authorization = KernelToolAuthorization(
+                        KernelToolAuthorizationKind.TOOL_UNAVAILABLE, "workspace:unavailable",
+                        "工作目录不可用，此工具未执行。")
                 if authorization.kind is not KernelToolAuthorizationKind.ALLOW:
                     if _physical_complete is not None:
                         _physical_complete()
@@ -1431,7 +1448,9 @@ class ToolBatchExecutor:
                         image_resource_allowance=image_allowance,
                     )
                     try:
-                        if call.tool_name == "report_agent_result":
+                        if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE":
+                            result = KernelToolResult(state="APPLICATION_ERROR", content="工作目录不可用，此工具未执行。".encode("utf-8"))
+                        elif call.tool_name == "report_agent_result":
                             task_id = canonical_identity.scope_subagent_task_id
                             if task_id is None or self._subagent_runtime is None:
                                 raise RuntimeError(

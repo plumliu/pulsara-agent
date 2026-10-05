@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -81,7 +83,9 @@ class TurnAdmissionCoordinator:
         writer_lease: WriterLease,
         deadline_factory: KernelExecutionDeadlineFactory,
         todo_finalizer: TodoRunAdmissionFinalizer | None,
+        workspace_gate: WorkspaceExecutionGate | None = None,
     ) -> None:
+        self._workspace_gate = workspace_gate
         self._repository = repository
         self._io = io_owner
         self._writer_lease = writer_lease
@@ -99,6 +103,8 @@ class TurnAdmissionCoordinator:
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
         cancellation_intent: ActiveTurnCancellationIntent,
     ) -> AcceptedEntry:
+        if self._workspace_gate is not None:
+            self._workspace_gate.require_available()
         activation = build_root_activation(
             session_id=intent.session_id,
             admission_kind="DIRECT",
@@ -190,6 +196,8 @@ class TurnAdmissionCoordinator:
                 )
             if cancellation_requested or not reissue_allowed:
                 return None
+            if self._workspace_gate is not None:
+                await self._workspace_gate.wait_available()
             try:
                 outcome = await self._io.run(
                     self._repository.accept_root_turn_intent,
@@ -212,6 +220,8 @@ class TurnAdmissionCoordinator:
         *,
         cancellation_intent: ActiveTurnCancellationIntent,
     ) -> AcceptedEntry:
+        if self._workspace_gate is not None:
+            self._workspace_gate.require_available()
         return await self._accept_subagent(
             candidate=candidate,
             cancellation_intent=cancellation_intent,

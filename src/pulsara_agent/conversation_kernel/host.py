@@ -13,7 +13,7 @@ import asyncio
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
@@ -224,10 +224,15 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
+from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+from pulsara_agent.conversation_kernel.root_status import LATEST_ROOT_SUMMARY_SQL
 from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     ResolvedWorkspace,
     resolve_workspace,
+    observe_workspace,
+    require_workspace,
+    WorkspaceUnavailable,
 )
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
@@ -262,7 +267,8 @@ from pulsara_agent.ports.terminal_observation import (
     NewTurnInstallation,
 )
 from pulsara_agent.ports.user_control_feedback import (
-    UserControlFeedbackContentV1,
+    ProcessControlFeedbackContent,
+    WorkspaceRecreatedFeedbackContent,
     UserControlFeedbackInstallationAttempt,
     UserControlMonitorFact,
     UserControlProcessFact,
@@ -375,6 +381,7 @@ class KernelSessionSummary:
     updated_at: datetime
     title: str | None = None
     model_call_binding: ModelCallBinding | None = None
+    latest_root_turn: dict[str, str] | None = None
     subagent_task_total: int = 0
     subagent_task_active: int = 0
     subagent_task_waiting: int = 0
@@ -396,6 +403,7 @@ class KernelSessionSummary:
             "lifecycle": self.lifecycle,
             "writer_generation": self.writer_generation,
             "latest_entry_sequence": self.latest_entry_sequence,
+            "latest_root_turn": self.latest_root_turn,
             "updated_at": self.updated_at.isoformat(),
             "model_call_binding": model_call_binding_to_dict(self.model_call_binding),
         }
@@ -631,6 +639,9 @@ class KernelHostSession:
         self.mcp_management = mcp_management
         self._capability_change_notifier = capability_change_notifier
         self.workspace = workspace
+        self.workspace_gate = WorkspaceExecutionGate(workspace.workspace_root)
+        self._workspace_recreated_at: datetime | None = None
+        self._workspace_feedback_candidate: UserControlFeedbackInstallationAttempt | None = None
         self.repository = repository
         self.runtime_session_id = session_id
         self.session_id = session_id
@@ -765,6 +776,7 @@ class KernelHostSession:
             )
         )
         self._subagents = KernelSubagentManager(
+            workspace_gate=self.workspace_gate,
             repository=repository,
             guard=self._lease.guard,
             host_owner_id=host_session_id,
@@ -867,6 +879,7 @@ class KernelHostSession:
             model=self._model,
             tools=self._tools,
             live_bus=self.live_bus,
+            workspace_gate=self.workspace_gate,
             before_provider_preparation=self._adopt_capabilities_if_requested,
             root_control_preparation_barrier=(
                 self._await_user_control_feedback_before_root_provider
@@ -1784,6 +1797,7 @@ class KernelHostSession:
         command_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
     ) -> KernelRunResult:
+        self.workspace_gate.require_available()
         frozen_content = await self._image_validator.freeze(
             content,
             deadline_monotonic=self._canonical_deadline(),
@@ -2698,6 +2712,7 @@ class KernelHostSession:
                 target_turn_id=target_turn_id,
                 requested_permission_mode=requested_permission_mode,
             )
+        self.workspace_gate.require_available()
         queue_item_id = _stable_id("queue-item", self.session_id, command_id)
         key = _IngressHookReservationKey(
             _IngressHookApiVariant.QUEUED,
@@ -2937,6 +2952,7 @@ class KernelHostSession:
         hook_context_reservation: PendingHookContextReservation | None,
     ) -> KernelCommandOutcome:
         try:
+            self.workspace_gate.require_available()
             accepted = await self._io.run(
                 self.repository.enqueue_prompt,
                 self._lease.guard,
@@ -3938,6 +3954,7 @@ class KernelHostSession:
             if self._closing:
                 return
             while not self._closing:
+                await self.workspace_gate.wait_available()
                 async with self._lock:
                     self._retire_done_active_root_locked()
                     active = self._active_task
@@ -4170,6 +4187,7 @@ class KernelHostSession:
                 if self._closing:
                     prospective_dispatch.close()
                     return None
+                await self.workspace_gate.wait_available()
                 try:
                     confirmation = await self._io.run(
                         self.repository.consume_prepared_prompt_head,
@@ -5105,10 +5123,96 @@ class KernelHostSession:
                 self._control_completion_sealed_turn_id = None
                 self._control_completion_seal_changed.set()
 
+    async def restore_missing_workspace(self) -> None:
+        self._require_open()
+        self._lease = await self._io.run(
+            self.repository.renew_host_writer, self._lease.guard,
+            memory_domain_id=self._memory_domain_id,
+            lease_seconds=self._deadlines.policy.writer_lease_seconds,
+            deadline_monotonic=self._canonical_deadline())
+        worker = asyncio.create_task(asyncio.to_thread(_restore_workspace_directory, self.workspace.workspace_root))
+        _, cancelled, _ = await _join_task_beyond_logical_deadline(
+            worker, deadline_monotonic=self._canonical_deadline())
+        created = worker.result()
+        self._lease = await self._io.run(
+            self.repository.renew_host_writer, self._lease.guard,
+            memory_domain_id=self._memory_domain_id,
+            lease_seconds=self._deadlines.policy.writer_lease_seconds,
+            deadline_monotonic=self._canonical_deadline())
+        if created:
+            self.record_workspace_recreated(datetime.now(timezone.utc))
+        else:
+            self.workspace_gate.wake()
+            self._queue_wake.set()
+        if cancelled is not None:
+            raise cancelled
+
+    def record_workspace_recreated(self, created_at: datetime) -> None:
+        self._workspace_recreated_at = created_at
+        self._workspace_feedback_candidate = None
+        self.workspace_gate.wake()
+        self._queue_wake.set()
+
+    async def _install_workspace_feedback_at_ordinary_barrier(self, turn_id: str) -> None:
+        # Advisory, process-local observation; never alter a frozen first call or
+        # compaction handoff, and never open an extra ROOT to deliver it.
+        observation = self._workspace_recreated_at
+        if observation is None:
+            return
+        candidate = self._workspace_feedback_candidate
+        if candidate is not None and candidate.target_root_turn_id != turn_id:
+            try:
+                confirmed = await self._runner.confirm_user_control_feedback(
+                    attempt=candidate, deadline_monotonic=self._canonical_deadline())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger(__name__).exception("workspace advisory confirmation awaits a later ROOT boundary")
+                return
+            if confirmed is not None:
+                if self._workspace_recreated_at is observation:
+                    self._workspace_recreated_at = None
+                self._workspace_feedback_candidate = None
+                return
+            candidate = None
+        if candidate is None:
+            candidate = UserControlFeedbackInstallationAttempt(
+                session_id=self.session_id, workspace_id=self.workspace.workspace_key,
+                writer_generation=self._lease.guard.writer_generation,
+                target_root_turn_id=turn_id, entry_id=f"entry:workspace-recreated:{uuid4().hex}",
+                content=WorkspaceRecreatedFeedbackContent(
+                    session_id=self.session_id, workspace_root=str(self.workspace.workspace_root),
+                    created_at=observation, target_root_turn_id=turn_id),
+                occurred_at=datetime.now(timezone.utc), actor_id=self.host_session_id,
+            )
+            self._workspace_feedback_candidate = candidate
+        async with self._lock:
+            try:
+                reservation = self._reserve_compaction_write_locked(
+                    scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None)
+            except RuntimeError:
+                return
+            cancellation = self._active_cancellation_intent
+        try:
+            await self._runner.install_user_control_feedback(
+                attempt=candidate, deadline_monotonic=self._canonical_deadline(),
+                admitted_writer=reservation, cancellation_intent=cancellation)
+            if self._workspace_recreated_at is observation:
+                self._workspace_recreated_at = None
+            self._workspace_feedback_candidate = None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception("workspace advisory awaits a later ordinary ROOT boundary")
+        finally:
+            await self._release_compaction_write_reservation(reservation)
+
     async def _await_user_control_feedback_before_root_provider(
         self, turn_id: str
     ) -> None:
         """Wait for fenced candidates at the next legal input boundary."""
+
+        await self._install_workspace_feedback_at_ordinary_barrier(turn_id)
 
         while True:
             async with self._lock:
@@ -5775,7 +5879,7 @@ class KernelHostSession:
             writer_generation=self._lease.guard.writer_generation,
             target_root_turn_id=target_turn_id,
             entry_id=f"entry:user-control:{uuid4().hex}",
-            content=UserControlFeedbackContentV1(
+            content=ProcessControlFeedbackContent(
                 command_id=attempt.request.command_id,
                 session_id=self.session_id,
                 host_session_id=self.host_session_id,
@@ -6824,6 +6928,11 @@ class KernelHostSession:
             )
             async with self._lock:
                 self._closing = True
+                if self._active_task is not None and not self._active_task.done():
+                    if self._active_cancellation_intent is None:
+                        raise RuntimeError("active ROOT task lacks cancellation intent")
+                    self._active_cancellation_intent.install_cause(
+                        ForegroundCancellationCause.HOST_SESSION_CLOSE)
                 self._presentation_notices.clear()
                 self._tools.todo_owner.mark_closing(
                     scope_kind=ModelInputScopeKind.ROOT,
@@ -6831,6 +6940,8 @@ class KernelHostSession:
                 )
                 self._queue_wake.set()
                 self._monitor_wake.set()
+            await self._subagents.install_host_close_intents()
+            self.workspace_gate.begin_close()
             # SessionEnd consumes the exact close-attempt carrier.  Freeze the
             # fixed workspace root for this attempt; the later terminal Hook
             # lane consumes the carrier without reopening any execution owner.
@@ -7081,6 +7192,7 @@ class KernelHostSession:
             model=self._model,
             tools=self._tools,
             live_bus=self.live_bus,
+            workspace_gate=self.workspace_gate,
             before_provider_preparation=self._adopt_capabilities_if_requested,
             io_owner=self._io,
             context_source_collector=self._context_sources,
@@ -7286,7 +7398,7 @@ def _list_resumable_session_rows(
         isolation_level=IsolationLevel.REPEATABLE_READ,
     ) as connection:
         return connection.execute(
-            """
+            f"""
             SELECT s.id, s.title, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
@@ -7298,6 +7410,7 @@ def _list_resumable_session_rows(
                        LIMIT 1
                    )) END AS updated_at,
                    s.model_call_binding,
+                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
                        AS subagent_task_active,
@@ -7335,7 +7448,7 @@ def _list_resumable_session_rows_across_workspaces(
         isolation_level=IsolationLevel.REPEATABLE_READ,
     ) as connection:
         return connection.execute(
-            """
+            f"""
             SELECT s.id, s.title, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
@@ -7347,6 +7460,7 @@ def _list_resumable_session_rows_across_workspaces(
                        LIMIT 1
                    )) END AS updated_at,
                    s.model_call_binding,
+                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
                        AS subagent_task_active,
@@ -7384,7 +7498,7 @@ def _read_resumable_session_row(
         isolation_level=IsolationLevel.REPEATABLE_READ,
     ) as connection:
         return connection.execute(
-            """
+            f"""
             SELECT s.id, s.title, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
@@ -7392,6 +7506,7 @@ def _read_resumable_session_row(
                        FROM pulsara_v3.transcript_entries AS e WHERE e.session_id = s.id
                        ORDER BY e.entry_sequence DESC LIMIT 1)) END AS updated_at,
                    s.model_call_binding,
+                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
                        AS subagent_task_active,
@@ -7427,11 +7542,33 @@ def _kernel_session_summary(row) -> KernelSessionSummary:
         latest_entry_sequence=int(row["latest_entry_sequence"]),
         updated_at=row["updated_at"],
         model_call_binding=model_call_binding_from_dict(row["model_call_binding"]),
+        latest_root_turn=row["latest_root_turn"],
         subagent_task_total=int(row.get("subagent_task_total") or 0),
         subagent_task_active=int(row.get("subagent_task_active") or 0),
         subagent_task_waiting=int(row.get("subagent_task_waiting") or 0),
         subagent_task_attention=int(row.get("subagent_task_attention") or 0),
     )
+
+
+def _restore_workspace_directory(root: Path) -> bool:
+    observation = observe_workspace(root)
+    if observation.outcome == "AVAILABLE":
+        return False
+    if observation.outcome != "MISSING":
+        raise WorkspaceUnavailable(observation)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    observation = observe_workspace(root)
+    if observation.outcome == "AVAILABLE":
+        return False
+    if observation.outcome != "MISSING":
+        raise WorkspaceUnavailable(observation)
+    try:
+        root.mkdir(exist_ok=False)
+    except FileExistsError:
+        require_workspace(root)
+        return False
+    require_workspace(root)
+    return True
 
 
 class KernelHostCore:
@@ -7627,6 +7764,10 @@ class KernelHostCore:
         """Canonical copy only. Opening the committed child uses ordinary resume."""
         settlement = await self._admit_session_open(source_session_id, child_session_id)
         try:
+            summary = await self.read_resumable_session(source_session_id, memory_domain_id=memory_domain_id)
+            if summary is None:
+                raise KeyError(source_session_id)
+            require_workspace(summary.workspace_root)
             repository = await self._ensure_resources()
             deadline = self._canonical_deadline()
             worker = asyncio.create_task(
@@ -7673,6 +7814,7 @@ class KernelHostCore:
         permission_policy: EffectivePermissionPolicy | None = None,
         system_prompt: str | None = None,
         active_skill_names: frozenset[str] = frozenset(),
+        restore_missing_workspace: bool = False,
     ) -> KernelHostSession:
         return await self._open(
             workspace_input,
@@ -7681,6 +7823,7 @@ class KernelHostCore:
             system_prompt=system_prompt,
             active_skill_names=active_skill_names,
             session_start_source="resume",
+            restore_missing_workspace=restore_missing_workspace,
         )
 
     async def resume_most_recent_session(
@@ -7706,6 +7849,7 @@ class KernelHostCore:
         system_prompt: str | None,
         active_skill_names: frozenset[str],
         session_start_source: str,
+        restore_missing_workspace: bool = False,
     ) -> KernelHostSession:
         settlement = await self._admit_session_open(session_id)
         try:
@@ -7716,6 +7860,7 @@ class KernelHostCore:
                 system_prompt=system_prompt,
                 active_skill_names=active_skill_names,
                 session_start_source=session_start_source,
+                restore_missing_workspace=restore_missing_workspace,
             )
         finally:
             await self._settle_session_open(settlement)
@@ -7745,8 +7890,83 @@ class KernelHostCore:
         system_prompt: str | None,
         active_skill_names: frozenset[str],
         session_start_source: str,
+        restore_missing_workspace: bool = False,
     ) -> KernelHostSession:
-        workspace = resolve_workspace(workspace_input)
+        workspace = resolve_workspace(
+            workspace_input,
+            intent="RESTORE" if restore_missing_workspace else
+                   "NEW" if session_start_source == "startup" else "EXISTING",
+        )
+        repository = await self._ensure_resources()
+        deadline = self._canonical_deadline()
+        host_id = f"host:{uuid4().hex}"
+        io_owner = KernelSessionIO()
+        writer_lease = None
+        try:
+            writer_lease = await io_owner.run(
+                repository.acquire_host_writer,
+                intent="RESTORE" if restore_missing_workspace else
+                       "NEW" if session_start_source == "startup" else "EXISTING",
+                session_id=session_id, workspace_id=workspace.workspace_key,
+                workspace_kind=workspace.workspace_kind,
+                workspace_root=str(workspace.workspace_root),
+                workspace_label=workspace.display_label,
+                memory_domain_id=workspace.memory_domain.memory_domain_id,
+                writer_owner_id=host_id,
+                lease_seconds=self._deadlines.policy.writer_lease_seconds,
+                deadline_monotonic=deadline,
+            )
+            created_at = None
+            if restore_missing_workspace:
+                renewed_lease = await io_owner.run(
+                    repository.renew_host_writer, writer_lease.guard,
+                    memory_domain_id=workspace.memory_domain.memory_domain_id,
+                    lease_seconds=self._deadlines.policy.writer_lease_seconds,
+                    deadline_monotonic=deadline,
+                )
+                # Keep the original acquisition fact for the cold-epoch bootstrap.
+                writer_lease = replace(writer_lease, expires_at=renewed_lease.expires_at)
+                filesystem = asyncio.create_task(asyncio.to_thread(_restore_workspace_directory, workspace.workspace_root))
+                _, cancelled, _ = await _join_task_beyond_logical_deadline(filesystem, deadline_monotonic=deadline)
+                created = filesystem.result()
+                if cancelled is not None:
+                    raise cancelled
+                if created:
+                    created_at = datetime.now(timezone.utc)
+                renewed_lease = await io_owner.run(
+                    repository.renew_host_writer, writer_lease.guard,
+                    memory_domain_id=workspace.memory_domain.memory_domain_id,
+                    lease_seconds=self._deadlines.policy.writer_lease_seconds,
+                    deadline_monotonic=deadline,
+                )
+                # Keep the original acquisition fact for the cold-epoch bootstrap.
+                writer_lease = replace(writer_lease, expires_at=renewed_lease.expires_at)
+            require_workspace(workspace.workspace_root)
+            session = await self._build_open_session(
+                workspace, session_id=session_id, host_id=host_id,
+                io_owner=io_owner, writer_lease=writer_lease,
+                permission_policy=permission_policy, system_prompt=system_prompt,
+                active_skill_names=active_skill_names, session_start_source=session_start_source,
+            )
+            if created_at is not None:
+                session.record_workspace_recreated(created_at)
+            return session
+        except BaseException:
+            if writer_lease is not None:
+                try:
+                    await asyncio.to_thread(repository.release_host_writer, writer_lease.guard,
+                                            deadline_monotonic=self._canonical_deadline())
+                except Exception:
+                    logging.getLogger(__name__).exception("failed to release prepared session writer")
+            await io_owner.aclose(deadline_monotonic=self._canonical_deadline())
+            raise
+
+    async def _build_open_session(
+        self, workspace: ResolvedWorkspace, *, session_id: str, host_id: str,
+        io_owner: KernelSessionIO, writer_lease: WriterLease,
+        permission_policy: EffectivePermissionPolicy | None, system_prompt: str | None,
+        active_skill_names: frozenset[str], session_start_source: str,
+    ) -> KernelHostSession:
         canonical_root = workspace.workspace_root.resolve(strict=False)
         async with self._lock:
             capability_baseline = self._workspace_capability_revisions.setdefault(
@@ -7813,22 +8033,16 @@ class KernelHostCore:
         except BaseException:
             initial_plugin_view.close()
             raise
-        host_id = f"host:{uuid4().hex}"
-        io_owner = KernelSessionIO()
         try:
-            writer_lease = await io_owner.run(
-                repository.acquire_host_writer,
-                intent="NEW" if session_start_source == "startup" else "EXISTING",
-                session_id=session_id,
-                workspace_id=workspace.workspace_key,
-                workspace_kind=workspace.workspace_kind,
-                workspace_root=str(workspace.workspace_root),
-                workspace_label=workspace.display_label,
+            renewed_lease = await io_owner.run(
+                repository.renew_host_writer, writer_lease.guard,
                 memory_domain_id=workspace.memory_domain.memory_domain_id,
-                writer_owner_id=host_id,
                 lease_seconds=self._deadlines.policy.writer_lease_seconds,
-                deadline_monotonic=deadline,
+                deadline_monotonic=self._canonical_deadline(),
             )
+            # Keep the original acquisition fact for the cold-epoch bootstrap.
+            writer_lease = replace(writer_lease, expires_at=renewed_lease.expires_at)
+            require_workspace(workspace.workspace_root)
             session = KernelHostSession(
                 model_runtime=self._model_runtime,
                 mcp_management=self.mcp_management,
@@ -7869,7 +8083,6 @@ class KernelHostCore:
             else:
                 with suppress(BaseException):
                     initial_plugin_view.close()
-            await io_owner.aclose(deadline_monotonic=deadline)
             raise
 
     async def _register_prepared_session(
@@ -8046,7 +8259,7 @@ class KernelHostCore:
         if not 1 <= limit <= 100:
             raise ValueError("session list limit is out of bounds")
         repository = await self._ensure_resources()
-        workspace = resolve_workspace(workspace_input)
+        workspace = resolve_workspace(workspace_input, intent="READ")
         rows = await asyncio.to_thread(
             _list_resumable_session_rows,
             repository,

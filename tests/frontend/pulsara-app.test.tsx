@@ -490,6 +490,8 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  workspaceAvailability = vi.fn(async (_sessionId: string) => ({path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null}));
+  restoreWorkspace = vi.fn(async (_sessionId: string) => ({path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null}));
   searchSessions = vi.fn(async () => ({ items: this.sessions.map(session => ({ session, matchKind: 'recent' as const, snippet: '' })), nextCursor: null }));
   renameSession = vi.fn(async (sessionId: string, title: string) => {
     this.sessions = this.sessions.map(item => item.id === sessionId ? { ...item, title } : item);
@@ -1707,11 +1709,11 @@ describe('PulsaraApp', () => {
     adapter.connectionRole = 'observer';
     render(<PulsaraApp adapter={adapter} />);
 
-    expect((await screen.findAllByText('这个会话正在另一个窗口中操作')).length).toBeGreaterThan(0);
-    expect(screen.getByText('这里仍会实时显示对话、思考和任务进展。')).toBeTruthy();
+    expect((await screen.findAllByText('此窗口仅供查看')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('这里仍会实时显示对话、思考和任务进展。')).toBeNull();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
     expect(screen.queryByRole('button', { name: '压缩上下文' })).toBeNull();
-    expect(screen.getAllByText('旁观中').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('观察中').length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getAllByRole('button', { name: '在此窗口继续' })[0]!);
 
@@ -4876,4 +4878,51 @@ it('replaces commands with session search and opens a result outside the loaded 
   expect(await screen.findByRole('dialog', { name: '搜索会话' })).toBeTruthy();
   fireEvent.keyDown(screen.getByLabelText('搜索关键词'), { key: 'Escape' });
   expect(screen.queryByRole('dialog', { name: '搜索会话' })).toBeNull();
+});
+
+describe('explicit runtime reopen owner', () => {
+  it('submits before closing the controller and owns reconnect after a slow server detach', async () => {
+    const adapter = new FakeAdapter();
+    const connect = adapter.connect.bind(adapter);
+    let disconnect!: (error: Error) => void;
+    vi.spyOn(adapter, 'connect').mockImplementationOnce(async (...args) => {
+      const connection = await connect(...args);
+      vi.spyOn(connection, 'observe').mockImplementation(() => new Promise((_resolve, reject) => { disconnect = reject; }));
+      return connection;
+    });
+    const accepted = deferred<{status:'reopened'}>();
+    const reopen = vi.spyOn(adapter, 'reopenRuntime').mockImplementation(async () => {
+      expect(adapter.lastConnection?.closed).toBe(false);
+      return accepted.promise;
+    });
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', {name:'准备发布'});
+    const original = adapter.lastConnection!;
+    fireEvent.click(screen.getByRole('button', {name:'更多会话操作'}));
+    fireEvent.click(screen.getByRole('button', {name:/重新载入当前会话运行时/}));
+    await waitFor(() => expect(reopen).toHaveBeenCalledOnce());
+    await act(async () => {
+      disconnect(new RuntimeApiError('DETACHED', 'connection detached', true));
+      await new Promise(resolve => setTimeout(resolve, 550));
+    });
+    expect(adapter.connectCalls).toHaveLength(1);
+    await act(async () => accepted.resolve({status:'reopened'}));
+    await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
+    expect(original.closed).toBe(true);
+    expect((screen.getByRole('button', {name:'更多会话操作'}) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+it('loads existing task groups for a cold history view without opening a runtime', async () => {
+  const { CanonicalHistoryView } = await import('../../frontend/lib/runtime-adapter');
+  const adapter = new FakeAdapter();
+  const history = new CanonicalHistoryView('session-1', {outcome:'MISSING', path:'/tmp/project'},
+    {session_id:'session-1', entries:[], control:{}, event_sequence_cut:'0'});
+  vi.spyOn(adapter, 'connect').mockResolvedValue(history);
+  vi.spyOn(adapter, 'workspaceAvailability').mockResolvedValue({outcome:'MISSING', path:'/tmp/project'});
+  render(<PulsaraApp adapter={adapter} />);
+  expect(await screen.findByText('工作目录已丢失')).toBeTruthy();
+  await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalledWith('session-1', undefined));
+  expect(adapter.lastConnection).toBeUndefined();
+  expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
 });

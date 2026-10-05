@@ -260,6 +260,9 @@ class ProtocolHost:
     resolve_tool_interaction = KernelHostSession.resolve_tool_interaction
 
     def __init__(self, owner, live, repository):
+        from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+        import tempfile
+        self.workspace_gate = WorkspaceExecutionGate(Path(tempfile.gettempdir()).resolve())
         self._interactions = owner
         self._presentation_notices = {}
         self.session_id = owner._guard.session_id

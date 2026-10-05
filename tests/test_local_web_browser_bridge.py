@@ -704,6 +704,9 @@ class _RuntimeReopenConnection:
         self.connection_id = connection_id
         self.session_id = session_id
         self.fail = fail
+        self.role = "controller"
+        self.generation = 1
+        self.is_open = True
         self.close_attempted = False
 
     async def aclose(self) -> None:
@@ -937,6 +940,7 @@ def test_runtime_reopen_post_detach_exception_quarantines_gate_and_operation(
             "connection:post-token", old.session_id
         )
         bridge._connections[connection.connection_id] = connection
+        bridge._controller_by_session[old.session_id] = connection.connection_id
 
         async def fail_after_detach(_operation):
             raise RuntimeError("injected post-detach failure")
@@ -974,6 +978,8 @@ def test_runtime_reopen_post_detach_exception_quarantines_gate_and_operation(
                 async with client.post(
                     f"{server.origin}/api/sessions/{old.session_id}/runtime/reopen",
                     headers={
+                        "X-Pulsara-Connection-Id": connection.connection_id,
+                        "X-Pulsara-Connection-Generation": "1",
                         "Origin": server.origin,
                         "Sec-Fetch-Site": "same-origin",
                     },

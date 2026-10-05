@@ -172,7 +172,7 @@ from pulsara_agent.ports.artifact import (
 )
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.ports.user_control_feedback import (
-    UserControlFeedbackContentV1,
+    ProcessControlFeedbackContent,
     UserControlFeedbackInstallationAttempt,
     UserControlProcessFact,
 )
@@ -1802,7 +1802,7 @@ def test_k3_user_control_feedback_is_measured_before_atomic_publication(
     async def install_feedback_before_followup() -> bool:
         if len(model.requests) != 1 or installed:
             return True
-        content = UserControlFeedbackContentV1(
+        content = ProcessControlFeedbackContent(
             command_id=_name("control"),
             session_id=session_id,
             host_session_id="host:test",
@@ -1926,7 +1926,7 @@ def test_k3_user_control_feedback_resource_failure_precedes_publication(
                     writer_generation=lease.guard.writer_generation,
                     target_root_turn_id=turn_id,
                     entry_id=feedback_entry_id,
-                    content=UserControlFeedbackContentV1(
+                    content=ProcessControlFeedbackContent(
                         command_id=_name("control"),
                         session_id=session_id,
                         host_session_id="host:test",
@@ -2052,7 +2052,7 @@ def test_k3_active_feedback_compacts_before_atomic_publication(
         writer_generation=lease.guard.writer_generation,
         target_root_turn_id=turn_id,
         entry_id=feedback_entry_id,
-        content=UserControlFeedbackContentV1(
+        content=ProcessControlFeedbackContent(
             command_id=_name("control"),
             session_id=session_id,
             host_session_id="host:test",

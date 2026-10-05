@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+
 import asyncio
 
 from dataclasses import dataclass, field as dataclass_field, replace
@@ -1006,7 +1008,9 @@ class CompactionCoordinator:
         deadline_factory: KernelExecutionDeadlineFactory,
         hook_dispatcher: KernelHookDispatcher | None = None,
         hook_root_scope: HookDispatchScopeRef | None = None,
+        workspace_gate: WorkspaceExecutionGate | None = None,
     ) -> None:
+        self._workspace_gate = workspace_gate
         self._compaction_owner = owner
         self._repository = repository
         self._writer_lease = writer_lease
@@ -2818,6 +2822,8 @@ class CompactionCoordinator:
             # A progressing summary stream has no independent total deadline,
             # matching ordinary foreground model execution.
             try:
+                if self._workspace_gate is not None:
+                    await self._workspace_gate.wait_available()
                 raw = await prepared_summary.open_once()
             except (ProviderModelExecutionFailed, ProviderModelOutputIncomplete):
                 if model_switch_candidate is not None and model_switch_tier == 2:
@@ -2870,6 +2876,8 @@ class CompactionCoordinator:
                     promotion_authority=repair_authority,
                 )
                 try:
+                    if self._workspace_gate is not None:
+                        await self._workspace_gate.wait_available()
                     raw = await repair.open_once()
                 except (
                     ProviderModelExecutionFailed,

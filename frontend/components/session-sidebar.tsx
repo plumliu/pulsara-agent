@@ -1,4 +1,4 @@
-import { Archive, ChevronRight, Ellipsis, Pencil, Eye, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
+import { Archive, ChevronRight, Ellipsis, Pencil, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
@@ -22,7 +22,6 @@ interface SessionSidebarProps {
   activeSessionId: string;
   openingSessionId?: string;
   runtimeStatus: RuntimeStatus;
-  connectionRole?: 'observer' | 'controller';
   isOpen: boolean;
   onClose: () => void;
   onSelectSession: (id: string) => void;
@@ -36,7 +35,6 @@ interface SessionSidebarProps {
   onNotify: (title: string, detail: string) => void;
   canCreateSession: boolean;
   onOpenSearch: () => void;
-  onTakeControl: () => void;
 }
 
 interface ProjectSessionGroup {
@@ -139,7 +137,6 @@ export function SessionSidebar({
   activeSessionId,
   openingSessionId,
   runtimeStatus,
-  connectionRole,
   isOpen,
   onClose,
   onSelectSession,
@@ -153,7 +150,6 @@ export function SessionSidebar({
   onNotify,
   canCreateSession,
   onOpenSearch,
-  onTakeControl,
 }: SessionSidebarProps) {
   const sidebarRef = useRef<HTMLElement>(null);
   const [scrollbarNearby, setScrollbarNearby] = useState(false);
@@ -380,14 +376,9 @@ export function SessionSidebar({
         <div className="sidebar-footer">
           <div className="connection-line">
             <span className={`runtime-dot runtime-dot--${runtimeStatus}`} />
-            <span>{runtimeStatus === 'online' && connectionRole === 'observer' ? '已连接 · 旁观中' : connectionLabels[runtimeStatus]}</span>
+            <span>{connectionLabels[runtimeStatus]}</span>
           </div>
-          {connectionRole === 'observer' && <div className="connection-detail is-observer">
-            <span>此会话正在另一个窗口中操作</span>
-            {runtimeStatus === 'online' && connectionRole === 'observer' && (
-              <button type="button" onClick={onTakeControl}><Eye size={11} /> 在此窗口继续</button>
-            )}
-          </div>}
+
         </div>
       </aside>
     </>

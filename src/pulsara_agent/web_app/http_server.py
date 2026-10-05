@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 from pulsara_agent.conversation_kernel.session_deletion import SessionDeleteRejected
+from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
+from pulsara_agent.workspace_identity import WorkspaceUnavailable
+from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
+from pulsara_agent.web_app.browser_bridge import protobuf_json
 
 import asyncio
 from pathlib import Path
@@ -333,7 +337,7 @@ class LocalHttpServer:
         self._closed = False
         self._app = web.Application(
             client_max_size=8 << 20,
-            middlewares=[self._errors, self._security],
+            middlewares=[self._errors, self._security, self._chat_write_admission],
         )
         self._install_routes()
         FilePreviewHttp(self.bridge, lambda: self.origin).install(self._app.router)
@@ -551,6 +555,12 @@ class LocalHttpServer:
         self._app.router.add_post("/api/sessions", self._create_session)
         self._app.router.add_get("/api/sessions/archived", self._list_archived_sessions)
         self._app.router.add_get("/api/sessions/{session_id}", self._read_session)
+        self._app.router.add_get("/api/sessions/{session_id}/workspace-availability", self._workspace_availability)
+        self._app.router.add_post("/api/sessions/{session_id}/restore-workspace", self._restore_workspace)
+        self._app.router.add_get("/api/sessions/{session_id}/history-snapshot", self._history_snapshot)
+        for operation in ("history", "read-content", "read-tool-artifact", "visualization-thumbnail"):
+            self._app.router.add_post("/api/sessions/{session_id}/history/" + operation, self._cold_history_action)
+
         self._app.router.add_post("/api/sessions/{session_id}/archive", self._archive_session)
         self._app.router.add_post("/api/sessions/{session_id}/unarchive", self._unarchive_session)
         self._app.router.add_post(
@@ -669,6 +679,10 @@ class LocalHttpServer:
                 status=exc.status,
                 retryable=exc.retryable,
             )
+        except WorkspaceUnavailable as exc:
+            return self._error_response("WORKSPACE_UNAVAILABLE", str(exc), status=409, retryable=False)
+        except SessionWriterConflict as exc:
+            return self._error_response("SESSION_WRITER_CONFLICT", str(exc), status=409, retryable=False)
         except FilePreviewError as exc:
             return self._error_response(exc.code, exc.message, status=exc.status, retryable=False)
         except SessionDeleteRejected as exc:
@@ -1987,6 +2001,71 @@ class LocalHttpServer:
                 expected_config_identity=body["config_identity"],
             )
         )
+
+    async def _workspace_availability(self, request):
+        return web.json_response(await self.sessions.workspace_availability(request.match_info["session_id"]))
+
+    async def _restore_workspace(self, request):
+        if await self._json_body(request):
+            raise ValueError("workspace recovery accepts no client path or identity")
+        return web.json_response(await self.bridge.restore_workspace(
+            request.match_info["session_id"], request.headers.get("X-Pulsara-Connection-Id"),
+            int(request.headers.get("X-Pulsara-Connection-Generation", "0"))))
+
+    async def _history_snapshot(self, request):
+        return web.json_response(protobuf_json(await self.sessions.history_snapshot(request.match_info["session_id"])))
+
+    async def _cold_content(self, session_id, body, *, artifact=False):
+        if artifact:
+            content_request = wire.ReadToolArtifactRequest(
+                result_entry_id=body.get("result_entry_id", ""),
+                offset_chars=int(body.get("offset_chars", 0)), max_chars=int(body.get("max_chars", 32000)))
+        else:
+            if sum(field in body for field in ("entry_id", "queue_item_id")) != 1:
+                raise ValueError("exactly one canonical content owner is required")
+            content_request = wire.ReadContentRequest(
+                block_id=body.get("block_id", ""), offset_bytes=int(body.get("offset_bytes", 0)),
+                limit_bytes=int(body.get("limit_bytes", 256 << 10)))
+            for field in ("entry_id", "queue_item_id", "image_ref_ordinal", "visualization_ordinal"):
+                if field in body:
+                    setattr(content_request, field, body[field])
+        return protobuf_json(await self.sessions.history_content(session_id, content_request, artifact=artifact))
+
+    async def _cold_history_action(self, request):
+        session_id = request.match_info["session_id"]
+        operation = request.path.rsplit("/", 1)[-1]
+        body = await self._json_body(request)
+        if operation == "history":
+            if not isinstance(body.get("cursor"), dict):
+                raise ValueError("history cursor is required")
+            return web.json_response(protobuf_json(await self.sessions.history_page(
+                session_id, body["cursor"], int(body.get("maximum_entries", 128)))))
+        if operation == "visualization-thumbnail":
+            return web.json_response(await self._visualization_previews.read_canonical(
+                body, read_content=lambda value: self._cold_content(session_id, value),
+                cancelled=lambda: request.transport is None or request.transport.is_closing()))
+        return web.json_response(await self._cold_content(session_id, body, artifact=operation == "read-tool-artifact"))
+
+    @web.middleware
+    async def _chat_write_admission(self, request, handler):
+        session_id = request.match_info.get("session_id")
+        if session_id and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            suffix = request.path.split("/api/sessions/", 1)[-1].split("/", 1)[-1]
+            independent = {session_id, "title", "archive", "unarchive", "connections", "restore-workspace", "path-candidates"}
+            if suffix not in independent and not suffix.startswith("history/"):
+                await self.bridge.require_chat_controller(
+                    request.headers.get("X-Pulsara-Connection-Id", ""),
+                    int(request.headers.get("X-Pulsara-Connection-Generation", "0")), session_id=session_id)
+        connection_id = request.match_info.get("connection_id")
+        if connection_id:
+            action = request.path.rsplit("/", 1)[-1]
+            write = action in {"command", "resolve-interaction", "resolve-plan-interaction", "resolve-capability-form"}
+            if action == "subagent-capacity":
+                write = not (await self._json_body(request)).get("read_only", False)
+            if write:
+                connection = await self.bridge._connection(connection_id)
+                await self.bridge.require_chat_controller(connection_id, connection.generation)
+        return await handler(request)
 
     async def _read_session(self, request: web.Request) -> web.Response:
         return web.json_response(

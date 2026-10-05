@@ -130,7 +130,7 @@ def test_host_workspace_kind_ephemeral_alias_is_removed() -> None:
 def test_host_workspace_project_requires_existing_directory(tmp_path) -> None:
     with pytest.raises(ValueError, match="requires workspace_root"):
         resolve_workspace(HostWorkspaceInput(workspace_kind="project"))
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(ValueError, match="工作目录已丢失"):
         resolve_workspace(
             HostWorkspaceInput(
                 workspace_kind="project", workspace_root=tmp_path / "missing"
@@ -138,7 +138,7 @@ def test_host_workspace_project_requires_existing_directory(tmp_path) -> None:
         )
     file_path = tmp_path / "file.txt"
     file_path.write_text("x", encoding="utf-8")
-    with pytest.raises(ValueError, match="not a directory"):
+    with pytest.raises(ValueError, match="不是目录"):
         resolve_workspace(
             HostWorkspaceInput(workspace_kind="project", workspace_root=Path(file_path))
         )

@@ -46,7 +46,7 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.ports.user_control_feedback import (
     USER_CONTROL_FEEDBACK_MEDIA_TYPE,
-    UserControlFeedbackContentV1,
+    ProcessControlFeedbackContent,
     UserControlFeedbackInstallationAttempt,
     UserControlProcessFact,
     project_user_control_feedback_for_provider,
@@ -71,8 +71,8 @@ def _id(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
 
 
-def _content(*, session_id: str = "session:one") -> UserControlFeedbackContentV1:
-    return UserControlFeedbackContentV1(
+def _content(*, session_id: str = "session:one") -> ProcessControlFeedbackContent:
+    return ProcessControlFeedbackContent(
         command_id="command:control:999999:one",
         session_id=session_id,
         host_session_id="host:one",
@@ -93,6 +93,8 @@ def _content(*, session_id: str = "session:one") -> UserControlFeedbackContentV1
 
 def _feedback_host() -> tuple[KernelHostSession, _UserControlAttempt, str]:
     host = object.__new__(KernelHostSession)
+    host._workspace_recreated_at = None
+    host._workspace_feedback_candidate = None
     host.session_id = "session:one"
     host.host_session_id = "host:one"
     host._lock = asyncio.Lock()
@@ -706,7 +708,7 @@ def test_pr03_feedback_projection_is_typed_and_preserves_literal_facts() -> None
     assert '"source":"USER_CONTROL"' in projection
     assert '"other_work_stopped":false' in projection
     assert "schema_version" not in projected
-    assert "user_control_feedback.v1" not in projection
+    assert "user_control_feedback.v2" not in projection
     assert USER_CONTROL_FEEDBACK_MEDIA_TYPE.endswith("+json")
     with pytest.raises(ValueError, match="identity"):
         project_user_control_feedback_for_provider(

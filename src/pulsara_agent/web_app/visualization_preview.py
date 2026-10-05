@@ -22,6 +22,9 @@ class VisualizationPreviews:
         self.slot = asyncio.Lock()
 
     async def read(self, connection_id: str, body: dict, *, cancelled: Callable[[], bool] = lambda: False) -> dict:
+        return await self.read_canonical(body, read_content=lambda value: self.bridge.read_content(connection_id, value), cancelled=cancelled)
+
+    async def read_canonical(self, body: dict, *, read_content, cancelled: Callable[[], bool] = lambda: False) -> dict:
         entry, ordinal = body.get("entry_id"), body.get("ordinal")
         digest, size = body.get("digest"), body.get("size")
         if (not isinstance(entry, str) or not entry or type(ordinal) is not int
@@ -34,7 +37,7 @@ class VisualizationPreviews:
                 raise asyncio.CancelledError
             content = bytearray()
             while True:
-                result = await self.bridge.read_content(connection_id, {
+                result = await read_content({
                     **target, "offset_bytes": len(content), "limit_bytes": 1 << 20,
                 })
                 if cancelled():
@@ -60,7 +63,7 @@ class VisualizationPreviews:
                 bytes(content), deadline_monotonic=monotonic() + 30, thumbnail=True,
             )
             # Revalidate the attached owner after the disposable browser settles.
-            result = await self.bridge.read_content(connection_id, {
+            result = await read_content({
                 **target, "offset_bytes": 0, "limit_bytes": 1,
             })
             if result.get("content", {}).get("digest") != digest:

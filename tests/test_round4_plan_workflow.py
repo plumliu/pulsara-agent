@@ -612,6 +612,10 @@ class _PlanProtocolHost:
     writer_generation = 7
 
     def __init__(self) -> None:
+        from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+        from pathlib import Path
+        import tempfile
+        self.workspace_gate = WorkspaceExecutionGate(Path(tempfile.gettempdir()).resolve())
         self.questions: list[object] = []
         self.drafts: list[tuple[PlanDraftDecision, str | None]] = []
         self._question_winners: dict[str, tuple[object, AcceptedPlanResolution]] = {}

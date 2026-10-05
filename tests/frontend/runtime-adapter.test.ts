@@ -2890,3 +2890,36 @@ it.each(['ALL', 'OPEN', 'ARCHIVED'] as const)('requests five recent sessions wit
     body: JSON.stringify({ query: '  ', lifecycle, limit: 5 }),
   }));
 });
+
+it.each(['live', 'history'])('keeps the current write owner when an earlier %s connect returns late', async (kind) => {
+  let release!: (response: Response) => void;
+  const delayed = new Promise<Response>(resolve => { release = resolve; });
+  const live = (id: string) => {
+    const payload = connectPayload();
+    payload.session_id = id; payload.connection_id = `connection-${id}`;
+    payload.snapshot.snapshot.session_id = id;
+    return payload;
+  };
+  const writes: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === '/api/sessions/A/connections') return delayed;
+    if (url === '/api/sessions/B/connections') return new Response(JSON.stringify(live('B')));
+    if (url.endsWith('/model-call-binding')) {
+      writes.push(new Headers(init?.headers).get('X-Pulsara-Connection-Id') ?? '');
+      return new Response(JSON.stringify({model_call_binding:{connection_id:'model', reasoning:null}, reasoning_preference_reset:false}));
+    }
+    if (init?.method === 'DELETE') return new Response('{}');
+    throw new Error(`Unexpected ${url}`);
+  }));
+  const adapter = new LocalHttpRuntimeAdapter();
+  const pending = adapter.connect('A');
+  await adapter.connect('B');
+  release(new Response(JSON.stringify(kind === 'live' ? live('A') : {
+    view:'history', session_id:'A', workspace_availability:{outcome:'MISSING', path:'/tmp/A'},
+    snapshot:{snapshot:{snapshot:{session_id:'A', entries:[], control:{}, event_sequence_cut:'0'}}},
+  })));
+  await (await pending).close();
+  await adapter.updateModelCallBinding('B', {connection_id:'model', reasoning:null});
+  expect(writes).toEqual(['connection-B']);
+});

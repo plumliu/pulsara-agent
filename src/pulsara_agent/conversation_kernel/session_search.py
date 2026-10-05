@@ -19,14 +19,16 @@ from pulsara_agent.conversation_kernel.prompt_content import (
 )
 from pulsara_agent.llm.input import LLMTextPart, PromptAnnotationPart
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.conversation_kernel.root_status import LATEST_ROOT_SUMMARY_SQL
 
 # UI page/preview budgets, never a cap on the corpus searched.
 MAX_PAGE_SIZE = 50
 SNIPPET_CHARACTERS = 240
 
-_SESSION_SQL = """
+_SESSION_SQL = f"""
 SELECT s.id, s.title, s.workspace_id, s.memory_domain_id, s.lifecycle,
        s.writer_generation, s.latest_entry_sequence, s.model_call_binding,
+       {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn,
        w.workspace_kind, w.workspace_root, w.workspace_label,
        CASE WHEN s.lifecycle='ARCHIVED' THEN s.updated_at ELSE
          GREATEST(s.created_at, (SELECT e.accepted_at FROM pulsara_v3.transcript_entries e

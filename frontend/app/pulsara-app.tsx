@@ -21,6 +21,9 @@ import { ToolResultDisplayContext, readSavedToolResultDisplay } from '../lib/too
 import { PromptDraftStore } from '../lib/prompt-draft';
 import {
   LocalHttpRuntimeAdapter,
+  CanonicalHistoryView,
+  projectRootStatus,
+  type WorkspaceAvailability,
   createUserControlCommandRef,
   mergeRuntimeTaskInventory,
   RuntimeApiError,
@@ -76,7 +79,7 @@ const emptySession: SessionSummary = {
   id: '',
   title: '尚未选择会话',
   subtitle: '创建一个任务，或从左侧恢复已有会话',
-  status: 'draft',
+  status: null,
   updatedAt: '',
   live: false,
 };
@@ -229,6 +232,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [userCapabilityError, setUserCapabilityError] = useState<string>();
   const userCapabilityAttempt = useRef(0);
   const [connection, setConnection] = useState<RuntimeConnection>();
+  const historyRef = useRef<CanonicalHistoryView | undefined>(undefined);
+  const [workspaceObservation, setWorkspaceObservation] = useState<{sessionId: string; value: WorkspaceAvailability}>();
+  const [workspaceRecoveryBusy, setWorkspaceRecoveryBusy] = useState(false);
+  const [workspaceRecoveryError, setWorkspaceRecoveryError] = useState<string>();
+
   const connectionRef = useRef<RuntimeConnection | undefined>(undefined);
   useEffect(() => {
     promptDraftStore.setImporter(async (sessionId, files, directory, signal) => {
@@ -243,6 +251,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('starting');
   const [runtimeError, setRuntimeError] = useState<string>();
   const [runtimeReopenBusy, setRuntimeReopenBusy] = useState(false);
+  const runtimeReopenOwner = useRef<RuntimeConnection | undefined>(undefined);
   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
   const [queueActions, setQueueActions] = useState<QueuedPromptAction[]>([]);
   const [toolDecisions, setToolDecisions] = useState<ToolDecisionIntent[]>([]);
@@ -281,6 +290,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const databaseState = bootstrap?.database_state;
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
   const canCreateSession = runtimeStatus === 'online' && databaseState === 'ready';
+
+  const ownsHistoryReader = (reader: RuntimeConnection | CanonicalHistoryView): boolean => (
+    activeSessionIdRef.current === reader.sessionId
+    && (reader instanceof CanonicalHistoryView ? historyRef.current === reader : connectionRef.current === reader)
+  );
 
   const ownsConnection = useCallback((expected: RuntimeConnection): boolean => (
     connectionRef.current === expected
@@ -424,10 +438,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       session.id === activeSessionIdRef.current
         ? {
           ...session,
-          status: next.isRunning ? 'running'
-            : next.control.latest_root_turn?.status === 'INTERRUPTED' ? 'interrupted'
-            : next.control.latest_root_turn?.status === 'COMPLETED' ? 'completed'
-            : 'draft',
+          status: projectRootStatus(next.control.latest_root_turn),
           updatedAt: '刚刚',
         }
         : session
@@ -500,10 +511,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   const loadTaskActivities = useCallback(async (taskId: string, cursor?: string) => {
     const sessionId = activeSessionIdRef.current;
-    const active = connectionRef.current;
+    const active = connectionRef.current ?? historyRef.current;
     if (!sessionId || !active || active.sessionId !== sessionId) throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
     const page = await adapter.listSessionTaskActivities(sessionId, taskId, cursor);
-    if (activeSessionIdRef.current !== sessionId || !ownsConnection(active)) {
+    if (activeSessionIdRef.current !== sessionId || !ownsHistoryReader(active)) {
       throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
     }
     const activities = [];
@@ -517,7 +528,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         activity.contentDigest,
         activity.contentSize,
       );
-      if (!ownsConnection(active)) {
+      if (!ownsHistoryReader(active)) {
         throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
       }
       activities.push({ ...activity, body });
@@ -665,6 +676,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (readSavedSessionId() === sessionId) saveSessionId('');
     if (requestedSession.current !== sessionId) return;
     const previous = connectionRef.current;
+    const previousHistory = historyRef.current;
+    historyRef.current = undefined;
+    if (previousHistory) void previousHistory.close();
     connectionAttempt.current += 1;
     taskInventoryAttempt.current += 1;
     taskReadOwner.current = {};
@@ -772,9 +786,17 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     setRuntimeStatus(reconnecting ? 'reconnecting' : 'starting');
     setRuntimeError(undefined);
     const previous = connectionRef.current;
+    const previousHistory = historyRef.current;
+    const retainedHistory = previousHistory?.sessionId === sessionId ? previousHistory : undefined;
+    historyRef.current = retainedHistory;
     connectionRef.current = undefined;
     setConnection(undefined);
+    if (!retainedHistory) setWorkspaceObservation(undefined);
+    setWorkspaceRecoveryBusy(false);
+    setRuntimeReopenBusy(false);
+    setWorkspaceRecoveryError(undefined);
     try {
+      if (previousHistory && previousHistory !== retainedHistory) await previousHistory.close();
       if (previous) await previous.close();
       if (attempt !== connectionAttempt.current) return undefined;
       const next = await adapter.connect(sessionId, takeover);
@@ -782,6 +804,25 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         await next.close();
         return undefined;
       }
+      if (next instanceof CanonicalHistoryView) {
+        if (retainedHistory) await retainedHistory.close();
+        historyRef.current = next;
+        activeSessionIdRef.current = sessionId;
+        setActiveSessionId(sessionId);
+        setOpeningSessionId('');
+        saveSessionId(sessionId);
+        setWorkspaceObservation({sessionId, value: next.availability});
+        publishProjection(next.current());
+        setRuntimeStatus('online');
+        setTaskInventoryLoading(false);
+        setCapabilityLoading(false);
+        return undefined;
+      }
+      const availability = await adapter.workspaceAvailability(sessionId);
+      if (attempt !== connectionAttempt.current) { await next.close(); return undefined; }
+      if (retainedHistory) await retainedHistory.close();
+      historyRef.current = undefined;
+      setWorkspaceObservation({sessionId, value: availability});
       connectionRef.current = next;
       activeSessionIdRef.current = sessionId;
       setConnection(next);
@@ -821,11 +862,77 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       const message = productMessage(error instanceof Error ? error.message : undefined, '无法连接本地服务。');
       setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
       setRuntimeError(message);
+      if (retainedHistory) {
+        setWorkspaceRecoveryError(message);
+        void adapter.workspaceAvailability(sessionId).then(value => {
+          if (attempt === connectionAttempt.current && historyRef.current === retainedHistory) {
+            setWorkspaceObservation({sessionId, value});
+          }
+        }).catch(() => {});
+      }
       setTaskInventoryLoading(false);
       setCapabilityLoading(false);
       return undefined;
     }
   }, [adapter, publishProjection, forgetSession]);
+
+  const recheckWorkspace = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    const attempt = connectionAttempt.current;
+    if (!sessionId) return;
+    setWorkspaceRecoveryError(undefined);
+    try {
+      const value = await adapter.workspaceAvailability(sessionId);
+      if (attempt !== connectionAttempt.current || activeSessionIdRef.current !== sessionId) return;
+      setWorkspaceObservation({sessionId, value});
+      if (value.outcome === 'AVAILABLE' && !connectionRef.current) await openRuntimeSession(sessionId);
+    } catch (error) {
+      if (attempt === connectionAttempt.current && activeSessionIdRef.current === sessionId) {
+        setWorkspaceRecoveryError(productMessage(error instanceof Error ? error.message : undefined, '无法检查工作目录。'));
+      }
+    }
+  }, [adapter, openRuntimeSession]);
+
+  const restoreWorkspace = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    const attempt = connectionAttempt.current;
+    if (!sessionId || workspaceRecoveryBusy) return;
+    setWorkspaceRecoveryBusy(true);
+    setWorkspaceRecoveryError(undefined);
+    try {
+      const value = await adapter.restoreWorkspace(sessionId);
+      if (attempt !== connectionAttempt.current || activeSessionIdRef.current !== sessionId) return;
+      setWorkspaceObservation({sessionId, value});
+      await openRuntimeSession(sessionId);
+    } catch (error) {
+      if (attempt === connectionAttempt.current && activeSessionIdRef.current === sessionId) {
+        setWorkspaceRecoveryError(productMessage(error instanceof Error ? error.message : undefined, '无法创建工作目录。'));
+      }
+    } finally {
+      if (activeSessionIdRef.current === sessionId) setWorkspaceRecoveryBusy(false);
+    }
+  }, [adapter, openRuntimeSession, workspaceRecoveryBusy]);
+
+  useEffect(() => {
+    if (!activeSessionId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const controller = new AbortController();
+    const check = async () => {
+      try {
+        const value = await adapter.workspaceAvailability(activeSessionId, controller.signal);
+        if (!disposed && activeSessionIdRef.current === activeSessionId) {
+          setWorkspaceObservation({sessionId: activeSessionId, value});
+          if (value.outcome === 'AVAILABLE' && historyRef.current?.sessionId === activeSessionId) {
+            await openRuntimeSession(activeSessionId);
+          }
+        }
+      } catch { /* A read error cannot establish missing or available. */ }
+      if (!disposed) timer = setTimeout(check, 30_000);
+    };
+    void check();
+    return () => { disposed = true; controller.abort(); clearTimeout(timer); };
+  }, [activeSessionId, adapter, openRuntimeSession]);
 
   const recoverConnectionAfterOperation = useCallback(async (
     error: unknown,
@@ -864,6 +971,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (boot.database_state !== 'ready') {
       if (boot.database_state === 'database_restart_required') {
         const previous = connectionRef.current;
+        const previousHistory = historyRef.current;
+        historyRef.current = undefined;
+        if (previousHistory) await previousHistory.close();
         connectionAttempt.current += 1;
         connectionRef.current = undefined;
         activeSessionIdRef.current = '';
@@ -913,6 +1023,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       disposed = true;
       connectionAttempt.current += 1;
       const active = connectionRef.current;
+      const history = historyRef.current;
+      historyRef.current = undefined;
+      if (history) void history.close();
       connectionRef.current = undefined;
       activeSessionIdRef.current = '';
       if (active) void active.close();
@@ -934,11 +1047,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           }
           setRuntimeStatus('online');
         } catch (error) {
-          if (abort.signal.aborted || !active || !ownsConnection(connection)) return;
+          if (abort.signal.aborted || !active || !ownsConnection(connection)
+            || runtimeReopenOwner.current === connection) return;
           setRuntimeStatus('reconnecting');
           setRuntimeError(productMessage(error instanceof Error ? error.message : undefined, '连接已中断。'));
           window.setTimeout(() => {
-            if (active && ownsConnection(connection)) void openRuntimeSession(connection.sessionId, true);
+            if (active && ownsConnection(connection) && runtimeReopenOwner.current !== connection) {
+              void openRuntimeSession(connection.sessionId, true);
+            }
           }, 450);
           return;
         }
@@ -1058,7 +1174,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [adapter, loadSessionTasks, mergeTaskTotal]);
 
   useEffect(() => {
-    if (!activeSessionId || !connection || connection.sessionId !== activeSessionId) return;
+    const reader = connection ?? historyRef.current;
+    if (!activeSessionId || !reader || reader.sessionId !== activeSessionId) return;
     taskReadOwner.current = {};
     taskPageRequest.current = undefined;
     taskRowWatermarks.current.clear();
@@ -1075,7 +1192,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       ]).catch(error => setTaskInventoryError(productMessage(error instanceof Error ? error.message : undefined, '任务清单暂时无法读取。')));
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeSessionId, connection, projection.taskSnapshotRevision, loadSessionTasks, refreshTaskGroups, loadTaskGroup]);
+  }, [activeSessionId, connection, runtimeStatus, projection.taskSnapshotRevision, loadSessionTasks, refreshTaskGroups, loadTaskGroup]);
 
   const taskGroupInvalidationKey = (projection.taskGroupInvalidations ?? []).join('|');
   const taskInvalidationKey = (projection.taskInvalidations ?? []).join('|');
@@ -1214,7 +1331,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const activeWorkspace = activeSession.workspace ?? emptyWorkspace;
   const openingSession = sessionList.find(session => session.id === openingSessionId);
   const isObserver = connection?.role === 'observer';
-  const canControl = connection?.role === 'controller';
+  const workspaceAvailability = workspaceObservation?.sessionId === activeSessionId ? workspaceObservation.value : undefined;
+  const canControl = connection?.role === 'controller' && workspaceAvailability?.outcome === 'AVAILABLE' && runtimeStatus === 'online';
   const mergedProjection = useMemo(() => mergeRuntimeTaskInventory(
     projection,
     taskInventorySessionId === activeSessionId ? taskInventory : [],
@@ -1256,36 +1374,37 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   const reopenRuntime = useCallback(async () => {
     const sessionId = activeSessionIdRef.current;
-    if (!sessionId || runtimeReopenBusy) return;
+    const previous = connectionRef.current;
+    if (!sessionId || !previous || !canControl || runtimeReopenBusy) return;
+    let attempt = connectionAttempt.current;
+    runtimeReopenOwner.current = previous;
     setRuntimeReopenBusy(true);
     setRuntimeStatus('reconnecting');
     setRuntimeError(undefined);
-    connectionAttempt.current += 1;
-    const previous = connectionRef.current;
-    connectionRef.current = undefined;
-    setConnection(undefined);
     try {
-      if (previous) await previous.close();
+      // Submit with the still-valid controller. The server's original reopen
+      // operation owns detach; closing the browser first would revoke admission.
       const outcome = await adapter.reopenRuntime(sessionId);
-      const reopened = await openRuntimeSession(sessionId, true);
+      if (attempt !== connectionAttempt.current || !ownsConnection(previous)) return;
+      const opening = openRuntimeSession(sessionId, true);
+      attempt = connectionAttempt.current;
+      const reopened = await opening;
+      if (attempt !== connectionAttempt.current || activeSessionIdRef.current !== sessionId) return;
       if (!reopened) throw new Error('新的 runtime 已准备，但浏览器尚未重新连接。');
-      notify(
-        outcome.status === 'reopened' ? 'Runtime 已安全重启' : 'Runtime 已重新连接',
-        '上下文已从 canonical 数据重新投影；本地运行态不会回放。',
-        'success',
-      );
+      notify(outcome.status === 'reopened' ? 'Runtime 已安全重启' : 'Runtime 已重新连接',
+        '上下文已从 canonical 数据重新投影；本地运行态不会回放。', 'success');
     } catch (error) {
-      const detail = productMessage(
-        error instanceof Error ? error.message : undefined,
-        '安全重启没有完成；如果提示隔离状态，请完整重启 Pulsara。',
-      );
+      if (attempt !== connectionAttempt.current || activeSessionIdRef.current !== sessionId) return;
+      const detail = productMessage(error instanceof Error ? error.message : undefined,
+        '安全重启没有完成；如果提示隔离状态，请完整重启 Pulsara。');
       setRuntimeStatus('failed');
       setRuntimeError(detail);
       notify('Runtime 没有重启', detail, 'warning');
     } finally {
-      setRuntimeReopenBusy(false);
+      if (runtimeReopenOwner.current === previous) runtimeReopenOwner.current = undefined;
+      if (attempt === connectionAttempt.current && activeSessionIdRef.current === sessionId) setRuntimeReopenBusy(false);
     }
-  }, [adapter, notify, openRuntimeSession, runtimeReopenBusy]);
+  }, [adapter, canControl, notify, openRuntimeSession, ownsConnection, runtimeReopenBusy]);
 
   const openSession = (id: string) => {
     if (deletingSession.current === id || archivingSession.current === id) return;
@@ -1319,7 +1438,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   const forkConversation = async (entryId: string): Promise<void> => {
     const sourceId = activeSessionIdRef.current;
-    if (!sourceId) return;
+    if (!sourceId || !canControl) return;
     let outcome;
     try {
       outcome = await adapter.forkConversation(sourceId, entryId);
@@ -2304,27 +2423,27 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [adapter, adoptCapabilityMutation, notify]);
 
   const readToolArtifact = useCallback(async (resultEntryId: string, offsetChars: number) => {
-    const active = connectionRef.current;
+    const active = connectionRef.current ?? historyRef.current;
     if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
     const page = await active.readToolArtifact(resultEntryId, offsetChars);
-    if (!ownsConnection(active)) {
+    if (!ownsHistoryReader(active)) {
       throw new RuntimeApiError('TOOL_ARTIFACT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
     }
     return page;
   }, [ownsConnection]);
 
   const locateAnnotationSource = useCallback(async (entryId: string, signal: AbortSignal) => {
-    const active = connectionRef.current;
+    const active = connectionRef.current ?? historyRef.current;
     if (!active?.locateAnnotationSource) throw new Error('本地服务未连接。');
     const next = await active.locateAnnotationSource(entryId, signal);
     signal.throwIfAborted();
-    if (!ownsConnection(active)) throw new Error('会话已经切换。');
-    publishProjection(next, active);
+    if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
+    publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
     setFocusSourceEntry({ sessionId: active.sessionId, entryId });
   }, [ownsConnection, publishProjection]);
 
   const readPromptImage = useCallback(async (image: CanonicalPromptImagePart) => {
-    const active = connectionRef.current;
+    const active = connectionRef.current ?? historyRef.current;
     if (!active) {
       throw new RuntimeApiError(
         'LOCAL_CONNECTION_UNAVAILABLE',
@@ -2333,7 +2452,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       );
     }
     const bytes = await active.readPromptImage(image);
-    if (!ownsConnection(active)) {
+    if (!ownsHistoryReader(active)) {
       throw new RuntimeApiError(
         'PROMPT_IMAGE_OWNER_CHANGED',
         '图片所属的会话已经改变。',
@@ -2346,24 +2465,24 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const readVisualizationThumbnail = useCallback(async (
     entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal,
   ) => {
-    const active = connectionRef.current;
+    const active = connectionRef.current ?? historyRef.current;
     if (!active) throw new Error('本地服务未连接。');
     const image = await active.readVisualizationThumbnail(entryId, ordinal, digest, size, signal);
-    if (!ownsConnection(active)) throw new Error('可视化所属的会话已经改变。');
+    if (!ownsHistoryReader(active)) throw new Error('可视化所属的会话已经改变。');
     return image;
   }, [ownsConnection]);
 
   const readVisualization = useCallback(async (
     entryId: string, ordinal: number, digest: string, size: number,
   ) => {
-    const active = connectionRef.current;
+    const active = connectionRef.current ?? historyRef.current;
     if (!active) {
       throw new RuntimeApiError(
         'LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true,
       );
     }
     const html = await active.readVisualizationHtml(entryId, ordinal, digest, size);
-    if (!ownsConnection(active)) {
+    if (!ownsHistoryReader(active)) {
       throw new RuntimeApiError(
         'VISUALIZATION_OWNER_CHANGED', '可视化所属的会话已经改变。', true,
       );
@@ -2383,7 +2502,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           activeSessionId={openingSessionId || activeSessionId}
           openingSessionId={runtimeError ? undefined : openingSessionId}
           runtimeStatus={runtimeStatus}
-          connectionRole={connection?.role}
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
           onSelectSession={openSession}
@@ -2397,7 +2515,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onNotify={(title, detail) => notify(title, detail, 'warning')}
           canCreateSession={canCreateSession}
           onOpenSearch={() => setSearchOpen(true)}
-          onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
         />
       )}
 
@@ -2465,7 +2582,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
             && item.hostSessionId === projection.hostSessionId && item.interactionId === projection.interaction?.id
             && item.status !== 'rejected')}
           canControl={canControl}
+          historyOnly={historyRef.current?.sessionId === activeSessionId}
           isObserver={isObserver}
+          workspaceAvailability={workspaceAvailability}
+          workspaceRecoveryBusy={workspaceRecoveryBusy}
+          workspaceRecoveryError={workspaceRecoveryError}
+          onRestoreWorkspace={restoreWorkspace}
+          onRecheckWorkspace={recheckWorkspace}
           skills={(capabilities?.skills.items ?? []).filter(
             (skill) => skill.enabled && skill.effective,
           )}
@@ -2485,7 +2608,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onStop={() => void stopRun()}
           onCompact={compact}
           onReopenRuntime={() => void reopenRuntime()}
-          onRenameSession={() => setRenameTarget(activeSession)}
           runtimeReopenBusy={runtimeReopenBusy}
           onReadInteraction={readInteraction}
           onResolveInteraction={resolveInteraction}

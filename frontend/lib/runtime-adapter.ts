@@ -502,6 +502,8 @@ export interface SessionSearchItem {
 export interface SessionSearchPage { items: SessionSearchItem[]; nextCursor: string | null }
 
 export interface RuntimeAdapter {
+  workspaceAvailability(sessionId: string, signal?: AbortSignal): Promise<WorkspaceAvailability>;
+  restoreWorkspace(sessionId: string): Promise<WorkspaceAvailability>;
   searchSessions(query: string, lifecycle: 'ALL' | 'OPEN' | 'ARCHIVED', cursor?: string, signal?: AbortSignal): Promise<SessionSearchPage>;
   readonly memory: LocalMemoryApi;
   bootstrap(): Promise<RuntimeBootstrap>;
@@ -528,7 +530,7 @@ export interface RuntimeAdapter {
     status: 'reopened' | 'deferred';
     publicCode?: string;
   }>;
-  connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection>;
+  connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
   pickWorkspaceDirectory(initialPath: string, signal?: AbortSignal): Promise<string | null>;
   completeWorkspacePaths(sessionId: string, prefix: string, cursor: string | null, signal: AbortSignal): Promise<import('./file-reference').WorkspacePathPage>;
@@ -1301,6 +1303,26 @@ function resolveBrowserInstanceId(): string {
 }
 
 export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
+  private chatConnection?: LocalRuntimeConnection;
+  private connectAttempt = 0;
+  private sessionRequest<T>(sessionId: string, url: string, init: RequestInit): Promise<T> {
+    const connection = this.chatConnection;
+    if (!connection || connection.sessionId !== sessionId || connection.role !== 'controller') {
+      throw new RuntimeApiError('CHAT_CONTROLLER_REQUIRED', '此窗口仅供查看。', false);
+    }
+    return apiRequest(url, {...init, headers: {...init.headers, ...connection.chatWriteHeaders()}});
+  }
+  workspaceAvailability(sessionId: string, signal?: AbortSignal): Promise<WorkspaceAvailability> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/workspace-availability`, {signal});
+  }
+  restoreWorkspace(sessionId: string): Promise<WorkspaceAvailability> {
+    const connection = this.chatConnection;
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/restore-workspace`, {
+      method: 'POST', body: '{}',
+      headers: connection?.sessionId === sessionId ? connection.chatWriteHeaders() : {},
+    });
+  }
+
   private sessionTitleRevision = 0;
   readonly memory = new LocalMemoryApi();
   private readonly browserInstanceId: string;
@@ -1411,11 +1433,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     sessionId: string,
     binding: ModelCallBindingPayload,
   ): Promise<ModelCallBindingUpdate> {
-    const value = await apiRequest<{
+    const value = await this.sessionRequest<{
       model_call_binding: ModelCallBindingPayload;
       reasoning_preference_reset: boolean;
-    }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/model-call-binding`,
+    }>(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/model-call-binding`,
       { method: 'PUT', body: JSON.stringify(binding) },
     );
     return {
@@ -1444,10 +1465,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     status: 'reopened' | 'deferred';
     publicCode?: string;
   }> {
-    const payload = await apiRequest<{
+    const payload = await this.sessionRequest<{
       status: 'reopened' | 'deferred';
       public_code?: string;
-    }>(`/api/sessions/${encodeURIComponent(sessionId)}/runtime/reopen`, {
+    }>(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/runtime/reopen`, {
       method: 'POST',
     });
     return { status: payload.status, publicCode: payload.public_code };
@@ -1631,6 +1652,9 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     const payload = await apiRequest<Record<string, unknown>>(
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities`,
     );
+    if (payload.available === false) {
+      throw new RuntimeApiError('CAPABILITIES_UNAVAILABLE', '未连接运行时，当前项目能力状态不可用。', false);
+    }
     return projectCapabilitySnapshot(payload);
   }
 
@@ -1638,7 +1662,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     sessionId: string,
     serverId: string,
   ): Promise<CapabilitySnapshot> {
-    const payload = await apiRequest<Record<string, unknown>>(
+    const payload = await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}/reconnect`,
       { method: 'POST' },
     );
@@ -1653,8 +1677,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     adoption: ProjectCapabilityAdoption;
     capabilities: CapabilitySnapshot;
   }> {
-    const payload = await apiRequest<Record<string, unknown>>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/install`,
+    const payload = await this.sessionRequest<Record<string, unknown>>(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/install`,
       {
         method: 'POST',
         body: JSON.stringify({ source_path: input.sourcePath, name: input.name, description: input.description }),
@@ -1672,7 +1695,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     skillId: string,
     enabled: boolean,
   ): Promise<ProjectCapabilityMutationResult> {
-    const payload = await apiRequest<Record<string, unknown>>(
+    const payload = await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/enabled`,
       {
         method: 'POST',
@@ -1686,7 +1709,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     sessionId: string,
     input: McpEditInput,
   ): Promise<ProjectCapabilityMutationResult> {
-    const payload = await apiRequest<Record<string, unknown>>(
+    const payload = await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp`,
       {
         method: 'POST',
@@ -1701,25 +1724,24 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async testProjectMcp(sessionId: string, input: McpEditInput): Promise<McpConnectionTestResult> {
-    return apiRequest<McpConnectionTestResult>(`/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/test`, {
+    return this.sessionRequest<McpConnectionTestResult>(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/test`, {
       method: 'POST', body: JSON.stringify({server_id: input.serverId, config: input.config,
         secret_changes: input.secretChanges, retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false}),
     });
   }
 
   async importProjectMcp(sessionId: string, input: McpImportSelection): Promise<ProjectCapabilityMutationResult> {
-    return projectCapabilityMutation(await apiRequest<Record<string, unknown>>(
+    return projectCapabilityMutation(await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/import`,
       {method: 'POST', body: JSON.stringify(input)},
     ));
   }
 
-  async projectMcpAuthorization(sessionId: string, serverId: string, action: 'login' | 'status' | 'cancel' | 'logout') {
+  async projectMcpAuthorization(sessionId: string, serverId: string, action: 'login' | 'status' | 'cancel' | 'logout'): Promise<{state: string; error: string | null}> {
     const suffix = action === 'login' ? 'authorize' : action === 'cancel' ? 'authorization/cancel' : 'authorization';
-    return apiRequest<{state: string; error: string | null}>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}/${suffix}`,
-      {method: action === 'status' ? 'GET' : action === 'logout' ? 'DELETE' : 'POST', ...(action === 'status' ? {} : {body: '{}'})},
-    );
+    const url = `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}/${suffix}`;
+    if (action === 'status') return apiRequest(url);
+    return this.sessionRequest(sessionId, url, {method: action === 'logout' ? 'DELETE' : 'POST', body: '{}'});
   }
 
   async setProjectMcpEnabled(
@@ -1728,7 +1750,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     configIdentity: string,
     enabled: boolean,
   ): Promise<ProjectCapabilityMutationResult> {
-    const payload = await apiRequest<Record<string, unknown>>(
+    const payload = await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}/enabled`,
       {
         method: 'POST',
@@ -1739,7 +1761,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async removeProjectSkill(sessionId: string, skill: SkillCapability): Promise<ProjectCapabilityMutationResult> {
-    return projectCapabilityMutation(await apiRequest<Record<string, unknown>>(
+    return projectCapabilityMutation(await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/remove`,
       {method: 'POST', body: JSON.stringify({path: skill.path, expected: skill.removalIdentity})},
     ));
@@ -1750,7 +1772,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     serverId: string,
     configIdentity: string,
   ): Promise<ProjectCapabilityMutationResult> {
-    const payload = await apiRequest<Record<string, unknown>>(
+    const payload = await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}`,
       {
         method: 'DELETE',
@@ -1761,7 +1783,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async updateProjectMcp(sessionId: string, input: McpEditInput, expectedIdentity: string): Promise<ProjectCapabilityMutationResult> {
-    return projectCapabilityMutation(await apiRequest<Record<string, unknown>>(
+    return projectCapabilityMutation(await this.sessionRequest<Record<string, unknown>>(sessionId,
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(input.serverId)}`,
       { method: 'PUT', body: JSON.stringify({ config: input.config, expected_identity: expectedIdentity,
         secret_changes: input.secretChanges, retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false }) },
@@ -1969,7 +1991,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome> {
-    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+    return this.sessionRequest(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
       method: 'POST', body: JSON.stringify({ anchor_entry_id: anchorEntryId }),
     });
   }
@@ -2002,8 +2024,9 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return projectSessionSummary(payload.session);
   }
 
-  async connect(sessionId: string, takeover = false): Promise<RuntimeConnection> {
-    const payload = await apiRequest<ConnectPayload>(
+  async connect(sessionId: string, takeover = false): Promise<RuntimeConnection | CanonicalHistoryView> {
+    const attempt = ++this.connectAttempt;
+    const payload = await apiRequest<ConnectPayload | {view: "history"; session_id: string; workspace_availability: WorkspaceAvailability; snapshot: {snapshot: {snapshot: ProtocolCanonicalSnapshot}}}>(
       `/api/sessions/${encodeURIComponent(sessionId)}/connections`,
       {
         method: 'POST',
@@ -2013,18 +2036,355 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         }),
       },
     );
-    const connection = new LocalRuntimeConnection(payload);
+    if ('view' in payload && payload.view === 'history') {
+      const history = new CanonicalHistoryView(payload.session_id, payload.workspace_availability, payload.snapshot.snapshot.snapshot);
+      await history.initialize();
+      if (attempt === this.connectAttempt) this.chatConnection = undefined;
+      return history;
+    }
+    const connection = new LocalRuntimeConnection(payload as ConnectPayload);
     await connection.initialize();
+    if (attempt === this.connectAttempt) this.chatConnection = connection;
     return connection;
   }
 }
 
-class LocalRuntimeConnection implements RuntimeConnection {
+abstract class CanonicalHistoryReader {
+  protected entries = new Map<string, ProtocolEntry>();
+  protected control: ProtocolCanonicalControl = {};
+  protected eventSequence = 0;
+  protected writerGeneration = 0;
+  protected olderHistoryCursor?: ProtocolHistoryCursor;
+  protected historyPageRead?: { promise: Promise<void>; signal?: AbortSignal };
+  abstract readonly sessionId: string;
+  protected abstract post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T>;
+  protected abstract project(): RuntimeProjection;
+  async readCanonicalEntryContent(
+    entryId: string,
+    digest: string,
+    size: number,
+  ): Promise<string> {
+    if (!entryId || !digest.startsWith('sha256:') || size < 0) {
+      throw new RuntimeApiError(
+        'CONTENT_REFERENCE_INVALID', '这条任务活动缺少精确内容身份。', false,
+      );
+    }
+    const reference: ProtocolContent = { digest, size };
+    await this.hydrateContentReference(
+      reference,
+      { entry_id: entryId },
+      '这条任务活动暂时无法完整读取。',
+    );
+    if (reference.inline_content === undefined) return '';
+    return decodeContent(reference, { kind: 'entry', entryId });
+  }
+
+  async readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string> {
+    const result = await this.post<{ image: string }>('visualization-thumbnail', {
+      entry_id: entryId, ordinal, digest, size,
+    }, signal);
+    if (!result.image?.startsWith('data:image/png;base64,')) throw new Error('缩略图暂时无法生成。');
+    return result.image;
+  }
+
+  async readVisualizationHtml(
+    entryId: string, ordinal: number, digest: string, size: number,
+  ): Promise<string> {
+    if (!entryId || !Number.isSafeInteger(ordinal) || ordinal < 0
+      || !/^sha256:[0-9a-f]{64}$/.test(digest)
+      || !Number.isSafeInteger(size) || size < 1) {
+      throw new RuntimeApiError(
+        'VISUALIZATION_REFERENCE_INVALID', '可视化内容缺少精确身份。', false,
+      );
+    }
+    const bytes = await this.readExactContentBytes(
+      { entry_id: entryId, visualization_ordinal: ordinal },
+      digest, size, '可视化内容暂时无法读取。', true,
+    );
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  }
+
+  async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
+    const target = image.owner.kind === 'entry'
+      ? { entry_id: image.owner.entryId }
+      : { queue_item_id: image.owner.queueItemId };
+    return this.readExactContentBytes(
+      {
+        ...target,
+        image_ref_ordinal: image.refOrdinal,
+      },
+      image.digest,
+      image.encodedBytes,
+      '这张图片暂时无法完整读取。',
+      false,
+    );
+  }
+
+  async readToolArtifact(
+    resultEntryId: string,
+    offsetChars: number,
+    maxChars = 32_000,
+  ): Promise<ToolArtifactPage> {
+    const frame = await this.post<{
+      tool_artifact?: {
+        result_entry_id?: string; text?: string; offset_chars?: string | number;
+        returned_chars?: string | number; total_chars?: string | number;
+        has_more?: boolean; next_offset_chars?: string | number;
+      };
+      error?: ProtocolError;
+    }>('read-tool-artifact', {
+      result_entry_id: resultEntryId, offset_chars: offsetChars, max_chars: maxChars,
+    });
+    assertProtocolFrame(frame);
+    const page = frame.tool_artifact;
+    if (!page || page.result_entry_id !== resultEntryId || numeric(page.offset_chars) !== offsetChars) {
+      throw new RuntimeApiError('TOOL_ARTIFACT_RESPONSE_INVALID', '工具原始输出暂时无法读取。', true);
+    }
+    return {
+      resultEntryId,
+      text: page.text ?? '',
+      offsetChars,
+      returnedChars: numeric(page.returned_chars),
+      totalChars: numeric(page.total_chars),
+      hasMore: Boolean(page.has_more),
+      nextOffsetChars: page.has_more ? numeric(page.next_offset_chars) : undefined,
+    };
+  }
+
+  protected async readOlderHistoryPage(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.historyPageRead) {
+      const pending = this.historyPageRead;
+      try {
+        // A waiter owns its cancellation, without aborting another caller's read.
+        await new Promise<void>((resolve, reject) => {
+          const aborted = () => reject(signal!.reason);
+          signal?.addEventListener('abort', aborted, { once: true });
+          pending.promise.then(resolve, reject).finally(() => signal?.removeEventListener('abort', aborted));
+        });
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!pending.signal?.aborted) throw error;
+        // A replacement lookup resumes from the unchanged owner cursor after
+        // the preceding lookup's canceled operation has settled.
+        if (this.historyPageRead === pending) this.historyPageRead = undefined;
+        return this.readOlderHistoryPage(signal);
+      }
+      signal?.throwIfAborted(); return;
+    }
+    const cursor = this.olderHistoryCursor;
+    if (!cursor) return;
+    const operation = (async () => {
+      const frame = await this.post<{ history_page?: ProtocolHistoryPage; error?: ProtocolError }>('history', {
+        cursor, maximum_entries: 256, maximum_serialized_bytes: 2 << 20,
+      }, signal);
+      signal?.throwIfAborted();
+      assertProtocolFrame(frame);
+      const page = frame.history_page;
+      if (!page) throw new RuntimeApiError('HISTORY_RESPONSE_INVALID', '较早的会话内容暂时无法加载。', true);
+      // A replacement snapshot owns a different cursor and cut.
+      if (this.olderHistoryCursor !== cursor) return;
+      const next = page.older_history_cursor;
+      if (page.has_more && (!next || next.session_id !== cursor.session_id
+        || numeric(next.cut_sequence) !== numeric(cursor.cut_sequence)
+        || numeric(next.entry_sequence) >= numeric(cursor.entry_sequence))) {
+        throw new RuntimeApiError('HISTORY_CURSOR_INVALID', '较早的会话内容无法继续加载。', true);
+      }
+      for (const entry of page.entries ?? []) this.entries.set(entry.entry_id, entry);
+      this.olderHistoryCursor = page.has_more ? next : undefined;
+    })();
+    const pending = { promise: operation, signal };
+    this.historyPageRead = pending;
+    try { await operation; } finally { if (this.historyPageRead === pending) this.historyPageRead = undefined; }
+  }
+
+  protected async backfillOlderHistory(): Promise<void> {
+    while (this.olderHistoryCursor) await this.readOlderHistoryPage();
+  }
+
+  async locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    signal.throwIfAborted();
+    while (!this.entries.has(entryId) && this.olderHistoryCursor) {
+      await this.readOlderHistoryPage(signal); signal.throwIfAborted();
+    }
+    const entry = this.entries.get(entryId);
+    if (!entry || !['ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'].includes(entry.entry_kind ?? '')) {
+      throw new RuntimeApiError('ANNOTATION_SOURCE_MISSING', '当前会话中找不到来源回复。', false);
+    }
+    for (const block of entry.blocks ?? []) {
+      signal.throwIfAborted();
+      if (block.block_kind === 'TEXT') await this.hydrateContentReference(block.content,
+        { entry_id: entryId, block_id: block.block_id }, '来源回复暂时无法完整读取。', signal);
+    }
+    signal.throwIfAborted();
+    return this.project();
+  }
+
+  protected async hydrateCanonicalContent(): Promise<void> {
+    for (const entry of this.entries.values()) {
+      await this.hydrateContentReference(
+        entry.content,
+        { entry_id: entry.entry_id },
+        '这条会话内容暂时无法完整读取。',
+      );
+      for (const block of entry.blocks ?? []) {
+        await this.hydrateContentReference(
+          block.content,
+          { entry_id: entry.entry_id, block_id: block.block_id },
+          '这条模型回复暂时无法完整读取。',
+        );
+      }
+      for (const block of entry.reasoning_blocks ?? []) {
+        await this.hydrateContentReference(
+          block.content,
+          { entry_id: entry.entry_id, block_id: block.block_id },
+          '这段思考内容暂时无法完整读取。',
+        );
+      }
+    }
+  }
+
+  protected async hydrateContentReference(
+    reference: ProtocolContent | undefined,
+    target: { entry_id: string; block_id?: string } | { queue_item_id: string },
+    publicMessage: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!reference || reference.inline_content !== undefined || numeric(reference.size) === 0) return;
+    const expectedSize = numeric(reference.size);
+    const expectedDigest = reference.digest ?? '';
+    const complete = await this.readExactContentBytes(
+      target,
+      expectedDigest,
+      expectedSize,
+      publicMessage,
+      true,
+      signal,
+    );
+    reference.inline_content = encodeBase64Bytes(complete);
+  }
+
+  protected async readExactContentBytes(
+    target: (
+      | { entry_id: string; block_id?: string }
+      | { queue_item_id: string }
+    ) & { image_ref_ordinal?: number; visualization_ordinal?: number },
+    expectedDigest: string,
+    expectedSize: number,
+    publicMessage: string,
+    requireUtf8: boolean,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    const chunks: Uint8Array[] = [];
+    let offset = 0;
+    while (true) {
+      signal?.throwIfAborted();
+      const frame = await this.post<{
+        content?: {
+          digest?: string; complete_size?: string | number; offset_bytes?: string | number;
+          content?: string; complete?: boolean;
+        };
+        error?: ProtocolError;
+      }>('read-content', {
+        ...target,
+        offset_bytes: offset,
+        limit_bytes: 1 << 20,
+      }, signal);
+      signal?.throwIfAborted();
+      assertProtocolFrame(frame);
+      const chunk = frame.content;
+      if (
+        !chunk || chunk.digest !== expectedDigest
+        || numeric(chunk.complete_size) !== expectedSize
+        || numeric(chunk.offset_bytes) !== offset
+      ) {
+        throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+      }
+      const bytes = decodeBase64Bytes(chunk.content ?? '');
+      chunks.push(bytes);
+      offset += bytes.length;
+      if (chunk.complete) break;
+      if (bytes.length === 0 || offset >= expectedSize) {
+        throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+      }
+    }
+    if (offset !== expectedSize) {
+      throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+    }
+    const complete = new Uint8Array(expectedSize);
+    let cursor = 0;
+    for (const chunk of chunks) {
+      complete.set(chunk, cursor);
+      cursor += chunk.length;
+    }
+    await verifyContentIntegrity(complete, expectedDigest, publicMessage, requireUtf8);
+    signal?.throwIfAborted();
+    return complete;
+  }
+}
+
+export interface WorkspaceAvailability {
+  path: string;
+  outcome: 'AVAILABLE' | 'MISSING' | 'UNAVAILABLE';
+  reason: string | null;
+}
+
+export class CanonicalHistoryView extends CanonicalHistoryReader {
+  readonly view = 'history';
+  private closed = false;
+  constructor(readonly sessionId: string, readonly availability: WorkspaceAvailability,
+              snapshot: ProtocolCanonicalSnapshot) {
+    super();
+    this.entries = new Map((snapshot.entries ?? []).map(entry => [entry.entry_id, entry]));
+    this.control = snapshot.control ?? {};
+    this.olderHistoryCursor = snapshot.older_history_cursor;
+    this.eventSequence = numeric(snapshot.event_sequence_cut);
+  }
+  protected post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T> {
+    if (this.closed) throw new RuntimeApiError('HISTORY_CLOSED', '会话已切换。', false);
+    return apiRequest(`/api/sessions/${encodeURIComponent(this.sessionId)}/history/${suffix}`, {
+      method: 'POST', body: JSON.stringify(body), signal,
+    });
+  }
+  async initialize() {
+    await this.backfillOlderHistory();
+    await this.hydrateCanonicalContent();
+    for (const item of this.control.prompt_queue ?? []) {
+      try {
+        await this.hydrateContentReference(item.content, {queue_item_id: item.queue_item_id!}, '待运行输入暂时无法读取。');
+      } catch (error) {
+        if (!(error instanceof RuntimeApiError) || error.code !== 'CONTENT_QUEUE_NOT_PENDING') throw error;
+        // The snapshot cut still retains this queue observation. Its content
+        // edge has since retired; show the existing unavailable presentation.
+      }
+    }
+  }
+  current(): RuntimeProjection { return this.project(); }
+  async close() { this.closed = true; }
+  protected project(): RuntimeProjection {
+    const canonical = [...this.entries.values()].sort((a,b) => numeric(a.entry_sequence) - numeric(b.entry_sequence));
+    const agentTasks: AgentTask[] = [];
+    const messages = projectEntries(canonical, new Set());
+    const canonicalRootTurnIds = orderedRootTurnIdsFromEntries(canonical);
+    annotateSubagentCompletionSources(messages, agentTasks, canonicalRootTurnIds);
+    const subagentRuns = projectSubagentRuns(canonical, agentTasks, []);
+    attachSubagentRuns(messages, subagentRuns);
+    return {messages, canonicalRootTurnIds, subagentRuns, agentTasks, subagentProgress: {},
+      presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
+      initialContextBase: this.control.initial_context_base, isRunning: false,
+      queuedCount: numeric(this.control.prompt_queue_total_count), queuedPrompts: projectQueuedPrompts(this.control),
+      promptTransitions: [], planMode: Boolean(this.control.active_plan_workflow),
+      control: this.control, liveControl: {}, taskInvalidations: [], taskGroupInvalidations: [],
+      taskSnapshotRevision: 0, todo: undefined, eventSequence: this.eventSequence,
+      liveOwnerEpoch: 0, liveRevision: 0, liveControlOwnerEpoch: 0, liveControlRevision: 0};
+  }
+}
+
+class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeConnection {
   readonly sessionId: string;
   readonly role: 'observer' | 'controller';
   readonly generation: number;
   private readonly connectionId: string;
-  private entries = new Map<string, ProtocolEntry>();
   private drafts = new Map<string, LiveDraft>();
   private liveResults = new Map<string, LiveToolResult>();
   private promptTransitions = new Map<string, LocalPromptSubmission>();
@@ -2032,16 +2392,12 @@ class LocalRuntimeConnection implements RuntimeConnection {
   private taskInvalidations: string[] = [];
   private taskGroupInvalidations: string[] = [];
   private taskSnapshotRevision = 0;
-  private control: ProtocolCanonicalControl = {};
   private liveControl: ProtocolLiveControlSnapshot = {};
-  private eventSequence = 0;
   private liveOwnerEpoch = 0;
   private liveRevision = 0;
   private liveControlOwnerEpoch = 0;
   private liveControlRevision = 0;
   private presentationNotices: string[] = [];
-  private writerGeneration = 0;
-  private olderHistoryCursor?: ProtocolHistoryCursor;
   private closed = false;
 
   async readSubagentCapacity(): Promise<{ target: number; occupied: number }> {
@@ -2076,7 +2432,13 @@ class LocalRuntimeConnection implements RuntimeConnection {
     };
   }
 
+  chatWriteHeaders(): Record<string, string> {
+    if (this.closed) throw new RuntimeApiError('CHAT_CONNECTION_CLOSED', '会话连接已关闭。', false);
+    return {'X-Pulsara-Connection-Id': this.connectionId, 'X-Pulsara-Connection-Generation': String(this.generation)};
+  }
+
   constructor(payload: ConnectPayload) {
+    super();
     this.connectionId = payload.connection_id;
     this.generation = payload.connection_generation;
     this.sessionId = payload.session_id;
@@ -2372,66 +2734,13 @@ class LocalRuntimeConnection implements RuntimeConnection {
     };
   }
 
-  async readCanonicalEntryContent(
-    entryId: string,
-    digest: string,
-    size: number,
-  ): Promise<string> {
-    if (!entryId || !digest.startsWith('sha256:') || size < 0) {
-      throw new RuntimeApiError(
-        'CONTENT_REFERENCE_INVALID', '这条任务活动缺少精确内容身份。', false,
-      );
-    }
-    const reference: ProtocolContent = { digest, size };
-    await this.hydrateContentReference(
-      reference,
-      { entry_id: entryId },
-      '这条任务活动暂时无法完整读取。',
-    );
-    if (reference.inline_content === undefined) return '';
-    return decodeContent(reference, { kind: 'entry', entryId });
-  }
 
-  async readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string> {
-    const result = await this.post<{ image: string }>('visualization-thumbnail', {
-      entry_id: entryId, ordinal, digest, size,
-    }, signal);
-    if (!result.image?.startsWith('data:image/png;base64,')) throw new Error('缩略图暂时无法生成。');
-    return result.image;
-  }
 
-  async readVisualizationHtml(
-    entryId: string, ordinal: number, digest: string, size: number,
-  ): Promise<string> {
-    if (!entryId || !Number.isSafeInteger(ordinal) || ordinal < 0
-      || !/^sha256:[0-9a-f]{64}$/.test(digest)
-      || !Number.isSafeInteger(size) || size < 1) {
-      throw new RuntimeApiError(
-        'VISUALIZATION_REFERENCE_INVALID', '可视化内容缺少精确身份。', false,
-      );
-    }
-    const bytes = await this.readExactContentBytes(
-      { entry_id: entryId, visualization_ordinal: ordinal },
-      digest, size, '可视化内容暂时无法读取。', true,
-    );
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  }
 
-  async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
-    const target = image.owner.kind === 'entry'
-      ? { entry_id: image.owner.entryId }
-      : { queue_item_id: image.owner.queueItemId };
-    return this.readExactContentBytes(
-      {
-        ...target,
-        image_ref_ordinal: image.refOrdinal,
-      },
-      image.digest,
-      image.encodedBytes,
-      '这张图片暂时无法完整读取。',
-      false,
-    );
-  }
+
+
+
+
 
   async readPromptForEdit(
     content: CanonicalPromptContent,
@@ -2670,36 +2979,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return projectCommand(frame.query_command.outcome);
   }
 
-  async readToolArtifact(
-    resultEntryId: string,
-    offsetChars: number,
-    maxChars = 32_000,
-  ): Promise<ToolArtifactPage> {
-    const frame = await this.post<{
-      tool_artifact?: {
-        result_entry_id?: string; text?: string; offset_chars?: string | number;
-        returned_chars?: string | number; total_chars?: string | number;
-        has_more?: boolean; next_offset_chars?: string | number;
-      };
-      error?: ProtocolError;
-    }>('read-tool-artifact', {
-      result_entry_id: resultEntryId, offset_chars: offsetChars, max_chars: maxChars,
-    });
-    assertProtocolFrame(frame);
-    const page = frame.tool_artifact;
-    if (!page || page.result_entry_id !== resultEntryId || numeric(page.offset_chars) !== offsetChars) {
-      throw new RuntimeApiError('TOOL_ARTIFACT_RESPONSE_INVALID', '工具原始输出暂时无法读取。', true);
-    }
-    return {
-      resultEntryId,
-      text: page.text ?? '',
-      offsetChars,
-      returnedChars: numeric(page.returned_chars),
-      totalChars: numeric(page.total_chars),
-      hasMore: Boolean(page.has_more),
-      nextOffsetChars: page.has_more ? numeric(page.next_offset_chars) : undefined,
-    };
-  }
+
 
   async close(): Promise<void> {
     if (this.closed) return;
@@ -2769,7 +3049,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     }
   }
 
-  private async post<T>(
+  protected async post<T>(
     operation: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
@@ -2794,76 +3074,13 @@ class LocalRuntimeConnection implements RuntimeConnection {
     this.writerGeneration = numeric(snapshot.writer_generation);
   }
 
-  private historyPageRead?: { promise: Promise<void>; signal?: AbortSignal };
 
-  private async readOlderHistoryPage(signal?: AbortSignal): Promise<void> {
-    signal?.throwIfAborted();
-    if (this.historyPageRead) {
-      const pending = this.historyPageRead;
-      try {
-        // A waiter owns its cancellation, without aborting another caller's read.
-        await new Promise<void>((resolve, reject) => {
-          const aborted = () => reject(signal!.reason);
-          signal?.addEventListener('abort', aborted, { once: true });
-          pending.promise.then(resolve, reject).finally(() => signal?.removeEventListener('abort', aborted));
-        });
-      } catch (error) {
-        signal?.throwIfAborted();
-        if (!pending.signal?.aborted) throw error;
-        // A replacement lookup resumes from the unchanged owner cursor after
-        // the preceding lookup's canceled operation has settled.
-        if (this.historyPageRead === pending) this.historyPageRead = undefined;
-        return this.readOlderHistoryPage(signal);
-      }
-      signal?.throwIfAborted(); return;
-    }
-    const cursor = this.olderHistoryCursor;
-    if (!cursor) return;
-    const operation = (async () => {
-      const frame = await this.post<{ history_page?: ProtocolHistoryPage; error?: ProtocolError }>('history', {
-        cursor, maximum_entries: 256, maximum_serialized_bytes: 2 << 20,
-      }, signal);
-      signal?.throwIfAborted();
-      assertProtocolFrame(frame);
-      const page = frame.history_page;
-      if (!page) throw new RuntimeApiError('HISTORY_RESPONSE_INVALID', '较早的会话内容暂时无法加载。', true);
-      // A replacement snapshot owns a different cursor and cut.
-      if (this.olderHistoryCursor !== cursor) return;
-      const next = page.older_history_cursor;
-      if (page.has_more && (!next || next.session_id !== cursor.session_id
-        || numeric(next.cut_sequence) !== numeric(cursor.cut_sequence)
-        || numeric(next.entry_sequence) >= numeric(cursor.entry_sequence))) {
-        throw new RuntimeApiError('HISTORY_CURSOR_INVALID', '较早的会话内容无法继续加载。', true);
-      }
-      for (const entry of page.entries ?? []) this.entries.set(entry.entry_id, entry);
-      this.olderHistoryCursor = page.has_more ? next : undefined;
-    })();
-    const pending = { promise: operation, signal };
-    this.historyPageRead = pending;
-    try { await operation; } finally { if (this.historyPageRead === pending) this.historyPageRead = undefined; }
-  }
 
-  private async backfillOlderHistory(): Promise<void> {
-    while (this.olderHistoryCursor) await this.readOlderHistoryPage();
-  }
 
-  async locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
-    signal.throwIfAborted();
-    while (!this.entries.has(entryId) && this.olderHistoryCursor) {
-      await this.readOlderHistoryPage(signal); signal.throwIfAborted();
-    }
-    const entry = this.entries.get(entryId);
-    if (!entry || !['ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'].includes(entry.entry_kind ?? '')) {
-      throw new RuntimeApiError('ANNOTATION_SOURCE_MISSING', '当前会话中找不到来源回复。', false);
-    }
-    for (const block of entry.blocks ?? []) {
-      signal.throwIfAborted();
-      if (block.block_kind === 'TEXT') await this.hydrateContentReference(block.content,
-        { entry_id: entryId, block_id: block.block_id }, '来源回复暂时无法完整读取。', signal);
-    }
-    signal.throwIfAborted();
-    return this.project();
-  }
+
+
+
+
 
   private async hydrateProjectionContent(): Promise<void> {
     while (true) {
@@ -2888,29 +3105,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     await this.backfillOlderHistory();
   }
 
-  private async hydrateCanonicalContent(): Promise<void> {
-    for (const entry of this.entries.values()) {
-      await this.hydrateContentReference(
-        entry.content,
-        { entry_id: entry.entry_id },
-        '这条会话内容暂时无法完整读取。',
-      );
-      for (const block of entry.blocks ?? []) {
-        await this.hydrateContentReference(
-          block.content,
-          { entry_id: entry.entry_id, block_id: block.block_id },
-          '这条模型回复暂时无法完整读取。',
-        );
-      }
-      for (const block of entry.reasoning_blocks ?? []) {
-        await this.hydrateContentReference(
-          block.content,
-          { entry_id: entry.entry_id, block_id: block.block_id },
-          '这段思考内容暂时无法完整读取。',
-        );
-      }
-    }
-  }
+
 
   private async hydrateQueuedPromptContent(): Promise<
     NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] | undefined
@@ -3031,83 +3226,9 @@ class LocalRuntimeConnection implements RuntimeConnection {
     };
   }
 
-  private async hydrateContentReference(
-    reference: ProtocolContent | undefined,
-    target: { entry_id: string; block_id?: string } | { queue_item_id: string },
-    publicMessage: string,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    if (!reference || reference.inline_content !== undefined || numeric(reference.size) === 0) return;
-    const expectedSize = numeric(reference.size);
-    const expectedDigest = reference.digest ?? '';
-    const complete = await this.readExactContentBytes(
-      target,
-      expectedDigest,
-      expectedSize,
-      publicMessage,
-      true,
-      signal,
-    );
-    reference.inline_content = encodeBase64Bytes(complete);
-  }
 
-  private async readExactContentBytes(
-    target: (
-      | { entry_id: string; block_id?: string }
-      | { queue_item_id: string }
-    ) & { image_ref_ordinal?: number; visualization_ordinal?: number },
-    expectedDigest: string,
-    expectedSize: number,
-    publicMessage: string,
-    requireUtf8: boolean,
-    signal?: AbortSignal,
-  ): Promise<Uint8Array> {
-    const chunks: Uint8Array[] = [];
-    let offset = 0;
-    while (true) {
-      signal?.throwIfAborted();
-      const frame = await this.post<{
-        content?: {
-          digest?: string; complete_size?: string | number; offset_bytes?: string | number;
-          content?: string; complete?: boolean;
-        };
-        error?: ProtocolError;
-      }>('read-content', {
-        ...target,
-        offset_bytes: offset,
-        limit_bytes: 1 << 20,
-      }, signal);
-      signal?.throwIfAborted();
-      assertProtocolFrame(frame);
-      const chunk = frame.content;
-      if (
-        !chunk || chunk.digest !== expectedDigest
-        || numeric(chunk.complete_size) !== expectedSize
-        || numeric(chunk.offset_bytes) !== offset
-      ) {
-        throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
-      }
-      const bytes = decodeBase64Bytes(chunk.content ?? '');
-      chunks.push(bytes);
-      offset += bytes.length;
-      if (chunk.complete) break;
-      if (bytes.length === 0 || offset >= expectedSize) {
-        throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
-      }
-    }
-    if (offset !== expectedSize) {
-      throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
-    }
-    const complete = new Uint8Array(expectedSize);
-    let cursor = 0;
-    for (const chunk of chunks) {
-      complete.set(chunk, cursor);
-      cursor += chunk.length;
-    }
-    await verifyContentIntegrity(complete, expectedDigest, publicMessage, requireUtf8);
-    signal?.throwIfAborted();
-    return complete;
-  }
+
+
 
   private applyLive(events: ProtocolLiveEvent[], settlements: ProtocolSettlement[]) {
     for (const event of events) {
@@ -3394,7 +3515,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     this.liveControl.current_todos = current;
   }
 
-  private project(): RuntimeProjection {
+  protected project(): RuntimeProjection {
     this.reconcileLiveToolResults();
     const canonical = [...this.entries.values()].sort(
       (a, b) => numeric(a.entry_sequence) - numeric(b.entry_sequence),
@@ -3945,6 +4066,14 @@ function projectModelCallBinding(value: unknown): SessionSummary['modelCallBindi
   return { connection_id: binding.connection_id, reasoning };
 }
 
+export function projectRootStatus(root: {status?: string} | null | undefined): import('./pulsara-types').SessionStatus | null {
+  if (!root) return null;
+  if (root.status === 'RUNNING') return 'running';
+  if (root.status === 'COMPLETED') return 'completed';
+  if (root.status === 'INTERRUPTED') return 'interrupted';
+  throw new RuntimeApiError('ROOT_STATUS_INVALID', '会话状态暂时无法读取。', false);
+}
+
 function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
   const lifecycle = String(value.lifecycle ?? 'OPEN');
   const rawWorkspace = value.workspace as Record<string, unknown> | undefined;
@@ -3963,7 +4092,7 @@ function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
     lifecycle: lifecycle === 'ARCHIVED' ? 'ARCHIVED' : 'OPEN',
     canArchive: value.can_archive === true,
     subtitle: String(value.subtitle ?? lifecycle),
-    status: Boolean(value.live) ? 'waiting' : 'completed',
+    status: projectRootStatus(value.latest_root_turn as {status?: string} | null),
     updatedAt: formatRelativeTime(String(value.updated_at ?? '')),
     live: Boolean(value.live),
     modelCallBinding: projectModelCallBinding(value.model_call_binding),

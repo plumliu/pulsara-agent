@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.repository import AcceptedEntry
 from pulsara_agent.conversation_kernel.interaction import KernelInteractionCoordinator
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.terminal_protocol.canonical_v3 import (
     COMMITTED_PROJECTION_BRANCH_BY_TYPE,
@@ -78,6 +80,8 @@ class _CommandHost:
     host_session_id = "host:test"
 
     def __init__(self) -> None:
+        self.workspace_gate = WorkspaceExecutionGate(Path.cwd())
+        self.repository = SimpleNamespace(connection_provider=None)
         self.controller_id = "attachment:test"
         self.submitted: list[tuple[str, object]] = []
         self.steered: list[tuple[str, str, str]] = []

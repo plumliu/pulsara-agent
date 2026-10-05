@@ -1,8 +1,8 @@
 # Pulsara 会话统一只读与工作目录恢复前置实施规格
 
-日期：2026-10-05。状态：冻结；主代理与 GPT-6 Astra / high critic 复审通过，可作为后续实施的当前权威规格。
+日期：2026-10-05。状态：规格与实现冻结；主代理与 GPT-6 Astra / high critic 代码复审通过，最终验收完成。本文仍是后续修改的当前权威规格。
 
-本规格是定时任务实施之前的前置工作，覆盖普通会话。用户决定优先于旧文档；本轮只交付规格，不表示功能已实现，不修改生产代码、配置或数据库。
+本规格是定时任务实施之前的前置工作，覆盖普通会话。用户决定优先于旧文档。普通会话实现已在 main 落地；代码审阅与验收记录见 §15。定时任务尚未实现，保存生产配置与生产数据库未修改。
 
 ## 1. 产品决定
 
@@ -14,9 +14,9 @@
 
 本次不包含选择替代目录、迁移工作区、恢复原文件、恢复已丢失的进程执行、任意新安全沙箱或持久修复工作流。
 
-## 2. 当前源码与复用 owner
+## 2. 实施前源码接缝与复用 owner
 
-以下 Python 路径以 `src/pulsara_agent/` 为根。
+以下是冻结规格时的实施前基线，Python 路径以 `src/pulsara_agent/` 为根；实施后的单一路径见 §15。
 
 | 当前接缝 | 事实与本次改变 |
 |---|---|
@@ -32,7 +32,7 @@
 | `frontend/app/pulsara-app.tsx::openRuntimeSession` | connect 失败进入 SessionOpeningView；缺目录应进入正常历史工作台，而非卡住全页 |
 | `conversation_kernel/_repository/archive.py` / `session_deletion.py` | 冷态访问、session 行锁、writer/lifecycle 与物理结算已有 owner；侧边栏管理不先打开失效目录 |
 
-当前 `ports/user_control_feedback.py` 仅表示后台进程控制，要求 process 与 RUNNING ROOT，不能把目录恢复伪装为 process 终止。§9 明确最小的 typed 内容扩展及其弱完整性边界。
+实施前 `ports/user_control_feedback.py` 仅表示后台进程控制，要求 process 与 RUNNING ROOT，不能把目录恢复伪装为 process 终止。§9 明确最小的 typed 内容扩展及其弱完整性边界。
 
 ## 3. 状态与统一只读规则
 
@@ -214,4 +214,33 @@ critic 重点审查：统一只读的产品例外、冷历史 scope、controller
 
 用户进一步决定观察与目录丢失也在同一顶部状态位置显示。§3.1/§4 已补齐单一标签优先级及底部恢复动作，界面不向用户解释内部状态分层；这不将只读原因写成新的数据库执行状态。
 
-本轮只写规格、核对当前 owner 并审阅，不实现代码或修改数据库。文档冻结不等于功能激活，后续代码与真实 provider dogfood 仍须完成 §13 验收。
+以上为规格审阅记录；实现与代码审阅另记录于 §15，不能用文档冻结代替代码验收。
+
+## 15. 实施与代码验收记录
+
+实施日期：2026-10-05；分支：main。实施前已提交冻结文档，提交为 `94e17da1`。本轮只实现普通会话前置，不增加定时任务表、派发器、页面或工具。
+
+实施后的唯一 owner 与硬切结果：
+
+- `resolve_workspace` 区分 NEW、EXISTING、RESTORE、READ。NEW 准备新目录，EXISTING 校验保存路径，RESTORE 仅允许明确恢复 owner 创建原路径，READ 无副作用读取身份。最近会话查询也走 READ；没有保留 transient resume 自动 mkdir。
+- `LocalSessionController` 使用原 scoped canonical reader 读取冷历史、内容、附件和任务；冷视图不分配 Host、writer、runtime role 或 connection。目录恢复复用原 in-flight operation 与 retirement owner；原 repository acquire 事务拥有 RESTORE 的非抢占检查，准备后的同一 lease/IO/Host ID 转交普通 Host 构造。
+- 聊天 HTTP 写准入复用真实 controller/generation 校验，并在异步目录检查之后再次核对 controller。目录观察不授权接管；明确 reopen 由原服务端 owner 先完成 detach，前端抑制这段期间的旧观察重连，避免接管竞态。
+- ROOT、待消费输入、子任务启动和下一 provider 请求共用 process-local 目录 gate。已启动调用沿原 owner 结算；关闭先安装原关闭原因，再唤醒目录等待，避免 ROOT/child 原因被改写，也避免 prepared queue 的 shielded 等待阻止关闭。尚未消费输入不因关闭被虚构为已消费。
+- 原 USER_CONTROL_FEEDBACK 内容硬切为 v2 闭合的 `process_control` / `workspace_recreated`。后者仅来自实际创建，按原普通 ROOT barrier 追加；冻结首调用与 compaction successor 保持原样。提醒保留原 advisory 边界，不增加投递记录或强完整性承诺。
+- 前端共用冷/热历史读取 owner，统一只读 dock 与所有聊天写入口。顶部单一状态优先级沿 §3.1；删除草稿/等待默认映射和重复旁观提示。冷读 pending 内容在读取期间变为已消费时，沿原 typed 不可读结果展示，不因此让整页历史打开失败。
+
+验证使用实际 Core/controller/bridge、隔离 PostgreSQL、临时工作目录以及保存配置中的真实模型。生产配置为只读输入，未重置生产数据库。
+
+真实 provider dogfood 使用 `deepseek-flash` Chat，证据为 `output/session-workspace-recovery-20261005/dogfood.json`，复现入口为 `tests/dogfood/run_workspace_recovery_dogfood.py`。实际记录证明：冷读没有分配 Host；明确恢复后 session/workspace 绑定不变且原文件不存在；模型继续执行终端检查，并明确识别空目录及未恢复原文件。恢复后同 epoch 的三个真实 provider 请求保持 tools 与其他输入根不变、messages 为 suffix 追加；恢复前后另起合法 cold epoch。
+
+durability oracle 保持 committed events 30、live events 24、subject slots 11、append guard 仅 HostWriterGuard、relations 29；未修改 schema 或增加 durable job。
+
+最终验收全部通过：
+
+- 仓库根 `.venv/bin/python -m pytest -q --maxfail=5`：2764 passed；未增加 skip/xfail 或削弱断言。56 个现有 aiohttp shutdown_timeout 弃用提示未造成失败。
+- 目录恢复专项：12 passed；协议专项：25 passed。使用实际隔离 PostgreSQL 验证冷读、writer 排他、恢复、关闭与 controller 竞态。
+- frontend 下 `NODE_OPTIONS=--no-experimental-webstorage npm test`：38 个文件、613 passed。该启动选项处理本机 Node 25 默认 WebStorage 与测试环境的冲突，不改变产品逻辑或测试断言。
+- frontend 下 `npx tsc --noEmit` 与 `npm run build:local`：通过；已刷新仓库跟踪的静态产物。修改过的 Python 文件 `ruff check` 与 `git diff --check`：通过。
+- 真实 provider dogfood：4 次模型请求全部 COMPLETED，冷读不分配 Host，明确重建没有恢复原文件，同 epoch 三次恢复后请求满足输入前缀连续性。
+
+GPT-6 Astra / high critic 已进行多轮代码复审，修正关闭唤醒、异步准入后 controller 变更、明确 reopen 重连竞态后，确认无剩余必改项；收尾代码与文档修改也已复审通过。最终回归、类型检查、构建与真实 provider dogfood 均通过，主代理确认本轮实现可冻结。实现提交以 Git 历史为准，保存生产配置和生产数据库保持原样。

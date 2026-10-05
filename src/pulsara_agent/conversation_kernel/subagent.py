@@ -7,6 +7,8 @@ lease, checkpoint, or resume carrier is durable.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+
 import asyncio
 import base64
 from collections import deque
@@ -283,7 +285,9 @@ class KernelSubagentManager:
         hook_dispatcher: KernelHookDispatcher | None = None,
         hook_context_owner: HookContextOwner | None = None,
         hook_root_scope: HookDispatchScopeRef | None = None,
+        workspace_gate: WorkspaceExecutionGate | None = None,
     ) -> None:
+        self._workspace_gate = workspace_gate
         self._repository = repository
         self._guard = guard
         self._host_owner_id = host_owner_id
@@ -808,6 +812,8 @@ class KernelSubagentManager:
         *,
         invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult:
+        if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE":
+            return _result("TOOL_UNAVAILABLE", {"error": "工作目录不可用，此批任务未接受。"})
         raw_tasks = arguments.get("tasks")
         subject = invocation_context.subagent_parent_context_subject
         if (
@@ -1249,6 +1255,8 @@ class KernelSubagentManager:
 
     async def _start_available_tasks_worker(self) -> None:
         while True:
+            if self._workspace_gate is not None:
+                await self._workspace_gate.wait_available()
             async with self._lock:
                 if self._closed:
                     return
@@ -1354,6 +1362,11 @@ class KernelSubagentManager:
                         actor_id=self._host_owner_id,
                     )
                     while True:
+                        if self._workspace_gate is not None:
+                            await self._workspace_gate.wait_available()
+                        async with self._lock:
+                            if self._closed or permit.stop_claimed:
+                                break
                         try:
                             changed = await self._io.run(
                                 self._repository.accept_subagent_task_start,
@@ -1394,6 +1407,8 @@ class KernelSubagentManager:
                     async with self._lock:
                         if self._closed or permit.stop_claimed:
                             continue
+                    if self._workspace_gate is not None:
+                        self._workspace_gate.require_available()
                     launch = await self._launch_preparation.prepare_launch(candidate)
                     if launch.task_start != candidate:
                         raise ConversationKernelConflict(
@@ -3222,6 +3237,26 @@ class KernelSubagentManager:
             worker(), name=f"kernel-subagent-dependency-frontier:{task_id}"
         )
         await _join_child_settlement(settlement)
+
+    async def install_host_close_intents(self) -> None:
+        """Fence existing live/launch cancellation before a shared gate wakes."""
+        async with self._lock:
+            for permit in self._launch_permits.values():
+                if permit.cancellation_reason is None:
+                    permit.cancellation_reason = "HOST_CLOSING"
+                if not permit.launching:
+                    permit.stop_claimed = True
+                permit.cancellation_signal.set()
+            for item in self._tasks.values():
+                if not item.task.done():
+                    self._todo_owner.mark_closing(
+                        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                        scope_subagent_task_id=item.task_id)
+                    cause = item.cancellation_intent.install_cause(
+                        ForegroundCancellationCause.HOST_SESSION_CLOSE)
+                    item.cancellation_reason = (
+                        "USER_CANCELLED" if cause is ForegroundCancellationCause.USER_REQUEST
+                        else "HOST_CLOSING")
 
     async def aclose(self, *, deadline_monotonic: float) -> None:
         close_error: BaseException | None = None

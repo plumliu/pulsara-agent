@@ -170,7 +170,7 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
         )
         await server.start()
         try:
-            async with ClientSession() as client:
+            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
                 url = f"{server.origin}/api/sessions/target"
                 for body in (
                     {},

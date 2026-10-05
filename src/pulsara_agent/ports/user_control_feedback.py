@@ -1,4 +1,4 @@
-"""Typed canonical content for one human background-process control fact."""
+"""Closed human process-control and workspace-recreation facts."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class UserControlMonitorFact:
 
 
 @dataclass(frozen=True, slots=True)
-class UserControlFeedbackContentV1:
+class ProcessControlFeedbackContent:
     command_id: str
     session_id: str
     host_session_id: str
@@ -44,14 +44,16 @@ class UserControlFeedbackContentV1:
     monitor: UserControlMonitorFact | None
     public_code: str
     public_detail: str
-    schema_version: str = "user_control_feedback.v1"
+    kind: str = "process_control"
+    schema_version: str = "user_control_feedback.v2"
     source: str = "USER_CONTROL"
     new_control_attempt: bool = True
     other_work_stopped: bool = False
 
     def __post_init__(self) -> None:
         if (
-            self.schema_version != "user_control_feedback.v1"
+            self.kind != "process_control"
+            or self.schema_version != "user_control_feedback.v2"
             or self.source != "USER_CONTROL"
             or self.new_control_attempt is not True
             or self.other_work_stopped is not False
@@ -107,6 +109,7 @@ class UserControlFeedbackContentV1:
                 "detail": self.monitor.detail,
             }
         return {
+            "kind": self.kind,
             "schema_version": self.schema_version,
             "source": self.source,
             "command_id": self.command_id,
@@ -142,13 +145,52 @@ class UserControlFeedbackContentV1:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceRecreatedFeedbackContent:
+    session_id: str
+    workspace_root: str
+    created_at: datetime
+    target_root_turn_id: str
+    kind: str = "workspace_recreated"
+    schema_version: str = "user_control_feedback.v2"
+    source: str = "USER_WORKSPACE_RECOVERY"
+    action: str = "CREATE_EMPTY_DIRECTORY_AND_CONTINUE"
+
+    def __post_init__(self) -> None:
+        from pathlib import Path
+        if (not isinstance(self.session_id, str) or not self.session_id
+            or not isinstance(self.target_root_turn_id, str) or not self.target_root_turn_id
+            or not isinstance(self.workspace_root, str)
+            or not isinstance(self.created_at, datetime)
+            or not Path(self.workspace_root).is_absolute()
+            or self.created_at.utcoffset() is None
+            or self.kind != "workspace_recreated"
+            or self.schema_version != "user_control_feedback.v2"
+            or self.source != "USER_WORKSPACE_RECOVERY"
+            or self.action != "CREATE_EMPTY_DIRECTORY_AND_CONTINUE"):
+            raise ValueError("workspace recreation feedback identity is invalid")
+
+    def canonical_mapping(self) -> dict[str, object]:
+        return {"schema_version": self.schema_version, "kind": self.kind,
+                "source": self.source, "action": self.action,
+                "session_id": self.session_id, "workspace_root": self.workspace_root,
+                "created_at": self.created_at.isoformat(),
+                "target_root_turn_id": self.target_root_turn_id}
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(self.canonical_mapping(), ensure_ascii=False,
+                          sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+UserControlFeedbackContent = ProcessControlFeedbackContent | WorkspaceRecreatedFeedbackContent
+
+@dataclass(frozen=True, slots=True)
 class UserControlFeedbackInstallationAttempt:
     session_id: str
     workspace_id: str
     writer_generation: int
     target_root_turn_id: str
     entry_id: str
-    content: UserControlFeedbackContentV1
+    content: UserControlFeedbackContent
     occurred_at: datetime
     actor_id: str
 
@@ -171,7 +213,9 @@ class UserControlFeedbackInstallationAttempt:
 
 __all__ = [
     "USER_CONTROL_FEEDBACK_MEDIA_TYPE",
-    "UserControlFeedbackContentV1",
+    "ProcessControlFeedbackContent",
+    "WorkspaceRecreatedFeedbackContent",
+    "UserControlFeedbackContent",
     "UserControlFeedbackInstallationAttempt",
     "UserControlMonitorFact",
     "UserControlProcessFact",
@@ -180,7 +224,7 @@ __all__ = [
 
 
 def project_user_control_feedback_for_provider(content: bytes) -> str:
-    """Validate stored v1 content and lower it to one attributed user fact."""
+    """Validate stored v2 content and lower it to one attributed user fact."""
 
     try:
         value = json.loads(content.decode("utf-8"))
@@ -188,7 +232,24 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
         raise ValueError("user control feedback content is invalid") from exc
     if not isinstance(value, dict):
         raise ValueError("user control feedback body must be an object")
+    if value.get("kind") == "workspace_recreated":
+        if set(value) != {"schema_version", "kind", "source", "action", "session_id",
+                          "workspace_root", "created_at", "target_root_turn_id"}:
+            raise ValueError("workspace recreation feedback fields are invalid")
+        try:
+            fact = WorkspaceRecreatedFeedbackContent(
+                session_id=value["session_id"], workspace_root=value["workspace_root"],
+                created_at=datetime.fromisoformat(value["created_at"]),
+                target_root_turn_id=value["target_root_turn_id"], kind=value["kind"],
+                schema_version=value["schema_version"], source=value["source"], action=value["action"],
+            )
+        except (TypeError, KeyError, ValueError) as exc:
+            raise ValueError("workspace recreation feedback is invalid") from exc
+        return json.dumps({"pulsara_user_control_feedback": fact.canonical_mapping(),
+                           "handling": "The user explicitly asked the Host to recreate an empty workspace at the original path. Original files were not recovered. Historical file content does not establish what currently exists on disk; inspect actual files before using them."},
+                          ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     fields = {
+        "kind",
         "schema_version",
         "source",
         "command_id",
@@ -208,7 +269,8 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
         "monitor",
     }
     if set(value) != fields or (
-        value.get("schema_version") != "user_control_feedback.v1"
+        value.get("kind") != "process_control"
+        or value.get("schema_version") != "user_control_feedback.v2"
         or value.get("source") != "USER_CONTROL"
         or value.get("new_control_attempt") is not True
         or value.get("other_work_stopped") is not False

@@ -19,6 +19,7 @@ from google.protobuf.message import Message
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
+from pulsara_agent.conversation_kernel.root_status import LATEST_ROOT_TURN_SQL
 from pulsara_agent.conversation_kernel.vocabulary import (
     COMMITTED_EVENT_DESCRIPTORS,
     CommittedEventType,
@@ -1130,9 +1131,7 @@ class CanonicalProtocolReader:
                 display_after_entry_sequence=int(genesis["source_through_sequence"]),
             ))
         latest_root = connection.execute(
-            """SELECT id, status, terminal_reason FROM pulsara_v3.turns
-               WHERE session_id = %s AND conversation_scope_kind = 'ROOT'
-               ORDER BY accepted_at DESC, id DESC LIMIT 1""",
+            LATEST_ROOT_TURN_SQL,
             (session_id,),
         ).fetchone()
         if latest_root is not None:

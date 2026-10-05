@@ -699,6 +699,7 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
             installed = True
 
         coordinator = object.__new__(TurnAdmissionCoordinator)
+        coordinator._workspace_gate = None
         coordinator._todo_finalizer = finalizer
         task = asyncio.create_task(
             coordinator._finalize_todo(
@@ -730,6 +731,7 @@ def test_child_todo_activation_failure_preserves_postcommit_ownership() -> None:
             terminalized.append((turn_id, reason))
 
         coordinator = object.__new__(TurnAdmissionCoordinator)
+        coordinator._workspace_gate = None
         coordinator._todo_finalizer = finalizer
         coordinator.interrupt_turn = terminalize
 
@@ -765,6 +767,7 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
             terminalized.append((turn_id, reason))
 
         coordinator = object.__new__(TurnAdmissionCoordinator)
+        coordinator._workspace_gate = None
         coordinator._io = _ImmediateAdmissionIO()
         coordinator._deadlines = SimpleNamespace(deadline=lambda _owner: 999_999_999.0)
         coordinator._repository = SimpleNamespace(

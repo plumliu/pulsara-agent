@@ -1872,7 +1872,7 @@ def test_fork_http_closed_request_scoped_lookup_and_cross_site_rejection(tmp_pat
         )
         await server.start()
         try:
-            async with ClientSession() as client:
+            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
                 url = f"{server.origin}/api/sessions/parent/fork"
                 body = {"anchor_entry_id": "anchor"}
                 async with client.post(url, json=body) as response:

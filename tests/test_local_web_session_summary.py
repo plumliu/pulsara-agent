@@ -31,8 +31,8 @@ def test_session_summary_keeps_live_state_out_of_display_copy() -> None:
     assert loaded["subtitle"] == "13 条记录"
     assert resumable["live"] is False
     assert loaded["live"] is True
-    assert resumable["status"] == "completed"
-    assert loaded["status"] == "waiting"
+    assert resumable["latest_root_turn"] is None
+    assert loaded["latest_root_turn"] is None
     assert loaded["task_counts"] == {
         "total": 7,
         "active": 2,

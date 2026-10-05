@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import tempfile
+import os
+import stat
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -12,6 +14,47 @@ from uuid import uuid4
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_context_id
 
 WorkspaceKind = Literal["project", "transient"]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceAvailability:
+    path: str
+    outcome: Literal["AVAILABLE", "MISSING", "UNAVAILABLE"]
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {"path": self.path, "outcome": self.outcome, "reason": self.reason}
+
+
+class WorkspaceUnavailable(ValueError):
+    def __init__(self, observation: WorkspaceAvailability):
+        self.observation = observation
+        super().__init__(observation.reason or f"工作目录已丢失：{observation.path}")
+
+
+def observe_workspace(root: Path | str) -> WorkspaceAvailability:
+    """Observe the saved canonical path without creating or rebinding it."""
+    path = Path(root)
+    try:
+        if not path.is_absolute() or path.resolve(strict=False) != path:
+            return WorkspaceAvailability(str(path), "UNAVAILABLE", "工作目录路径身份已改变。")
+        mode = path.stat().st_mode
+        if not stat.S_ISDIR(mode):
+            return WorkspaceAvailability(str(path), "UNAVAILABLE", "工作目录路径不是目录。")
+        if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            return WorkspaceAvailability(str(path), "UNAVAILABLE", "工作目录访问权限不足。")
+    except FileNotFoundError:
+        return WorkspaceAvailability(str(path), "MISSING")
+    except (OSError, RuntimeError) as exc:
+        return WorkspaceAvailability(str(path), "UNAVAILABLE", str(exc))
+    return WorkspaceAvailability(str(path), "AVAILABLE")
+
+
+def require_workspace(root: Path | str) -> WorkspaceAvailability:
+    observation = observe_workspace(root)
+    if observation.outcome != "AVAILABLE":
+        raise WorkspaceUnavailable(observation)
+    return observation
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,12 +90,15 @@ def resolve_workspace(
     workspace: HostWorkspaceInput,
     *,
     scratch_root: Path | str | None = None,
+    intent: Literal["NEW", "EXISTING", "RESTORE", "READ"] = "NEW",
 ) -> ResolvedWorkspace:
+    if intent not in {"NEW", "EXISTING", "RESTORE", "READ"}:
+        raise ValueError("invalid workspace resolution intent")
     kind = normalize_workspace_kind(workspace.workspace_kind)
     if kind == "project":
         if workspace.display_label is not None:
             raise ValueError("project workspace does not accept display_label")
-        root = _resolve_project_root(workspace.workspace_root)
+        root = _resolve_project_root(workspace.workspace_root, intent=intent)
         stable_key = root.as_posix()
         label = root.name or root.as_posix()
         domain = MemoryDomainContext(
@@ -73,7 +119,7 @@ def resolve_workspace(
         )
 
     root, host_created_root = _resolve_transient_root(
-        workspace.workspace_root, scratch_root=scratch_root
+        workspace.workspace_root, scratch_root=scratch_root, intent=intent
     )
     label = _display_label(workspace.display_label, default="Scratch")
     domain = MemoryDomainContext(
@@ -100,14 +146,14 @@ def resolve_workspace(
     )
 
 
-def _resolve_project_root(value: Path | str | None) -> Path:
+def _resolve_project_root(value: Path | str | None, *, intent: str) -> Path:
     if value is None:
         raise ValueError("project workspace requires workspace_root")
-    root = Path(value).expanduser().resolve()
-    if not root.exists():
-        raise ValueError(f"project workspace_root does not exist: {root}")
-    if not root.is_dir():
-        raise ValueError(f"project workspace_root is not a directory: {root}")
+    root = Path(value).expanduser().absolute()
+    if intent == "NEW":
+        root = root.resolve()
+    if intent not in {"RESTORE", "READ"}:
+        require_workspace(root)
     return root
 
 
@@ -115,13 +161,18 @@ def _resolve_transient_root(
     value: Path | str | None,
     *,
     scratch_root: Path | str | None,
+    intent: str,
 ) -> tuple[Path, bool]:
     if value is not None:
-        root = Path(value).expanduser().resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        if not root.is_dir():
-            raise ValueError(f"transient workspace_root is not a directory: {root}")
+        root = Path(value).expanduser().absolute()
+        if intent == "NEW":
+            root = root.resolve()
+            root.mkdir(parents=True, exist_ok=True)
+        if intent not in {"RESTORE", "READ"}:
+            require_workspace(root)
         return root, False
+    if intent != "NEW":
+        raise ValueError("existing workspace requires its saved root")
     base = (
         Path(scratch_root).expanduser().resolve()
         if scratch_root is not None

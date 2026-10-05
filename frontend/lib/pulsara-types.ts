@@ -20,12 +20,7 @@ export type PermissionMode =
   | 'ask-permissions'
   | 'bypass-permissions';
 
-export type SessionStatus =
-  | 'running'
-  | 'waiting'
-  | 'completed'
-  | 'interrupted'
-  | 'draft';
+export type SessionStatus = 'running' | 'completed' | 'interrupted';
 
 export type TaskStatus =
   | 'pending'
@@ -292,7 +287,7 @@ export interface SessionSummary {
   id: string;
   title: string;
   subtitle: string;
-  status: SessionStatus;
+  status: SessionStatus | null;
   updatedAt: string;
   live: boolean;
   pinned?: boolean;

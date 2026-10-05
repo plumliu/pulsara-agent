@@ -16,6 +16,9 @@ from .native_desktop import open_desktop_path
 from pulsara_agent.conversation_kernel.session_deletion import (
     KernelSessionRetirement, SessionDeleteRejected,
 )
+from pulsara_agent.workspace_identity import observe_workspace
+from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader, MAXIMUM_CONTROL_ITEMS
+from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy, SessionWriterConflict
 
 from pulsara_agent.capability.local_skill_management import (
@@ -293,6 +296,11 @@ RuntimeReopenHostOutcome = (
 @dataclass(slots=True)
 class _ResumeInFlight:
     task: asyncio.Task[HostSessionHandle]
+
+
+@dataclass(slots=True)
+class _WorkspaceRestoreInFlight(_ResumeInFlight):
+    pass
 
 
 @dataclass(slots=True)
@@ -825,9 +833,15 @@ class LocalSessionController:
         }
 
     async def inspect_session_capabilities(self, session_id: str) -> dict[str, object]:
-        """Project current capability owners for one selected Session."""
-
-        handle = await self.resume_session(session_id)
+        """Read actual live observations; inspection never activates a Host."""
+        summary = await self.core.read_resumable_session(session_id, memory_domain_id=self.memory_domain_id)
+        if summary is None:
+            raise KeyError(session_id)
+        async with self._lock:
+            handle = self._by_session.get(session_id)
+        if handle is None:
+            return {"available": False, "skills": {"items": [], "issues": [], "details": []},
+                    "mcp": {"servers": []}, "plugins": {"items": []}}
         return await self._session_capability_payload(handle)
 
     async def reconnect_session_mcp(
@@ -1430,12 +1444,20 @@ class LocalSessionController:
         action: str,
         session_id: str | None = None,
     ) -> dict[str, object]:
-        handle = (
-            await self.resume_session(session_id) if session_id is not None else None
-        )
-        owner = LocalMcpTarget(
-            server_id, handle.session.workspace.workspace_root if handle else None
-        ).owner
+        if action not in {"status", "cancel", "logout"}:
+            raise ValueError("invalid MCP authorization action")
+        workspace_root = None
+        if session_id is not None:
+            if action == "status":
+                summary = await self.core.read_resumable_session(
+                    session_id, memory_domain_id=self.memory_domain_id)
+                if summary is None:
+                    raise KeyError(session_id)
+                workspace_root = Path(summary.workspace_root)
+            else:
+                handle = await self.resume_session(session_id)
+                workspace_root = handle.session.workspace.workspace_root
+        owner = LocalMcpTarget(server_id, workspace_root).owner
         manager = self.core.mcp_management.oauth
         if action == "cancel":
             await manager.cancel(owner)
@@ -1775,6 +1797,82 @@ class LocalSessionController:
             }
         return {"outcome": "CREATED_AND_OPENED", "child_session_id": child_session_id}
 
+    async def workspace_availability(self, session_id: str) -> dict[str, object]:
+        summary = await self.core.read_resumable_session(session_id, memory_domain_id=self.memory_domain_id)
+        if summary is None:
+            raise KeyError(session_id)
+        return observe_workspace(summary.workspace_root).to_dict()
+
+    async def _history_reader(self, session_id: str) -> CanonicalProtocolReader:
+        # Authorize every read independently. No writer, Host or browser attachment.
+        summary = await self.core.read_resumable_session(
+            session_id, memory_domain_id=self.memory_domain_id, include_archived=True)
+        if summary is None:
+            raise KeyError(session_id)
+        repository = await self.core._ensure_resources()
+        return CanonicalProtocolReader(repository.connection_provider)
+
+    async def history_snapshot(self, session_id: str):
+        reader = await self._history_reader(session_id)
+        return wire.ServerFrame(snapshot=wire.SnapshotResponse(snapshot=await asyncio.to_thread(
+            reader.snapshot, session_id=session_id, maximum_entries=256,
+            maximum_control_items=MAXIMUM_CONTROL_ITEMS,
+            deadline_monotonic=self.core._canonical_deadline())))
+
+    async def history_page(self, session_id: str, cursor: dict, maximum_entries: int):
+        if cursor.get("session_id") != session_id:
+            raise ValueError("history cursor session conflicts")
+        reader = await self._history_reader(session_id)
+        entries, next_cursor, has_more = await asyncio.to_thread(
+            reader.history_page, session_id=session_id,
+            cut_sequence=int(cursor["cut_sequence"]),
+            before_entry_sequence=int(cursor["entry_sequence"]),
+            maximum_entries=maximum_entries, deadline_monotonic=self.core._canonical_deadline())
+        response = wire.HistoryPageResponse(entries=entries, has_more=has_more)
+        if next_cursor is not None:
+            response.older_history_cursor.CopyFrom(next_cursor)
+        return wire.ServerFrame(history_page=response)
+
+    async def history_content(self, session_id: str, request, *, artifact: bool = False):
+        from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
+        reader = await self._history_reader(session_id)
+        repository = await self.core._ensure_resources()
+        method = (TerminalKernelProtocolServer.read_canonical_tool_artifact if artifact
+                  else TerminalKernelProtocolServer.read_canonical_content)
+        return await method(connection_provider=repository.connection_provider,
+                            protocol_reader=reader, session_id=session_id, request=request)
+
+    async def restore_missing_workspace(self, session_id: str) -> HostSessionHandle:
+        summary = await self.core.read_resumable_session(session_id, memory_domain_id=self.memory_domain_id)
+        if summary is None:
+            raise KeyError(session_id)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Local Web application is draining")
+            current = self._operations.get(session_id)
+            if isinstance(current, _WorkspaceRestoreInFlight):
+                task = current.task
+            else:
+                if current is not None:
+                    raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
+                live = self._by_session.get(session_id)
+                task = asyncio.create_task(
+                    self._restore_live_owner(session_id, live) if live is not None
+                    else self._resume_owner(session_id, restore_missing_workspace=True),
+                    name=f"local-web-workspace-restore:{session_id}")
+                self._operations[session_id] = _WorkspaceRestoreInFlight(task)
+        return await asyncio.shield(task)
+
+    async def _restore_live_owner(self, session_id: str, handle: HostSessionHandle) -> HostSessionHandle:
+        try:
+            await handle.session.restore_missing_workspace()
+            return handle
+        finally:
+            async with self._lock:
+                current = self._operations.get(session_id)
+                if isinstance(current, _WorkspaceRestoreInFlight) and current.task is asyncio.current_task():
+                    self._operations.pop(session_id, None)
+
     async def resume_session(
         self,
         session_id: str,
@@ -1830,7 +1928,7 @@ class LocalSessionController:
                 self._operations[session_id] = _ResumeInFlight(task)
         return await asyncio.shield(task)
 
-    async def _resume_owner(self, session_id: str) -> HostSessionHandle:
+    async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False) -> HostSessionHandle:
         task = asyncio.current_task()
         try:
             summary = await self.core.read_resumable_session(
@@ -1860,6 +1958,7 @@ class LocalSessionController:
                 workspace_input=workspace_input,
                 permission_policy=self.permission_policy,
                 active_skill_names=self.active_skill_names,
+                restore_missing_workspace=restore_missing_workspace,
             )
             handle = HostSessionHandle(session, workspace_input)
             try:
@@ -2571,7 +2670,7 @@ class LocalSessionController:
             "title": summary.title or f"会话 {_display_session_id(summary.session_id)}",
             "subtitle": f"{summary.latest_entry_sequence} 条记录",
             "lifecycle": summary.lifecycle,
-            "status": "waiting" if live else "completed",
+            "latest_root_turn": summary.latest_root_turn,
             "updated_at": updated_value,
             "latest_entry_sequence": summary.latest_entry_sequence,
             "model_call_binding": model_call_binding_to_dict(

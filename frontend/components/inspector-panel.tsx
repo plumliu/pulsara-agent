@@ -252,6 +252,7 @@ function ProjectCapabilityDialog({
 
 function ProjectCapabilityPanel({
   onNotify,
+  canControl,
   kind,
   setKind,
   mcpForms,
@@ -273,6 +274,7 @@ function ProjectCapabilityPanel({
   onOpenHomeSettings,
 }: {
   onNotify: MarkdownNotify;
+  canControl: boolean;
   mcpForms: ProjectMcpForms;
   kind: ProjectCapabilityKind;
   setKind: (kind: ProjectCapabilityKind) => void;
@@ -300,6 +302,9 @@ function ProjectCapabilityPanel({
   const [inheritedExpanded, setInheritedExpanded] = useState(false);
   const [dialogKind, setDialogKind] = useState<ProjectCapabilityKind>();
   const [dialogOpener, setDialogOpener] = useState<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!canControl) { setEditingMcp(undefined); setImportingMcp(false); setRemovingSkill(undefined); setDialogKind(undefined); }
+  }, [canControl]);
   const skills = snapshot?.skills.items ?? [];
   const servers = snapshot?.mcp.servers ?? [];
   const projectSkills = skills.filter((item) => item.source === 'workspace');
@@ -322,11 +327,11 @@ function ProjectCapabilityPanel({
       <span className="project-capability-row__icon"><Wrench size={13} /></span>
       <span className="project-capability-row__copy"><strong>{skill.name}</strong><small>{skill.description}</small></span>
       {skill.editable && skill.removalIdentity && (removingSkill === skill.path ? <>
-        <button className="secondary-ghost" disabled={Boolean(busy)} onClick={() => setRemovingSkill(undefined)}>取消</button>
-        <button className="danger-ghost" disabled={Boolean(busy)} onClick={() => void onRemoveSkill(skill).then(() => setRemovingSkill(undefined), () => {})}>确认删除</button>
-      </> : <button className="danger-ghost" aria-label={`删除 ${skill.name}`} disabled={Boolean(busy)} onClick={() => setRemovingSkill(skill.path)}><Trash2 size={12} /></button>)}
+        <button className="secondary-ghost" disabled={!canControl || Boolean(busy)} onClick={() => setRemovingSkill(undefined)}>取消</button>
+        <button className="danger-ghost" disabled={!canControl || Boolean(busy)} onClick={() => void onRemoveSkill(skill).then(() => setRemovingSkill(undefined), () => {})}>确认删除</button>
+      </> : <button className="danger-ghost" aria-label={`删除 ${skill.name}`} disabled={!canControl || Boolean(busy)} onClick={() => setRemovingSkill(skill.path)}><Trash2 size={12} /></button>)}
       {skill.editable ? (
-        <CapabilitySwitch checked={skill.enabled} disabled={Boolean(busy)} label={`${skill.enabled ? '关闭' : '开启'} ${skill.name}`} onChange={(enabled) => void onToggleSkill(skill, enabled)} />
+        <CapabilitySwitch checked={skill.enabled} disabled={!canControl || Boolean(busy)} label={`${skill.enabled ? '关闭' : '开启'} ${skill.name}`} onChange={(enabled) => void onToggleSkill(skill, enabled)} />
       ) : (
         <span className="project-capability-row__source">{capabilitySourceLabels[skill.source]}</span>
       )}
@@ -345,7 +350,7 @@ function ProjectCapabilityPanel({
             <span className="project-capability-row__copy"><strong>{server.name}</strong><small>{status}{server.toolCount ? ` · ${server.toolCount} 个工具` : ''}</small></span>
           </button>
           {server.editable ? (
-            <CapabilitySwitch checked={server.enabled} disabled={Boolean(busy)} label={`${server.enabled ? '关闭' : '开启'} ${server.name}`} onChange={(enabled) => void onToggleMcp(server, enabled)} />
+            <CapabilitySwitch checked={server.enabled} disabled={!canControl || Boolean(busy)} label={`${server.enabled ? '关闭' : '开启'} ${server.name}`} onChange={(enabled) => void onToggleMcp(server, enabled)} />
           ) : (
             <span className="project-capability-row__source">{capabilitySourceLabels[server.source]}</span>
           )}
@@ -361,9 +366,9 @@ function ProjectCapabilityPanel({
               <ul>{server.tools.map((tool) => <li key={tool.name}><code>{tool.name}</code><span>{tool.description || 'MCP 工具'}</span></li>)}</ul>
             )}
             <footer>
-              {server.editable && server.config && <button type="button" disabled={Boolean(busy)} onClick={() => setEditingMcp(server)}>编辑连接</button>}
-              {server.effective && server.status !== 'disabled' && <button type="button" disabled={Boolean(busy)} onClick={() => void onReconnectMcp(server)}><RefreshCw size={11} /> 重新连接</button>}
-              {server.editable && <button className="is-danger" type="button" disabled={Boolean(busy)} onClick={() => void onRemoveMcp(server)}><Trash2 size={11} /> 移除</button>}
+              {server.editable && server.config && <button type="button" disabled={!canControl || Boolean(busy)} onClick={() => setEditingMcp(server)}>编辑连接</button>}
+              {server.effective && server.status !== 'disabled' && <button type="button" disabled={!canControl || Boolean(busy)} onClick={() => void onReconnectMcp(server)}><RefreshCw size={11} /> 重新连接</button>}
+              {server.editable && <button className="is-danger" type="button" disabled={!canControl || Boolean(busy)} onClick={() => void onRemoveMcp(server)}><Trash2 size={11} /> 移除</button>}
             </footer>
           </div>
         </AnimatedDisclosure>
@@ -392,11 +397,11 @@ function ProjectCapabilityPanel({
             <button role="tab" aria-selected={kind === 'mcp'} className={kind === 'mcp' ? 'is-active' : ''} onClick={() => { setKind('mcp'); setInheritedExpanded(false); }}>MCP <span>{servers.length}</span></button>
           </div>
           <div className="project-capability-actions" role="group" aria-label="能力操作">
-            {kind === 'mcp' && <button className="project-capability-action" type="button" disabled={Boolean(busy)} onClick={() => setImportingMcp(true)}>导入 MCP</button>}
+            {kind === 'mcp' && <button className="project-capability-action" type="button" disabled={!canControl || Boolean(busy)} onClick={() => setImportingMcp(true)}>导入 MCP</button>}
             <button
               className="project-capability-action"
               type="button"
-              disabled={Boolean(busy)}
+              disabled={!canControl || Boolean(busy)}
               onClick={(event) => {
                 setDialogOpener(event.currentTarget);
                 setDialogKind(kind);
@@ -441,9 +446,9 @@ function ProjectCapabilityPanel({
         </section>
       )}
       {busy && <div className="project-capability-busy"><LoaderCircle size={12} /> {busy}</div>}
-      {dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
-      {editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
-      {importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
+      {canControl && dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
+      {canControl && editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
+      {canControl && importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
     </div>
   );
 }
@@ -556,6 +561,7 @@ export function InspectorPanel({
           />
         ) : (
           <ProjectCapabilityPanel
+            canControl={canControl}
             onNotify={onNotify}
             key={session.id}
             kind={capabilityKind}

@@ -29,7 +29,7 @@ describe('visualization occurrence layout', () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
     const read = vi.fn(async () => '<h1>Chart</h1>');
-    const view = render(<ConversationMessages
+    const view = render(<ConversationMessages canFork={true}
       messages={[{ id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
         time: '13:04', body: '图表如下。', visualizations: [0, 1].map(ordinal => ({
           ordinal, state: 'READY', visualizationRef: 'sha256:test', contentSize: 14,
@@ -332,7 +332,6 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onSend: vi.fn(async () => true),
     onStop: vi.fn(),
     onCompact: vi.fn(async () => undefined),
-    onRenameSession: vi.fn(),
     onReopenRuntime: vi.fn(),
     runtimeReopenBusy: false,
     onReadInteraction: vi.fn(),
@@ -607,7 +606,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     view.rerender(<WorkbenchView {...props({ isObserver: true, canControl: false, onStop: stop })} />);
     expect(screen.queryByRole('button', { name: '停止本轮运行' })).toBeNull();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
-    expect(screen.getByText('这个会话正在另一个窗口中操作')).toBeTruthy();
+    expect(screen.getByText('此窗口仅供查看')).toBeTruthy();
   });
 
   it('renders current, previous, and earlier ROOT completion acceptance precisely', () => {
@@ -862,7 +861,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
 
 describe('completed reply process disclosure', () => {
   it('keeps imported final replies visible without granting extra fork actions', () => {
-    const { container } = render(<ConversationMessages
+    const { container } = render(<ConversationMessages canFork={true}
       messages={[
         { id: 'user-one', turnId: 'history-one', role: 'user', userKind: 'prompt', time: '09:37', body: 'hello?' },
         { id: 'tool-one', turnId: 'history-one', role: 'assistant', assistantKind: 'tool-request', time: '09:37', body: '', status: 'completed',
@@ -1235,5 +1234,50 @@ describe('workbench file drop boundary', () => {
     fireEvent.dragEnter(region, { dataTransfer });
     fireEvent.drop(region, { dataTransfer });
     await waitFor(() => expect(upload).toHaveBeenCalledWith('session-two', expect.any(Array), false, expect.any(AbortSignal)));
+  });
+});
+
+describe('shared workspace read-only dock', () => {
+  it('retains historical text and drafts while blocking fork and chat writes', () => {
+    promptDraftStore.restoreIfEmpty('session-one', textPrompt('keep my draft'));
+    const restore = vi.fn();
+    const original = props({ canControl: false, isRunning: false,
+      workspaceAvailability: {outcome:'MISSING', path:'/tmp/pr03'},
+      onRestoreWorkspace: restore,
+      messages:[{id:'answer', role:'assistant', time:'现在', body:'saved history',
+        status:'completed', forkEligible:true}],
+    });
+    const view = render(<WorkbenchView {...original} />);
+    expect(screen.getByText('saved history')).toBeTruthy();
+    expect(screen.getByText('工作目录已丢失')).toBeTruthy();
+    expect(screen.getByText('目录丢失')).toBeTruthy();
+    expect(screen.queryByRole('button', {name:'从这里开始新对话'})).toBeNull();
+    expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
+    fireEvent.click(screen.getByRole('button', {name:'创建空目录并继续'}));
+    expect(restore).toHaveBeenCalledOnce();
+    view.rerender(<WorkbenchView {...original} canControl={true} workspaceAvailability={{outcome:'AVAILABLE', path:'/tmp/pr03'}} />);
+    expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('keep my draft');
+  });
+
+  it('requires takeover before offering creation and never creates an unavailable path', () => {
+    const takeover = vi.fn(), restore = vi.fn(), recheck = vi.fn();
+    const base = props({canControl:false, isObserver:true,
+      workspaceAvailability:{outcome:'MISSING', path:'/tmp/pr03'},
+      onTakeControl:takeover, onRestoreWorkspace:restore, onRecheckWorkspace:recheck});
+    const view = render(<WorkbenchView {...base} />);
+    expect(screen.getByText('观察中')).toBeTruthy();
+    expect(screen.queryByText('目录丢失')).toBeNull();
+    expect(screen.queryByRole('button',{name:'创建空目录并继续'})).toBeNull();
+    fireEvent.click(screen.getByRole('button',{name:'在此窗口继续'}));
+    expect(takeover).toHaveBeenCalledOnce();
+    expect(restore).not.toHaveBeenCalled();
+    view.rerender(<WorkbenchView {...base} isObserver={false}
+      workspaceAvailability={{outcome:'UNAVAILABLE', path:'/tmp/pr03', reason:'路径是文件'}} />);
+    expect(screen.getByText('目录不可用')).toBeTruthy();
+    expect(screen.getByText('路径是文件')).toBeTruthy();
+    expect(screen.queryByRole('button',{name:'创建空目录并继续'})).toBeNull();
+    fireEvent.click(screen.getByRole('button',{name:'重新检查'}));
+    expect(recheck).toHaveBeenCalledOnce();
+    expect(restore).not.toHaveBeenCalled();
   });
 });

@@ -123,7 +123,13 @@ interface WorkbenchViewProps {
   interaction?: RuntimeInteractionSummary;
   toolDecisionPending?: boolean;
   canControl: boolean;
+  historyOnly?: boolean;
   isObserver: boolean;
+  workspaceAvailability?: import('../lib/runtime-adapter').WorkspaceAvailability;
+  workspaceRecoveryBusy?: boolean;
+  workspaceRecoveryError?: string;
+  onRestoreWorkspace?: () => Promise<void>;
+  onRecheckWorkspace?: () => Promise<void>;
   permission: PermissionMode;
   skills: SkillCapability[];
   focusTaskId?: string;
@@ -145,7 +151,6 @@ interface WorkbenchViewProps {
   onStop: () => void;
   onCompact: () => Promise<void>;
   onReopenRuntime: () => void;
-  onRenameSession: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
     interaction: RuntimeInteractionSummary,
@@ -1066,6 +1071,7 @@ function AssistantMessage({
   mcpToolRefs,
   onNotify,
   onFork,
+  canFork,
   artifactOwnerKey,
   onReadToolArtifact,
   onReadPromptImage,
@@ -1085,6 +1091,7 @@ function AssistantMessage({
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   onNotify: WorkbenchViewProps['onNotify'];
   onFork: WorkbenchViewProps['onFork'];
+  canFork: boolean;
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
@@ -1137,10 +1144,10 @@ function AssistantMessage({
                   }}
                   aria-label="复制回复"
                 ><Copy size={13} /></button>
-                {message.forkEligible && (
+                {canFork && message.forkEligible && (
                   <button aria-label="从此处分叉" title="从此处分叉" disabled={forking} aria-busy={forking}
                     onClick={() => {
-                      if (forkInFlight.current) return;
+                      if (!canFork || forkInFlight.current) return;
                       forkInFlight.current = true;
                       setForking(true);
                       void onFork(message.id).finally(() => { forkInFlight.current = false; setForking(false); });
@@ -1258,6 +1265,7 @@ export function ConversationMessages({
   onReadToolArtifact,
   onNotify,
   onFork = async () => undefined,
+  canFork = false,
   onReadPromptImage = unavailablePromptImage,
   onReadVisualization = unavailableVisualization,
   onReadVisualizationThumbnail,
@@ -1277,6 +1285,7 @@ export function ConversationMessages({
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onNotify: MarkdownNotify;
   onFork?: (entryId: string) => Promise<void>;
+  canFork?: boolean;
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
   onReadVisualizationThumbnail?: ReadVisualizationThumbnail;
   onReadVisualization?: WorkbenchViewProps['onReadVisualization'];
@@ -1303,7 +1312,7 @@ export function ConversationMessages({
             joinsNextToolChain={toolChainConnections.after.has(message.id)}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs}
-            onNotify={onNotify} onFork={onFork} artifactOwnerKey={artifactOwnerKey}
+            onNotify={onNotify} onFork={onFork} canFork={canFork} artifactOwnerKey={artifactOwnerKey}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
@@ -1580,7 +1589,13 @@ export function WorkbenchView({
   interaction,
   toolDecisionPending = false,
   canControl,
+  historyOnly = false,
   isObserver,
+  workspaceAvailability,
+  workspaceRecoveryBusy = false,
+  workspaceRecoveryError,
+  onRestoreWorkspace,
+  onRecheckWorkspace,
   permission,
   skills,
   focusTaskId,
@@ -1598,7 +1613,6 @@ export function WorkbenchView({
   onStop,
   onCompact,
   onReopenRuntime,
-  onRenameSession,
   runtimeReopenBusy,
   onReadInteraction,
   onResolveInteraction,
@@ -1627,6 +1641,14 @@ export function WorkbenchView({
   }
   const welcomeDeparture = useRef<{ sessionId: string; top: number } | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const directoryReadOnly = workspaceAvailability?.outcome === 'MISSING' || workspaceAvailability?.outcome === 'UNAVAILABLE';
+  const readOnlyDock = isObserver || directoryReadOnly || historyOnly;
+  const sessionStatusLabel = isObserver ? '观察中'
+    : workspaceAvailability?.outcome === 'MISSING' ? '目录丢失'
+    : workspaceAvailability?.outcome === 'UNAVAILABLE' ? '目录不可用'
+    : session.status === 'running' ? '进行中'
+    : session.status === 'completed' ? '已完成'
+    : session.status === 'interrupted' ? '已中断' : undefined;
   const [sessionActionsOpen, setSessionActionsOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
@@ -1645,6 +1667,11 @@ export function WorkbenchView({
   const pickerSession = useRef(session.id);
   const [modelOpen, setModelOpen] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
+  useEffect(() => {
+    if (canControl) return;
+    setSessionActionsOpen(false); setAddOpen(false); setSkillOpen(false);
+    setPermissionOpen(false); setModelOpen(false); setReasoningOpen(false);
+  }, [canControl]);
   const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [preparingQueueEdit, setPreparingQueueEdit] = useState<string>();
   const [atBottom, setAtBottom] = useState(true);
@@ -1806,7 +1833,7 @@ export function WorkbenchView({
     && selectedModel?.status === 'ready'
     && (selectedModel.authentication === 'none' || selectedModel.credential_configured),
   );
-  const welcome = Boolean(session.id && !isObserver && messages.length === 0
+  const welcome = Boolean(session.id && !readOnlyDock && messages.length === 0
     && !isRunning && localSubmissions.length === 0 && queuedPrompts.length === 0
     && !interaction && initialContextBase?.base_kind !== 'SNAPSHOT' && !contextCompaction
     && session.status !== 'interrupted' && runtimeStatus === 'online'
@@ -1989,6 +2016,7 @@ export function WorkbenchView({
   }, [draft.hasContent, draft.revision, draftStore, session.id]);
 
   const submit = useCallback(async () => {
+    if (!canControl) return;
     if (!draft.hasContent || submitting || editingQueue) return;
     if (!modelReady) {
       if (!welcome) onNotify(
@@ -2036,12 +2064,12 @@ export function WorkbenchView({
     if (!draftStore.clearIfSnapshot(session.id, snapshot)) acceptedDraftLayout.current = null;
     setRequestPlan(false);
     onPermissionChange('bypass-permissions');
-  }, [activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
+  }, [canControl, activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
     modelBindingMissing, modelReady, onNotify, onPermissionChange, onSend,
     permission, requestPlan, session.id, setRequestPlan, submitting, welcome]);
 
   const changeBinding = async (binding: ModelCallBindingPayload) => {
-    if (modelBindingBusy) return;
+    if (!canControl || modelBindingBusy) return;
     setModelBindingBusy(true);
     try {
       await onModelCallBindingChange(binding);
@@ -2160,12 +2188,11 @@ export function WorkbenchView({
       <header className="topbar">
         <div className="session-title">
           <button className="mobile-menu-button" onClick={onOpenSidebar} aria-label="打开会话侧栏"><Menu size={17} /></button>
-          <span className={`live-badge live-badge--${session.status}`}>{session.status === 'running' ? '进行中' : session.status === 'completed' ? '已完成' : session.status === 'waiting' ? '等待中' : session.status === 'interrupted' ? '已中断' : '草稿'}</span>
+          {sessionStatusLabel && <span className={`live-badge live-badge--${readOnlyDock ? "readonly" : session.status}`}>{sessionStatusLabel}</span>}
           <div><h2>{session.title}</h2><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
         </div>
         <div className="topbar-actions">
           {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
-          {isObserver && <span className="observer-badge"><Eye size={11} /> 旁观中</span>}
           <div className="popover-anchor session-actions" ref={sessionActionsRef}>
             <button
               ref={sessionActionsTriggerRef}
@@ -2173,16 +2200,13 @@ export function WorkbenchView({
               type="button"
               aria-label="更多会话操作"
               aria-expanded={sessionActionsOpen}
-              disabled={!session.id || runtimeReopenBusy}
+              disabled={!session.id || runtimeReopenBusy || !canControl}
               onClick={() => setSessionActionsOpen((open) => !open)}
             >
               {runtimeReopenBusy ? <LoaderCircle size={15} className="session-actions__busy" /> : <MoreHorizontal size={16} />}
             </button>
             {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
-              <button type="button" onClick={() => { setSessionActionsOpen(false); sessionActionsTriggerRef.current?.focus(); onRenameSession(); }}>
-                <Pencil size={15} /><span><strong>重命名</strong></span>
-              </button>
-              <button type="button" onClick={() => { setSessionActionsOpen(false); onReopenRuntime(); }}>
+              <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onReopenRuntime(); }}>
                 <RotateCcw size={15} />
                 <span><strong>重新载入当前会话运行时</strong><small>仅作用于当前会话；空闲时从已保存记录重建</small></span>
               </button>
@@ -2240,7 +2264,7 @@ export function WorkbenchView({
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
-            onNotify={onNotify} onFork={onFork} contextCompactionIndex={contextCompactionIndex}
+            onNotify={onNotify} onFork={onFork} canFork={canControl} contextCompactionIndex={contextCompactionIndex}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={focusSourceEntry} />
           {session.status === 'interrupted' && !isRunning && (
@@ -2318,7 +2342,7 @@ export function WorkbenchView({
           </div>
           <p className="composer-note">当前没有活动会话</p>
         </div>
-      ) : !isObserver ? <div className="composer-wrap" ref={composerWrapRef}>
+      ) : !readOnlyDock ? <div className="composer-wrap" ref={composerWrapRef}>
         <div className="composer-frame">
           <div className="welcome-heading" aria-hidden={!welcome}>
             <WelcomeTypewriter key={session.id} active={welcome} cycling={!draft.hasContent} />
@@ -2488,8 +2512,21 @@ export function WorkbenchView({
           {composerQueue}
           <div className="observer-dock">
             <span className="observer-dock__icon"><Eye size={15} /></span>
-            <span><strong>这个会话正在另一个窗口中操作</strong><small>这里仍会实时显示对话、思考和任务进展。</small></span>
-            <button type="button" onClick={onTakeControl}>在此窗口继续</button>
+            <span className="readonly-dock__copy">
+              <strong>{isObserver ? '此窗口仅供查看' : directoryReadOnly && workspaceAvailability?.outcome === 'MISSING' ? '工作目录已丢失' : workspaceAvailability?.outcome === 'UNAVAILABLE' ? '工作目录不可用' : '暂时无法继续'}</strong>
+              {!isObserver && <>
+                {workspaceAvailability?.outcome === 'MISSING' && <small>历史对话仍可查看。继续时会在原路径创建空目录，原文件不会恢复。</small>}
+                <small className="readonly-dock__path">{workspaceAvailability?.path}</small>
+                {workspaceAvailability?.outcome === 'UNAVAILABLE' && <small>{workspaceAvailability.reason}</small>}
+              </>}
+              {workspaceRecoveryError && <small role="alert">{workspaceRecoveryError}</small>}
+            </span>
+            <button type="button" disabled={workspaceRecoveryBusy} onClick={() => {
+              if (isObserver) onTakeControl();
+              else if (workspaceAvailability?.outcome === 'MISSING') void onRestoreWorkspace?.();
+              else void onRecheckWorkspace?.();
+            }}>{workspaceRecoveryBusy ? '正在创建…' : isObserver ? '在此窗口继续' : workspaceAvailability?.outcome === 'MISSING' ? '创建空目录并继续' : '重新检查'}</button>
+            {!isObserver && workspaceAvailability?.outcome === 'MISSING' && <button type="button" disabled={workspaceRecoveryBusy} onClick={() => void onRecheckWorkspace?.()}>重新检查</button>}
           </div>
         </div>
       )}

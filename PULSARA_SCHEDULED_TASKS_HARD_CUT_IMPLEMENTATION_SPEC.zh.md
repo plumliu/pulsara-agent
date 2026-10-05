@@ -2,9 +2,9 @@
 
 日期：2026-10-05。状态：冻结；主代理与 GPT-6 Astra / high critic 均认可，可作为后续实施的当前权威规格。
 
-本规格记录本轮产品讨论及本地 Codex 源码参考，规定后续实现与验收。本文提交不代表功能已实现；本轮不修改生产代码、依赖、数据库或保存配置。
+本规格记录本轮产品讨论及本地 Codex 源码参考，规定后续实现与验收。本定时规格仅交付文档；本文提交不代表定时任务功能已实现，不修改其生产代码、依赖、数据库或保存配置。
 
-实施前置为 [会话统一只读与工作目录恢复规格](PULSARA_SESSION_READ_ONLY_WORKSPACE_RECOVERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)：先完成普通会话的冷历史、显式目录恢复与具体非抢占 writer 接缝。定时入口复用它，不静默 mkdir、不另写恢复路径。
+实施前置为 [会话统一只读与工作目录恢复规格](PULSARA_SESSION_READ_ONLY_WORKSPACE_RECOVERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)：普通会话已落地冷历史、显式目录恢复与具体非抢占 writer 接缝，代码验收见其 §15。定时入口复用这些 owner，不静默 mkdir、不另写恢复路径。本次仅更新前置依赖说明，定时任务尚未实现。
 
 ## 1. 产品目标与明确范围
 
@@ -157,7 +157,7 @@ once 如果关闭期间到期，恢复后仍尝试一次；成功接受或与已
 
 `ScheduledTaskService`（具体产品 owner）负责管理、时间计算、派发及 Host 路由；不拥有模型/工具运行。获取目标 session 必须复用 `LocalSessionController.resume_session` 的 live handle / in-flight 打开路径；若 Host 层工具接入需要共享，把现有获取部分移到唯一可注入 owner，再让 controller 和工具使用它。`KernelHostCore.resume_session` 是底层打开操作，不能作为第二套 handle 缓存或另一路无条件打开。浏览器 controller 授权与 session writer 是不同边界，复用 handle 不夺取浏览器控制权。其他进程已有活跃 writer 时保持任务 due，等现有 writer 机制可用，UI 显示暂不能派发。
 
-非抢占获取复用上述前置规格在原 acquire 事务内的有效他者 writer 检查；当前 acquire 默认会接管，不能直接调用该默认再宣称安全，也不能先读 lease 再无条件获取。此处只复用前置已闭合的具体 owner，不增加任务专用 lease。
+非抢占获取复用前置实现 `conversation_kernel/_repository/authority.py::acquire_host_writer` 在原 session 行锁事务内的有效他者 writer 检查；普通默认获取仍允许接管，不能直接调用默认再宣称安全，也不能先读 lease 再无条件获取。已落地的 RESTORE 意图仅用于明确目录恢复。未来定时准备须复用该事务内排他检查与普通 EXISTING 目录校验，不调用 `restore_missing_workspace`、RESTORE 打开或创建目录的 owner；届时只补齐其具体非抢占打开意图，不增加任务专用 lease 或第二套恢复路径。原 `LocalSessionController` 继续拥有 live handle/in-flight 获取，原目录 gate 继续拥有已接受工作下一准入的阻塞。
 
 任务新增/管理与派发均以现有 session row 串行化，再锁 task row、prompt queue rows；不持有数据库锁等待模型、Hook、网络或 sleep。打开的 Host 使用原 writer 事务。纯管理、无 Host 时的合并及终止准备失败可使用具体冷态 mutation 接缝，复用 `archive.py` 的 session FOR UPDATE、memory_domain 可访问范围与既有 writer ownership 检查：存在活跃 writer 必须经其原 owner；无有效 writer 时在该短事务内操作，不申请新的 lease、不伪造 HostWriterGuard，不启动模型/MCP/Hook。controller retirement/draining/quarantine 仍须验证。
 
@@ -299,4 +299,4 @@ UI、HTTP、模型工具都调用同一 owner；建议 HTTP `/api/scheduled-task
 
 冻结结论（2026-10-05）：经过初审、修订复审及最新用户规则的最终复审，主代理与 GPT-6 Astra / high critic 均确认无剩余必改项。已闭合时间查询/DST、队列合并与事务、编辑/暂停/消费竞态、run_now 命令确认、冷态管理、重启唤醒、可信来源与 prefix 边界。成功归档或删除会话删除全部绑定任务，归档失败无变更，取消归档不重建任务；这是本轮最终用户决定。
 
-本轮只交付已冻结规格与参考核对，不修改生产实现、保存配置或数据库，也不创建实际定时任务。后续实现仍须完成 §15 验收和代码 critic，文档冻结不等于功能激活。
+本定时规格只交付已冻结文档与参考核对，不修改定时任务生产实现、保存配置或数据库，也不创建实际定时任务。后续实现仍须完成 §15 验收和代码 critic，文档冻结不等于功能激活。

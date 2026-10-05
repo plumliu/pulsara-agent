@@ -860,3 +860,6 @@
 .context-usage__tooltip[data-tone="danger"] .context-usage__heading span { color: var(--red); }
 .context-usage__amount { display: grid; gap: 2px; margin: 7px 0 0; font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .context-usage__fill { transition: none; } }
+
+.readonly-dock__path { overflow-wrap: anywhere; }
+.observer-dock > button:last-child:nth-of-type(2) { grid-column: 3; justify-self: start; }

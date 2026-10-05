@@ -42,7 +42,7 @@ def test_context_usage_http_reads_the_selected_session_without_a_command(tmp_pat
             is_ready=lambda: True, is_draining=lambda: False, **_model_server_dependencies())
         await server.start()
         try:
-            async with ClientSession() as client:
+            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
                 async with client.get(f'{server.origin}/api/sessions/session:preview/context-usage') as response:
                     assert response.status == 200
                     assert await response.json() == payload
@@ -67,7 +67,7 @@ def test_native_workspace_picker_http_security_selection_cancel_and_failure(tmp_
         monkeypatch.setattr(server._directory_picker, "choose", choose)
         await server.start()
         try:
-            async with ClientSession() as client:
+            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
                 url = f"{server.origin}/api/workspace-directory/pick"
                 for headers, code in [
                     ({"Origin": "https://other.test"}, "ORIGIN_REJECTED"),
@@ -382,6 +382,12 @@ class _Bridge:
         self.connect_calls: list[tuple[str, str, bool]] = []
         self.operation_calls: list[tuple[str, str, dict[str, object]]] = []
 
+    async def require_chat_controller(self, connection_id, generation, *, session_id=None, require_directory=True):
+        assert connection_id == "connection-1" and generation == 1
+
+    async def _connection(self, connection_id):
+        return SimpleNamespace(connection_id=connection_id, generation=1)
+
     async def connect(
         self,
         session_id: str,
@@ -482,7 +488,7 @@ async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
         "Sec-Fetch-Site": "same-origin",
     }
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
             async with client.post(
                 f"{server.origin}/api/connections/connection-1/command",
                 data=exact,
@@ -564,7 +570,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
     }
     secret = "model-api-key-sentinel"
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
             async with client.get(f"{server.origin}/api/app/bootstrap") as response:
                 assert response.status == 200
                 payload = await response.json()
@@ -749,7 +755,7 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
     await server.start()
     headers = {"Origin": server.origin, "Sec-Fetch-Site": "same-origin"}
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
             for source in ("models_dev", "user_declared"):
                 if source == "models_dev":
                     draft = {
@@ -889,7 +895,7 @@ async def _exercise_model_connection_test(
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
             async with client.post(
                 f"{server.origin}/api/model-configurations/test",
                 json={
@@ -948,7 +954,7 @@ async def _exercise_settings_catalog_refresh_failure(tmp_path: Path) -> None:
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
             async with client.post(
                 f"{server.origin}/api/model-catalog/refresh",
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
@@ -1003,7 +1009,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
             async with client.get(
                 f"{server.origin}/", allow_redirects=False
             ) as response:
@@ -1338,7 +1344,7 @@ async def _exercise_request_guards(tmp_path: Path) -> None:
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
             async with client.get(
                 f"{server.origin}/api/app/bootstrap",
                 headers={"Host": f"localhost:{server.port}"},
@@ -1541,7 +1547,7 @@ def test_workspace_path_candidates_http_contract_and_security(tmp_path):
         )
         await server.start()
         try:
-            async with ClientSession() as client:
+            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
                 url = f'{server.origin}/api/sessions/selected/path-candidates'
                 for headers, status in [({'Origin': 'https://other.test'}, 403), ({'Sec-Fetch-Site': 'cross-site'}, 403), ({'Host': 'other.test'}, 421)]:
                     async with client.post(url, json={'prefix': ''}, headers=headers) as response:
@@ -1593,7 +1599,7 @@ def test_settings_expose_effective_home_readonly_independently_of_cwd(tmp_path, 
         )
         await server.start()
         try:
-            async with ClientSession() as client:
+            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
                 for path in ("/api/app/bootstrap", "/api/local-settings"):
                     async with client.get(server.origin + path) as response:
                         assert response.status == 200

@@ -477,6 +477,9 @@ class TerminalKernelProtocolServer:
         else:
             if not self._has_controller_capability(state):
                 return _error(request.request_id, "CONTROL_UNAVAILABLE")
+            blocked = self._workspace_write_error(state, request.request_id)
+            if blocked is not None:
+                return blocked
             try:
                 target, occupied = await session.set_subagent_capacity(int(request.target))
             except StaleHostWriter:
@@ -666,6 +669,15 @@ class TerminalKernelProtocolServer:
                 )
             await asyncio.sleep(min(0.05, max(0.0, deadline - monotonic())))
 
+    @staticmethod
+    def _workspace_write_error(state: _Connection, request_id: str) -> wire.ServerFrame | None:
+        observation = state.host_session.workspace_gate.observe()
+        if observation.outcome != "AVAILABLE":
+            rejected = _error(request_id, "WORKSPACE_UNAVAILABLE")
+            rejected.error.public_message = observation.reason or "工作目录已丢失。"
+            return rejected
+        return None
+
     async def _command(
         self, state: _Connection, request: wire.CommandRequest
     ) -> wire.ServerFrame:
@@ -684,6 +696,10 @@ class TerminalKernelProtocolServer:
             not self._has_controller_capability(state)
         ):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
+        if request.command_kind != wire.DETACH:
+            blocked = self._workspace_write_error(state, request.request_id)
+            if blocked is not None:
+                return blocked
         if request.force and request.command_kind != wire.COMPACT_CONTEXT:
             return _error(request.request_id, "COMMAND_FORCE_FIELD_NOT_ALLOWED")
         queue_action = request.command_kind in (
@@ -937,6 +953,9 @@ class TerminalKernelProtocolServer:
     ) -> wire.ServerFrame:
         if not self._has_controller_capability(state):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
+        blocked = self._workspace_write_error(state, request.request_id)
+        if blocked is not None:
+            return blocked
         if not _valid_command_id(request.command_id) or not request.interaction_id:
             return _error(request.request_id, "INTERACTION_REQUEST_INVALID")
         decision = {
@@ -970,6 +989,9 @@ class TerminalKernelProtocolServer:
     ) -> wire.ServerFrame:
         if not self._has_controller_capability(state):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
+        blocked = self._workspace_write_error(state, request.request_id)
+        if blocked is not None:
+            return blocked
         if (
             not _valid_command_id(request.command_id)
             or not request.interaction_id
@@ -1189,9 +1211,15 @@ class TerminalKernelProtocolServer:
             response.outcome.CopyFrom(_outcome_to_wire(request.request_id, outcome))
         return wire.ServerFrame(query_command=response)
 
-    async def _read_content(
-        self, state: _Connection, request: wire.ReadContentRequest
-    ) -> wire.ServerFrame:
+    async def _read_content(self, state: _Connection, request: wire.ReadContentRequest) -> wire.ServerFrame:
+        return await self.read_canonical_content(
+            connection_provider=state.host_session.repository.connection_provider,
+            protocol_reader=state.protocol_reader,
+            session_id=state.host_session.session_id, request=request)
+
+    @staticmethod
+    async def read_canonical_content(*, connection_provider, protocol_reader: CanonicalProtocolReader,
+                             session_id: str, request: wire.ReadContentRequest) -> wire.ServerFrame:
         if not 1 <= request.limit_bytes <= 1 << 20:
             return _error(request.request_id, "CONTENT_RANGE_INVALID")
         target = request.WhichOneof("target")
@@ -1207,8 +1235,8 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "CONTENT_TARGET_INVALID")
         try:
             reference = await asyncio.to_thread(
-                state.protocol_reader.resolve_content_reference,
-                session_id=state.host_session.session_id,
+                protocol_reader.resolve_content_reference,
+                session_id=session_id,
                 entry_id=request.entry_id if target == "entry_id" else None,
                 queue_item_id=(
                     request.queue_item_id if target == "queue_item_id" else None
@@ -1264,7 +1292,7 @@ class TerminalKernelProtocolServer:
         if not reference["blob_id"]:
             return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
         store = PostgresCanonicalBlobStore(
-            state.host_session.repository.connection_provider
+            connection_provider
         )
         try:
             value = await asyncio.to_thread(
@@ -1295,9 +1323,15 @@ class TerminalKernelProtocolServer:
             )
         )
 
-    async def _read_tool_artifact(
-        self, state: _Connection, request: wire.ReadToolArtifactRequest
-    ) -> wire.ServerFrame:
+    async def _read_tool_artifact(self, state: _Connection, request: wire.ReadToolArtifactRequest) -> wire.ServerFrame:
+        return await self.read_canonical_tool_artifact(
+            connection_provider=state.host_session.repository.connection_provider,
+            protocol_reader=state.protocol_reader,
+            session_id=state.host_session.session_id, request=request)
+
+    @staticmethod
+    async def read_canonical_tool_artifact(*, connection_provider, protocol_reader: CanonicalProtocolReader,
+                             session_id: str, request: wire.ReadToolArtifactRequest) -> wire.ServerFrame:
         if (
             not request.result_entry_id
             or not 1 <= request.max_chars <= ARTIFACT_READ_HARD_CHARS
@@ -1305,8 +1339,8 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "TOOL_ARTIFACT_RANGE_INVALID")
         try:
             reference = await asyncio.to_thread(
-                state.protocol_reader.resolve_tool_artifact_reference,
-                session_id=state.host_session.session_id,
+                protocol_reader.resolve_tool_artifact_reference,
+                session_id=session_id,
                 result_entry_id=request.result_entry_id,
                 deadline_monotonic=monotonic() + 10.0,
             )
@@ -1319,8 +1353,8 @@ class TerminalKernelProtocolServer:
         if not artifact_id:
             return _error(request.request_id, "TOOL_ARTIFACT_CORRUPT")
         port = PostgresToolArtifactReadPort(
-            state.host_session.repository.connection_provider,
-            session_id=state.host_session.session_id,
+            connection_provider,
+            session_id=session_id,
             workspace_id=str(reference["workspace_id"]),
         )
         try:

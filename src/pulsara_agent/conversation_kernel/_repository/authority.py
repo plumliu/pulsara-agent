@@ -96,7 +96,7 @@ class _AuthorityOperations:
     def acquire_host_writer(
         self,
         *,
-        intent: Literal["NEW", "EXISTING"],
+        intent: Literal["NEW", "EXISTING", "RESTORE"],
         session_id: str,
         workspace_id: str,
         workspace_kind: str = "project",
@@ -107,7 +107,7 @@ class _AuthorityOperations:
         lease_seconds: float,
         deadline_monotonic: float,
     ) -> WriterLease:
-        if intent not in {"NEW", "EXISTING"}:
+        if intent not in {"NEW", "EXISTING", "RESTORE"}:
             raise ValueError("explicit Host writer acquisition intent is required")
         if lease_seconds <= 0:
             raise ValueError("writer lease must be finite and positive")
@@ -143,7 +143,7 @@ class _AuthorityOperations:
                     """,
                     (session_id,),
                 ).fetchone()
-                if intent == "EXISTING" and row is None:
+                if intent != "NEW" and row is None:
                     raise ConversationKernelConflict("session is unavailable")
                 if intent == "NEW" and row is not None:
                     raise ConversationKernelConflict("new session identity already exists")
@@ -221,6 +221,12 @@ class _AuthorityOperations:
                         and row["writer_lease_expires_at"] is not None
                         and row["writer_lease_expires_at"] > _utcnow()
                     )
+                    if (intent == "RESTORE" and not same_live_owner
+                        and row["writer_lease_owner_id"] is not None
+                        and row["writer_lease_expires_at"] is not None
+                        and row["writer_lease_expires_at"] > _utcnow()):
+                        from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
+                        raise SessionWriterConflict("session has another live writer")
                     if same_live_owner:
                         generation = int(row["writer_generation"])
                         acquisition_kind = (

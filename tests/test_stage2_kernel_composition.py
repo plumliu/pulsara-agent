@@ -356,8 +356,23 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
 
     class FakeRepository:
         @staticmethod
-        def acquire_host_writer(**_kwargs: object) -> object:
-            return object()
+        def acquire_host_writer(**kwargs: object):
+            from datetime import datetime, timedelta, timezone
+            from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, WriterLease, HostWriterAcquisitionKind
+            return WriterLease(guard=HostWriterGuard(str(kwargs["session_id"]), 1, str(kwargs["writer_owner_id"])),
+                               expires_at=datetime.now(timezone.utc)+timedelta(seconds=60),
+                               acquisition_kind=HostWriterAcquisitionKind.NEW_SESSION)
+
+        @staticmethod
+        def renew_host_writer(guard, **kwargs):
+            from datetime import datetime, timedelta, timezone
+            from pulsara_agent.conversation_kernel.contracts import WriterLease, HostWriterAcquisitionKind
+            return WriterLease(guard=guard, expires_at=datetime.now(timezone.utc)+timedelta(seconds=60),
+                               acquisition_kind=HostWriterAcquisitionKind.SAME_OWNER_RENEWAL)
+
+        @staticmethod
+        def release_host_writer(guard, **kwargs):
+            return None
 
     class BlockingSession:
         def __init__(self, **kwargs: object) -> None:
