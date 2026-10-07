@@ -153,6 +153,7 @@ interface WorkbenchViewProps {
   ) => Promise<boolean>;
   onStop: () => void;
   onCompact: () => Promise<void>;
+  onRenameSession: () => void;
   onReopenRuntime: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
@@ -1623,6 +1624,7 @@ export function WorkbenchView({
   onSend,
   onStop,
   onCompact,
+  onRenameSession,
   onReopenRuntime,
   runtimeReopenBusy,
   onReadInteraction,
@@ -2218,6 +2220,10 @@ export function WorkbenchView({
               {runtimeReopenBusy ? <LoaderCircle size={15} className="session-actions__busy" /> : <MoreHorizontal size={16} />}
             </button>
             {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
+              <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onRenameSession(); }}>
+                <Pencil size={15} />
+                <span><strong>重命名</strong><small>给你的会话起个名字吧</small></span>
+              </button>
               <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onReopenRuntime(); }}>
                 <RotateCcw size={15} />
                 <span><strong>重新载入当前会话运行时</strong><small>仅作用于当前会话；空闲时从已保存记录重建</small></span>
@@ -2267,8 +2273,7 @@ export function WorkbenchView({
           {!welcome && !session.id && messages.length === 0 && conversationSubmissions.length === 0 && runtimeStatus === 'online' && (
             <div className="conversation-empty">
               <Sparkles size={20} />
-              <strong>{session.id ? '这个会话还没有消息' : '准备开始一次真实运行'}</strong>
-              <span>{session.id ? '在下方输入目标，Pulsara 会立即开始处理。' : '新建会话后，任务进展和回复会持续显示在这里。'}</span>
+              <span>点击下方的“创建会话”，开始你的第一个任务。</span>
             </div>
           )}
           {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
@@ -2341,7 +2346,7 @@ export function WorkbenchView({
                 <span className="session-required-composer__icon" aria-hidden="true"><Sparkles size={15} /></span>
                 <span className="session-required-composer__copy">
                   <strong>创建或选择会话后开始</strong>
-                  <small>模型、推理、规划和本轮权限都会跟随当前会话。</small>
+                  <small>提问、写代码，或一起探索一个想法。</small>
                 </span>
                 <button className="secondary-action" type="button" disabled={!canCreateSession} onClick={onNewSession}>
                   <MessageSquarePlus size={13} /> 创建会话

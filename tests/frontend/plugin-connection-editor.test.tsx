@@ -6,7 +6,7 @@ import type {PluginMcpConnection, UserPluginCapability} from '../../frontend/lib
 afterEach(cleanup);
 const plugin: UserPluginCapability = {
   id: 'docs', name: 'Docs', description: 'A fixture', enabled: false,
-  packageInstallId: 'pkg-fixture', packageRoot: '/tmp/package', skillCount: 0, mcpCount: 1,
+  packageInstallId: 'pkg-fixture', packageRoot: '/tmp/package', skillCount: 0, mcpCount: 1, hookCount: 3,
   effectiveSkillNames: [], effectiveMcpServerIds: [], details: [],
 };
 const connection: PluginMcpConnection = {

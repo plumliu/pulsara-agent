@@ -65,12 +65,12 @@
 .model-config-card__buttons { display: flex; gap: 2px; }
 .model-config-card__actions .model-delete-trigger, .model-config-card__actions .model-edit-trigger { min-height: 26px; padding: 0 7px; border-color: transparent; background: transparent; }
 .model-editor-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
-.model-edit-dialog { margin: auto; width: min(720px,calc(100% - 32px)); max-height: calc(100dvh - 64px); padding: 0; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--paper-solid); color: var(--ink); box-shadow: var(--shadow-lg); }
-.model-edit-dialog::backdrop { background: #0006; backdrop-filter: blur(3px); }
-.model-edit-dialog .model-add-panel { border: 0; border-radius: 0; box-shadow: none; }
+.model-config-dialog { margin: auto; width: min(720px,calc(100% - 32px)); max-height: calc(100dvh - 64px); padding: 0; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--paper-solid); color: var(--ink); box-shadow: var(--shadow-lg); }
+.model-config-dialog::backdrop { background: #0006; backdrop-filter: blur(3px); }
+.model-config-dialog .model-add-panel { border: 0; border-radius: 0; box-shadow: none; }
 .model-edit-notice { margin: 15px 15px 0; color: var(--muted); font-size: var(--type-caption); line-height: 1.6; }
 .model-edit-notice p { margin: 5px 0 0; color: var(--faint); }
-.model-edit-dialog .settings-form-grid label { align-content: start; }
+.model-config-dialog .settings-form-grid label { align-content: start; }
 .settings-form-grid label > small { color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
 .model-delete-confirmation { display: flex; justify-content: flex-end; justify-self: end; gap: 6px; }
 .model-config-card__actions .subtle-danger { color: var(--red); }

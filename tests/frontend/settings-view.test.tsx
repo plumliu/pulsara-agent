@@ -83,8 +83,8 @@ it.each([{ modalities: null }, { modalities: ['text', 'image', 'audio', 'future-
   const dialog = await screen.findByRole('dialog', { name: '修改模型配置' });
   expect(readModel).toHaveBeenCalledExactlyOnceWith('connection-1');
   expect(within(dialog).getByLabelText('配置名称')).toHaveProperty('value', 'Saved Custom');
-  expect(within(dialog).getByLabelText('Context window')).toHaveProperty('value', '300000');
-  expect(within(dialog).getByLabelText('最大输出长度')).toHaveProperty('value', '16384');
+  expect(within(dialog).getByLabelText('上下文窗口大小')).toHaveProperty('value', '300000');
+  expect(within(dialog).queryByText('最大输出长度')).toBeNull();
   expect(within(dialog).getByLabelText('支持 tool calling')).toHaveProperty('checked', false);
   expect(within(dialog).getByLabelText('Reasoning 请求形状')).toHaveProperty('value', 'broad_compat');
   expect(within(dialog).getByLabelText('Effort 列表')).toHaveProperty('value', 'none, medium, high');
@@ -146,7 +146,7 @@ it('edits a catalog profile using the saved selection and matching catalog choic
   expect(updateModel).toHaveBeenCalledExactlyOnceWith('connection-1', { ...detail.configuration, reasoning_wire_profile: 'catalog_standard' });
 });
 
-it('edits a catalog context allowance within its limits while output remains read-only', async () => {
+it('edits a catalog context allowance within its limits without changing output limits', async () => {
   const detail: ModelConfigurationDetail = {
     base_url: 'https://catalog.example/v1', credential_configured: true,
     configuration: { source: 'models_dev', context_window_tokens: 512_000, route_id: 'test', model_id: 'catalog-model', wire_api: 'openai_chat_completions', reasoning_wire_profile: 'catalog_standard', api_key: null },
@@ -159,12 +159,11 @@ it('edits a catalog context allowance within its limits while output remains rea
   fireEvent.click(screen.getByRole('button', { name: '模型' }));
   fireEvent.click(await screen.findByRole('button', { name: '修改模型配置 Test · Model 1' }));
   const dialog = await screen.findByRole('dialog', { name: '修改模型配置' });
-  const allowance = within(dialog).getByLabelText('上下文额度（tokens）');
+  const allowance = within(dialog).getByLabelText('上下文窗口大小');
   expect(allowance).toHaveProperty('value', '512000');
   expect(allowance.getAttribute('min')).toBe('256000');
   expect(allowance.getAttribute('max')).toBe('1000000');
-  expect(within(dialog).getByLabelText('最大输出长度')).toHaveProperty('readOnly', true);
-  expect(within(dialog).getByLabelText('最大输出长度')).toHaveProperty('value', '384000');
+  expect(within(dialog).queryByText('最大输出长度')).toBeNull();
   for (const invalid of ['255999', '1000001', '256000.5']) {
     fireEvent.change(allowance, { target: { value: invalid } });
     expect(within(dialog).getByRole('button', { name: '保存修改' })).toHaveProperty('disabled', true);
@@ -219,22 +218,42 @@ it('shows the page containing a newly saved model while retaining capability con
   fireEvent.click(screen.getByRole('button', { name: '模型' }));
   await screen.findByText('Test · Model 1');
   fireEvent.click(screen.getByRole('button', { name: '添加配置' }));
-  fireEvent.click(screen.getByRole('button', { name: '自定义服务' }));
-  fireEvent.change(screen.getByLabelText('配置名称'), { target: { value: 'Test' } });
-  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://localhost:8000/v1' } });
-  fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'model-6' } });
-  fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_chat_completions' } });
-  fireEvent.change(screen.getByLabelText('认证方式'), { target: { value: 'none' } });
-  fireEvent.change(screen.getByLabelText('Reasoning 请求形状'), { target: { value: 'effort' } });
-  fireEvent.click(screen.getByLabelText('支持图像输入'));
-  fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+  const dialog = await screen.findByRole('dialog', { name: '添加模型配置' });
+  expect(within(dialog).queryByText('最大输出长度')).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: '自定义服务' }));
+  expect(within(dialog).queryByText('最大输出长度')).toBeNull();
+  fireEvent.change(within(dialog).getByLabelText('配置名称'), { target: { value: 'Test' } });
+  fireEvent.change(within(dialog).getByLabelText('Base URL'), { target: { value: 'http://localhost:8000/v1' } });
+  fireEvent.change(within(dialog).getByLabelText('Model ID'), { target: { value: 'model-6' } });
+  fireEvent.change(within(dialog).getByLabelText('API 协议'), { target: { value: 'openai_chat_completions' } });
+  fireEvent.change(within(dialog).getByLabelText('认证方式'), { target: { value: 'none' } });
+  fireEvent.change(within(dialog).getByLabelText('Reasoning 请求形状'), { target: { value: 'effort' } });
+  fireEvent.click(within(dialog).getByLabelText('支持图像输入'));
+  fireEvent.click(within(dialog).getByRole('button', { name: '保存配置' }));
   expect(await screen.findByText('Test · Model 6')).toBeTruthy();
   expect(screen.getByText('6–6 / 共 6 项')).toBeTruthy();
   expect(screen.getAllByRole('article')).toHaveLength(1);
   expect(screen.queryByRole('heading', { name: '添加模型配置' })).toBeNull();
   expect(addModel).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-    input_modalities: ['text', 'image'], reasoning: { kind: 'effort', values: ['low', 'medium', 'high'] },
+    max_output_tokens: 8192, input_modalities: ['text', 'image'], reasoning: { kind: 'effort', values: ['low', 'medium', 'high'] },
   }));
+});
+
+it('closes the add modal without saving and resets its draft when reopened', async () => {
+  const { addModel } = setup();
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  fireEvent.click(await screen.findByRole('button', { name: '添加配置' }));
+  const dialog = await screen.findByRole('dialog', { name: '添加模型配置' });
+  fireEvent.click(within(dialog).getByRole('button', { name: '自定义服务' }));
+  fireEvent.change(within(dialog).getByLabelText('配置名称'), { target: { value: 'Unsaved' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '关闭添加模型配置' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(addModel).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '添加配置' }));
+  const reopened = await screen.findByRole('dialog', { name: '添加模型配置' });
+  expect(within(reopened).getByLabelText('配置名称')).toHaveProperty('value', '');
+  fireEvent.click(within(reopened).getByRole('button', { name: '取消' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
 it('shows only the connection row in local service', async () => {

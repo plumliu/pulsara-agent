@@ -186,7 +186,7 @@ type ToolDecisionIntent = {
 export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps) {
   const [promptDraftStore] = useState(() => new PromptDraftStore());
   const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
-  const [activeView, setActiveView] = useState<AppView>('workbench');
+  const [activeView, setActiveView] = useState<AppView>('overview');
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>();
   const [settingsHighlightHome, setSettingsHighlightHome] = useState(false);
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
@@ -1011,7 +1011,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         setSessionList(sessions);
         const savedSessionId = readSavedSessionId();
         const initialSession = sessions.find((session) => session.id === savedSessionId) ?? sessions[0];
-        if (initialSession) await openRuntimeSession(initialSession.id);
+        if (initialSession) {
+          setActiveView('workbench');
+          await openRuntimeSession(initialSession.id);
+        }
         else {
           setRuntimeStatus('online');
           setActiveView('overview');
@@ -1019,6 +1022,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       } catch (error) {
         if (disposed) return;
         setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
+        setActiveView('workbench');
         setRuntimeError(productMessage(error instanceof Error ? error.message : undefined, 'Pulsara 启动失败。'));
       }
     })();
@@ -2618,6 +2622,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onSend={sendPrompt}
           onStop={() => void stopRun()}
           onCompact={compact}
+          onRenameSession={() => setRenameTarget(activeSession)}
           onReopenRuntime={() => void reopenRuntime()}
           runtimeReopenBusy={runtimeReopenBusy}
           onReadInteraction={readInteraction}

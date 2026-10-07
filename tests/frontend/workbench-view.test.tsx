@@ -332,6 +332,7 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onSend: vi.fn(async () => true),
     onStop: vi.fn(),
     onCompact: vi.fn(async () => undefined),
+    onRenameSession: vi.fn(),
     onReopenRuntime: vi.fn(),
     runtimeReopenBusy: false,
     onReadInteraction: vi.fn(),
@@ -388,6 +389,16 @@ describe('prompt delivery and preparation', () => {
 });
 
 describe('current-session runtime actions', () => {
+  it('opens rename from the header menu and closes the menu', () => {
+    const onRenameSession = vi.fn();
+    render(<WorkbenchView {...props({ onRenameSession })} />);
+    const trigger = screen.getByRole('button', { name: '更多会话操作' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: '重命名给你的会话起个名字吧' }));
+    expect(onRenameSession).toHaveBeenCalledOnce();
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('keeps runtime reopen in the header menu, separate from compaction', () => {
     const onReopenRuntime = vi.fn();
     render(<WorkbenchView {...props({ onReopenRuntime })} />);

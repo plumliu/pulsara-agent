@@ -233,7 +233,7 @@ export function CapabilityView({
                 <CapabilityDrawer open={open}>
                   <div className="capability-list-detail">
                     <div className="capability-plugin-summary">
-                      <div className="capability-detail-stats"><span><strong>{plugin.skillCount}</strong> 技能</span><span><strong>{plugin.mcpCount}</strong> MCP 服务</span>{plugin.author && <span>作者 {plugin.author}</span>}</div>
+                      <div className="capability-detail-stats"><span><strong>{plugin.skillCount}</strong> 技能</span><span><strong>{plugin.mcpCount}</strong> MCP 服务</span><span><strong>{plugin.hookCount}</strong> 钩子</span>{plugin.author && <span>作者 {plugin.author}</span>}</div>
                       <div className="capability-detail-actions">{removeCandidate === plugin.id ? <><span className="capability-remove-warning">确定从 Pulsara 中移除？</span><button className="secondary-ghost" onClick={() => setRemoveCandidate(undefined)}>取消</button><button className="danger-ghost" disabled={busyKey === `remove:${plugin.id}`} onClick={() => void removePlugin(plugin)}><Trash2 size={13} />确认移除</button></> : <button className="danger-ghost" onClick={() => setRemoveCandidate(plugin.id)}><Trash2 size={13} />移除插件</button>}</div>
                     </div>
                     {(plugin.mcpConnections ?? []).map((connection) => <div className="capability-detail-actions" key={connection.serverId}><span>{connection.serverId}{!plugin.enabled && ' · 插件已关闭'}</span><button className="secondary-ghost" onClick={() => setEditingPluginConnection({plugin, connection})}><PlugZap size={13} />配置连接</button></div>)}

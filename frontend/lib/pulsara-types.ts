@@ -188,6 +188,7 @@ export interface UserPluginCapability {
   packageRoot: string;
   skillCount: number;
   mcpCount: number;
+  hookCount: number;
   effectiveSkillNames: string[];
   effectiveMcpServerIds: string[];
   details: string[];

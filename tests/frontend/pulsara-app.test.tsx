@@ -74,6 +74,9 @@ function composerIsDisabled(composer: HTMLElement): boolean {
 }
 
 beforeEach(() => {
+  Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+    configurable: true, value() { this.setAttribute('open', ''); },
+  });
   // Each test starts with its own browser selection; remounts within a test
   // still exercise the production preference persistence.
   window.localStorage.removeItem('pulsara-active-session');
@@ -265,7 +268,7 @@ const userCapabilitySnapshot: UserCapabilitySnapshot = {
       packageInstallId: 'pkg_0123456789abcdef0123456789abcdef',
       packageRoot: '/Users/test/.pulsara/plugins/personal-tools',
       skillCount: 2,
-      mcpCount: 1,
+      mcpCount: 1, hookCount: 3,
       effectiveSkillNames: ['personal-pdf'],
       effectiveMcpServerIds: ['personal-docs'],
       details: [],
@@ -1053,6 +1056,7 @@ describe('PulsaraApp', () => {
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
     expect(await screen.findByText('Personal Tools')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '查看 Personal Tools' }));
+    expect(screen.getByText('钩子').textContent).toBe('3 钩子');
     expect(screen.queryByText('已启用；会话将在安全时机采用')).toBeNull();
     expect(screen.getByRole('switch', { name: '关闭 Personal Tools' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.queryByText('已用于当前打开的会话')).toBeNull();
@@ -2658,10 +2662,12 @@ describe('PulsaraApp', () => {
     vi.spyOn(adapter, 'bootstrap').mockImplementation(() => new Promise(resolve => { finishBootstrap = resolve; }));
     vi.spyOn(adapter, 'listSessions').mockImplementation(() => new Promise(resolve => { finishList = resolve; }));
     render(<PulsaraApp adapter={adapter} />);
-    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => finishBootstrap(bootstrap));
-    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
     await act(async () => finishList([]));
+    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
     expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.keyDown(window, { key: 'n', metaKey: true });
     expect(screen.getByRole('dialog', { name: '新建会话' })).toBeTruthy();
@@ -4083,7 +4089,7 @@ describe('PulsaraApp', () => {
     };
     adapter.taskInventory = [{id:'task-readme',label:'检查 README',role:'研究',objective:'读取 README.md 并报告一级标题。',status:'completed',color:'blue',parentId:'turn-1',batchId:'batch-1',dependencyIds:[],completionAccepted:true}];
     render(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(screen.getByRole('button', {name: '任务'}));
+    fireEvent.click(await screen.findByRole('button', {name: '任务'}));
     fireEvent.click(await screen.findByRole('button', {name: /检查 README/}));
 
     expect(await screen.findByText('任务执行')).toBeTruthy();
@@ -4323,7 +4329,7 @@ describe('PulsaraApp', () => {
     adapter.listSessionTaskGroups.mockResolvedValueOnce({groups:[group('old-first')],totalCount:2,remainingCount:1,nextCursor:'old-cursor',readEventSequence:100});
     adapter.listSessionTaskGroups.mockImplementationOnce(()=>delayed.promise);
     render(<PulsaraApp adapter={adapter}/>);
-    fireEvent.click(screen.getByRole('button',{name:'任务'}));
+    fireEvent.click(await screen.findByRole('button',{name:'任务'}));
     const more = await screen.findByRole('button',{name:'加载更多任务组'});
     fireEvent.click(more);
     fireEvent.click(more);

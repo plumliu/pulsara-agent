@@ -2951,6 +2951,7 @@ def _user_plugins_payload(inspection: object, secret_resolver) -> dict[str, obje
                 "package_root": str(item.package_root),
                 "skill_count": len(item.summary.skills.skills),
                 "mcp_count": len(item.summary.mcp.mcp_servers),
+                "hook_count": len(item.summary.hooks.hook_definitions),
                 "effective_skill_names": list(item.effective_skill_names),
                 "effective_mcp_server_ids": list(item.effective_mcp_server_ids),
                 "mcp_connections": _plugin_connection_editors(item),

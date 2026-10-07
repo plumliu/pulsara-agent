@@ -4047,6 +4047,7 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
         packageRoot: String(item.package_root ?? ''),
         skillCount: numeric(item.skill_count),
         mcpCount: numeric(item.mcp_count),
+        hookCount: numeric(item.hook_count),
         mcpConnections: recordArray(item.mcp_connections).map((connection) => ({
           serverId: String(connection.server_id), defaults: asRecord(connection.defaults), config: asRecord(connection.config),
           overlay: connection.overlay === null ? null : asRecord(connection.overlay),
