@@ -686,6 +686,7 @@ class DirectKernelToolPort:
         user_home_resolution: UserHomeResolution | None = None,
         image_validator: HostPromptImageValidator | None = None,
         scheduled_tasks=None,
+        session_content_query=None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
         frozen_user_home = user_home_resolution or resolve_user_home()
@@ -776,6 +777,10 @@ class DirectKernelToolPort:
                 ),
             )
         self._scheduled_tasks = scheduled_tasks
+        self._session_content_query = session_content_query
+        if session_content_query is not None:
+            from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
+            tools = (*tools, *(_DirectCapabilityControlTool(name) for name in sorted(SESSION_QUERY_TOOL_NAMES)))
         if scheduled_tasks is not None:
             tools = (*tools, _DirectCapabilityControlTool("scheduled_tasks"))
         self._tools = {tool.name: tool for tool in tools}
@@ -961,6 +966,9 @@ class DirectKernelToolPort:
                     for item in bindings
                     if item.tool_name
                     not in {
+                        "search_sessions",
+                        "search_session_content",
+                        "read_session_content",
                         "scheduled_tasks",
                         "remember",
                         "mark_memory_relation",
@@ -2905,6 +2913,124 @@ class DirectKernelToolPort:
             raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
         invocation_started = monotonic()
         observation_origin = tool_observation_origin_for_binding(binding)
+        from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
+
+        if tool_name in SESSION_QUERY_TOOL_NAMES:
+            from pulsara_agent.conversation_kernel.session_content import (
+                SessionQueryError,
+            )
+            from pulsara_agent.conversation_kernel.repository_errors import (
+                ConversationKernelConflict,
+            )
+            from pulsara_agent.ports.artifact import ArtifactContentError
+            from pulsara_agent.terminal_protocol.canonical_v3 import (
+                CanonicalProtocolGap,
+            )
+            from pulsara_agent.storage.migrations.errors import (
+                PostgresSchemaError,
+                PostgresSchemaFailureCode,
+            )
+            from psycopg import Error as PostgresError
+            from psycopg.errors import QueryCanceled
+
+            if (
+                self._session_content_query is None
+                or invocation_context.conversation_scope_kind != "ROOT"
+                or invocation_context.session_content_range is None
+            ):
+                raise RuntimeError("session query lost its ROOT call-local owner")
+            deadline = self._deadlines.deadline(
+                KernelWatchdogOwner.FOREGROUND_CANONICAL
+            )
+
+            def query(*, deadline_monotonic):
+                try:
+                    value = self._session_content_query.invoke(
+                        tool_name,
+                        dict(arguments),
+                        current_range=invocation_context.session_content_range,
+                        tool_call_id=tool_call_id,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    return "SUCCESS", value
+                except SessionQueryError as exc:
+                    return "APPLICATION_ERROR", {"code": exc.code, "message": str(exc)}
+                except (TimeoutError, QueryCanceled):
+                    return "APPLICATION_ERROR", {
+                        "code": "QUERY_TIMEOUT",
+                        "message": "Session query timed out; narrow or retry it.",
+                    }
+                except CanonicalProtocolGap:
+                    return "APPLICATION_ERROR", {
+                        "code": "CURSOR_INVALID",
+                        "message": "History cuts do not match; restart the query.",
+                    }
+                except PostgresSchemaError as exc:
+                    code = (
+                        "QUERY_TIMEOUT"
+                        if exc.code is PostgresSchemaFailureCode.DEADLINE_EXCEEDED
+                        else "QUERY_UNAVAILABLE"
+                    )
+                    return "APPLICATION_ERROR", {
+                        "code": code,
+                        "message": "Canonical session storage is unavailable or timed out.",
+                    }
+                except (RuntimeError, ArtifactContentError, ConversationKernelConflict):
+                    return "APPLICATION_ERROR", {
+                        "code": "CONTENT_CORRUPT",
+                        "message": "Saved session content could not be verified.",
+                    }
+                except ValueError:
+                    return "APPLICATION_ERROR", {
+                        "code": "INVALID_REQUEST",
+                        "message": "Invalid session query or cursor.",
+                    }
+                except PostgresError:
+                    return "APPLICATION_ERROR", {
+                        "code": "QUERY_UNAVAILABLE",
+                        "message": "Canonical session storage is unavailable.",
+                    }
+
+            physical = await self._physical_io.run_tool_invocation(
+                query, deadline_monotonic=deadline
+            )
+            if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
+                if isinstance(physical.error, TimeoutError):
+                    state, value = (
+                        "APPLICATION_ERROR",
+                        {
+                            "code": "QUERY_TIMEOUT",
+                            "message": "Session query timed out; narrow or retry it.",
+                        },
+                    )
+                else:
+                    assert physical.error is not None
+                    raise KernelToolPhysicalInvocationError(
+                        effect_class="read_only",
+                        error=physical.error,
+                        timing=physical.timing.value,
+                        caller_cancelled=physical.caller_cancelled,
+                        physical_observation=physical.observation,
+                    )
+            else:
+                state, value = physical.value
+            return KernelToolResult(
+                state=state,
+                content=json.dumps(
+                    value, ensure_ascii=False, separators=(",", ":")
+                ).encode(),
+                artifact_inline_result=True,
+                caller_cancelled_while_running=physical.caller_cancelled,
+                effect_class="read_only",
+                physical_timing=physical.timing.value,
+                physical_observation=(
+                    None
+                    if physical.observation is None
+                    else replace(
+                        physical.observation, observation_origin_kind=observation_origin
+                    )
+                ),
+            )
         if tool_name == "scheduled_tasks":
             if self._scheduled_tasks is None or invocation_context.conversation_scope_kind != "ROOT":
                 raise RuntimeError("scheduled management lost its ROOT owner")

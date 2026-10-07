@@ -728,6 +728,8 @@ class KernelHostSession:
         def wake_terminal_monitor_scheduler() -> None:
             self._event_loop.call_soon_threadsafe(self._monitor_wake.set)
 
+        from pulsara_agent.conversation_kernel.session_content import SessionContentQuery
+
         self._tools = DirectKernelToolPort(
             workspace_root=workspace.workspace_root,
             host_owner_id=host_session_id,
@@ -751,6 +753,8 @@ class KernelHostSession:
             ),
             terminal_monitor_wake_scheduler=wake_terminal_monitor_scheduler,
             scheduled_tasks=scheduled_tasks,
+            session_content_query=SessionContentQuery(repository, session_id=session_id,
+                                  memory_domain_id=workspace.memory_domain.memory_domain_id),
             deadline_factory=self._deadlines,
             pulsara_home_resolution=pulsara_home_resolution,
             user_home_resolution=user_home_resolution,

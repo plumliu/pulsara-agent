@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.interruption import (
 from dataclasses import asdict
 
 import codecs
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -271,6 +272,44 @@ class CanonicalProtocolReader:
             )
         )
 
+    def authorize_session(self, *, session_id: str, memory_domain_id: str,
+                          deadline_monotonic: float) -> Mapping[str, object]:
+        """Cold authorization shared by browser and model history reads."""
+        with self._connection(deadline_monotonic) as connection:
+            return self.authorized_session(connection, session_id, memory_domain_id)
+
+    @staticmethod
+    def authorized_session(connection, session_id: str, memory_domain_id: str):
+        row = connection.execute(
+            """SELECT s.* FROM pulsara_v3.sessions s
+               JOIN pulsara_v3.workspaces w ON w.id=s.workspace_id
+                 AND w.memory_domain_id=s.memory_domain_id
+               WHERE s.id=%s AND s.memory_domain_id=%s""",
+            (session_id, memory_domain_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(session_id)
+        return row
+
+    @staticmethod
+    def validate_history_cut(connection, session, cut_sequence: int, event_sequence_cut: int):
+        if (type(cut_sequence) is not int or type(event_sequence_cut) is not int
+            or cut_sequence < 0 or event_sequence_cut < 0):
+            raise ValueError("history cut is invalid")
+        if (int(session["latest_entry_sequence"]) < cut_sequence
+            or int(session["latest_event_sequence"]) < event_sequence_cut):
+            raise CanonicalProtocolGap("history cut is ahead of canonical head")
+        mixed_cut = connection.execute(
+            """SELECT 1 FROM pulsara_v3.transcript_entries e
+               JOIN pulsara_v3.agent_events ev ON ev.session_id=e.session_id
+                 AND ev.subject_entry_id=e.id
+               WHERE e.session_id=%s AND e.entry_sequence<=%s
+                 AND ev.event_sequence>%s LIMIT 1""",
+            (session["id"], cut_sequence, event_sequence_cut),
+        ).fetchone()
+        if mixed_cut is not None:
+            raise CanonicalProtocolGap("history entry and event cuts disagree")
+
     def history_page(
         self,
         *,
@@ -296,21 +335,7 @@ class CanonicalProtocolReader:
             raise ValueError("history cursor is invalid")
         with self._connection(deadline_monotonic) as connection:
             session = self._session(connection, session_id)
-            if (
-                int(session["latest_entry_sequence"]) < cut_sequence
-                or int(session["latest_event_sequence"]) < event_sequence_cut
-            ):
-                raise CanonicalProtocolGap("history cut is ahead of canonical head")
-            mixed_cut = connection.execute(
-                """SELECT 1 FROM pulsara_v3.transcript_entries e
-                   JOIN pulsara_v3.agent_events ev ON ev.session_id=e.session_id
-                     AND ev.subject_entry_id=e.id
-                   WHERE e.session_id=%s AND e.entry_sequence<=%s
-                     AND ev.event_sequence>%s LIMIT 1""",
-                (session_id, cut_sequence, event_sequence_cut),
-            ).fetchone()
-            if mixed_cut is not None:
-                raise CanonicalProtocolGap("history entry and event cuts disagree")
+            self.validate_history_cut(connection, session, cut_sequence, event_sequence_cut)
             rows = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s
                    AND entry_sequence<=%s AND entry_sequence<%s
@@ -730,9 +755,10 @@ class CanonicalProtocolReader:
         session_id: str,
         result_entry_id: str,
         deadline_monotonic: float,
+        read_connection=None,
     ) -> Mapping[str, object]:
         """Resolve one browser-visible result entry to its canonical artifact edge."""
-        with self._connection(deadline_monotonic) as connection:
+        with (nullcontext(read_connection) if read_connection is not None else self._connection(deadline_monotonic)) as connection:
             self._session(connection, session_id)
             row = connection.execute(
                 """

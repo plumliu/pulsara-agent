@@ -1821,12 +1821,15 @@ class LocalSessionController:
 
     async def _history_reader(self, session_id: str) -> CanonicalProtocolReader:
         # Authorize every read independently. No writer, Host or browser attachment.
-        summary = await self.core.read_resumable_session(
-            session_id, memory_domain_id=self.memory_domain_id, include_archived=True)
-        if summary is None:
-            raise KeyError(session_id)
         repository = await self.core._ensure_resources()
-        return CanonicalProtocolReader(repository.connection_provider)
+        reader = CanonicalProtocolReader(repository.connection_provider)
+        await asyncio.to_thread(
+            reader.authorize_session,
+            session_id=session_id,
+            memory_domain_id=self.memory_domain_id,
+            deadline_monotonic=self.core._canonical_deadline(),
+        )
+        return reader
 
     async def history_snapshot(self, session_id: str):
         reader = await self._history_reader(session_id)

@@ -65,6 +65,7 @@ from pulsara_agent.ports.artifact import (
     ToolResultDisplayKind,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.ports.session_content import SessionContentRange
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
 from pulsara_agent.primitives.tool_result_projection import (
     FrozenToolResultDeliveryRequirement,
@@ -159,6 +160,7 @@ class KernelToolInvocationContext:
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False, compare=False)
     input_modalities: tuple[str, ...] | None = None
     image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
+    session_content_range: SessionContentRange | None = None
     permission_confirmation_granted: bool = False
     capability_call: CapabilityManagementCall | None = field(
         default=None, repr=False, compare=False

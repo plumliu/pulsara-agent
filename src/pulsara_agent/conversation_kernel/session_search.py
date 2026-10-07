@@ -3,26 +3,29 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 from datetime import datetime
-from hashlib import sha256
 import heapq
 import itertools
 import json
-import re
 from time import monotonic
 
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
-from pulsara_agent.conversation_kernel.prompt_content import (
-    decode_canonical_prompt_body,
+from pulsara_agent.conversation_kernel.session_text import (
+    entry_documents,
+    keyword_patterns,
 )
-from pulsara_agent.llm.input import LLMTextPart, PromptAnnotationPart
+from pulsara_agent.ports.session_content import (
+    SESSION_QUERY_MAX_ITEMS,
+    SessionContentRange,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.conversation_kernel.root_status import LATEST_ROOT_SUMMARY_SQL
 
 # UI page/preview budgets, never a cap on the corpus searched.
-MAX_PAGE_SIZE = 50
+MAX_PAGE_SIZE = SESSION_QUERY_MAX_ITEMS
 SNIPPET_CHARACTERS = 240
 
 _SESSION_SQL = f"""
@@ -45,32 +48,28 @@ WITH sessions AS MATERIALIZED ("""
     + """), documents AS (
  SELECT s.id AS session_id, NULL::text AS entry_id, 0::bigint AS sequence,
         0::integer AS ordinal, 'title'::text AS kind, NULL::bytea AS content,
-        NULL::text AS digest, NULL::bigint AS size FROM sessions s
+        NULL::text AS digest, NULL::bigint AS size,
+        NULL::timestamptz AS accepted_at, NULL::jsonb AS scheduled_input FROM sessions s
  UNION ALL
  SELECT e.session_id, e.id, e.entry_sequence, 0, 'user',
-        COALESCE(e.inline_content,b.body), e.content_digest,e.content_size
+        COALESCE(e.inline_content,b.body), e.content_digest,e.content_size, e.accepted_at,e.scheduled_input
  FROM sessions s JOIN pulsara_v3.transcript_entries e ON e.session_id=s.id
  LEFT JOIN pulsara_v3.blobs b ON b.id=e.blob_id AND b.workspace_id=e.workspace_id
  WHERE e.conversation_scope_kind='ROOT' AND e.entry_kind IN ('USER_MESSAGE','USER_STEER')
  UNION ALL
  SELECT e.session_id,e.id,e.entry_sequence,a.block_ordinal,'assistant',
-        COALESCE(a.inline_content,b.body),a.content_digest,a.content_size
+        COALESCE(a.inline_content,b.body),a.content_digest,a.content_size,e.accepted_at,e.scheduled_input
  FROM sessions s JOIN pulsara_v3.transcript_entries e ON e.session_id=s.id
  JOIN pulsara_v3.assistant_message_blocks a ON a.assistant_entry_id=e.id AND a.session_id=e.session_id
  LEFT JOIN pulsara_v3.blobs b ON b.id=a.blob_id AND b.workspace_id=a.workspace_id
  WHERE e.conversation_scope_kind='ROOT' AND e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST')
    AND a.block_kind='TEXT'
 )
-SELECT s.*,d.entry_id,d.sequence,d.ordinal,d.kind,d.content,d.digest,d.size
+SELECT s.*,d.entry_id,d.sequence,d.ordinal,d.kind,d.content,d.digest,d.size,d.accepted_at,d.scheduled_input
 FROM sessions s JOIN documents d ON d.session_id=s.id
-ORDER BY s.id,d.sequence DESC,d.ordinal DESC
+ORDER BY s.id,d.sequence DESC,d.ordinal ASC
 """
 )
-
-
-def display_title(row):
-    suffix = row["id"].removeprefix("session:")
-    return row["title"] or f"会话 {(suffix or row['id'])[:8]}"
 
 
 def _position(row):
@@ -103,31 +102,6 @@ def _cursor_position(cursor, query, lifecycle):
         raise ValueError("invalid session search cursor") from exc
 
 
-def _text(row):
-    if row["kind"] == "title":
-        return display_title(row)
-    content = row["content"]
-    if content is None:
-        raise RuntimeError("search source content is missing")
-    content = bytes(content)
-    if (
-        len(content) != row["size"]
-        or "sha256:" + sha256(content).hexdigest() != row["digest"]
-    ):
-        raise RuntimeError("search source content is corrupt")
-    try:
-        if row["kind"] == "assistant":
-            return content.decode("utf-8")
-        parts = decode_canonical_prompt_body(content).parts
-        return "\n".join(
-            part.text if isinstance(part, LLMTextPart) else part.comment or ""
-            for part in parts
-            if isinstance(part, (LLMTextPart, PromptAnnotationPart))
-        )
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("search source content cannot be decoded") from exc
-
-
 def search_session_page(
     repository,
     *,
@@ -137,6 +111,9 @@ def search_session_page(
     cursor=None,
     limit=20,
     deadline_monotonic,
+    current_session_id: str | None = None,
+    current_range: SessionContentRange | None = None,
+    read_connection=None,
 ):
     if not isinstance(query, str) or lifecycle not in ("ALL", "OPEN", "ARCHIVED"):
         raise ValueError("invalid session search")
@@ -148,15 +125,18 @@ def search_session_page(
         raise ValueError("invalid session search page")
     query = query.strip()
     after = _cursor_position(cursor, query, lifecycle)
-    patterns = [
-        re.compile(re.escape(term), re.IGNORECASE)
-        for term in dict.fromkeys(query.split())
-    ]
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        row_factory=dict_row,
-        isolation_level=IsolationLevel.REPEATABLE_READ,
-        deadline_monotonic=deadline_monotonic,
+    patterns = keyword_patterns(query)
+    if (current_session_id is None) != (current_range is None):
+        raise ValueError("current session search scope is incomplete")
+    with (
+        nullcontext(read_connection)
+        if read_connection is not None
+        else repository.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        )
     ) as connection:
         # Server cursor avoids loading the entire corpus into Python at once.
         with connection.cursor(name="session_search", row_factory=dict_row) as stream:
@@ -171,7 +151,21 @@ def search_session_page(
                     stream, key=lambda row: row["id"]
                 ):
                     best = None
-                    for row in documents:
+                    # Filter BEFORE aggregation/matching: a suffix hit must not
+                    # hide an older readable hit from the same session.
+                    scoped = (
+                        row
+                        for row in documents
+                        if not patterns
+                        or row["kind"] == "title"
+                        or row["id"] != current_session_id
+                        or (
+                            row["sequence"] <= current_range.through_sequence
+                            and row["entry_id"] != current_range.excluded_entry_id
+                        )
+                    )
+                    candidates = entry_documents(scoped) if patterns else scoped
+                    for row in candidates:
                         if monotonic() >= deadline_monotonic:
                             raise TimeoutError("session search deadline exceeded")
                         if not patterns:
@@ -182,7 +176,7 @@ def search_session_page(
                                 "snippet": "",
                             }
                             continue
-                        text = _text(row)
+                        text = row["text"]
                         hits = [pattern.search(text) for pattern in patterns]
                         if not all(hits):
                             continue
@@ -219,6 +213,15 @@ def search_session_page(
                             + text[start:end]
                             + ("…" if end < len(text) else ""),
                         )
+                        if row["entry_id"] is not None:
+                            best.update(
+                                entry_id=row["entry_id"],
+                                role=row["kind"],
+                                at=row["accepted_at"].isoformat(),
+                                text=text[start:end],
+                                partial=start > 0 or end < len(text),
+                                scheduled_input=row["scheduled_input"],
+                            )
                     if best is not None and (after is None or _position(best) > after):
                         yield best
 

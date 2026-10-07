@@ -943,7 +943,14 @@ def test_round1_missing_artifact_edge_fails_before_canonical_acceptance(
         ).fetchone() == (0,)
 
 
-def _install_tool_call(repository: ConversationKernelRepository, workspace_id: str):
+def _install_tool_call(
+    repository: ConversationKernelRepository,
+    workspace_id: str,
+    *,
+    tool_name="terminal",
+    arguments=None,
+    attempted=True,
+):
     session_id = _name("session")
     lease = acquire_bound_test_writer(
         repository,
@@ -965,7 +972,7 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text('run'),
+        content=FrozenPromptContent.text("run"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -985,14 +992,16 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
             AssistantToolCallBlock(
                 _name("block"),
                 tool_call_id,
-                "terminal",
-                freeze_json({"command": "true"}),
+                tool_name,
+                freeze_json({"command": "true"} if arguments is None else arguments),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
         actor_id="model:test",
         deadline_monotonic=monotonic() + 30,
     )
+    if not attempted:
+        return lease, turn_id, assistant_entry_id, tool_call_id, None
     attempt = repository.accept_tool_attempt(
         lease.guard,
         attempt_id=_name("attempt"),
@@ -1612,8 +1621,6 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
     assert missing.status is ToolResultState.ERROR
     assert missing_payload["status"] == "content_error"
     assert missing_payload["error_code"] == "artifact_content_missing"
-
-
 
 
 def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
