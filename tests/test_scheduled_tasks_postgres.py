@@ -183,6 +183,64 @@ def mutate(owner, t, action, values=None):
     )
 
 
+def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(owner, monkeypatch):
+    import asyncio
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from pulsara_agent.conversation_kernel._repository import scheduling
+    from pulsara_agent.scheduling.service import ScheduledTaskService
+
+    # Small page fixture exercises the existing keyset boundary without adding
+    # a product inventory/lifetime limit or creating 129 unrelated task rows.
+    monkeypatch.setattr(scheduling, "STAGE2_LIMITS", replace(scheduling.STAGE2_LIMITS, history_page_default_entries=1))
+    repo, lease, cut = owner
+    current = [task(owner) for _ in range(3)]
+    paused = mutate(owner, current.pop(), "pause")
+    other_lease = repo.acquire_host_writer(
+        intent="NEW", session_id=_name("session"), workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"), lease_seconds=120,
+        deadline_monotonic=monotonic() + 30,
+    )
+    _, binding, _ = _two_connection_resolution_cut()
+    repo.update_session_model_call_binding(
+        other_lease.guard, binding=binding, deadline_monotonic=monotonic() + 30
+    )
+    other = task((repo, other_lease, cut))
+
+    async def run():
+        service = ScheduledTaskService(SimpleNamespace())
+
+        async def read_repository(method, **kwargs):
+            return getattr(repo, method)(memory_domain_id="u_local", deadline_monotonic=monotonic() + 30, **kwargs)
+
+        service._read = read_repository
+        arguments = {"action": "list", "session_id": None, "status": "ACTIVE"}
+        ids = []
+        while True:
+            page = await service.invoke(arguments, default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+            ids.extend(row["id"] for row in page["tasks"])
+            assert all(row["session_id"] == lease.guard.session_id for row in page["tasks"])
+            if page["next_cursor"] is None:
+                break
+            arguments = {**arguments, "cursor": page["next_cursor"]}
+        assert ids == sorted(row["id"] for row in current)
+        assert paused["id"] not in ids and other["id"] not in ids
+        selected = await service.invoke({"action": "list", "session_id": other_lease.guard.session_id}, default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+        assert [row["id"] for row in selected["tasks"]] == [other["id"]]
+        all_ids = []
+        cursor = None
+        while True:
+            page = await service.list(cursor=cursor)
+            all_ids.extend(row["id"] for row in page["tasks"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        assert set(all_ids) >= {*(row["id"] for row in current), paused["id"], other["id"]}
+
+    asyncio.run(run())
+
+
 def test_atomic_enqueue_cursor_coalescing_and_old_snapshot(owner):
     t = make_due(owner, task(owner))
     candidate, _ = enqueue(owner, admission(t))

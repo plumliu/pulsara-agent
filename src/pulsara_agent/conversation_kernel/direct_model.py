@@ -81,7 +81,7 @@ from pulsara_agent.llm.resolution import (
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.llm.validation import (
-    validate_model_context_for_call,
+    validate_model_context_shape_for_call,
     validate_model_message_content_for_call,
 )
 from pulsara_agent.model_input.contracts import (
@@ -988,10 +988,11 @@ class DirectKernelModelPort:
         ):
             raise ValueError("model execution identity does not exact-join preparation")
         if (
-            compiled.compile_binding_fingerprint
+            compiled != append_candidate.resulting_compiled_input
+            or compiled.compile_binding_fingerprint
             != prepared.compile_binding.binding_fingerprint
             or compiled.tools != prepared.tool_surface.model_surface.tool_specs
-            or compiled.budget_report.tool_surface_fingerprint
+            or compiled.compile_report.tool_surface_fingerprint
             != prepared.tool_surface.model_surface.surface_fingerprint
             or prepared.transport_timeout_policy_fingerprint
             != self._transport_timeout_policy_fingerprint
@@ -1052,12 +1053,9 @@ class DirectKernelModelPort:
             model_call_index=request.model_call_index,
             tools=tuple(thawed_tools),
             system_prompt=compiled.system_prompt,
-            compiler_estimated_input_tokens=compiled.final_estimate.total_input_tokens,
             provider_wire_input_plan=plan,
         )
-        validated = validate_model_context_for_call(call=call, context=context)
-        if validated.estimate != compiled.final_estimate:
-            raise RuntimeError("compiler and pre-send input estimates differ")
+        validate_model_context_shape_for_call(call=call, context=context)
         return PreparedKernelModelExecution(
             request=request,
             final_context=context,
@@ -1443,13 +1441,6 @@ def freeze_provider_wire_measurement(
         call=call,
         messages=semantic_input.messages,
     )
-    recomputed_semantic = binding.estimator.estimate_frozen_input(
-        system_prompt=semantic_input.system_prompt,
-        messages=semantic_input.messages,
-        tools=semantic_input.tools,
-    )
-    if recomputed_semantic != semantic_input.final_estimate:
-        raise ValueError("provider wire semantic estimate changed")
     generic_groups, wire_tools = _semantic_wire_groups(
         call=call,
         semantic_input=semantic_input,
@@ -1636,12 +1627,6 @@ def freeze_provider_wire_measurement(
         wire_api=profile.wire_api,
         estimator_fingerprint=binding.estimator_fingerprint,
         effective_input_budget_tokens=binding.effective_input_budget_tokens,
-        semantic_estimated_input_tokens=(
-            semantic_input.final_estimate.total_input_tokens
-        ),
-        semantic_visual_image_tokens=(
-            semantic_input.final_estimate.visual_image_tokens
-        ),
         generic_wire_estimated_input_tokens=(
             generic_wire_tokens.total_input_tokens
         ),
@@ -1727,7 +1712,6 @@ def _wire_plan_semantic_identity(
                 semantic_input.message_placements
             ),
             "tools": semantic_input.tools,
-            "estimate": semantic_input.final_estimate,
             "binding": semantic_input.compile_binding_fingerprint,
         },
     )
@@ -1744,7 +1728,6 @@ def _require_same_wire_semantic_input(
         or measured.messages != selected.messages
         or measured.message_placements != selected.message_placements
         or measured.tools != selected.tools
-        or measured.final_estimate != selected.final_estimate
         or measured.compile_binding_fingerprint != selected.compile_binding_fingerprint
     ):
         raise ValueError("provider wire semantic input changed after measurement")
@@ -1782,6 +1765,27 @@ def _materialize_context_bearing_projection(
             tool_choice=tool_choice,
         )
     raise ValueError("provider wire API is unsupported")
+
+
+def quote_provider_suffix_input_tokens(
+    *, call: ResolvedModelCall, messages: tuple[LLMMessage, ...]
+) -> int:
+    """Price a possible suffix using the same adapter projection and V3 seam."""
+    wire_api = call.target.model_profile.route_wire_profile.wire_api
+    if wire_api == "openai_chat_completions":
+        project = chat_semantic_wire_group
+    elif wire_api == "openai_responses":
+        project = responses_semantic_wire_group
+    else:
+        raise ValueError("provider wire API is unsupported")
+    items, sources = [], []
+    for message in messages:
+        group = project(message)
+        items.extend(group)
+        sources.extend(message for _ in group)
+    return call.target.token_estimator.estimate_ordered_wire_json_components(
+        ordered_input_items=tuple(items), ordered_input_sources=tuple(sources)
+    ).total_input_tokens
 
 
 def quote_provider_followup_wire_resources(

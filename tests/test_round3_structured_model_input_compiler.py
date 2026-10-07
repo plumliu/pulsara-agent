@@ -1921,16 +1921,17 @@ def test_round3_source_identity_duplicate_and_variant_order_fail_closed() -> Non
         _candidate(ContextSourceKind.BASE_SYSTEM, ("\ud800",))
 
 
-def test_round3_source_variants_must_not_increase_exact_estimator_cost() -> None:
-    environment = _candidate(
-        ContextSourceKind.RUNTIME_ENVIRONMENT,
-        ("x", "this compact variant is larger than full"),
-    )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler().compile(
-            _prepared_request(_snapshot(), _sources(environment))
-        )
-    assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+def test_round3_source_floors_allow_nonmonotonic_wire_sizes() -> None:
+    environment = _candidate(ContextSourceKind.RUNTIME_ENVIRONMENT,
+        ("x", "this compact variant is larger than full"))
+    request = _prepared_request(_snapshot(), _sources(environment))
+    compiler = StructuredModelInputCompiler()
+    full = compiler.compile(request)
+    compact = compiler.compile(request,
+        source_render_floors=((ContextSourceKind.RUNTIME_ENVIRONMENT, ContextRenderMode.COMPACT),))
+    assert next(d for d in full.source_decisions if d.source_kind is ContextSourceKind.RUNTIME_ENVIRONMENT).selected_mode is ContextRenderMode.FULL
+    assert next(d for d in compact.source_decisions if d.source_kind is ContextSourceKind.RUNTIME_ENVIRONMENT).selected_mode is ContextRenderMode.COMPACT
+    assert any("this compact variant is larger than full" in p.text for m in compact.messages for p in m.content if isinstance(p, LLMTextPart))
 
 
 def test_round3_system_placement_is_independent_of_input_order() -> None:
@@ -2013,7 +2014,7 @@ def test_round3_optional_clock_advances_only_after_wire_render_feedback() -> Non
     compiler = StructuredModelInputCompiler()
     request = _prepared_request(_snapshot(_user("hello")), sources, budget=4)
     full = compiler.compile(request)
-    assert full.final_estimate.total_input_tokens > request.compile_binding.effective_input_budget_tokens
+    assert any("clock " * 100 in p.text for m in full.messages for p in m.content if isinstance(p, LLMTextPart))
     assert all(item.selected_mode is ContextRenderMode.FULL for item in full.source_decisions if item.included)
     floors = compiler.next_wire_render_floors(request=request, compiled=full)
     assert floors[0] == ((ContextSourceKind.RUNTIME_CLOCK, ContextRenderMode.COMPACT),)
@@ -2027,7 +2028,7 @@ def test_round3_must_keep_source_stays_complete_in_unadmitted_candidate() -> Non
     request = _prepared_request(_snapshot(), _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("required " * 100,))), budget=4)
     compiler = StructuredModelInputCompiler()
     compiled = compiler.compile(request)
-    assert compiled.final_estimate.total_input_tokens > request.compile_binding.effective_input_budget_tokens
+    assert compiled.system_prompt == "required " * 100
     base = next(item for item in compiled.source_decisions if item.source_kind is ContextSourceKind.BASE_SYSTEM)
     assert base.included and base.selected_mode is ContextRenderMode.FULL
     with pytest.raises(ValueError, match="required source"):
@@ -2039,11 +2040,11 @@ def test_round3_active_skill_and_tool_schema_are_preserved_before_wire_admission
     active = _candidate(ContextSourceKind.ACTIVE_SKILL, ("active " * 100, ""))
     active_request = _prepared_request(_snapshot(), _sources(active), budget=4)
     active_candidate = compiler.compile(active_request)
-    assert active_candidate.final_estimate.total_input_tokens > 4
+    assert any("active " * 100 in p.text for m in active_candidate.messages for p in m.content if isinstance(p, LLMTextPart))
     assert next(item for item in active_candidate.source_decisions if item.source_kind is ContextSourceKind.ACTIVE_SKILL).selected_mode is ContextRenderMode.FULL
     schema_request = _prepared_request(_snapshot(), _sources(), budget=4, tool_names=("artifact_read",))
     schema_candidate = compiler.compile(schema_request)
-    assert schema_candidate.final_estimate.total_input_tokens > 4
+    assert not hasattr(schema_candidate, "final_estimate")
     assert schema_candidate.tools == schema_request.compile_binding.tool_surface.tool_specs
 
 
@@ -2679,30 +2680,17 @@ class _CountingEstimator:
     def __init__(self, delegate: ModelInputTokenEstimator) -> None:
         self._delegate = delegate
         self.fact = delegate.fact
-        self.full_calls = 0
-        self.message_calls = 0
+        self.calls = 0
 
-    def estimate_text(self, text: str) -> int:
-        return self._delegate.estimate_text(text)
-
-    def estimate_message(self, message):
-        self.message_calls += 1
-        return self._delegate.estimate_message(message)
-
-    def estimate_frozen_tool_spec(self, tool):
-        return self._delegate.estimate_frozen_tool_spec(tool)
-
-    def estimate_frozen_input(self, **kwargs):
-        self.full_calls += 1
-        return self._delegate.estimate_frozen_input(**kwargs)
+    def __getattr__(self, name):
+        self.calls += 1
+        raise AssertionError(f"structural compiler must not ask its budget estimator for {name}")
 
 
-class _SlowCooperativeEstimator(_CountingEstimator):
-    def estimate_frozen_input_cooperative(self, *, checkpoint, **kwargs):
-        for _ in range(1_000):
-            sleep(0.001)
-            checkpoint()
-        return self._delegate.estimate_frozen_input(**kwargs)
+class _SlowIdentityCompiler(StructuredModelInputCompiler):
+    def _identity_source_contents(self, request, decisions):
+        sleep(0.04)
+        return super()._identity_source_contents(request, decisions)
 
 
 def test_round3_4096_item_allocation_does_not_full_reestimate_per_item() -> None:
@@ -2714,12 +2702,8 @@ def test_round3_4096_item_allocation_does_not_full_reestimate_per_item() -> None
         compile_binding=replace(request.compile_binding, estimator=counting),
     )
     compiled = StructuredModelInputCompiler().compile(request)
-    assert compiled.final_estimate.total_input_tokens > 0
-    assert counting.full_calls <= 4
-    # Constant first-party runtime-observation carriers add a bounded number
-    # of estimates; transcript growth must remain linear, never per-item full
-    # re-estimation.
-    assert counting.message_calls <= 4_096 + 16
+    assert sum(m.content == (LLMTextPart("x"),) for m in compiled.messages) == 4096
+    assert counting.calls == 0
 
 
 def test_round3_compiler_rejects_expired_deadline_before_allocation() -> None:
@@ -2752,17 +2736,12 @@ def test_round3_compiler_rejects_expired_deadline_before_allocation() -> None:
 def test_round3_compiler_deadline_physically_exits_before_io_close() -> None:
     async def exercise() -> None:
         request = _prepared_request(_snapshot(_user("deadline")), _sources())
-        slow = _SlowCooperativeEstimator(request.compile_binding.estimator)
-        request = replace(
-            request,
-            compile_binding=replace(request.compile_binding, estimator=slow),
-        )
         io_owner = KernelSessionIO()
         started = monotonic()
         deadline = started + 0.03
         with pytest.raises((TimeoutError, StructuredModelInputCompileError)):
             await io_owner.run(
-                StructuredModelInputCompiler().compile,
+                _SlowIdentityCompiler().compile,
                 request,
                 deadline_monotonic=deadline,
             )
@@ -2815,7 +2794,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         dispatch_anchor=_append_anchor(request),
     )
     candidate = compiler.compile_installed_append(request, planning=planning)
-    assert candidate.compiled_input.final_estimate.total_input_tokens > 800
+    assert any(m.content == jumped.content for m in candidate.compiled_input.messages)
     assert candidate.compiled_input.messages[:len(installed.messages)] == installed.messages
 
     projection = compiler.project_installed_append(
@@ -2823,7 +2802,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         planning=planning,
     )
     projected = projection.projected_input
-    assert projected.final_estimate.total_input_tokens > 800
+    assert projected.messages == candidate.compiled_input.messages
     assert projected.system_prompt == installed.system_prompt
     assert projected.tools == installed.tools
     assert projected.messages[: len(installed.messages)] == installed.messages
@@ -2856,25 +2835,9 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         source_projection=projected,
         deadline_monotonic=monotonic() + 1,
     )
-    quoted = tuple(
-        (tail, prefix, estimate)
-        for tail, prefix in safe_prefixes
-        for estimate in (
-            request.compile_binding.estimator.estimate_frozen_input(
-                system_prompt=projected.system_prompt,
-                messages=(
-                    projected.messages[: prefix.summary_prefix_message_count]
-                    + (LLMMessage.user(summary_request),)
-                ),
-                tools=projected.tools,
-            ),
-        )
-    )
-    # The appended user entry is one indivisible canonical item. Projection is
-    # still valid even when no safe summary prefix fits the summary model.
-    assert quoted
-    tail, prefix, summary_estimate = quoted[-1]
-    assert summary_estimate.total_input_tokens > 800
+    assert safe_prefixes
+    tail, prefix = safe_prefixes[-1]
+    assert summary_request
     assert 0 < prefix.summary_prefix_message_count < len(projected.messages)
     assert tail.protected_tail_message_start_index == (
         prefix.summary_prefix_message_count
@@ -2901,9 +2864,7 @@ def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work()
     candidate = StructuredModelInputCompiler().compile(request)
     assert len(candidate.tool_result_decisions) == 4_096
     assert all(item.selected_mode is ToolResultProviderRenderMode.FULL for item in candidate.tool_result_decisions)
-    assert candidate.final_estimate.total_input_tokens > 128
-    assert counting.full_calls <= 8
-    assert counting.message_calls < 50_000
+    assert counting.calls == 0
 
 
 class _Capability:
@@ -3844,7 +3805,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     assert compiled.source_collection_fingerprint == (
         "sha256:7817597999d8607618dc44d98dc5526c5569c07c1ddac9f581fb2a22ec347b74"
     )
-    assert compiled.budget_report.decision_digest == (
+    assert compiled.compile_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
@@ -3852,7 +3813,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         # budget decisions stay the same; the target-bound identity changes.
         "sha256:449f69c07fd3bf261d2cac32d133d4d5b8c83e7219876191bc9c3c99fd6e3354"
     )
-    assert compiled.final_estimate.total_input_tokens == 237
+    assert not hasattr(compiled, "final_estimate")
 
 
 def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> None:
@@ -4153,7 +4114,6 @@ def _assert_replay_final_wire_projection(*, result, view, prepared_call) -> None
         resolved_model_call_id=prepared_call.call.resolved_model_call_id,
         model_call_index=1,
         system_prompt=compiled.system_prompt,
-        compiler_estimated_input_tokens=compiled.final_estimate.total_input_tokens,
         provider_wire_input_plan=plan,
     )
     if plan.wire_api == "openai_chat_completions":

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { CalendarClock, ChevronDown, ChevronRight, CircleAlert, Clock3, ExternalLink, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import type { SessionSummary, PermissionMode } from '../lib/pulsara-types';
@@ -39,6 +39,8 @@ export function ScheduledTasksView({ modelConfigurations, onCreateSession, api, 
   const [editor, setEditor] = useState<{task?: ScheduledTask} | null>(null); const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const revision = useRef(0); const runRequests = useRef(new Map<string, ScheduledRunRequest>());
+  // Invalidate every outstanding list request, including manual reloads, on cleanup.
+  const invalidateListRequests = useCallback(() => { revision.current++; }, []);
   const reload = async (more = false) => {
     const captured = ++revision.current; setLoading(true);
     try { const page = await api.list(status, more ? cursor ?? undefined : undefined); if (revision.current !== captured) return; setItems(old => more ? [...old.filter(x => !page.tasks.some(y => y.id === x.id)), ...page.tasks] : page.tasks); setCursor(page.next_cursor); }
@@ -52,8 +54,8 @@ export function ScheduledTasksView({ modelConfigurations, onCreateSession, api, 
       if (revision.current !== captured) return;
       setItems(page.tasks); setCursor(page.next_cursor); setLoading(false);
     }).catch(e => { if (!controller.signal.aborted && revision.current === captured) { setError((e as Error).message); setLoading(false); } });
-    return () => { controller.abort(); revision.current++; };
-  }, [api, ready, status]);
+    return () => { controller.abort(); invalidateListRequests(); };
+  }, [api, ready, status, invalidateListRequests]);
   const act = async (task: ScheduledTask, action: 'pause' | 'resume' | 'delete' | 'run') => {
     setBusy(true); setError('');
     try {
@@ -150,6 +152,7 @@ function TaskEditor({modelConfigurations, onCreateSession, onOpenSettings, task,
   const [onceChanged, setOnceChanged] = useState(false);
   const [anchor,setAnchor] = useState(() => initial?.kind === 'interval' ? initial.anchor_at_utc : new Date(Math.floor(Date.now()/1000)*1000).toISOString());
   const [preview,setPreview] = useState(''); const [error,setError] = useState(''); const [busy,setBusy] = useState(false); const previewRevision = useRef(0);
+  const invalidatePreviewRequests = useCallback(() => { previewRevision.current++; }, []);
   const rule = async (signal?: AbortSignal): Promise<ScheduleRule> => {
     const contract = 'scheduled-rule:v1' as const;
     if (kind === 'once') return current?.schedule.kind === 'once' && !onceChanged ? current.schedule : (await api.localOnce(once, timezone, signal)).schedule;
@@ -160,8 +163,8 @@ function TaskEditor({modelConfigurations, onCreateSession, onOpenSettings, task,
   };
   useEffect(() => { const controller = new AbortController(); const captured = ++previewRevision.current;
     void rule(controller.signal).then(schedule => api.preview(schedule, timezone,controller.signal)).then(p => { if (captured === previewRevision.current) setPreview(dateTime(p.next_run_at,timezone,timezone !== 'Asia/Shanghai') + (p.local_time_fold === 0 ? " · 重复时间的第一次" : p.local_time_fold === 1 ? " · 重复时间的第二次" : "")); }).catch(e => { if (!controller.signal.aborted && captured === previewRevision.current) setPreview((e as Error).message); });
-    return () => { controller.abort(); previewRevision.current++; };
-  }, [kind, start,time,day,days,seconds,once,anchor,timezone,onceChanged,current]); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { controller.abort(); invalidatePreviewRequests(); };
+  }, [kind, start,time,day,days,seconds,once,anchor,timezone,onceChanged,current,invalidatePreviewRequests]); // eslint-disable-line react-hooks/exhaustive-deps
   const save = async () => {
     setBusy(true); setError('');
     try {

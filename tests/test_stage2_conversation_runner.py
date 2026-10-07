@@ -4132,9 +4132,6 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     assert len(model.summary_transport.contexts) == 1
     assert len(summary_measurements) >= 2
     longest_count, longest_quote = summary_measurements[0]
-    assert longest_quote.semantic_estimated_input_tokens <= (
-        longest_quote.effective_input_budget_tokens
-    )
     assert longest_quote.raw_final_wire_estimated_input_tokens > (
         longest_quote.effective_input_budget_tokens
     )
@@ -4428,43 +4425,10 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     )
     original_prepare = compaction_model_call.prepare_compaction_summary_semantic
     prepared_semantics: list[object] = []
-    estimator_patched = False
-
     def prepare_semantic_overbudget(**kwargs):
-        nonlocal estimator_patched
-        estimator = kwargs["source_view"].normal_compile_binding.estimator
-        if not estimator_patched:
-            estimate_frozen_input = estimator.estimate_frozen_input
-
-            def inflate_summary_semantic_estimate(*, system_prompt, messages, tools):
-                estimate = estimate_frozen_input(
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    tools=tools,
-                )
-                summary_request = kwargs["summary_request"]
-                if (
-                    not messages
-                    or messages[-1].role is not MessageRole.USER
-                    or messages[-1].content != (LLMTextPart(summary_request),)
-                ):
-                    return estimate
-                addend = 100_000
-                by_index = list(estimate.message_tokens_by_index)
-                by_index[-1] += addend
-                return replace(
-                    estimate,
-                    message_tokens=estimate.message_tokens + addend,
-                    message_tokens_by_index=tuple(by_index),
-                    total_input_tokens=estimate.total_input_tokens + addend,
-                )
-
-            monkeypatch.setattr(
-                estimator,
-                "estimate_frozen_input",
-                inflate_summary_semantic_estimate,
-            )
-            estimator_patched = True
+        # No semantic estimator exists on this owner. Replay-bearing input
+        # must reach final-wire admission directly.
+        assert not hasattr(kwargs["source_view"].normal_compile_binding.estimator, "estimate_frozen_input")
         semantic = original_prepare(**kwargs)
         prepared_semantics.append(semantic)
         return semantic
@@ -4494,14 +4458,8 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
 
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert len(prepared_semantics) == 1
-    semantic = prepared_semantics[0]
+    assert not hasattr(prepared_semantics[0].semantic_input, "final_estimate")
     selected_plan = model.summary_transport.contexts[0].provider_wire_input_plan
-    assert semantic.semantic_input.final_estimate.total_input_tokens > (
-        selected_plan.quote.effective_input_budget_tokens
-    )
-    assert selected_plan.quote.semantic_estimated_input_tokens == (
-        semantic.semantic_input.final_estimate.total_input_tokens
-    )
     assert selected_plan.quote.raw_final_wire_estimated_input_tokens <= (
         selected_plan.quote.effective_input_budget_tokens
     )
@@ -6238,7 +6196,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert source_wire_quotes[0][0] <= source_wire_quotes[0][1]
     assert len(model.summary_transport.contexts) == 1
     assert (
-        model.summary_transport.contexts[0].compiler_estimated_input_tokens
+        model.summary_transport.contexts[0].provider_wire_input_plan.quote.budget_input_tokens
         <= (source_wire_quotes[0][1])
     )
     assert len(model.requests) == 2
@@ -7716,7 +7674,7 @@ def test_k3_direct_input_failure_rejects_before_user_acceptance_and_provider_ope
     with pytest.raises(StructuredModelInputCompileError) as failure:
         asyncio.run(runner.run_turn(frozen_test_prompt("reject before acceptance")))
     assert failure.value.kind is (
-        ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
+        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
     )
     assert model.preparation_requests
     assert model.requests == []
@@ -7903,7 +7861,7 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
         )
 
     assert failure.value.kind is (
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
+        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
     )
     assert model.preparation_requests
     assert model.requests == []

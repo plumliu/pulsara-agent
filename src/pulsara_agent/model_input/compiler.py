@@ -11,10 +11,6 @@ from enum import IntEnum
 import json
 from time import monotonic
 
-from pulsara_agent.llm.estimator import (
-    TokenEstimate,
-    estimate_image_visual_tokens,
-)
 from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
@@ -26,13 +22,14 @@ from pulsara_agent.llm.input import (
     llm_content_logical_bytes,
     prompt_provider_parts,
 )
+from pulsara_agent.model_input._stable_input_identity import compiled_input_identity
 from pulsara_agent.model_input.contracts import (
     CompiledSourceDecision,
     CompiledToolResultDecision,
     CompactionSnapshotCarrier,
     ContextBudgetClass,
     ContextChannel,
-    ContextCompileBudgetReport,
+    ContextCompileReport,
     ContextPublicDiagnosticCode,
     ContextRenderMode,
     ContextSourceCandidate,
@@ -43,7 +40,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenCompiledMessagePlacement,
     FrozenCompiledModelInput,
     FrozenModelInputSemanticProjection,
-    FrozenToolSpec,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ModelInputCompileFailureKind,
@@ -55,7 +51,6 @@ from pulsara_agent.model_input.contracts import (
     ToolAttachmentSource,
     ToolAttachmentSourceMember,
     compiled_tool_result_source_fingerprint,
-    frozen_compiled_model_input_fingerprint,
     provider_input_item_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
@@ -492,7 +487,6 @@ class _Layout:
     system_prompt: str
     messages: tuple[LLMMessage, ...]
     message_placements: tuple[FrozenCompiledMessagePlacement, ...]
-    estimate: TokenEstimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -957,7 +951,6 @@ class StructuredModelInputCompiler:
             lowered,
             materialized_plan_bytes=materialized_plan_bytes,
         )
-        estimator = request.compile_binding.estimator
         diagnostics = [item.code for item in request.sources.diagnostics]
 
         layout = self._layout(
@@ -967,7 +960,6 @@ class StructuredModelInputCompiler:
             tools=tool_states,
             deadline=deadline,
         )
-        budget = request.compile_binding.effective_input_budget_tokens
         degraded_source_ids = {
             state.candidate.source_instance_id
             for state in source_states
@@ -981,17 +973,6 @@ class StructuredModelInputCompiler:
             if state.selected > 0
         }
 
-        full = self._estimate_frozen_input(
-            request,
-            system_prompt=layout.system_prompt,
-            messages=layout.messages,
-            tools=surface.tool_specs,
-            deadline=deadline,
-        )
-        if full != layout.estimate:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
-            )
         source_decisions = tuple(
             CompiledSourceDecision(
                 source_kind=state.candidate.source_kind,
@@ -999,9 +980,6 @@ class StructuredModelInputCompiler:
                 channel=state.candidate.channel,
                 selected_mode=state.mode(),
                 included=not state.omitted,
-                estimated_tokens=self._selected_source_tokens(
-                    request, state, source_states
-                ),
                 reason_code=(
                     "OMITTED_FOR_BUDGET"
                     if state.omitted
@@ -1031,7 +1009,6 @@ class StructuredModelInputCompiler:
                 selected_mode=state.mode(),
                 delivery_requirement=(state.item.tool_result_delivery.requirement),
                 full_delivery_reason=state.item.tool_result_delivery.reason,
-                estimated_tokens=estimator.estimate_message(state.message()),
                 reason_code=self._tool_decision_reason(state),
             )
             for state in tool_states
@@ -1082,7 +1059,6 @@ class StructuredModelInputCompiler:
                 messages=layout.messages,
                 message_placements=layout.message_placements,
                 tools=surface.tool_specs,
-                final_estimate=full,
                 source_decisions=source_decisions,
                 tool_result_decisions=tool_decisions,
                 diagnostic_codes=diagnostic_codes,
@@ -1118,38 +1094,32 @@ class StructuredModelInputCompiler:
                 ),
             },
         )
-        source_tokens = self._context_source_tokens(request, layout, source_states)
-        report = ContextCompileBudgetReport(
+        report = ContextCompileReport(
             compiler_contract_version=COMPILER_CONTRACT_VERSION,
-            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
             tool_surface_fingerprint=surface.surface_fingerprint,
-            effective_input_budget_tokens=budget,
-            system_tokens=full.system_tokens,
-            message_tokens=full.message_tokens,
-            tool_tokens=full.tool_tokens,
-            envelope_tokens=full.envelope_tokens,
-            total_input_tokens=full.total_input_tokens,
-            protected_transcript_tokens=0,
             protected_prefix_message_count=0,
             protected_prefix_logical_bytes=0,
             protected_prefix_fingerprint=None,
-            context_source_tokens=source_tokens,
             degraded_source_count=len(degraded_source_ids),
             omitted_source_count=omitted_sources,
             degraded_tool_result_count=len(degraded_tool_ids),
             omitted_tool_result_body_count=omitted_tools,
             decision_digest=decision_digest,
         )
-        compiled_fingerprint = frozen_compiled_model_input_fingerprint(
+        compiled_fingerprint = compiled_input_identity(
+            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
+            effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
+            source_contents=self._identity_source_contents(request, source_decisions),
+            tool_messages=tuple(state.message() for state in tool_states),
+            checkpoint=deadline.check,
             context_id=request.context_id,
             canonical_input_identity=request.canonical_input.identity,
             system_prompt=layout.system_prompt,
             messages=layout.messages,
             tools=surface.tool_specs,
-            final_estimate=full,
             source_decisions=source_decisions,
             tool_result_decisions=tool_decisions,
-            budget_report=report,
+            compile_report=report,
             diagnostic_codes=diagnostic_codes,
             source_collection_fingerprint=request.sources.collection_fingerprint,
             compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
@@ -1162,10 +1132,9 @@ class StructuredModelInputCompiler:
             messages=layout.messages,
             message_placements=layout.message_placements,
             tools=surface.tool_specs,
-            final_estimate=full,
             source_decisions=source_decisions,
             tool_result_decisions=tool_decisions,
-            budget_report=report,
+            compile_report=report,
             diagnostic_codes=diagnostic_codes,
             source_collection_fingerprint=request.sources.collection_fingerprint,
             compiled_semantic_fingerprint=compiled_fingerprint,
@@ -1613,13 +1582,6 @@ class StructuredModelInputCompiler:
             prefix=prefix_placements,
             values=suffix_placement_values,
         )
-        estimate = self._estimate_frozen_input(
-            request,
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=tools,
-            deadline=deadline,
-        )
         if provider_input_logical_bytes(
             system_prompt=system_prompt, tools=tools, messages=messages
         ) > (64 << 20):
@@ -1634,7 +1596,6 @@ class StructuredModelInputCompiler:
                     messages=messages,
                     message_placements=message_placements,
                     tools=tools,
-                    final_estimate=estimate,
                     source_decisions=fresh.source_decisions,
                     tool_result_decisions=fresh.tool_result_decisions,
                     diagnostic_codes=fresh.diagnostic_codes,
@@ -1664,29 +1625,25 @@ class StructuredModelInputCompiler:
             },
         )
         report = replace(
-            fresh.budget_report,
-            system_tokens=estimate.system_tokens,
-            message_tokens=estimate.message_tokens,
-            tool_tokens=estimate.tool_tokens,
-            envelope_tokens=estimate.envelope_tokens,
-            total_input_tokens=estimate.total_input_tokens,
-            protected_transcript_tokens=estimate.message_tokens,
-            context_source_tokens=sum(
-                request.compile_binding.estimator.estimate_message(item)
-                for item in ordered_observations
-            ),
+            fresh.compile_report,
             decision_digest=decision_digest,
         )
-        compiled_fingerprint = frozen_compiled_model_input_fingerprint(
+        compiled_fingerprint = compiled_input_identity(
+            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
+            effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
+            source_contents=self._identity_source_contents(request, fresh.source_decisions),
+            tool_messages=tuple(message for item, message in zip(lowered_delta, selected_delta_messages, strict=True) if item.tool_result_variants),
+            protected_messages=messages,
+            context_messages=ordered_observations,
+            checkpoint=deadline.check,
             context_id=request.context_id,
             canonical_input_identity=identity,
             system_prompt=system_prompt,
             messages=messages,
             tools=tools,
-            final_estimate=estimate,
             source_decisions=fresh.source_decisions,
             tool_result_decisions=fresh.tool_result_decisions,
-            budget_report=report,
+            compile_report=report,
             diagnostic_codes=fresh.diagnostic_codes,
             source_collection_fingerprint=request.sources.collection_fingerprint,
             compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
@@ -1699,10 +1656,9 @@ class StructuredModelInputCompiler:
             messages=messages,
             message_placements=message_placements,
             tools=tools,
-            final_estimate=estimate,
             source_decisions=fresh.source_decisions,
             tool_result_decisions=fresh.tool_result_decisions,
-            budget_report=report,
+            compile_report=report,
             diagnostic_codes=fresh.diagnostic_codes,
             source_collection_fingerprint=request.sources.collection_fingerprint,
             compiled_semantic_fingerprint=compiled_fingerprint,
@@ -2022,17 +1978,6 @@ class StructuredModelInputCompiler:
                     ContextRenderMode.FULL if item.state is None else item.state.mode()
                 ),
                 included=(item.state is None or not item.state.omitted),
-                estimated_tokens=(
-                    request.compile_binding.estimator.estimate_message(
-                        item.fixed_message
-                    )
-                    if item.state is None
-                    else 0
-                    if item.state.omitted
-                    else request.compile_binding.estimator.estimate_message(
-                        item.state.message()
-                    )
-                ),
                 reason_code=(
                     "OMITTED_FOR_BUDGET"
                     if item.state is not None and item.state.omitted
@@ -2063,9 +2008,6 @@ class StructuredModelInputCompiler:
                 selected_mode=state.mode(),
                 delivery_requirement=(state.item.tool_result_delivery.requirement),
                 full_delivery_reason=state.item.tool_result_delivery.reason,
-                estimated_tokens=request.compile_binding.estimator.estimate_message(
-                    state.message()
-                ),
                 reason_code=self._tool_decision_reason(state),
             )
             for state in tool_states
@@ -2104,7 +2046,6 @@ class StructuredModelInputCompiler:
                     messages=layout.messages,
                     message_placements=layout.message_placements,
                     tools=predecessor.tools,
-                    final_estimate=layout.estimate,
                     source_decisions=source_decisions,
                     tool_result_decisions=tool_decisions,
                     diagnostic_codes=diagnostic_codes,
@@ -2118,9 +2059,7 @@ class StructuredModelInputCompiler:
                 canonical_frontier=frontier,
                 appended_message_count=(len(layout.messages) - len(previous_messages)),
             )
-        prefix_message_tokens = predecessor.final_estimate.message_tokens
         prefix_fingerprint = predecessor.semantic_prefix_fingerprint
-        source_tokens = sum(decision.estimated_tokens for decision in source_decisions)
         decision_digest = context_fingerprint(
             "pulsara:model-input-append-decisions:v2",
             {
@@ -2146,41 +2085,42 @@ class StructuredModelInputCompiler:
                 ),
             },
         )
-        report = ContextCompileBudgetReport(
+        report = ContextCompileReport(
             compiler_contract_version=COMPILER_CONTRACT_VERSION,
-            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
             tool_surface_fingerprint=(
                 predecessor.tool_exposure_plan.direct_tool_surface.surface_fingerprint
             ),
-            effective_input_budget_tokens=(
-                request.compile_binding.effective_input_budget_tokens
-            ),
-            system_tokens=layout.estimate.system_tokens,
-            message_tokens=layout.estimate.message_tokens,
-            tool_tokens=layout.estimate.tool_tokens,
-            envelope_tokens=layout.estimate.envelope_tokens,
-            total_input_tokens=layout.estimate.total_input_tokens,
-            protected_transcript_tokens=prefix_message_tokens,
             protected_prefix_message_count=len(previous_messages),
             protected_prefix_logical_bytes=predecessor.logical_bytes,
             protected_prefix_fingerprint=prefix_fingerprint,
-            context_source_tokens=source_tokens,
             degraded_source_count=len(degraded_source_ids),
             omitted_source_count=omitted_sources,
             degraded_tool_result_count=len(degraded_tool_ids),
             omitted_tool_result_body_count=omitted_tools,
             decision_digest=decision_digest,
         )
-        compiled_fingerprint = frozen_compiled_model_input_fingerprint(
+        compiled_fingerprint = compiled_input_identity(
+            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
+            effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
+            source_contents=tuple(
+                item.fixed_message if item.state is None else None if item.state.omitted else item.state.message()
+                for item in sorted(emissions, key=lambda value: (value.placement_ordinal, value.source_kind.value))
+            ),
+            tool_messages=tuple(state.message() for state in tool_states),
+            protected_messages=previous_messages,
+            context_messages=tuple(
+                item.fixed_message if item.state is None else item.state.message()
+                for item in emissions if item.state is None or not item.state.omitted
+            ),
+            checkpoint=deadline.check,
             context_id=request.context_id,
             canonical_input_identity=request.canonical_input.identity,
             system_prompt=layout.system_prompt,
             messages=layout.messages,
             tools=predecessor.tools,
-            final_estimate=layout.estimate,
             source_decisions=source_decisions,
             tool_result_decisions=tool_decisions,
-            budget_report=report,
+            compile_report=report,
             diagnostic_codes=diagnostic_codes,
             source_collection_fingerprint=request.sources.collection_fingerprint,
             compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
@@ -2193,10 +2133,9 @@ class StructuredModelInputCompiler:
             messages=layout.messages,
             message_placements=layout.message_placements,
             tools=predecessor.tools,
-            final_estimate=layout.estimate,
             source_decisions=source_decisions,
             tool_result_decisions=tool_decisions,
-            budget_report=report,
+            compile_report=report,
             diagnostic_codes=diagnostic_codes,
             source_collection_fingerprint=request.sources.collection_fingerprint,
             compiled_semantic_fingerprint=compiled_fingerprint,
@@ -2292,41 +2231,6 @@ class StructuredModelInputCompiler:
             )
         else:
             suffix = (*delta_messages, *ordered_observations)
-        suffix_token_values: list[int] = []
-        for message in suffix:
-            deadline.check()
-            suffix_token_values.append(
-                request.compile_binding.estimator.estimate_message(message)
-            )
-        previous_estimate = predecessor.final_estimate
-        message_tokens_by_index = (
-            *previous_estimate.message_tokens_by_index,
-            *suffix_token_values,
-        )
-        message_tokens = sum(message_tokens_by_index)
-        suffix_visual_image_tokens = sum(
-            estimate_image_visual_tokens(width=part.width, height=part.height)
-            for message in suffix
-            for part in message.content
-            if isinstance(part, LLMImagePart)
-        )
-        estimate = TokenEstimate(
-            system_tokens=previous_estimate.system_tokens,
-            message_tokens=message_tokens,
-            message_tokens_by_index=message_tokens_by_index,
-            tool_tokens=previous_estimate.tool_tokens,
-            envelope_tokens=previous_estimate.envelope_tokens,
-            visual_image_tokens=(
-                previous_estimate.visual_image_tokens
-                + suffix_visual_image_tokens
-            ),
-            total_input_tokens=(
-                previous_estimate.system_tokens
-                + message_tokens
-                + previous_estimate.tool_tokens
-                + previous_estimate.envelope_tokens
-            ),
-        )
         messages = (*predecessor.messages, *suffix)
         suffix_placement_values: list[
             tuple[LLMMessage, str | None, str | None, ToolAttachmentSource | None]
@@ -2388,7 +2292,7 @@ class StructuredModelInputCompiler:
             values=tuple(suffix_placement_values),
         )
         deadline.check()
-        return _Layout(predecessor.system_prompt, messages, placements, estimate)
+        return _Layout(predecessor.system_prompt, messages, placements)
 
     @staticmethod
     def _require_provider_safe_delta(
@@ -2481,25 +2385,6 @@ class StructuredModelInputCompiler:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
                 )
-            costs = tuple(
-                self._source_variant_tokens(
-                    request, candidate, variant.text, variant.mode
-                )
-                for variant in candidate.variants
-            )
-            initial_position = tuple(
-                variant.mode for variant in candidate.variants
-            ).index(candidate.initial_mode)
-            selectable_costs = costs[initial_position:]
-            if any(
-                after > before
-                for before, after in zip(selectable_costs, selectable_costs[1:])
-            ):
-                failure = StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-                failure.add_note(f"source={candidate.source_kind.value} variant_token_costs={selectable_costs}")
-                raise failure
             if any(
                 variant.utf8_bytes > self._limits.maximum_single_source_variant_bytes
                 for variant in candidate.variants
@@ -2507,8 +2392,8 @@ class StructuredModelInputCompiler:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
                 )
-            # Raw semantic estimates are diagnostic. The frozen source and
-            # physical contracts validate each variant; final-wire measurement
+            # The frozen source and physical contracts validate each variant;
+            # final-wire measurement
             # decides whether dispatch should advance to another render floor.
         for fact in sources.absent_facts:
             expected = _SOURCE_POLICY.get(fact.source_kind)
@@ -2736,19 +2621,6 @@ class StructuredModelInputCompiler:
         )
         return tuple(items), added
 
-    @staticmethod
-    def _source_variant_tokens(
-        request: StructuredModelInputCompileRequest,
-        candidate: ContextSourceCandidate,
-        text: str,
-        mode: ContextRenderMode,
-    ) -> int:
-        estimator = request.compile_binding.estimator
-        if candidate.channel is ContextChannel.SYSTEM:
-            return estimator.estimate_text(text)
-        return estimator.estimate_message(
-            source_variant_message(candidate, text, mode=mode)
-        )
 
     def _layout(
         self,
@@ -2828,52 +2700,25 @@ class StructuredModelInputCompiler:
             prefix=(),
             values=tuple((item[0], item[2], item[1], item[3]) for item in ordered),
         )
-        estimate = self._estimate_frozen_input(
-            request,
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=request.compile_binding.tool_surface.tool_specs,
-            deadline=active_deadline,
-        )
         active_deadline.check()
-        return _Layout(system_prompt, messages, placements, estimate)
+        return _Layout(system_prompt, messages, placements)
+
 
     @staticmethod
-    def _estimate_frozen_input(
-        request: StructuredModelInputCompileRequest,
-        *,
-        system_prompt: str,
-        messages: tuple[LLMMessage, ...],
-        tools: tuple[FrozenToolSpec, ...],
-        deadline: _CompileDeadline,
-    ) -> TokenEstimate:
-        """Run one bounded estimator call with cooperative unit checkpoints.
-
-        The estimator remains the sole token authority.  The per-unit calls do
-        not supply a competing estimate; they only ensure a deadline can stop
-        work between already-bounded messages and tool schemas.
-        """
-
-        estimator = request.compile_binding.estimator
-        deadline.check()
-        cooperative = getattr(estimator, "estimate_frozen_input_cooperative", None)
-        if callable(cooperative):
-            result = cooperative(
-                system_prompt=system_prompt,
-                messages=messages,
-                tools=tools,
-                checkpoint=deadline.check,
+    def _identity_source_contents(request, decisions):
+        candidates = {c.source_semantic_fingerprint: c for c in request.sources.candidates}
+        contents = []
+        for decision in decisions:
+            if not decision.included:
+                contents.append(None)
+                continue
+            candidate = candidates[decision.source_instance_fingerprint]
+            variant = next(v for v in candidate.variants if v.mode is decision.selected_mode)
+            contents.append(
+                variant.text if candidate.channel is ContextChannel.SYSTEM
+                else source_variant_message(candidate, variant.text, mode=variant.mode)
             )
-        else:
-            # Third-party/test estimators keep the frozen estimator protocol;
-            # their whole call is bracketed by the same absolute deadline.
-            result = estimator.estimate_frozen_input(
-                system_prompt=system_prompt,
-                messages=messages,
-                tools=tools,
-            )
-        deadline.check()
-        return result
+        return tuple(contents)
 
     @staticmethod
     def _placement_key(candidate: ContextSourceCandidate) -> tuple[object, ...]:
@@ -2953,50 +2798,6 @@ class StructuredModelInputCompiler:
             state.item.source_entry_id or "",
         )
 
-    def _selected_source_tokens(
-        self,
-        request: StructuredModelInputCompileRequest,
-        state: _SourceState,
-        all_states: list[_SourceState],
-    ) -> int:
-        text = state.text()
-        if text is None:
-            return 0
-        estimator = request.compile_binding.estimator
-        if state.candidate.channel is not ContextChannel.SYSTEM:
-            return estimator.estimate_message(state.message())
-        # System fragments are not individually additive because joining them
-        # can change text token rounding.  Attribute the deterministic marginal
-        # cost in provider placement order.
-        ordered = [
-            item
-            for item in sorted(
-                all_states, key=lambda item: self._placement_key(item.candidate)
-            )
-            if item.candidate.channel is ContextChannel.SYSTEM
-            and item.text() is not None
-        ]
-        index = ordered.index(state)
-        before = "\n\n".join(item.text() or "" for item in ordered[:index])
-        through = "\n\n".join(item.text() or "" for item in ordered[: index + 1])
-        return max(
-            0, estimator.estimate_text(through) - estimator.estimate_text(before)
-        )
-
-    def _context_source_tokens(
-        self,
-        request: StructuredModelInputCompileRequest,
-        layout: _Layout,
-        states: list[_SourceState],
-    ) -> int:
-        estimator = request.compile_binding.estimator
-        observation = sum(
-            estimator.estimate_message(state.message())
-            for state in states
-            if state.candidate.channel is not ContextChannel.SYSTEM
-            and not state.omitted
-        )
-        return layout.estimate.system_tokens + observation
 
     def _add_diagnostic(
         self,

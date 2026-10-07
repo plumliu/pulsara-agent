@@ -6,25 +6,19 @@ from dataclasses import dataclass
 import base64
 import re
 import unicodedata
-from typing import TYPE_CHECKING, Callable, Protocol
+from typing import Protocol
 
 from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
     MessageRole,
-    ToolSpec,
 )
-from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.model_call import (
     TokenEstimatorFact,
     canonical_json_bytes,
     sha256_fingerprint,
 )
-
-if TYPE_CHECKING:
-    from pulsara_agent.model_input.contracts import FrozenToolSpec
 
 TEXT_UTF8_BYTES_PER_TOKEN = 4
 _NON_ASCII = re.compile(r"[^\x00-\x7f]")
@@ -48,36 +42,6 @@ IMAGE_GRID_PIXELS = 28
 IMAGE_SCALE_NUMERATOR = 7
 IMAGE_SCALE_DENOMINATOR = 8
 IMAGE_MIN_TOKENS = 256
-
-
-@dataclass(frozen=True, slots=True)
-class TokenEstimate:
-    system_tokens: int
-    message_tokens: int
-    message_tokens_by_index: tuple[int, ...]
-    tool_tokens: int
-    envelope_tokens: int
-    visual_image_tokens: int
-    total_input_tokens: int
-
-    def __post_init__(self) -> None:
-        if self.message_tokens != sum(self.message_tokens_by_index):
-            raise ValueError("message token total does not match per-message breakdown")
-        if self.total_input_tokens != (
-            self.system_tokens
-            + self.message_tokens
-            + self.tool_tokens
-            + self.envelope_tokens
-        ):
-            raise ValueError("total input tokens do not match estimate components")
-        if not 0 <= self.visual_image_tokens <= self.total_input_tokens:
-            raise ValueError("visual image token estimate is invalid")
-        if any(value < 0 for value in self.message_tokens_by_index):
-            raise ValueError("message token estimates must be non-negative")
-
-    @property
-    def text_and_framing_tokens(self) -> int:
-        return self.total_input_tokens - self.visual_image_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,22 +81,6 @@ class TokenEstimator(Protocol):
         ordered_input_items: tuple[object, ...],
         ordered_input_sources: tuple[LLMMessage | None, ...],
     ) -> FinalWireTokenEstimate: ...
-
-    def estimate_tool_spec(self, tool: ToolSpec) -> int: ...
-
-    def estimate_message(self, message: LLMMessage) -> int: ...
-
-    def estimate_context(self, context: LLMContext) -> TokenEstimate: ...
-
-    def estimate_frozen_tool_spec(self, tool: "FrozenToolSpec") -> int: ...
-
-    def estimate_frozen_input(
-        self,
-        *,
-        system_prompt: str,
-        messages: tuple[LLMMessage, ...],
-        tools: tuple["FrozenToolSpec", ...],
-    ) -> TokenEstimate: ...
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -300,170 +248,6 @@ class PulsaraHeuristicTokenEstimatorV3:
             total_input_tokens=text_and_framing + visual,
             visual_image_tokens=visual,
         )
-
-    def estimate_tool_spec(self, tool: ToolSpec) -> int:
-        return TOOL_SPEC_FRAMING_TOKENS + self.estimate_json(
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-            }
-        )
-
-    def estimate_message(self, message: LLMMessage) -> int:
-        total = MESSAGE_FRAMING_TOKENS
-        for part in message.content:
-            if isinstance(part, LLMImagePart):
-                total += estimate_image_visual_tokens(
-                    width=part.width,
-                    height=part.height,
-                )
-            elif not isinstance(part, LLMTextPart):
-                raise TypeError("model message contains an invalid content part")
-            else:
-                total += self.estimate_text(part.text)
-        for call in message.tool_calls:
-            total += TOOL_CALL_FRAMING_TOKENS
-            total += self.estimate_text(call.id)
-            total += self.estimate_text(call.name)
-            total += self.estimate_text(call.arguments)
-        for value in (message.tool_call_id, message.name, message.arguments):
-            if value is not None:
-                total += self.estimate_text(value)
-        return total
-
-    def estimate_context(self, context: LLMContext) -> TokenEstimate:
-        system_tokens = (
-            SYSTEM_MESSAGE_FRAMING_TOKENS + self.estimate_text(context.system_prompt)
-            if context.system_prompt
-            else 0
-        )
-        message_tokens_by_index = tuple(
-            self.estimate_message(message) for message in context.messages
-        )
-        message_tokens = sum(message_tokens_by_index)
-        visual_image_tokens = sum(
-            estimate_image_visual_tokens(width=part.width, height=part.height)
-            for message in context.messages
-            for part in message.content
-            if isinstance(part, LLMImagePart)
-        )
-        tool_tokens = sum(self.estimate_tool_spec(tool) for tool in context.tools)
-        envelope_tokens = REQUEST_ENVELOPE_TOKENS
-        return TokenEstimate(
-            system_tokens=system_tokens,
-            message_tokens=message_tokens,
-            message_tokens_by_index=message_tokens_by_index,
-            tool_tokens=tool_tokens,
-            envelope_tokens=envelope_tokens,
-            visual_image_tokens=visual_image_tokens,
-            total_input_tokens=(
-                system_tokens + message_tokens + tool_tokens + envelope_tokens
-            ),
-        )
-
-    def estimate_frozen_input_cooperative(
-        self,
-        *,
-        system_prompt: str,
-        messages: tuple[LLMMessage, ...],
-        tools: tuple["FrozenToolSpec", ...],
-        checkpoint: Callable[[], None],
-    ) -> TokenEstimate:
-        """Estimate the same contract while yielding at bounded item seams."""
-
-        checkpoint()
-        system_tokens = (
-            SYSTEM_MESSAGE_FRAMING_TOKENS + self.estimate_text(system_prompt)
-            if system_prompt
-            else 0
-        )
-        message_tokens_by_index: list[int] = []
-        for message in messages:
-            checkpoint()
-            message_tokens_by_index.append(self.estimate_message(message))
-        tool_tokens = 0
-        for tool in tools:
-            checkpoint()
-            tool_tokens += self.estimate_frozen_tool_spec(tool)
-        checkpoint()
-        message_tokens = sum(message_tokens_by_index)
-        visual_image_tokens = sum(
-            estimate_image_visual_tokens(width=part.width, height=part.height)
-            for message in messages
-            for part in message.content
-            if isinstance(part, LLMImagePart)
-        )
-        return TokenEstimate(
-            system_tokens=system_tokens,
-            message_tokens=message_tokens,
-            message_tokens_by_index=tuple(message_tokens_by_index),
-            tool_tokens=tool_tokens,
-            envelope_tokens=REQUEST_ENVELOPE_TOKENS,
-            visual_image_tokens=visual_image_tokens,
-            total_input_tokens=(
-                system_tokens + message_tokens + tool_tokens + REQUEST_ENVELOPE_TOKENS
-            ),
-        )
-
-    def estimate_frozen_tool_spec(self, tool: "FrozenToolSpec") -> int:
-        parameters = thaw_json(tool.parameters)
-        if not isinstance(parameters, dict):
-            raise TypeError("frozen tool schema did not thaw to an object")
-        return self.estimate_tool_spec(
-            ToolSpec(
-                name=tool.name,
-                description=tool.description,
-                parameters=parameters,
-            )
-        )
-
-    def estimate_frozen_input(
-        self,
-        *,
-        system_prompt: str,
-        messages: tuple[LLMMessage, ...],
-        tools: tuple["FrozenToolSpec", ...],
-    ) -> TokenEstimate:
-        system_tokens = (
-            SYSTEM_MESSAGE_FRAMING_TOKENS + self.estimate_text(system_prompt)
-            if system_prompt
-            else 0
-        )
-        message_tokens_by_index = tuple(
-            self.estimate_message(message) for message in messages
-        )
-        message_tokens = sum(message_tokens_by_index)
-        visual_image_tokens = sum(
-            estimate_image_visual_tokens(width=part.width, height=part.height)
-            for message in messages
-            for part in message.content
-            if isinstance(part, LLMImagePart)
-        )
-        tool_tokens = sum(self.estimate_frozen_tool_spec(tool) for tool in tools)
-        return TokenEstimate(
-            system_tokens=system_tokens,
-            message_tokens=message_tokens,
-            message_tokens_by_index=message_tokens_by_index,
-            tool_tokens=tool_tokens,
-            envelope_tokens=REQUEST_ENVELOPE_TOKENS,
-            visual_image_tokens=visual_image_tokens,
-            total_input_tokens=(
-                system_tokens + message_tokens + tool_tokens + REQUEST_ENVELOPE_TOKENS
-            ),
-        )
-
-
-def estimate_model_context_for_call(
-    *, call: object, context: LLMContext
-) -> TokenEstimate:
-    """PR1 estimate-only seam; validation is layered around this in PR3."""
-
-    target = getattr(call, "target", None)
-    estimator = getattr(target, "token_estimator", None)
-    if estimator is None:
-        raise TypeError("resolved model call does not carry a token estimator")
-    return estimator.estimate_context(context)
 
 
 def _final_wire_counting_item(

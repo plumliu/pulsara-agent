@@ -321,9 +321,14 @@ def test_d1_visual_token_formula_is_frozen(
     assert estimate_image_visual_tokens(width=width, height=height) == expected
 
 
-def test_v2_semantic_estimator_charges_each_image_occurrence() -> None:
+def test_wire_estimator_charges_each_image_occurrence() -> None:
     message = LLMMessage.user_content(FrozenPromptContent((_validated_image(),)))
-    assert PulsaraHeuristicTokenEstimatorV3().estimate_message(message) == 4 + 256
+    from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
+    wire = tuple(chat_semantic_wire_group(message))
+    quote = PulsaraHeuristicTokenEstimatorV3().estimate_ordered_wire_json_components(
+        ordered_input_items=wire * 2, ordered_input_sources=(message,) * 2)
+    assert quote.visual_image_tokens == 512
+    assert quote.total_input_tokens > 512
 
 
 def test_d2_minimum_service_headroom_is_distinct_and_exact() -> None:

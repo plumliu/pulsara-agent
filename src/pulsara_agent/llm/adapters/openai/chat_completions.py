@@ -53,6 +53,7 @@ from pulsara_agent.llm.provider import (
     RouteWireProfile,
     mutable_provider_value,
 )
+from pulsara_agent.llm.validation import validate_model_context_shape_for_call
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall, resolve_wire_output_tokens
 from pulsara_agent.llm.model_target import reasoning_wire_fields
@@ -318,6 +319,7 @@ def build_chat_completions_payload(
     call: ResolvedModelCall,
     context: LLMContext,
 ) -> dict[str, Any]:
+    validate_model_context_shape_for_call(call=call, context=context)
     model = call.target.model_profile
     route_wire_profile = model.route_wire_profile
     plan = context.provider_wire_input_plan

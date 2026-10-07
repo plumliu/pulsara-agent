@@ -78,7 +78,11 @@ task succeeding. Material/history references do not wait for running tasks.
 
 Omit `model` to inherit the assigning turn's model and reasoning. For a requested
 different model, call `list_agent_models` and copy a returned `connection_id` and
-supported reasoning choice. Omitted reasoning uses that target's default.
+supported reasoning choice. With an explicit connection, omitted reasoning uses
+that target's default. Do not use `reasoning: null` for the default. An explicit
+choice contains only its variant's fields: `kind` and `value` for effort, `kind`
+and `enabled` for toggle, or `kind` and `tokens` for budget_tokens. Effort `value`
+is required and may be null only when that exact choice is listed for the target.
 `profile` changes working style, not the model; omit it for ordinary work.
 
 ## Common calls
@@ -119,6 +123,8 @@ Task labels are not IDs. Recover lost IDs with `list_agents`.
 Dispatch returns before completion; extra tasks can queue for execution capacity.
 Continue independent work, then use `wait_agent` if your answer needs the results.
 Results arrive as separate conversation messages, not inside the wait response.
+With `task_ids`, omit `settle` for all targets or choose `first` for any target.
+Without `task_ids`, omit `settle`; only `timeout_seconds` may be supplied.
 Read whether each task succeeded; a satisfied wait only means its finish condition
 was met. A timeout leaves tasks running. Avoid polling task lists for delivery.
 

@@ -312,10 +312,6 @@ def validate_compaction_wire_transition(
     if (
         phase not in {"PRE_FULL", "POST_FULL"}
         or source_candidate.canonical_read != source_view.canonical_dispatch_read
-        or source_candidate.semantic_input.final_estimate.total_input_tokens
-        != source_quote.semantic_estimated_input_tokens
-        or successor_candidate.semantic_input.final_estimate.total_input_tokens
-        != successor_quote.semantic_estimated_input_tokens
         or source_call.target.fact != successor_call.target.fact
         or source_binding.target_fact != source_call.target.fact
         or successor_binding.target_fact != successor_call.target.fact
@@ -438,12 +434,6 @@ def validate_model_switch_wire_transition(
         or source_semantic.system_prompt != source_view.materialized_system_prompt()
         or source_semantic.messages != source_view.materialized_messages()
         or source_semantic.tools != source_view_binding.tool_surface.tool_specs
-        or source_semantic.final_estimate
-        != source_view.provider_projection.final_estimate
-        or source_quote.semantic_estimated_input_tokens
-        != source_semantic.final_estimate.total_input_tokens
-        or source_quote.semantic_visual_image_tokens
-        != source_semantic.final_estimate.visual_image_tokens
         or source_call.target.fact != source_view_binding.target_fact
         or source_quote.wire_api
         != source_call.target.model_profile.route_wire_profile.wire_api

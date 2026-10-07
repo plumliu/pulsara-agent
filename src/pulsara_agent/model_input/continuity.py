@@ -18,7 +18,6 @@ from pulsara_agent.llm.input import (
     llm_content_identity_value,
     llm_content_logical_bytes,
 )
-from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.frozen_target import (
     FrozenEpochModelCallTarget,
     FrozenEpochModelTargetBundle,
@@ -339,7 +338,6 @@ class FrozenProviderInputEpochView:
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
     source_heads: tuple[ProcessLocalSourceHead, ...]
-    final_estimate: TokenEstimate
     logical_bytes: int
     semantic_prefix_fingerprint: str
     assistant_replay_fragments: tuple[ProviderAssistantReplayFragment, ...] = field(
@@ -352,8 +350,6 @@ class FrozenProviderInputEpochView:
     def __post_init__(self) -> None:
         if not self.epoch_nonce or self.epoch_revision < 1:
             raise ValueError("provider-input epoch revision is invalid")
-        if len(self.final_estimate.message_tokens_by_index) != len(self.messages):
-            raise ValueError("provider-input epoch token breakdown is invalid")
         if len(self.message_placements) != len(self.messages):
             raise ValueError("provider-input epoch placements are not parallel")
         _fingerprint(

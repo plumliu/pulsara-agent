@@ -6,7 +6,7 @@ import type { McpEditInput, PluginMcpConnection, PluginMcpEditInput, UserMcpServ
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 export function PluginConnectionEditor({ plugin, connection, onClose, onSave, onAuthorization }: {
-  plugin: UserPluginCapability; connection: PluginMcpConnection; onClose: () => void;
+  plugin: Pick<UserPluginCapability, 'name' | 'enabled' | 'packageInstallId'>; connection: PluginMcpConnection; onClose: () => void;
   onSave: (input: PluginMcpEditInput) => Promise<boolean>;
   onAuthorization?: (action: 'login' | 'status' | 'cancel' | 'logout') => Promise<void>;
 }) {

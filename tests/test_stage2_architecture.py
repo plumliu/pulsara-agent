@@ -537,11 +537,9 @@ def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> N
     blob = (KERNEL / "blob.py").read_text(encoding="utf-8")
     host = (KERNEL / "host.py").read_text(encoding="utf-8")
 
-    # Foreground model input is estimated by the pure structured compiler and
-    # exact-joined to the transport-aware final validator. The direct-memory
-    # hard cut removes the auxiliary governance model entirely.
-    assert "validate_model_context_for_call" in direct
-    assert "validated.estimate != compiled.final_estimate" in direct
+    # Structural compilation joins the registered candidate; wire owns budget.
+    assert "validate_model_context_shape_for_call" in direct
+    assert "compiled != append_candidate.resulting_compiled_input" in direct
     assert "estimate_model_context_for_call" not in direct
     assert not (KERNEL / "auxiliary_model.py").exists()
     assert "canonical_bytes / 4" not in direct

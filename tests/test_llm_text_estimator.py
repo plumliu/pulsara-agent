@@ -62,8 +62,12 @@ def test_wire_suffix_additivity_keeps_fixed_tools_and_item_framing():
     assert second.total_input_tokens == 49
 
 
-def test_semantic_message_framing_is_preserved_with_cjk_text():
+def test_wire_message_framing_is_preserved_with_cjk_text():
     estimator = PulsaraHeuristicTokenEstimatorV3()
     message = LLMMessage(role=MessageRole.USER, content=(LLMTextPart("你好"),))
-    assert estimator.estimate_message(message) == 6
+    wire = {"role": "user", "content": "你好"}
+    quote = estimator.estimate_ordered_wire_json_components(
+        ordered_input_items=(wire,), ordered_input_sources=(message,))
+    assert quote.total_input_tokens == 4 + estimator.estimate_json(wire)
+    assert quote.visual_image_tokens == 0
     assert estimator.fact.estimator_version == "v3"

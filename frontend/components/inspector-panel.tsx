@@ -302,9 +302,14 @@ function ProjectCapabilityPanel({
   const [inheritedExpanded, setInheritedExpanded] = useState(false);
   const [dialogKind, setDialogKind] = useState<ProjectCapabilityKind>();
   const [dialogOpener, setDialogOpener] = useState<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (!canControl) { setEditingMcp(undefined); setImportingMcp(false); setRemovingSkill(undefined); setDialogKind(undefined); }
-  }, [canControl]);
+  const [previousCanControl, setPreviousCanControl] = useState(canControl);
+  if (previousCanControl !== canControl) {
+    setPreviousCanControl(canControl);
+    if (!canControl) {
+      setEditingMcp(undefined); setImportingMcp(false);
+      setRemovingSkill(undefined); setDialogKind(undefined);
+    }
+  }
   const skills = snapshot?.skills.items ?? [];
   const servers = snapshot?.mcp.servers ?? [];
   const projectSkills = skills.filter((item) => item.source === 'workspace');

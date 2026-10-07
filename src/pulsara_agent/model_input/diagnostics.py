@@ -73,12 +73,6 @@ class ModelInputCompileOperationalProjection:
     compiler_contract_version: str
     model_call_index: int
     tool_surface_fingerprint: str
-    effective_input_budget_tokens: int
-    total_input_tokens: int
-    system_tokens: int
-    message_tokens: int
-    tool_tokens: int
-    envelope_tokens: int
     degraded_source_count: int
     omitted_source_count: int
     degraded_tool_result_count: int
@@ -92,12 +86,6 @@ class ModelInputCompileOperationalProjection:
         if (
             self.model_call_index < 1
             or min(
-                self.effective_input_budget_tokens,
-                self.total_input_tokens,
-                self.system_tokens,
-                self.message_tokens,
-                self.tool_tokens,
-                self.envelope_tokens,
                 self.degraded_source_count,
                 self.omitted_source_count,
                 self.degraded_tool_result_count,
@@ -120,12 +108,6 @@ class ModelInputCompileOperationalProjection:
             "compiler_contract_version": self.compiler_contract_version,
             "model_call_index": self.model_call_index,
             "tool_surface_fingerprint": self.tool_surface_fingerprint,
-            "effective_input_budget_tokens": self.effective_input_budget_tokens,
-            "total_input_tokens": self.total_input_tokens,
-            "system_tokens": self.system_tokens,
-            "message_tokens": self.message_tokens,
-            "tool_tokens": self.tool_tokens,
-            "envelope_tokens": self.envelope_tokens,
             "degraded_source_count": self.degraded_source_count,
             "omitted_source_count": self.omitted_source_count,
             "degraded_tool_result_count": self.degraded_tool_result_count,
@@ -182,18 +164,12 @@ def project_model_input_compile_observation(
     total_decisions = len(compiled.source_decisions) + len(
         compiled.tool_result_decisions
     )
-    report = compiled.budget_report
+    report = compiled.compile_report
     return ModelInputCompileOperationalProjection(
         disposition=CompileObservationDisposition.COMPILED,
         compiler_contract_version=report.compiler_contract_version,
         model_call_index=model_call_index,
         tool_surface_fingerprint=report.tool_surface_fingerprint,
-        effective_input_budget_tokens=report.effective_input_budget_tokens,
-        total_input_tokens=report.total_input_tokens,
-        system_tokens=report.system_tokens,
-        message_tokens=report.message_tokens,
-        tool_tokens=report.tool_tokens,
-        envelope_tokens=report.envelope_tokens,
         degraded_source_count=report.degraded_source_count,
         omitted_source_count=report.omitted_source_count,
         degraded_tool_result_count=report.degraded_tool_result_count,

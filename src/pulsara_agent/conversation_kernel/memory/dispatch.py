@@ -12,6 +12,7 @@ from pulsara_agent.conversation_kernel.context_sources import (
 )
 from pulsara_agent.conversation_kernel.direct_model import (
     PreparedKernelModelCall,
+    quote_provider_suffix_input_tokens,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -32,6 +33,7 @@ from pulsara_agent.conversation_kernel.steer import (
     MemorySourceInvalidationReservation,
     build_memory_source_invalidation_reservation,
 )
+from pulsara_agent.model_input._stable_input_identity import memory_reservation_identity
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
 )
@@ -45,7 +47,6 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceLifecycle,
     FrozenCanonicalCompileSnapshot,
     PreparedProviderInputCut,
-    FrozenCompiledModelInput,
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
     StructuredModelInputCompileRequest,
@@ -80,7 +81,6 @@ class MemoryContextProjectionPort(Protocol):
     ) -> AutomaticMemoryTriggerDisposition: ...
 
     def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy: ...
-
 
 
 class MemoryDispatchSupport:
@@ -169,9 +169,11 @@ class MemoryDispatchSupport:
         *,
         planning: FrozenProviderInputAppendPlanningInput,
         desired: ContextSourceCandidate | ContextSourceAbsentFact,
-        compiled: FrozenCompiledModelInput,
         prepared_call: PreparedKernelModelCall,
+        new_epoch: bool,
     ) -> MemorySourceInvalidationReservation | None:
+        if new_epoch:
+            return None
         prior = self._memory_source_head(
             planning, ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
         )
@@ -181,7 +183,6 @@ class MemoryDispatchSupport:
             source_kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
             prior=prior,
             desired=desired,
-            compiled=compiled,
             prepared_call=prepared_call,
         )
 
@@ -250,7 +251,6 @@ class MemoryDispatchSupport:
         source_kind: ContextSourceKind,
         prior: ProcessLocalSourceHead,
         desired: ContextSourceCandidate | ContextSourceAbsentFact,
-        compiled: FrozenCompiledModelInput,
         prepared_call: PreparedKernelModelCall,
     ) -> MemorySourceInvalidationReservation:
         cleared = build_memory_context_source(
@@ -284,28 +284,15 @@ class MemoryDispatchSupport:
             )
             for item in (cleared, unavailable)
         )
-        estimator = prepared_call.compile_binding.estimator
-        base_estimate = compiled.final_estimate
-        token_deltas: list[int] = []
-        byte_deltas: list[int] = []
-        for message in invalidation_messages:
-            estimate = estimator.estimate_frozen_input(
-                system_prompt=compiled.system_prompt,
-                messages=(*compiled.messages, message),
-                tools=compiled.tools,
-            )
-            token_deltas.append(
-                max(0, estimate.total_input_tokens - base_estimate.total_input_tokens)
-            )
-            byte_deltas.append(
-                provider_input_logical_bytes(
-                    system_prompt="",
-                    tools=(),
-                    messages=(message,),
-                )
-            )
-        full_bytes = 0
-        full_tokens = 0
+        token_deltas = [
+            quote_provider_suffix_input_tokens(call=prepared_call.call, messages=(message,))
+            for message in invalidation_messages
+        ]
+        byte_deltas = [
+            provider_input_logical_bytes(system_prompt="", tools=(), messages=(message,))
+            for message in invalidation_messages
+        ]
+        full_message = None
         if isinstance(desired, ContextSourceCandidate):
             full_message = encode_runtime_observation(
                 source_kind=source_kind,
@@ -314,18 +301,6 @@ class MemoryDispatchSupport:
                 presence=SourceObservationPresence.VALUE,
                 contract_version=desired.source_contract_version,
                 body=desired.variants[0].text,
-            )
-            full_bytes = provider_input_logical_bytes(
-                system_prompt="", tools=(), messages=(full_message,)
-            )
-            full_estimate = estimator.estimate_frozen_input(
-                system_prompt=compiled.system_prompt,
-                messages=(*compiled.messages, full_message),
-                tools=compiled.tools,
-            )
-            full_tokens = max(
-                0,
-                full_estimate.total_input_tokens - base_estimate.total_input_tokens,
             )
         return build_memory_source_invalidation_reservation(
             source_kind=source_kind,
@@ -336,11 +311,17 @@ class MemoryDispatchSupport:
                 self._memory_source_occurrence_fingerprint(desired)
             ),
             source_contract_fingerprint=desired.source_contract_fingerprint,
-            invalidation_encoded_utf8_bytes_ceiling=max(byte_deltas),
+            stable_identity=memory_reservation_identity(
+                source_kind=source_kind, prior=prior,
+                desired_presence=self._memory_source_presence(desired),
+                desired_fingerprint=self._memory_source_occurrence_fingerprint(desired),
+                contract=desired.source_contract_fingerprint,
+                invalidations=invalidation_messages, full_message=full_message,
+                epoch_bytes=max(byte_deltas),
+                estimator_fingerprint=prepared_call.compile_binding.estimator_fingerprint,
+            ),
             invalidation_input_token_ceiling=max(token_deltas),
             invalidation_epoch_bytes_ceiling=max(byte_deltas),
-            full_encoded_utf8_bytes=full_bytes,
-            full_input_token_cost=full_tokens,
             estimator_fingerprint=(
                 prepared_call.compile_binding.estimator.fact.estimator_fingerprint
             ),
@@ -352,12 +333,16 @@ class MemoryDispatchSupport:
         planning: FrozenProviderInputAppendPlanningInput,
         prepared_preference: ContextSourceCandidate | ContextSourceAbsentFact,
         recall_desired: ContextSourceCandidate | ContextSourceAbsentFact,
-        compiled: FrozenCompiledModelInput,
         prepared_call: PreparedKernelModelCall,
+        new_epoch: bool,
     ) -> tuple[
         MemorySourceInvalidationReservation | None,
         MemorySourceInvalidationReservation | None,
     ]:
+        # A cold root has no installed stale memory to invalidate. This cut also
+        # removes its physical-byte reservation before steer phase A admission.
+        if new_epoch:
+            return None, None
         recall_prior = self._memory_source_head(
             planning, ContextSourceKind.MEMORY_RECALL
         )
@@ -373,7 +358,6 @@ class MemoryDispatchSupport:
                 source_kind=ContextSourceKind.MEMORY_RECALL,
                 prior=recall_prior,
                 desired=recall_desired,
-                compiled=compiled,
                 prepared_call=prepared_call,
             )
         preference = None
@@ -393,7 +377,6 @@ class MemoryDispatchSupport:
                 source_kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
                 prior=preference_prior,
                 desired=prepared_preference,
-                compiled=compiled,
                 prepared_call=prepared_call,
             )
         return recall, preference

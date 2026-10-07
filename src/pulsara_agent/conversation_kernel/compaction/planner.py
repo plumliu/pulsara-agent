@@ -1192,7 +1192,6 @@ def freeze_compaction_source_view(
 
         projection = CompatibleAppendCompactionProjection(
             append_only_messages=suffix,
-            final_estimate=compiled.final_estimate,
             logical_bytes=projection_logical_bytes,
         )
     else:
@@ -1202,7 +1201,6 @@ def freeze_compaction_source_view(
         projection = ColdRebuildCompactionProjection(
             system_prompt=compiled.system_prompt,
             full_messages=compiled.messages,
-            final_estimate=compiled.final_estimate,
             logical_bytes=projection_logical_bytes,
         )
     canonical_input = canonical_read.dispatch_read.compile_snapshot.canonical_input

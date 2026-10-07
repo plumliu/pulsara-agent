@@ -382,7 +382,8 @@ def test_cold_successor_may_omit_optional_source_despite_old_epoch_head():
     assert decision.quote.budget_input_tokens <= decision.quote.effective_input_budget_tokens
 
 
-def test_wire_memory_fallback_preserves_installed_state_and_steer_headroom():
+@pytest.mark.parametrize("api", ["openai_chat_completions", "openai_responses"])
+def test_wire_memory_fallback_preserves_installed_state_and_steer_headroom(api):
     import asyncio
     from time import monotonic
     from tests.test_catalog_final_wire_resources import _prepare_case
@@ -393,7 +394,7 @@ def test_wire_memory_fallback_preserves_installed_state_and_steer_headroom():
     kind = ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
     old = build_memory_context_source(kind=kind, texts=('old preference',))
     updated = build_memory_context_source(kind=kind, texts=('new preference ' * 500,))
-    coordinator, candidate, view, _ = _prepare_case('openai_chat_completions', updated,
+    coordinator, candidate, view, _ = _prepare_case(api, updated,
         initial_catalog=old, budget=100_000)
     support = MemoryDispatchSupport(compiler=coordinator._compiler, io_owner=coordinator._io,
         memory_projection=None, input_reader=coordinator._input_reader, deadline_factory=None)
@@ -409,17 +410,23 @@ def test_wire_memory_fallback_preserves_installed_state_and_steer_headroom():
     measured = asyncio.run(coordinator._freeze_candidate_wire_measurement(fallback_candidate, deadline=monotonic()+30))
     delta = measured.quote.raw_final_wire_estimated_input_tokens - view.wire_input_plan.quote.raw_final_wire_estimated_input_tokens
     measured.discard_materialization_to_quote()
-    headroom = 300
+    reservation = support.planning_preference_refresh_reservation(
+        planning=candidate.planning, desired=updated, prepared_call=candidate.prepared_call, new_epoch=False)
+    assert reservation is not None
+    headroom = reservation.invalidation_input_token_ceiling
     plan, call = view.wire_input_plan, candidate.call
     anchor = ProviderInputUsageAnchor(call.resolved_model_call_id, view.epoch_nonce, view.epoch_revision,
         call.binding.connection_id.value, call.target.fact, plan.route_wire_profile_fingerprint,
-        'alias', 100_000-delta-headroom, plan.quote.raw_final_wire_estimated_input_tokens, plan.materialization)
+        'alias', 100_000-delta, plan.quote.raw_final_wire_estimated_input_tokens, plan.materialization)
     coordinator._continuity.observe_usage_anchor(view.scope, epoch_nonce=view.epoch_nonce,
         epoch_revision=view.epoch_revision, reported_model_id='alias', anchor=anchor)
     decision = asyncio.run(coordinator.measure_prepared_wire_candidate(candidate,
-        deadline=monotonic()+30, invalidation_input_token_ceiling=headroom))
+        deadline=monotonic()+30, invalidation_reservations=(reservation,)))
     assert decision.wire_input_plan is not None  # steer remains admissible
-    assert decision.quote.budget_input_tokens + headroom <= 100_000
+    from pulsara_agent.conversation_kernel.provider_dispatch import _remaining_invalidation_input_tokens
+    assert _remaining_invalidation_input_tokens(decision.candidate, (reservation,)) == 0
+    assert headroom > 0
+    assert decision.quote.budget_input_tokens == 100_000
     assert decision.quote.anchor_model_call_id == anchor.model_call_id
     absent = next(item for item in decision.candidate.sources.absent_facts if item.source_kind is kind)
     assert absent.absence_kind is ContextSourceAbsenceKind.UNAVAILABLE
@@ -434,8 +441,12 @@ def test_reserved_headroom_exhaustion_keeps_wire_admission_union_valid():
     from time import monotonic
     from tests.test_catalog_final_wire_resources import _prepare_case, _skill_source
     coordinator, candidate, _, _ = _prepare_case('openai_chat_completions', _skill_source(1), budget=100_000)
+    from types import SimpleNamespace
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    reservation = SimpleNamespace(source_kind=ContextSourceKind.MEMORY_RECALL,
+        invalidation_input_token_ceiling=100_000)
     decision = asyncio.run(coordinator.measure_prepared_wire_candidate(candidate,
-        deadline=monotonic()+30, invalidation_input_token_ceiling=100_000))
+        deadline=monotonic()+30, invalidation_reservations=(reservation,)))
     # Wire input itself fits. The steer owner rejects its unsatisfied reservation
     # from this same quote, rather than an inconsistent None-plan union.
     assert decision.wire_input_plan is not None

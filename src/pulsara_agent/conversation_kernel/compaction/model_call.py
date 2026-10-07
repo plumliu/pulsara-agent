@@ -47,7 +47,6 @@ from pulsara_agent.model_input.lowering import (
     image_referenced_content,
     lower_retained_request_content,
 )
-from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     FrozenProviderWireInputPlan,
@@ -122,7 +121,6 @@ class PreparedCompactionSummarySemanticInput:
     messages: tuple[LLMMessage, ...] = field(repr=False)
     message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(repr=False)
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
-    final_estimate: TokenEstimate
     compile_binding_fingerprint: str
     compiled_semantic_fingerprint: str
 
@@ -140,8 +138,6 @@ class PreparedCompactionSummarySemanticInput:
             )
         ):
             raise ValueError("summary semantic placement role drifted")
-        if len(self.final_estimate.message_tokens_by_index) != len(self.messages):
-            raise ValueError("summary semantic token breakdown is invalid")
         for value in (
             self.compile_binding_fingerprint,
             self.compiled_semantic_fingerprint,
@@ -359,13 +355,6 @@ class PreparedCompactionSummarySemantic:
                 raise ValueError(
                     "destination-projection summary proof does not exact-join"
                 )
-        estimate = binding.estimator.estimate_frozen_input(
-            system_prompt=compiled.system_prompt,
-            messages=compiled.messages,
-            tools=compiled.tools,
-        )
-        if estimate != compiled.final_estimate:
-            raise ValueError("summary semantic estimate changed")
 
     @property
     def canonical_read(self) -> FrozenCanonicalProviderDispatchRead:
@@ -413,24 +402,10 @@ class PreparedCompactionSummaryCall:
             + 1,
             tools=tools,
             system_prompt=compiled.system_prompt,
-            compiler_estimated_input_tokens=(
-                compiled.final_estimate.total_input_tokens
-            ),
             provider_wire_input_plan=wire_input_plan,
             tool_choice="auto",
         )
         validate_model_context_shape_for_call(call=call, context=context)
-        if (
-            semantic.compile_binding.estimator.estimate_frozen_input(
-                system_prompt=compiled.system_prompt,
-                messages=compiled.messages,
-                tools=compiled.tools,
-            )
-            != compiled.final_estimate
-        ):
-            raise ValueError(
-                "summary pre-send estimate differs from its semantic input"
-            )
         self._semantic = semantic
         self._wire_input_plan = wire_input_plan
         self._context = context
@@ -450,7 +425,6 @@ class PreparedCompactionSummaryCall:
                     wire_input_plan,
                     target_fact=call.target.fact,
                 ),
-                "estimate": _estimate_value(compiled.final_estimate),
             },
         )
 
@@ -604,11 +578,6 @@ def prepare_compaction_summary_semantic(
         ),
     )
     binding = source_view.normal_compile_binding
-    estimate = binding.estimator.estimate_frozen_input(
-        system_prompt=source_projection.system_prompt,
-        messages=messages,
-        tools=source_projection.tools,
-    )
     context_id = context_fingerprint(
         "pulsara.compaction-summary-context-id.v1",
         {
@@ -624,7 +593,6 @@ def prepare_compaction_summary_semantic(
         "messages": messages,
         "message_placements": placements,
         "tools": source_projection.tools,
-        "final_estimate": estimate,
         "compile_binding_fingerprint": binding.binding_fingerprint,
     }
     compiled = PreparedCompactionSummarySemanticInput(
@@ -636,7 +604,6 @@ def prepare_compaction_summary_semantic(
                 "canonical": source_projection.canonical_input_identity.identity_fingerprint,
                 "messages": compaction_summary_message_prefix_fingerprint(messages),
                 "placements": compiled_message_placements_fingerprint(placements),
-                "estimate": _estimate_value(estimate),
                 "binding": binding.binding_fingerprint,
             },
         ),
@@ -826,11 +793,6 @@ def prepare_destination_projection_summary_semantic(
     )
     messages = tuple(message_values)
     placements = tuple(placement_values)
-    estimate = compile_binding.estimator.estimate_frozen_input(
-        system_prompt=source_projection.system_prompt,
-        messages=messages,
-        tools=source_projection.tools,
-    )
     source_digest = canonical_compaction_range_digest(
         canonical_source.lineage_base,
         canonical_source.safe_head_range,
@@ -869,7 +831,6 @@ def prepare_destination_projection_summary_semantic(
         "messages": messages,
         "message_placements": placements,
         "tools": source_projection.tools,
-        "final_estimate": estimate,
         "compile_binding_fingerprint": compile_binding.binding_fingerprint,
     }
     compiled = PreparedCompactionSummarySemanticInput(
@@ -881,7 +842,6 @@ def prepare_destination_projection_summary_semantic(
                 "canonical": identity.identity_fingerprint,
                 "messages": compaction_summary_message_prefix_fingerprint(messages),
                 "placements": compiled_message_placements_fingerprint(placements),
-                "estimate": _estimate_value(estimate),
                 "binding": compile_binding.binding_fingerprint,
             },
         ),
@@ -1021,12 +981,6 @@ def prepare_compaction_summary_repair_semantic(
             )
         )
     frozen_placements = tuple(placements)
-    binding = initial.compile_binding
-    estimate = binding.estimator.estimate_frozen_input(
-        system_prompt=compiled.system_prompt,
-        messages=messages,
-        tools=compiled.tools,
-    )
     values = {
         "context_id": context_fingerprint(
             "pulsara.compaction-summary-repair-context-id.v1",
@@ -1040,7 +994,6 @@ def prepare_compaction_summary_repair_semantic(
         "messages": messages,
         "message_placements": frozen_placements,
         "tools": compiled.tools,
-        "final_estimate": estimate,
         "compile_binding_fingerprint": compiled.compile_binding_fingerprint,
     }
     repaired = PreparedCompactionSummarySemanticInput(
@@ -1054,7 +1007,6 @@ def prepare_compaction_summary_repair_semantic(
                 "placements": compiled_message_placements_fingerprint(
                     frozen_placements
                 ),
-                "estimate": _estimate_value(estimate),
                 "binding": compiled.compile_binding_fingerprint,
             },
         ),
@@ -1204,18 +1156,6 @@ async def _drain_summary_execution(execution: object):
 class _NullLiveBus:
     def offer_nowait(self, **values: object) -> None:
         del values
-
-
-def _estimate_value(estimate: TokenEstimate) -> dict[str, object]:
-    return {
-        "system": estimate.system_tokens,
-        "messages": estimate.message_tokens,
-        "message_by_index": estimate.message_tokens_by_index,
-        "tools": estimate.tool_tokens,
-        "envelope": estimate.envelope_tokens,
-        "visual_image": estimate.visual_image_tokens,
-        "total": estimate.total_input_tokens,
-    }
 
 
 __all__ = [

@@ -148,8 +148,6 @@ class FrozenProviderWireInputQuote:
     wire_api: str
     estimator_fingerprint: str
     effective_input_budget_tokens: int
-    semantic_estimated_input_tokens: int
-    semantic_visual_image_tokens: int
     generic_wire_estimated_input_tokens: int
     generic_wire_visual_image_tokens: int
     replaced_generic_wire_estimated_tokens: int
@@ -167,8 +165,6 @@ class FrozenProviderWireInputQuote:
         values = (
             self.budget_input_tokens,
             self.effective_input_budget_tokens,
-            self.semantic_estimated_input_tokens,
-            self.semantic_visual_image_tokens,
             self.generic_wire_estimated_input_tokens,
             self.generic_wire_visual_image_tokens,
             self.replaced_generic_wire_estimated_tokens,
@@ -186,9 +182,7 @@ class FrozenProviderWireInputQuote:
         ):
             raise ValueError("provider wire quote is invalid")
         if (
-            self.semantic_visual_image_tokens
-            > self.semantic_estimated_input_tokens
-            or self.generic_wire_visual_image_tokens
+            self.generic_wire_visual_image_tokens
             > self.generic_wire_estimated_input_tokens
             or self.final_wire_visual_image_tokens
             > self.raw_final_wire_estimated_input_tokens
@@ -377,8 +371,6 @@ def provider_wire_input_plan_identity_fingerprint(
                 "wire_api": plan.quote.wire_api,
                 "estimator": plan.quote.estimator_fingerprint,
                 "budget": plan.quote.effective_input_budget_tokens,
-                "semantic_estimated": (plan.quote.semantic_estimated_input_tokens),
-                "semantic_visual": plan.quote.semantic_visual_image_tokens,
                 "generic_wire_estimated": (
                     plan.quote.generic_wire_estimated_input_tokens
                 ),
@@ -412,7 +404,6 @@ class LLMContext:
     model_call_index: int | None
     tools: tuple[ToolSpec, ...] = field(default_factory=tuple)
     system_prompt: str | None = None
-    compiler_estimated_input_tokens: int | None = None
     provider_wire_input_plan: FrozenProviderWireInputPlan | None = field(
         default=None, repr=False
     )

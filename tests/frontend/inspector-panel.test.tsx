@@ -171,6 +171,23 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
 }
 
 describe('InspectorPanel PR03 production navigation', () => {
+  it('closes capability editing on control loss and keeps it closed after control returns', () => {
+    const base = props({ capabilities: capabilitySnapshot, capabilityLoading: false, canControl: true });
+    const view = render(<InspectorPanel {...base} />);
+    fireEvent.click(screen.getByRole('button', { name: '添加' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+
+    view.rerender(<InspectorPanel {...base} canControl={false} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    view.rerender(<InspectorPanel {...base} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '添加' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(base.onCreateProjectMcp).not.toHaveBeenCalled();
+    expect(base.onInstallProjectSkill).not.toHaveBeenCalled();
+  });
+
   it('keeps an unselected session out of data loading and loads after selection', async () => {
     const loadBackground = vi.fn(async () => ({ processes: [backgroundProcess] }));
     const emptyProps = props({

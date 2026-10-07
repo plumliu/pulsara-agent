@@ -1680,11 +1680,14 @@ export function WorkbenchView({
   const pickerSession = useRef(session.id);
   const [modelOpen, setModelOpen] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
-  useEffect(() => {
-    if (canControl) return;
-    setSessionActionsOpen(false); setAddOpen(false); setSkillOpen(false);
-    setPermissionOpen(false); setModelOpen(false); setReasoningOpen(false);
-  }, [canControl]);
+  const [previousCanControl, setPreviousCanControl] = useState(canControl);
+  if (previousCanControl !== canControl) {
+    setPreviousCanControl(canControl);
+    if (!canControl) {
+      setSessionActionsOpen(false); setAddOpen(false); setSkillOpen(false);
+      setPermissionOpen(false); setModelOpen(false); setReasoningOpen(false);
+    }
+  }
   const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [preparingQueueEdit, setPreparingQueueEdit] = useState<string>();
   const [atBottom, setAtBottom] = useState(true);

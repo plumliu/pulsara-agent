@@ -579,8 +579,6 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     assert any(s.summary_request == initial for s in prepared)
     assert any(
         s.summary_request == initial
-        and q.semantic_estimated_input_tokens
-        == s.semantic_input.final_estimate.total_input_tokens
         and q.final_wire_utf8_bytes >= len(initial.encode())
         for s, q in measured
     )

@@ -329,13 +329,14 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
     model = _K2ImageCompileProbe()
     compiled_messages = []
     activation_projections = []
-    original_estimate_message = PulsaraHeuristicTokenEstimatorV3.estimate_message
+    original_estimate_wire = PulsaraHeuristicTokenEstimatorV3.estimate_ordered_wire_json_components
     original_activation = provider_dispatch._activation_subject_for_anchor
 
-    def estimate_message(estimator, message):
-        if any(isinstance(part, LLMImagePart) for part in message.content):
-            compiled_messages.append(message)
-        return original_estimate_message(estimator, message)
+    def estimate_wire(estimator, *, ordered_input_items, ordered_input_sources):
+        compiled_messages.extend(message for message in ordered_input_sources
+            if message is not None and any(isinstance(part, LLMImagePart) for part in message.content))
+        return original_estimate_wire(estimator, ordered_input_items=ordered_input_items,
+            ordered_input_sources=ordered_input_sources)
 
     def activation_subject(canonical_input, anchor):
         result = original_activation(canonical_input, anchor)
@@ -344,8 +345,8 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
 
     monkeypatch.setattr(
         PulsaraHeuristicTokenEstimatorV3,
-        "estimate_message",
-        estimate_message,
+        "estimate_ordered_wire_json_components",
+        estimate_wire,
     )
     monkeypatch.setattr(
         provider_dispatch,

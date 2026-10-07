@@ -157,6 +157,7 @@ from pulsara_agent.conversation_kernel.safe_point import (
     SealedProviderInputPreparationBasis,
 )
 from pulsara_agent.conversation_kernel.steer import (
+    MemorySourceInvalidationReservation,
     MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES,
     AcceptedSteerDispatchBatch,
     PendingPromptSteerFact,
@@ -501,20 +502,51 @@ def _provider_candidate_meets_input_resource_headroom(
     )
 
 
-def _wire_budget_failure_kind(candidate: ProviderWireMeasurementCandidate) -> ModelInputCompileFailureKind:
-    """Explain an already over-budget wire quote without another admission gate."""
-    from pulsara_agent.llm.input import content_has_image
-    from pulsara_agent.primitives.tool_result_projection import ToolResultDeliveryRequirement
-    semantic = candidate.semantic_input
-    if any(item.delivery_requirement is ToolResultDeliveryRequirement.FULL_REQUIRED for item in semantic.tool_result_decisions):
-        return ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-    if any(content_has_image(message.content) for message in semantic.messages):
-        return ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
-    protected = tuple(message for message, placement in zip(semantic.messages, semantic.message_placements, strict=True) if placement.origin_entry_id is not None)
-    diagnostic_estimate = candidate.compile_binding.estimator.estimate_frozen_input(system_prompt="", messages=protected, tools=semantic.tools)
-    if diagnostic_estimate.total_input_tokens > candidate.compile_binding.effective_input_budget_tokens:
-        return ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
-    return ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
+def _remaining_invalidation_input_tokens(
+    candidate: ProviderWireMeasurementCandidate,
+    reservations: tuple[MemorySourceInvalidationReservation, ...],
+) -> int:
+    """Reserve only while the stale head remains in the installed epoch."""
+    from pulsara_agent.model_input.continuity import SourceObservationPresence
+
+    if isinstance(candidate, PreparedProviderWireCandidate) and candidate.cold_semantic is not None:
+        return 0
+    heads = (
+        {} if not isinstance(candidate, PreparedProviderWireCandidate)
+        or candidate.append_result is None
+        else {head.source_kind: head for head in candidate.append_result.source_heads}
+    )
+    resolved_values = (
+        {} if not isinstance(candidate, PreparedProviderWireCandidate)
+        or candidate.sources is None
+        else {
+            source.source_kind: MemoryDispatchSupport._memory_source_occurrence_fingerprint(source)
+            for source in candidate.sources.candidates
+            if source.source_kind in {
+                ContextSourceKind.MEMORY_RECALL,
+                ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+            }
+        }
+    )
+    return sum(
+        reservation.invalidation_input_token_ceiling
+        for reservation in reservations
+        if reservation.source_kind not in heads
+        or (
+            heads[reservation.source_kind].presence not in {
+                SourceObservationPresence.CLEARED, SourceObservationPresence.UNAVAILABLE,
+            }
+            and heads[reservation.source_kind].semantic_fingerprint
+            == reservation.prior_semantic_fingerprint
+            # A successful retrieval can reaffirm the same VALUE. The compiler
+            # then correctly emits no SNAPSHOT_ON_CHANGE suffix; the installed
+            # head already satisfies the actual resolved source, not its earlier
+            # planning placeholder.
+            and heads[reservation.source_kind].semantic_fingerprint
+            != resolved_values.get(reservation.source_kind)
+        )
+    )
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,10 +576,6 @@ class PreparedWireMeasurementDecision:
             != candidate.compile_binding.estimator_fingerprint
             or self.quote.effective_input_budget_tokens
             != candidate.compile_binding.effective_input_budget_tokens
-            or self.quote.semantic_estimated_input_tokens
-            != candidate.semantic_input.final_estimate.total_input_tokens
-            or self.quote.semantic_visual_image_tokens
-            != candidate.semantic_input.final_estimate.visual_image_tokens
         ):
             raise ValueError("wire measurement decision does not join its candidate")
         plan = self.wire_input_plan
@@ -2241,7 +2269,7 @@ class ProviderDispatchCoordinator:
                 result.select_wire_candidate(wire.candidate)
                 if wire.wire_input_plan is None:
                     kind = (
-                        _wire_budget_failure_kind(wire.candidate)
+                        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
                         if wire.quote.budget_input_tokens
                         > wire.quote.effective_input_budget_tokens
                         else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
@@ -3437,8 +3465,8 @@ class ProviderDispatchCoordinator:
                                 planning=planning,
                                 prepared_preference=effective_preference,
                                 recall_desired=recall_desired,
-                                compiled=append.compiled_input,
                                 prepared_call=prepared_call,
+                                new_epoch=steer_new_epoch,
                             )
                         )
                     reservations = tuple(
@@ -3473,7 +3501,6 @@ class ProviderDispatchCoordinator:
                             tools=append.compiled_input.tools,
                             messages=append.compiled_input.messages,
                         ),
-                        resulting_target_estimate=append.compiled_input.final_estimate,
                         effective_target_budget=(
                             prepared_call.compile_binding.effective_input_budget_tokens
                         ),
@@ -3614,14 +3641,12 @@ class ProviderDispatchCoordinator:
                     trial_wire = await self.measure_prepared_wire_candidate(
                         trial_candidate,
                         deadline=deadline,
-                        invalidation_input_token_ceiling=sum(
-                            item.invalidation_input_token_ceiling for item in reservations
-                        ),
+                        invalidation_reservations=reservations,
                     )
                     if (
                         trial_wire.wire_input_plan is None
                         or trial_wire.quote.budget_input_tokens
-                        + sum(item.invalidation_input_token_ceiling for item in reservations)
+                        + _remaining_invalidation_input_tokens(trial_wire.candidate, reservations)
                         > trial_wire.quote.effective_input_budget_tokens
                     ):
                         self._continuity.abort_planning(planning)
@@ -4063,8 +4088,8 @@ class ProviderDispatchCoordinator:
                         planning=planning,
                         prepared_preference=preference_source,
                         recall_desired=recall_desired,
-                        compiled=base_append.compiled_input,
                         prepared_call=prepared_call,
+                        new_epoch=cold_seed is not None,
                     )
                 )
                 final_sources = await self._memory_support.apply_sources(
@@ -4124,8 +4149,8 @@ class ProviderDispatchCoordinator:
                     self._memory_support.planning_preference_refresh_reservation(
                         planning=planning,
                         desired=preference_source,
-                        compiled=base_append.compiled_input,
                         prepared_call=prepared_call,
+                        new_epoch=cold_seed is not None,
                     )
                 )
                 final_sources = replace_memory_context_sources(
@@ -4198,7 +4223,7 @@ class ProviderDispatchCoordinator:
                 final_sources = completion_wire.candidate.sources
                 if completion_wire.wire_input_plan is None:
                     kind = (
-                        _wire_budget_failure_kind(completion_wire.candidate)
+                        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
                         if completion_wire.quote.budget_input_tokens
                         > completion_wire.quote.effective_input_budget_tokens
                         else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
@@ -4429,8 +4454,8 @@ class ProviderDispatchCoordinator:
                     planning=planning,
                     prepared_preference=family.preference_source,
                     recall_desired=recall_desired,
-                    compiled=append.compiled_input,
                     prepared_call=family.prepared_call,
+                    new_epoch=cold_seed is not None,
                 )
             )
             resolved_sources = family.resolved_sources
@@ -4501,7 +4526,7 @@ class ProviderDispatchCoordinator:
         final_sources = wire_decision.candidate.sources
         if wire_decision.wire_input_plan is None:
             kind = (
-                _wire_budget_failure_kind(wire_decision.candidate)
+                ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
                 if wire_decision.quote.budget_input_tokens
                 > wire_decision.quote.effective_input_budget_tokens
                 else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
@@ -5171,7 +5196,7 @@ class ProviderDispatchCoordinator:
         *,
         deadline: float,
         reusable_observation: HandleFreeProviderWireObservation | None = None,
-        invalidation_input_token_ceiling: int = 0,
+        invalidation_reservations: tuple[MemorySourceInvalidationReservation, ...] = (),
     ) -> PreparedWireMeasurementDecision:
         usage_anchor = None
         if isinstance(candidate, PreparedProviderWireCandidate) and candidate.planning is not None:
@@ -5197,7 +5222,7 @@ class ProviderDispatchCoordinator:
             memory_fallbacks = None
             fallback_basis = candidate
             while (
-                measurement.quote.budget_input_tokens + invalidation_input_token_ceiling
+                measurement.quote.budget_input_tokens + _remaining_invalidation_input_tokens(candidate, invalidation_reservations)
                 > measurement.quote.effective_input_budget_tokens
                 or measurement.quote.final_wire_utf8_bytes
                 > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
@@ -5244,8 +5269,8 @@ class ProviderDispatchCoordinator:
                                     planning=fallback_basis.planning,
                                     prepared_preference=preference,
                                     recall_desired=recall,
-                                    compiled=fallback_basis.append_result.compiled_input,
                                     prepared_call=fallback_basis.prepared_call,
+                                    new_epoch=fallback_basis.cold_semantic is not None,
                                 )
                                 memory_fallbacks = iter(self._memory_support.optional_value_fallbacks(
                                     sources=fallback_basis.sources,
@@ -5376,7 +5401,7 @@ class ProviderDispatchCoordinator:
         direct_switch_admission = direct_switch_admission or owned_direct_admission
         if decision.wire_input_plan is None:
             kind = (
-                _wire_budget_failure_kind(decision.candidate)
+                ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
                 if decision.quote.budget_input_tokens
                 > decision.quote.effective_input_budget_tokens
                 else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
@@ -5604,7 +5629,7 @@ class ProviderDispatchCoordinator:
                 raise
             except Exception as exc:
                 raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
+                    ModelInputCompileFailureKind.FINAL_INPUT_BINDING_MISMATCH
                 ) from exc
             _require_dispatch_planning_deadline(deadline)
             permit = self._safe_point.install_provider_input_candidate(
@@ -6420,7 +6445,6 @@ def _same_provider_wire_measurement_candidate(
         and left.semantic_input.message_placements
         == right.semantic_input.message_placements
         and left.semantic_input.tools == right.semantic_input.tools
-        and left.semantic_input.final_estimate == right.semantic_input.final_estimate
         and left.semantic_input.compile_binding_fingerprint
         == right.semantic_input.compile_binding_fingerprint
         and left.call == right.call
@@ -6501,7 +6525,6 @@ def _semantic_projection_from_compiled(
         messages=compiled.messages,
         message_placements=compiled.message_placements,
         tools=compiled.tools,
-        final_estimate=compiled.final_estimate,
         source_decisions=compiled.source_decisions,
         tool_result_decisions=compiled.tool_result_decisions,
         diagnostic_codes=compiled.diagnostic_codes,

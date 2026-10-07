@@ -449,6 +449,19 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
     # the closed action union; every accepted value must still match exactly
     # one of the strict branch schemas below it.
     resolved.setdefault("type", "object")
+    if "discriminator" in resolved:
+        # The provider flattens root action unions. Preserve allowed fields in
+        # the terminal contract itself; the Pydantic union remains authoritative.
+        signatures = []
+        for branch in resolved["oneOf"]:
+            properties = branch["properties"]
+            action = properties["action"]["const"]
+            fields = ", ".join(name for name in properties if name != "action")
+            signatures.append(f"{action}: {fields or 'none'}.")
+        resolved["description"] = (
+            "Allowed fields besides action (omit all others, including null placeholders): "
+            + " ".join(signatures)
+        )
     return resolved
 
 

@@ -46,6 +46,7 @@ from pulsara_agent.llm.input import (
     join_text_content,
 )
 from pulsara_agent.llm.errors import LLMTransportContractError
+from pulsara_agent.llm.validation import validate_model_context_shape_for_call
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.provider import (
     ProviderAssistantReplayCodecKind,
@@ -324,6 +325,7 @@ def build_responses_payload(
     call: ResolvedModelCall,
     context: LLMContext,
 ) -> dict[str, Any]:
+    validate_model_context_shape_for_call(call=call, context=context)
     model = call.target.model_profile
     plan = context.provider_wire_input_plan
     if plan is not None:

@@ -283,8 +283,14 @@ class _RecordingModelRuntime:
     def freeze_resolution_snapshot(self):
         return self._delegate.freeze_resolution_snapshot()
 
-    def resolve_target(self, binding, *, timeout_policy) -> ResolvedModelTarget:
-        target = self._delegate.resolve_target(binding, timeout_policy=timeout_policy)
+    def resolve_target(
+        self, binding, *, timeout_policy, frozen_target_fact=None
+    ) -> ResolvedModelTarget:
+        target = self._delegate.resolve_target(
+            binding,
+            timeout_policy=timeout_policy,
+            frozen_target_fact=frozen_target_fact,
+        )
         return replace(
             target,
             transport=_RecordingTransport(

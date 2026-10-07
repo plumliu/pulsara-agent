@@ -44,6 +44,8 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
             "type": "string",
             "description": "Literal keywords; all must match in one entry. Required on the first content search.",
         }
+        if name == "search_session_content":
+            properties["query"].update(minLength=1, pattern=r"\S")
     if name == "search_sessions":
         properties["lifecycle"] = {
             "type": "string",
@@ -85,9 +87,34 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
                 },
             }
         )
+    budgets = {"limit", "max_chars"} if name == "read_session_content" else {"limit"}
+    first = {key: value for key, value in properties.items() if key != "cursor"}
+    continuation = {
+        key: value for key, value in properties.items() if key in budgets | {"cursor"}
+    }
     return {
         "type": "object",
-        "properties": properties,
-        "required": [],
-        "additionalProperties": False,
+        "description": (
+            "First page: omit cursor; "
+            + (
+                "query is required and must contain non-whitespace text. "
+                if name == "search_session_content" else "all fields are optional. "
+            )
+            + f"Continue with only cursor and optional {', '.join(sorted(budgets))}; "
+            "omit all query/filter/anchor fields, even if unchanged. Do not use null placeholders."
+        ),
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": first,
+                "required": ["query"] if name == "search_session_content" else [],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": continuation,
+                "required": ["cursor"],
+                "additionalProperties": False,
+            },
+        ],
     }

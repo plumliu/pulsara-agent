@@ -662,14 +662,8 @@ def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
     )
     assert compiled.system_prompt.startswith("ROOT SYSTEM")
     assert [item.name for item in compiled.tools] == ["read_file"]
-    assert (
-        compiled.final_estimate
-        == prepared.compile_binding.estimator.estimate_frozen_input(
-            system_prompt=compiled.system_prompt,
-            messages=compiled.messages,
-            tools=compiled.tools,
-        )
-    )
+    assert request.wire_input_plan.quote.budget_input_tokens <= prepared.compile_binding.effective_input_budget_tokens
+    assert not hasattr(compiled, "final_estimate")
     request.surface_borrow.close()
 
 
@@ -1566,44 +1560,21 @@ def test_round3_execution_rejects_same_shape_foreign_host_surface_borrow() -> No
     request_b.surface_borrow.close()
 
 
-def test_round3_direct_model_rejects_final_estimate_drift_before_transport_open(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_round3_direct_model_rejects_content_drift_before_transport_open(monkeypatch) -> None:
     port = _port()
-    request, _tool_port = _prepared_execution(port)
-    compiled = request.compiled_input
-    divergent = replace(
-        compiled.final_estimate,
-        envelope_tokens=compiled.final_estimate.envelope_tokens + 1,
-        total_input_tokens=compiled.final_estimate.total_input_tokens + 1,
-    )
-    opened = 0
-
-    def validate_differently(*, call, context):
-        del call, context
-        return SimpleNamespace(estimate=divergent)
-
-    def forbidden_open(*, call, context):
-        del call, context
-        nonlocal opened
-        opened += 1
-        raise AssertionError("transport must not open after estimate drift")
-
-    monkeypatch.setattr(
-        "pulsara_agent.conversation_kernel.direct_model.validate_model_context_for_call",
-        validate_differently,
-    )
-    monkeypatch.setattr(
-        request.prepared_call.call.target.transport, "open_stream", forbidden_open
-    )
-
-    async def collect() -> list[object]:
-        return await _collect_preflighted(port, request)
-
-    with pytest.raises(RuntimeError, match="pre-send input estimates differ"):
-        asyncio.run(collect())
-    assert opened == 0
-    request.surface_borrow.close()
+    request, _ = _prepared_execution(port)
+    owner, candidate = _continuity_candidate(request)
+    drifted = replace(request, compiled_input=replace(request.compiled_input, system_prompt="changed input"))
+    opened = []
+    monkeypatch.setattr(request.prepared_call.call.target.transport, "open_stream",
+        lambda **kwargs: opened.append(kwargs))
+    try:
+        with pytest.raises(ValueError, match="exact-join"):
+            port.preflight_execution(drifted, append_candidate=candidate,
+                install_authority=owner.install_authority)
+        assert opened == []
+    finally:
+        request.surface_borrow.close()
 
 
 def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> None:

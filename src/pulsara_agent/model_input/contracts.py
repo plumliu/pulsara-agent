@@ -14,7 +14,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Literal, Mapping, Protocol
 
-from pulsara_agent.llm.estimator import FinalWireTokenEstimate, TokenEstimate
+from pulsara_agent.llm.estimator import FinalWireTokenEstimate
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     FrozenPromptPart,
@@ -205,7 +205,7 @@ class ModelInputCompileFailureKind(StrEnum):
     STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET = "STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET"
     REQUIRED_CONTEXT_EXCEEDS_BUDGET = "REQUIRED_CONTEXT_EXCEEDS_BUDGET"
     TOOL_SCHEMA_EXCEEDS_BUDGET = "TOOL_SCHEMA_EXCEEDS_BUDGET"
-    FINAL_ESTIMATE_MISMATCH = "FINAL_ESTIMATE_MISMATCH"
+    FINAL_INPUT_BINDING_MISMATCH = "FINAL_INPUT_BINDING_MISMATCH"
     FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE = (
         "FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE"
     )
@@ -357,18 +357,6 @@ class ModelInputTokenEstimator(Protocol):
         ordered_input_sources: tuple[LLMMessage | None, ...],
     ) -> FinalWireTokenEstimate: ...
 
-    def estimate_message(self, message: LLMMessage) -> int: ...
-
-    def estimate_frozen_tool_spec(self, tool: FrozenToolSpec) -> int: ...
-
-    def estimate_frozen_input(
-        self,
-        *,
-        system_prompt: str,
-        messages: tuple[LLMMessage, ...],
-        tools: tuple[FrozenToolSpec, ...],
-    ) -> TokenEstimate: ...
-
 
 class ProviderWireSemanticInput(Protocol):
     """The complete structural input needed by provider-wire planning.
@@ -382,7 +370,6 @@ class ProviderWireSemanticInput(Protocol):
     messages: tuple[LLMMessage, ...]
     message_placements: tuple["FrozenCompiledMessagePlacement", ...]
     tools: tuple[FrozenToolSpec, ...]
-    final_estimate: TokenEstimate
     compile_binding_fingerprint: str
 
 
@@ -2150,11 +2137,10 @@ class CompiledSourceDecision:
     channel: ContextChannel
     selected_mode: ContextRenderMode | None
     included: bool
-    estimated_tokens: int
     reason_code: str
 
     def __post_init__(self) -> None:
-        if self.estimated_tokens < 0 or self.reason_code not in {
+        if self.reason_code not in {
             "SELECTED_FULL",
             "SELECTED_UNAVAILABLE",
             "DEGRADED_FOR_BUDGET",
@@ -2165,7 +2151,7 @@ class CompiledSourceDecision:
         if self.included != (self.selected_mode is not None):
             raise ValueError("compiled source inclusion union is invalid")
         if not self.included and (
-            self.estimated_tokens != 0 or self.reason_code != "OMITTED_FOR_BUDGET"
+            self.reason_code != "OMITTED_FOR_BUDGET"
         ):
             raise ValueError("omitted source decision is inconsistent")
 
@@ -2178,11 +2164,10 @@ class CompiledToolResultDecision:
     selected_mode: ToolResultProviderRenderMode
     delivery_requirement: ToolResultDeliveryRequirement
     full_delivery_reason: ToolResultFullDeliveryReason | None
-    estimated_tokens: int
     reason_code: str
 
     def __post_init__(self) -> None:
-        if self.estimated_tokens < 0 or self.reason_code not in {
+        if self.reason_code not in {
             "SELECTED_FULL",
             "FULL_INELIGIBLE_RESULT_BOUND",
             "DEGRADED_FOR_BUDGET",
@@ -2209,21 +2194,12 @@ class CompiledToolResultDecision:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextCompileBudgetReport:
+class ContextCompileReport:
     compiler_contract_version: str
-    estimator_fingerprint: str
     tool_surface_fingerprint: str
-    effective_input_budget_tokens: int
-    system_tokens: int
-    message_tokens: int
-    tool_tokens: int
-    envelope_tokens: int
-    total_input_tokens: int
-    protected_transcript_tokens: int
     protected_prefix_message_count: int
     protected_prefix_logical_bytes: int
     protected_prefix_fingerprint: str | None
-    context_source_tokens: int
     degraded_source_count: int
     omitted_source_count: int
     degraded_tool_result_count: int
@@ -2234,16 +2210,8 @@ class ContextCompileBudgetReport:
         if not self.compiler_contract_version:
             raise ValueError("compile budget report contract is empty")
         numeric = (
-            self.effective_input_budget_tokens,
-            self.system_tokens,
-            self.message_tokens,
-            self.tool_tokens,
-            self.envelope_tokens,
-            self.total_input_tokens,
-            self.protected_transcript_tokens,
             self.protected_prefix_message_count,
             self.protected_prefix_logical_bytes,
-            self.context_source_tokens,
             self.degraded_source_count,
             self.omitted_source_count,
             self.degraded_tool_result_count,
@@ -2251,15 +2219,7 @@ class ContextCompileBudgetReport:
         )
         if any(value < 0 for value in numeric):
             raise ValueError("compile budget report contains a negative value")
-        if self.total_input_tokens != (
-            self.system_tokens
-            + self.message_tokens
-            + self.tool_tokens
-            + self.envelope_tokens
-        ):
-            raise ValueError("compile budget report total is inconsistent")
         for value in (
-            self.estimator_fingerprint,
             self.tool_surface_fingerprint,
             self.decision_digest,
         ):
@@ -2397,10 +2357,9 @@ class FrozenCompiledModelInput:
     messages: tuple[LLMMessage, ...] = field(repr=False)
     message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(repr=False)
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
-    final_estimate: TokenEstimate
     source_decisions: tuple[CompiledSourceDecision, ...]
     tool_result_decisions: tuple[CompiledToolResultDecision, ...]
-    budget_report: ContextCompileBudgetReport
+    compile_report: ContextCompileReport
     diagnostic_codes: tuple[ContextPublicDiagnosticCode, ...]
     source_collection_fingerprint: str
     compiled_semantic_fingerprint: str
@@ -2409,18 +2368,6 @@ class FrozenCompiledModelInput:
     def __post_init__(self) -> None:
         if not self.context_id:
             raise ValueError("compiled model input context identity is empty")
-        if (
-            self.final_estimate.total_input_tokens
-            != self.budget_report.total_input_tokens
-        ):
-            raise ValueError("compiled model input estimate and report differ")
-        if (
-            self.final_estimate.system_tokens != self.budget_report.system_tokens
-            or self.final_estimate.message_tokens != self.budget_report.message_tokens
-            or self.final_estimate.tool_tokens != self.budget_report.tool_tokens
-            or self.final_estimate.envelope_tokens != self.budget_report.envelope_tokens
-        ):
-            raise ValueError("compiled model input component estimates differ")
         if len(self.message_placements) != len(self.messages):
             raise ValueError("compiled message placements are not parallel")
         if tuple(item.message_ordinal for item in self.message_placements) != tuple(
@@ -2453,22 +2400,6 @@ class FrozenCompiledModelInput:
         ):
             if not value.startswith(SHA256_PREFIX):
                 raise ValueError("compiled model input fingerprint is invalid")
-        expected = frozen_compiled_model_input_fingerprint(
-            context_id=self.context_id,
-            canonical_input_identity=self.canonical_input_identity,
-            system_prompt=self.system_prompt,
-            messages=self.messages,
-            tools=self.tools,
-            final_estimate=self.final_estimate,
-            source_decisions=self.source_decisions,
-            tool_result_decisions=self.tool_result_decisions,
-            budget_report=self.budget_report,
-            diagnostic_codes=self.diagnostic_codes,
-            source_collection_fingerprint=self.source_collection_fingerprint,
-            compile_binding_fingerprint=self.compile_binding_fingerprint,
-        )
-        if self.compiled_semantic_fingerprint != expected:
-            raise ValueError("compiled model input fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2485,7 +2416,6 @@ class FrozenModelInputSemanticProjection:
     messages: tuple[LLMMessage, ...] = field(repr=False)
     message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(repr=False)
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
-    final_estimate: TokenEstimate
     source_decisions: tuple[CompiledSourceDecision, ...]
     tool_result_decisions: tuple[CompiledToolResultDecision, ...]
     diagnostic_codes: tuple[ContextPublicDiagnosticCode, ...]
@@ -2506,8 +2436,6 @@ class FrozenModelInputSemanticProjection:
             )
         ):
             raise ValueError("semantic projection placement role drifted")
-        if len(self.final_estimate.message_tokens_by_index) != len(self.messages):
-            raise ValueError("semantic projection token breakdown is invalid")
         if (
             len(self.tool_result_decisions)
             > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_result_decisions
@@ -2524,67 +2452,6 @@ class FrozenModelInputSemanticProjection:
                 raise ValueError("semantic projection fingerprint is invalid")
 
 
-def frozen_compiled_model_input_fingerprint(
-    *,
-    context_id: str,
-    canonical_input_identity: CanonicalModelInputIdentity,
-    system_prompt: str,
-    messages: tuple[LLMMessage, ...],
-    tools: tuple[FrozenToolSpec, ...],
-    final_estimate: TokenEstimate,
-    source_decisions: tuple[CompiledSourceDecision, ...],
-    tool_result_decisions: tuple[CompiledToolResultDecision, ...],
-    budget_report: ContextCompileBudgetReport,
-    diagnostic_codes: tuple[ContextPublicDiagnosticCode, ...],
-    source_collection_fingerprint: str,
-    compile_binding_fingerprint: str,
-) -> str:
-    return context_fingerprint(
-        "frozen-compiled-model-input:v1",
-        {
-            "context_id": context_id,
-            "canonical_identity": canonical_input_identity.identity_fingerprint,
-            "compile_binding": compile_binding_fingerprint,
-            "source_collection": source_collection_fingerprint,
-            "system_prompt": system_prompt,
-            "messages": tuple(_llm_message_value(item) for item in messages),
-            "tools": tuple(tool.canonical_bytes.decode("utf-8") for tool in tools),
-            "estimate": _token_estimate_value(final_estimate),
-            "source_decisions": tuple(
-                (
-                    item.source_kind.value,
-                    item.source_instance_fingerprint,
-                    item.channel.value,
-                    None if item.selected_mode is None else item.selected_mode.value,
-                    item.included,
-                    item.estimated_tokens,
-                    item.reason_code,
-                )
-                for item in source_decisions
-            ),
-            "tool_result_decisions": tuple(
-                (
-                    item.source_entry_fingerprint,
-                    item.current_turn,
-                    item.first_legal_mode.value,
-                    item.selected_mode.value,
-                    item.delivery_requirement.value,
-                    (
-                        None
-                        if item.full_delivery_reason is None
-                        else item.full_delivery_reason.value
-                    ),
-                    item.estimated_tokens,
-                    item.reason_code,
-                )
-                for item in tool_result_decisions
-            ),
-            "budget_report": _budget_report_value(budget_report),
-            "diagnostics": tuple(item.value for item in diagnostic_codes),
-        },
-    )
-
-
 def _llm_message_value(message: LLMMessage) -> dict[str, object]:
     return {
         "role": message.role.value,
@@ -2598,42 +2465,6 @@ def _llm_message_value(message: LLMMessage) -> dict[str, object]:
         "tool_call_id": message.tool_call_id,
         "name": message.name,
         "arguments": message.arguments,
-    }
-
-
-def _token_estimate_value(estimate: TokenEstimate) -> dict[str, object]:
-    return {
-        "system_tokens": estimate.system_tokens,
-        "message_tokens": estimate.message_tokens,
-        "message_tokens_by_index": estimate.message_tokens_by_index,
-        "tool_tokens": estimate.tool_tokens,
-        "envelope_tokens": estimate.envelope_tokens,
-        "visual_image_tokens": estimate.visual_image_tokens,
-        "total_input_tokens": estimate.total_input_tokens,
-    }
-
-
-def _budget_report_value(report: ContextCompileBudgetReport) -> dict[str, object]:
-    return {
-        "compiler_contract_version": report.compiler_contract_version,
-        "estimator_fingerprint": report.estimator_fingerprint,
-        "tool_surface_fingerprint": report.tool_surface_fingerprint,
-        "effective_input_budget_tokens": report.effective_input_budget_tokens,
-        "system_tokens": report.system_tokens,
-        "message_tokens": report.message_tokens,
-        "tool_tokens": report.tool_tokens,
-        "envelope_tokens": report.envelope_tokens,
-        "total_input_tokens": report.total_input_tokens,
-        "protected_transcript_tokens": report.protected_transcript_tokens,
-        "protected_prefix_message_count": report.protected_prefix_message_count,
-        "protected_prefix_logical_bytes": report.protected_prefix_logical_bytes,
-        "protected_prefix_fingerprint": report.protected_prefix_fingerprint,
-        "context_source_tokens": report.context_source_tokens,
-        "degraded_source_count": report.degraded_source_count,
-        "omitted_source_count": report.omitted_source_count,
-        "degraded_tool_result_count": report.degraded_tool_result_count,
-        "omitted_tool_result_body_count": report.omitted_tool_result_body_count,
-        "decision_digest": report.decision_digest,
     }
 
 

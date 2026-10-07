@@ -1292,3 +1292,19 @@ describe('shared workspace read-only dock', () => {
     expect(restore).not.toHaveBeenCalled();
   });
 });
+
+
+it('closes composer menus on control loss without reopening them when control returns', () => {
+  const base = props({ canControl: true });
+  const view = render(<WorkbenchView {...base} />);
+  fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
+  expect(screen.getByRole('dialog', { name: '添加内容与模式' })).toBeTruthy();
+
+  view.rerender(<WorkbenchView {...base} canControl={false} />);
+  expect(screen.queryByRole('dialog', { name: '添加内容与模式' })).toBeNull();
+  view.rerender(<WorkbenchView {...base} />);
+  expect(screen.queryByRole('dialog', { name: '添加内容与模式' })).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
+  expect(screen.getByRole('dialog', { name: '添加内容与模式' })).toBeTruthy();
+});

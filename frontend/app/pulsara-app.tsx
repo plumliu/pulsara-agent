@@ -537,7 +537,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       activities.push({ ...activity, body });
     }
     return { ...page, activities };
-  }, [adapter, ownsConnection]);
+  }, [adapter]);
 
   const loadTaskBackgroundProcesses = useCallback(async (cursor?: string) => {
     const active = connectionRef.current;
@@ -2444,7 +2444,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       throw new RuntimeApiError('TOOL_ARTIFACT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
     }
     return page;
-  }, [ownsConnection]);
+  }, []);
 
   const locateAnnotationSource = useCallback(async (entryId: string, signal: AbortSignal) => {
     const active = connectionRef.current ?? historyRef.current;
@@ -2454,7 +2454,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
     publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
     setFocusSourceEntry({ sessionId: active.sessionId, entryId });
-  }, [ownsConnection, publishProjection]);
+  }, [publishProjection]);
 
   const readPromptImage = useCallback(async (image: CanonicalPromptImagePart) => {
     const active = connectionRef.current ?? historyRef.current;
@@ -2474,7 +2474,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       );
     }
     return bytes;
-  }, [ownsConnection]);
+  }, []);
 
   const readVisualizationThumbnail = useCallback(async (
     entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal,
@@ -2484,7 +2484,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const image = await active.readVisualizationThumbnail(entryId, ordinal, digest, size, signal);
     if (!ownsHistoryReader(active)) throw new Error('可视化所属的会话已经改变。');
     return image;
-  }, [ownsConnection]);
+  }, []);
 
   const readVisualization = useCallback(async (
     entryId: string, ordinal: number, digest: string, size: number,
@@ -2502,7 +2502,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       );
     }
     return html;
-  }, [ownsConnection]);
+  }, []);
 
   return (
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>

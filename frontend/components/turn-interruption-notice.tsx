@@ -20,30 +20,30 @@ const reasons: Record<string, string> = {
 };
 
 export function TurnInterruptionHistoryNotice({notice}: {notice: TurnInterruptionNotice}) {
-  const hover = usePromptHover<HTMLButtonElement, HTMLDivElement>(360);
+  const { trigger: triggerRef, details: detailsRef, position, show, hide, keep, dismiss } = usePromptHover<HTMLButtonElement, HTMLDivElement>(360);
   const [pinned, setPinned] = useState(false);
   const id = useId();
   useEffect(() => {
     const clear = (event: KeyboardEvent) => { if (event.key === 'Escape') setPinned(false); };
     const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !hover.trigger.current?.contains(event.target) && !hover.details.current?.contains(event.target)) setPinned(false);
+      if (event.target instanceof Node && !triggerRef.current?.contains(event.target) && !detailsRef.current?.contains(event.target)) setPinned(false);
     };
     document.addEventListener('keydown', clear); document.addEventListener('pointerdown', outside);
     return () => {document.removeEventListener('keydown', clear); document.removeEventListener('pointerdown', outside);};
-  }, [hover.trigger, hover.details]);
+  }, [triggerRef, detailsRef]);
   return <div className="conversation-interruption" data-interruption-owner={`${notice.ownerKind}:${notice.ownerId}`}>
     <span>本轮回复已中断。</span>
-    <button ref={hover.trigger} type="button" aria-label="查看中断详情" aria-describedby={hover.position ? id : undefined}
-      aria-expanded={Boolean(hover.position)} onMouseEnter={hover.show} onFocus={hover.show}
-      onMouseLeave={() => {if (!pinned) hover.hide();}} onBlur={() => {if (!pinned) hover.hide();}}
-      onClick={() => {if (pinned) {setPinned(false); hover.dismiss();} else {setPinned(true); hover.show();}}}>
+    <button ref={triggerRef} type="button" aria-label="查看中断详情" aria-describedby={position ? id : undefined}
+      aria-expanded={Boolean(position)} onMouseEnter={show} onFocus={show}
+      onMouseLeave={() => {if (!pinned) hide();}} onBlur={() => {if (!pinned) hide();}}
+      onClick={() => {if (pinned) {setPinned(false); dismiss();} else {setPinned(true); show();}}}>
       <Info size={14} />
     </button>
-    {hover.position && createPortal(<div ref={hover.details} id={id} role="tooltip" className="interruption-details"
-      onMouseEnter={hover.keep} onMouseLeave={() => {if (!pinned) hover.hide();}}
-      style={{position:'fixed',left:hover.position.left,top:hover.position.top,
-        maxHeight:Math.max(80, hover.position.above?hover.position.top-16:window.innerHeight-hover.position.top-16),
-        overflowY:'auto',transform:hover.position.above?'translateY(calc(-100% - 8px))':'translateY(8px)'}}>
+    {position && createPortal(<div ref={detailsRef} id={id} role="tooltip" className="interruption-details"
+      onMouseEnter={keep} onMouseLeave={() => {if (!pinned) hide();}}
+      style={{position:'fixed',left:position.left,top:position.top,
+        maxHeight:Math.max(80, position.above?position.top-16:window.innerHeight-position.top-16),
+        overflowY:'auto',transform:position.above?'translateY(calc(-100% - 8px))':'translateY(8px)'}}>
       <p>{reasons[notice.reason] ?? '未能确定具体原因。'}</p>
       {notice.publicDetail && <p>{notice.publicDetail}</p>}
       <time dateTime={notice.terminalAtUtc}>{new Date(notice.terminalAtUtc).toLocaleString('zh-CN')}</time>

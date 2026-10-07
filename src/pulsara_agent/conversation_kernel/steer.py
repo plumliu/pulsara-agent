@@ -27,7 +27,6 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
     SubjectSlot,
 )
-from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     model_call_binding_to_dict,
@@ -278,8 +277,6 @@ class PreparedRootProviderInputAdmission:
             or identity.provider_input_through_sequence
             != self.candidate.exact_initial_entry_sequence
             or self.semantic_input.canonical_input_identity != identity
-            or self.wire_quote.semantic_estimated_input_tokens
-            != self.semantic_input.final_estimate.total_input_tokens
             or self.wire_quote.final_wire_utf8_bytes > (64 << 20)
             or self.wire_quote.budget_input_tokens
             > self.wire_quote.effective_input_budget_tokens
@@ -368,8 +365,6 @@ class PreparedActiveRootInputAdmission:
             or identity.provider_input_through_sequence
             != self.candidate.resulting_provider_input_through_sequence
             or self.semantic_input.canonical_input_identity != identity
-            or self.wire_quote.semantic_estimated_input_tokens
-            != self.semantic_input.final_estimate.total_input_tokens
             or self.wire_quote.final_wire_utf8_bytes > (64 << 20)
             or self.wire_quote.budget_input_tokens
             > self.wire_quote.effective_input_budget_tokens
@@ -1086,7 +1081,6 @@ class SteerSuffixAdmissionQuote:
     selected_canonical_expanded_bytes: int
     prospective_snapshot_hydrated_bytes: int
     resulting_epoch_logical_bytes: int
-    resulting_target_estimate: TokenEstimate
     effective_target_budget: int
     estimator_fingerprint: str
     predecessor_prefix_fingerprint: str | None
@@ -1155,13 +1149,12 @@ class MemorySourceInvalidationReservation:
     desired_presence: SourceObservationPresence
     desired_semantic_fingerprint: str
     source_contract_fingerprint: str
-    invalidation_provider_item_ceiling: int
-    invalidation_encoded_utf8_bytes_ceiling: int
     invalidation_input_token_ceiling: int
     invalidation_epoch_bytes_ceiling: int
-    full_encoded_utf8_bytes: int
-    full_input_token_cost: int
     estimator_fingerprint: str
+    # Existing canonical steer-ID preimage digest, derived before source text
+    # is released. Never used for admission or owner/permission validation.
+    stable_identity: str
 
     def __post_init__(self) -> None:
         if self.source_kind not in {
@@ -1185,17 +1178,14 @@ class MemorySourceInvalidationReservation:
             self.desired_semantic_fingerprint,
             self.source_contract_fingerprint,
             self.estimator_fingerprint,
+            self.stable_identity,
         ):
             if not value.startswith("sha256:"):
                 raise ValueError("memory invalidation fingerprint is invalid")
         if (
-            self.invalidation_provider_item_ceiling != 1
-            or min(
-                self.invalidation_encoded_utf8_bytes_ceiling,
+            min(
                 self.invalidation_input_token_ceiling,
                 self.invalidation_epoch_bytes_ceiling,
-                self.full_encoded_utf8_bytes,
-                self.full_input_token_cost,
             )
             < 0
         ):
@@ -1210,12 +1200,10 @@ def build_memory_source_invalidation_reservation(
     desired_presence: SourceObservationPresence,
     desired_semantic_fingerprint: str,
     source_contract_fingerprint: str,
-    invalidation_encoded_utf8_bytes_ceiling: int,
     invalidation_input_token_ceiling: int,
     invalidation_epoch_bytes_ceiling: int,
-    full_encoded_utf8_bytes: int,
-    full_input_token_cost: int,
     estimator_fingerprint: str,
+    stable_identity: str,
 ) -> MemorySourceInvalidationReservation:
     return MemorySourceInvalidationReservation(
         source_kind=source_kind,
@@ -1224,13 +1212,10 @@ def build_memory_source_invalidation_reservation(
         desired_presence=desired_presence,
         desired_semantic_fingerprint=desired_semantic_fingerprint,
         source_contract_fingerprint=source_contract_fingerprint,
-        invalidation_provider_item_ceiling=1,
-        invalidation_encoded_utf8_bytes_ceiling=invalidation_encoded_utf8_bytes_ceiling,
         invalidation_input_token_ceiling=invalidation_input_token_ceiling,
         invalidation_epoch_bytes_ceiling=invalidation_epoch_bytes_ceiling,
-        full_encoded_utf8_bytes=full_encoded_utf8_bytes,
-        full_input_token_cost=full_input_token_cost,
         estimator_fingerprint=estimator_fingerprint,
+        stable_identity=stable_identity,
     )
 
 
@@ -1432,24 +1417,11 @@ def build_steer_plan_conflict_interruption(
     )
 
 
-def _estimate_value(estimate: TokenEstimate) -> dict[str, object]:
-    return {
-        "system": estimate.system_tokens,
-        "messages": estimate.message_tokens,
-        "message_by_index": estimate.message_tokens_by_index,
-        "tools": estimate.tool_tokens,
-        "envelope": estimate.envelope_tokens,
-        "visual_image": estimate.visual_image_tokens,
-        "total": estimate.total_input_tokens,
-    }
-
-
 def build_steer_suffix_quote(
     *,
     candidates: tuple[PreparedSteerConsumptionCandidate, ...],
     prospective_snapshot_hydrated_bytes: int,
     resulting_epoch_logical_bytes: int,
-    resulting_target_estimate: TokenEstimate,
     effective_target_budget: int,
     estimator_fingerprint: str,
     predecessor_prefix_fingerprint: str | None,
@@ -1467,7 +1439,6 @@ def build_steer_suffix_quote(
         selected_canonical_expanded_bytes=canonical_bytes,
         prospective_snapshot_hydrated_bytes=prospective_snapshot_hydrated_bytes,
         resulting_epoch_logical_bytes=resulting_epoch_logical_bytes,
-        resulting_target_estimate=resulting_target_estimate,
         effective_target_budget=effective_target_budget,
         estimator_fingerprint=estimator_fingerprint,
         predecessor_prefix_fingerprint=predecessor_prefix_fingerprint,
@@ -1540,69 +1511,16 @@ def steer_consumption_candidate_identity_fingerprint(
     )
 
 
-def _legacy_memory_reservation_identity(
-    reservation: MemorySourceInvalidationReservation,
-) -> str:
-    return context_fingerprint(
-        "pulsara:memory-source-invalidation-reservation:v1",
-        {
-            "source": reservation.source_kind.value,
-            "prior": (
-                reservation.prior_presence.value,
-                reservation.prior_semantic_fingerprint,
-            ),
-            "desired": (
-                reservation.desired_presence.value,
-                reservation.desired_semantic_fingerprint,
-            ),
-            "contract": reservation.source_contract_fingerprint,
-            "invalidation": (
-                reservation.invalidation_provider_item_ceiling,
-                reservation.invalidation_encoded_utf8_bytes_ceiling,
-                reservation.invalidation_input_token_ceiling,
-                reservation.invalidation_epoch_bytes_ceiling,
-            ),
-            "full": (
-                reservation.full_encoded_utf8_bytes,
-                reservation.full_input_token_cost,
-            ),
-            "estimator": reservation.estimator_fingerprint,
-        },
-    )
-
-
 def _legacy_steer_quote_identity(plan: PreparedSteerSuffixAdmissionPlan) -> str:
-    quote = plan.quote
-    return context_fingerprint(
-        "pulsara:steer-suffix-admission-quote:v1",
-        {
-            "candidates": tuple(
-                steer_consumption_candidate_identity_fingerprint(item)
-                for item in plan.selected_consumption_candidates
-            ),
-            "selected_items": quote.selected_item_count,
-            "selected_canonical_bytes": quote.selected_canonical_expanded_bytes,
-            "snapshot_bytes": quote.prospective_snapshot_hydrated_bytes,
-            "epoch_bytes": quote.resulting_epoch_logical_bytes,
-            "estimate": _estimate_value(quote.resulting_target_estimate),
-            "effective_budget": quote.effective_target_budget,
-            "estimator": quote.estimator_fingerprint,
-            "predecessor_prefix": quote.predecessor_prefix_fingerprint,
-            "memory_recall_reservation": (
-                None
-                if quote.memory_recall_reservation is None
-                else _legacy_memory_reservation_identity(
-                    quote.memory_recall_reservation
-                )
-            ),
-            "memory_response_preference_reservation": (
-                None
-                if quote.memory_response_preference_reservation is None
-                else _legacy_memory_reservation_identity(
-                    quote.memory_response_preference_reservation
-                )
-            ),
-        },
+    from pulsara_agent.model_input._stable_input_identity import steer_quote_identity
+
+    return steer_quote_identity(
+        candidate_ids=tuple(
+            steer_consumption_candidate_identity_fingerprint(item)
+            for item in plan.selected_consumption_candidates
+        ),
+        quote=plan.quote,
+        compiled=plan.prospective_compiled_input,
     )
 
 

@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 
 from pulsara_agent.llm.errors import (
     ModelContextIdentityMismatch,
-    ModelInputBudgetExceeded,
-    ModelInputEstimateMismatch,
     ModelTargetBindingMismatch,
     ModelTargetCapabilityMismatch,
 )
-from pulsara_agent.llm.estimator import TokenEstimate, estimate_model_context_for_call
 from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
@@ -22,41 +18,6 @@ from pulsara_agent.llm.input import (
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.primitives.model_call import ModelContextMode
-
-
-@dataclass(frozen=True, slots=True)
-class ModelContextValidationResult:
-    estimate: TokenEstimate
-
-
-def validate_model_context_for_call(
-    *,
-    call: ResolvedModelCall,
-    context: LLMContext,
-) -> ModelContextValidationResult:
-    validate_model_context_shape_for_call(call=call, context=context)
-    fact = call.fact
-    target_fact = call.target.fact
-    estimate = estimate_model_context_for_call(call=call, context=context)
-    if context.provider_wire_input_plan is None and estimate.total_input_tokens > target_fact.context_budget.input_budget_tokens:
-        exc = ModelInputBudgetExceeded(
-            f"model input estimate {estimate.total_input_tokens} exceeds budget "
-            f"{target_fact.context_budget.input_budget_tokens}"
-        )
-        exc.estimate = estimate  # type: ignore[attr-defined]
-        raise exc
-    if fact.context_mode is ModelContextMode.COMPILED and (
-        context.compiler_estimated_input_tokens is None
-        or context.compiler_estimated_input_tokens != estimate.total_input_tokens
-    ):
-        exc = ModelInputEstimateMismatch(
-            "compiled model context is missing its final estimate"
-            if context.compiler_estimated_input_tokens is None
-            else "compiler and pre-send model input estimates differ"
-        )
-        exc.estimate = estimate  # type: ignore[attr-defined]
-        raise exc
-    return ModelContextValidationResult(estimate=estimate)
 
 
 def validate_model_context_shape_for_call(

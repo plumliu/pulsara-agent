@@ -180,8 +180,6 @@ def _wire_quote(
             or PulsaraHeuristicTokenEstimatorV3().fact.estimator_fingerprint
         ),
         effective_input_budget_tokens=budget_tokens,
-        semantic_estimated_input_tokens=semantic_tokens,
-        semantic_visual_image_tokens=0,
         generic_wire_estimated_input_tokens=final_tokens,
         generic_wire_visual_image_tokens=0,
         replaced_generic_wire_estimated_tokens=0,
@@ -1412,10 +1410,6 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
         budget_tokens=1_000,
         estimator_fingerprint=estimator.fact.estimator_fingerprint,
     )
-    source_estimate = SimpleNamespace(
-        total_input_tokens=900,
-        visual_image_tokens=0,
-    )
     source_tool_surface = SimpleNamespace(tool_specs=())
     source_binding = SimpleNamespace(
         target_fact=source_target_fact,
@@ -1431,7 +1425,6 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
         system_prompt="source system",
         messages=(),
         tools=(),
-        final_estimate=source_estimate,
     )
     source_candidate = SimpleNamespace(
         canonical_read=canonical_read,
@@ -1466,7 +1459,6 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
         canonical_dispatch_read=canonical_read,
         provider_wire_quote=source_quote,
         normal_compile_binding=source_binding,
-        provider_projection=SimpleNamespace(final_estimate=source_estimate),
         materialized_system_prompt=lambda: "source system",
         materialized_messages=lambda: (),
     )
@@ -1668,7 +1660,6 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
         canonical_read=source_read,
         semantic_input=SimpleNamespace(
             canonical_input_identity=source_identity,
-            final_estimate=SimpleNamespace(total_input_tokens=800),
         ),
         prepared_call=SimpleNamespace(
             call=SimpleNamespace(
@@ -1685,7 +1676,6 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
         canonical_read=successor_read,
         semantic_input=SimpleNamespace(
             canonical_input_identity=successor_identity,
-            final_estimate=SimpleNamespace(total_input_tokens=400),
         ),
         prepared_call=SimpleNamespace(
             call=SimpleNamespace(

@@ -116,10 +116,13 @@ def test_five_recalled_facts_keep_source_variants_monotone(tmp_path, monkeypatch
 
     source = asyncio.run(exercise())
     estimator = PulsaraHeuristicTokenEstimatorV3()
+    from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
     costs = tuple(
-        estimator.estimate_message(
-            source_variant_message(source, variant.text, mode=variant.mode)
-        )
+        estimator.estimate_ordered_wire_json_components(
+            ordered_input_items=tuple(chat_semantic_wire_group(message)),
+            ordered_input_sources=(message,),
+        ).total_input_tokens
         for variant in source.variants
+        for message in (source_variant_message(source, variant.text, mode=variant.mode),)
     )
     assert costs == tuple(sorted(costs, reverse=True))

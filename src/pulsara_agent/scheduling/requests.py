@@ -41,9 +41,12 @@ def validate_action(value):
 
 def action_schema():
     properties = {
-        "action": {"type": "string", "enum": list(_FIELDS)},
         "task_id": {"type": "string"},
-        "session_id": {"type": "string"},
+        "session_id": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Omit or use null for this session; otherwise copy the exact target session ID.",
+        },
         "expected_revision": {"type": "integer", "minimum": 1},
         "client_command_id": {
             "type": "string",
@@ -53,7 +56,10 @@ def action_schema():
             "type": "string",
             "description": "Integral UTC ISO instant, for this manual action; preserve on retries.",
         },
-        "cursor": {"type": "string"},
+        "cursor": {
+            "type": "string",
+            "description": "Copy next_cursor and repeat the same status/session_id filters; this cursor stores only a position.",
+        },
         "status": {
             "type": "string",
             "enum": ["ACTIVE", "PAUSED", "COMPLETED", "ENABLED"],
@@ -135,9 +141,15 @@ def action_schema():
     }
     return {
         "type": "object",
-        "properties": properties,
-        "required": ["action"],
-        "additionalProperties": False,
+        "description": (
+            "Besides action, send only the fields in its signature below; omit all others, even null. "
+            "Omit optional fields for defaults. "
+            + " ".join(
+                f"{action}: required {', '.join(sorted(required)) or 'none'}; "
+                f"optional {', '.join(sorted(optional)) or 'none'}."
+                for action, (required, optional) in _FIELDS.items()
+            )
+        ),
         "oneOf": [
             {
                 "type": "object",

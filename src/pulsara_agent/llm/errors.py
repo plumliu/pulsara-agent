@@ -48,10 +48,6 @@ class ModelInputBudgetExceeded(ModelContractError):
     reason_code = "model_input_budget_exceeded"
 
 
-class ModelInputEstimateMismatch(ModelContractError):
-    reason_code = "model_input_estimate_mismatch"
-
-
 class ModelContextIdentityMismatch(ModelContractError):
     reason_code = "model_context_identity_mismatch"
 

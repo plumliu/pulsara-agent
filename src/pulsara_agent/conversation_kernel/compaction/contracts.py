@@ -46,7 +46,6 @@ from pulsara_agent.model_input.continuity import (
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
 )
-from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMImagePart,
@@ -283,7 +282,6 @@ class ResolvedCompactionPolicy:
 @dataclass(frozen=True, slots=True)
 class CompatibleAppendCompactionProjection:
     append_only_messages: tuple[LLMMessage, ...] = field(repr=False)
-    final_estimate: TokenEstimate
     logical_bytes: int
 
     def __post_init__(self) -> None:
@@ -295,7 +293,6 @@ class CompatibleAppendCompactionProjection:
 class ColdRebuildCompactionProjection:
     system_prompt: str
     full_messages: tuple[LLMMessage, ...] = field(repr=False)
-    final_estimate: TokenEstimate
     logical_bytes: int
 
     def __post_init__(self) -> None:
@@ -477,16 +474,6 @@ def _compaction_projection_identity_digest(
     compile_binding: ModelInputCompileBinding,
     predecessor: FrozenProviderInputEpochView | None,
 ) -> str:
-    estimate = projection.final_estimate
-    estimate_value = {
-        "system": estimate.system_tokens,
-        "messages": estimate.message_tokens,
-        "message_by_index": estimate.message_tokens_by_index,
-        "tools": estimate.tool_tokens,
-        "envelope": estimate.envelope_tokens,
-        "visual_image": estimate.visual_image_tokens,
-        "total": estimate.total_input_tokens,
-    }
     if isinstance(projection, CompatibleAppendCompactionProjection):
         return context_fingerprint(
             "pulsara.compatible-append-compaction-projection.v1",
@@ -499,7 +486,6 @@ def _compaction_projection_identity_digest(
                 "append": provider_input_prefix_fingerprint(
                     system_prompt="", tools=(), messages=projection.append_only_messages
                 ),
-                "estimate": estimate_value,
                 "logical_bytes": projection.logical_bytes,
             },
         )
@@ -512,7 +498,6 @@ def _compaction_projection_identity_digest(
                 tools=compile_binding.tool_surface.tool_specs,
                 messages=projection.full_messages,
             ),
-            "estimate": estimate_value,
             "logical_bytes": projection.logical_bytes,
         },
     )
@@ -569,8 +554,6 @@ class FrozenCompactionSourceView:
             != self.normal_compile_binding.estimator_fingerprint
             or self.provider_wire_quote.effective_input_budget_tokens
             != self.normal_compile_binding.effective_input_budget_tokens
-            or self.provider_wire_quote.semantic_estimated_input_tokens
-            != self.provider_projection.final_estimate.total_input_tokens
         ):
             raise ValueError("compaction source wire quote does not exact-join")
         expected = context_fingerprint(

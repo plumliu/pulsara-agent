@@ -327,10 +327,7 @@ def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result(
         for index in range(1, 4)
     )
     snapshot = _snapshot(request_item, *results)
-    full = StructuredModelInputCompiler().compile(
-        _prepared_request(snapshot, _sources())
-    )
-    request = _prepared_request(snapshot, _sources(), budget=full.final_estimate.total_input_tokens - 1)
+    request = _prepared_request(snapshot, _sources(), budget=1)
     compiler = StructuredModelInputCompiler()
     initial = compiler.compile(request)
     assert all(item.selected_mode is ToolResultProviderRenderMode.FULL for item in initial.tool_result_decisions)
@@ -386,7 +383,7 @@ def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(
     )
     request = _prepared_request(_snapshot(_user("question"), inlineable), _sources(), budget=100)
     candidate = StructuredModelInputCompiler().compile(request)
-    assert candidate.final_estimate.total_input_tokens > 100
+    assert candidate.tool_result_decisions[0].selected_mode is ToolResultProviderRenderMode.FULL
     decision = candidate.tool_result_decisions[0]
     assert decision.delivery_requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
     assert decision.selected_mode is ToolResultProviderRenderMode.FULL

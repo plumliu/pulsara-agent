@@ -152,7 +152,15 @@ class ScheduledTaskService:
         return None if result is None else self._payload(result)
 
     async def invoke(self, arguments, *, default_session_id, permission_mode):
-        value = dict(validate_action(dict(arguments)))
+        value = dict(arguments)
+        # Tool-only default: service/HTTP list(None) still means all sessions.
+        # Never discard null on a branch where session_id is forbidden.
+        if (
+            value.get("action") in ("list", "create", "run_now")
+            and value.get("session_id") is None
+        ):
+            value["session_id"] = default_session_id
+        value = dict(validate_action(value))
         action = value.pop("action")
         if action in {"create", "update"}:
             values = value["values"]
@@ -166,8 +174,6 @@ class ScheduledTaskService:
                 raise ScheduledTaskError(
                     "PERMISSION_ESCALATION", "当前会话权限不足以保存此任务配置，请由用户调整会话权限后再试。"
                 )
-        if action in {"list", "create", "run_now"}:
-            value.setdefault("session_id", default_session_id)
         if action == "list":
             return await self.list(**value)
         if action == "get":

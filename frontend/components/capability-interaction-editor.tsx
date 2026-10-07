@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react';
 import { McpEditor, mcpAuthLabels } from './mcp-editor';
 import { PluginConnectionEditor } from './plugin-connection-editor';
-import type { McpCredentialOwner, UserMcpServerCapability, UserPluginCapability, PluginMcpConnection } from '../lib/pulsara-types';
+import type { McpCredentialOwner, UserMcpServerCapability, PluginMcpConnection } from '../lib/pulsara-types';
 import type { RuntimeInteractionResolution } from '../lib/runtime-adapter';
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -63,9 +63,8 @@ export function CapabilityInteractionEditor({form, onResolve}: {
   }
   if (action === 'CONFIGURE_PLUGIN_MCP_CONNECTION') {
     const connection = record(form.connection);
-    const view: UserPluginCapability = {id: String(plugin.id), name: String(plugin.name), description: '',
-      enabled: Boolean(plugin.enabled), packageInstallId: String(plugin.package_install_id), packageRoot: '',
-      skillCount: 0, mcpCount: 0, effectiveSkillNames: [], effectiveMcpServerIds: [], details: []};
+    const view = {name: String(plugin.name), enabled: Boolean(plugin.enabled),
+      packageInstallId: String(plugin.package_install_id)};
     return <PluginConnectionEditor plugin={view} connection={{serverId: String(connection.server_id),
       defaults: record(connection.defaults), config: record(connection.config),
       overlay: connection.overlay == null ? null : record(connection.overlay),

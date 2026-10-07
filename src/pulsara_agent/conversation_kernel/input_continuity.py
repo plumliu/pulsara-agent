@@ -1268,9 +1268,6 @@ class HostProviderInputContinuityOwner:
                                 candidate.resulting_compiled_input.message_placements
                             ),
                             tools=candidate.resulting_compiled_input.tools,
-                            final_estimate=(
-                                candidate.resulting_compiled_input.final_estimate
-                            ),
                             source_decisions=(
                                 candidate.resulting_compiled_input.source_decisions
                             ),
@@ -1340,7 +1337,6 @@ class HostProviderInputContinuityOwner:
                 tool_exposure_plan=candidate.tool_exposure_plan,
                 canonical_frontier=candidate.resulting_canonical_frontier,
                 source_heads=candidate.resulting_source_heads,
-                final_estimate=compiled.final_estimate,
                 logical_bytes=provider_input_logical_bytes(
                     system_prompt=compiled.system_prompt,
                     tools=compiled.tools,

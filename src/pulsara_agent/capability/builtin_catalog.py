@@ -389,14 +389,97 @@ _SUBAGENT_CONTEXT_DESCRIPTION = (
     "a finished worker's conversation history (worker_history). This creates an independent branch "
     "with current tools and permissions; it does not restart the old task."
 )
-_SUBAGENT_CONTEXT_MODE_DESCRIPTION = (
-    "none needs no other fields; last_n requires turns; worker_history requires "
-    "task_id for a started, terminal worker in this conversation with readable public history."
-)
 _SUBAGENT_CONTEXT_TURNS_DESCRIPTION = (
     "Required only for last_n: 1–3 recent main-conversation turns, excluding tool calls/results. "
     "Omit for none and worker_history."
 )
+
+
+def _subagent_context_schema() -> dict[str, Any]:
+    # Describe the existing _parse_context variants; runtime history eligibility
+    # remains owned by subagent admission, not by this static schema.
+    fields = {
+        "none": {},
+        "last_n": {
+            "turns": {
+                "type": "integer", "minimum": 1, "maximum": 3,
+                "description": _SUBAGENT_CONTEXT_TURNS_DESCRIPTION,
+            },
+        },
+        "worker_history": {
+            "task_id": {
+                "type": "string", "minLength": 1,
+                "description": "Exact started, finished worker ID with readable public history in this conversation.",
+            },
+        },
+    }
+    return {
+        "description": _SUBAGENT_CONTEXT_DESCRIPTION,
+        "oneOf": [
+            object_schema(
+                properties={"mode": {"const": mode}, **properties},
+                required=["mode", *properties],
+            )
+            for mode, properties in fields.items()
+        ],
+    }
+
+
+def _subagent_model_schema() -> dict[str, Any]:
+    variants = {
+        "effort": {"value": {"type": ["string", "null"]}},
+        "toggle": {"enabled": {"type": "boolean"}},
+        "budget_tokens": {"tokens": {"type": "integer", "minimum": 1}},
+    }
+    return {
+        **object_schema(
+            properties={
+                "connection_id": {"type": "string", "description": "Exact ID from list_agent_models."},
+                "reasoning": {
+                    "description": "Exact listed choice; effort.value may be null only if listed. Omit reasoning for this target's default.",
+                    "oneOf": [
+                        object_schema(
+                            properties={"kind": {"const": kind}, **properties},
+                            required=["kind", *properties],
+                        )
+                        for kind, properties in variants.items()
+                    ],
+                },
+            },
+            required=["connection_id"],
+        ),
+        "description": "Omit model to inherit the parent's model and reasoning; otherwise select a saved connection.",
+    }
+
+
+def _wait_agent_schema() -> dict[str, Any]:
+    timeout = {
+        "type": "number", "minimum": 0, "maximum": 300,
+        "description": "Seconds for this wait only; omit for 30, use 0 for an immediate snapshot.",
+    }
+    return {
+        "type": "object",
+        "description": "With task_ids, settle defaults to all. Without task_ids, only timeout_seconds is allowed; omit settle.",
+        "oneOf": [
+            object_schema(properties={"timeout_seconds": timeout}, required=[]),
+            object_schema(
+                properties={
+                    "task_ids": {
+                        "type": "array", "minItems": 1, "maxItems": 16,
+                        "uniqueItems": True,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "description": "Exact task IDs to join; omit for any delegated result or current-reply guidance.",
+                    },
+                    "settle": {
+                        "type": "string", "enum": ["all", "first"],
+                        "description": "first: any target terminal; all (default): every target terminal.",
+                    },
+                    "timeout_seconds": timeout,
+                },
+                required=["task_ids"],
+            ),
+        ],
+    }
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
@@ -1274,39 +1357,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "default": "general_worker",
                     "description": _SUBAGENT_PROFILE_DESCRIPTION,
                 },
-                "context": {
-                    "type": "object",
-                    "properties": {
-                        "mode": {
-                            "type": "string",
-                            "enum": ["none", "last_n", "worker_history"],
-                            "description": _SUBAGENT_CONTEXT_MODE_DESCRIPTION,
-                        },
-                        "turns": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 3,
-                            "description": _SUBAGENT_CONTEXT_TURNS_DESCRIPTION,
-                        },
-                        "task_id": {"type": "string", "description": "Finished, started worker task ID whose public conversation this new task continues, including retained tool calls/results."},
-                    },
-                    "required": ["mode"],
-                    "additionalProperties": False,
-                    "default": {"mode": "none"},
-                    "description": _SUBAGENT_CONTEXT_DESCRIPTION,
-                },
-                "model": {
-                    "type": "object", "properties": {
-                        "connection_id": {"type": "string", "description": "Exact ID from list_agent_models."},
-                        "reasoning": {"type": "object", "properties": {
-                            "kind": {"type": "string", "enum": ["effort", "toggle", "budget_tokens"]},
-                            "value": {"type": "string"},
-                            "enabled": {"type": "boolean"},
-                            "tokens": {"type": "integer", "minimum": 1},
-                        }, "required": ["kind"], "additionalProperties": False},
-                    }, "required": ["connection_id"], "additionalProperties": False,
-                    "description": "Optional saved connection and reasoning choice. Omit reasoning for this target's default.",
-                },
+                "context": _subagent_context_schema(),
+                "model": _subagent_model_schema(),
                 "material_task_ids": {"type": "array", "maxItems": 16, "uniqueItems": True, "items": {"type": "string", "minLength": 1}, "description": "Terminal task IDs whose result or public failure detail is needed as material; these do not block scheduling."},
             },
             required=["task"],
@@ -1327,40 +1379,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "Without task_ids, completion_available means a result is ready and nothing_pending means no "
             "active task or ready result. timeout ends only this wait, not any task. Prefer a meaningful wait to polling."
         ),
-        input_schema=object_schema(
-            properties={
-                "task_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 16,
-                    "uniqueItems": True,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
-                    "description": (
-                        "Optional exact task identities whose completion is required before "
-                        "continuing. Omit to wait for any delegated result or guidance sent "
-                        "to the reply currently in progress."
-                    ),
-                },
-                "settle": {
-                    "type": "string",
-                    "enum": ["all", "first"],
-                    "description": (
-                        "Join predicate used only with task_ids: first means any target "
-                        "terminal; all means every target terminal. Omit to use all."
-                    ),
-                },
-                "timeout_seconds": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 300,
-                    "description": (
-                        "Maximum seconds to wait in this call. Omit for 30 seconds; use "
-                        "0 to return the current state immediately."
-                    ),
-                },
-            },
-            required=[],
-        ),
+        input_schema=_wait_agent_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         permission_category="subagent_runtime",
@@ -1508,38 +1527,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                     "the agent's working style; use profile for that."
                                 ),
                             },
-                            "context": {
-                                "type": "object",
-                                "properties": {
-                                    "mode": {
-                                        "type": "string",
-                                        "enum": ["none", "last_n", "worker_history"],
-                                        "description": _SUBAGENT_CONTEXT_MODE_DESCRIPTION,
-                                    },
-                                    "turns": {
-                                        "type": "integer",
-                                        "minimum": 1,
-                                        "maximum": 3,
-                                        "description": _SUBAGENT_CONTEXT_TURNS_DESCRIPTION,
-                                    },
-                                    "task_id": {"type": "string", "description": "Finished, started worker task ID whose public conversation this new task continues, including retained tool calls/results."},
-                                },
-                                "required": ["mode"],
-                                "additionalProperties": False,
-                                "description": _SUBAGENT_CONTEXT_DESCRIPTION,
-                            },
-                            "model": {
-                                "type": "object", "properties": {
-                                    "connection_id": {"type": "string", "description": "Exact ID from list_agent_models."},
-                                    "reasoning": {"type": "object", "properties": {
-                                        "kind": {"type": "string", "enum": ["effort", "toggle", "budget_tokens"]},
-                                        "value": {"type": "string"},
-                                        "enabled": {"type": "boolean"},
-                                        "tokens": {"type": "integer", "minimum": 1},
-                                    }, "required": ["kind"], "additionalProperties": False},
-                                }, "required": ["connection_id"], "additionalProperties": False,
-                                "description": "Optional saved connection and reasoning choice; omit reasoning for its default.",
-                            },
+                            "context": _subagent_context_schema(),
+                            "model": _subagent_model_schema(),
                             "material_task_ids": {"type": "array", "maxItems": 16, "uniqueItems": True, "items": {"type": "string", "minLength": 1}, "description": "Terminal task IDs to read as result or failure material without a success dependency."},
                             "depends_on": {
                                 "type": "array",
