@@ -38,7 +38,7 @@ from pulsara_agent.mcp_config import (
 )
 from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
-    ProcessCredentialBoundMcpClient,
+    ProcessCredentialBoundHttpx2Client,
 )
 
 from .wire import (
@@ -503,7 +503,7 @@ class _BoundedStdioTransport(_BoundedTransport):
         await self.read_writer.aclose()
 
 
-class _McpHttpClient(ProcessCredentialBoundMcpClient):
+class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
     """HTTP policy/credentials only; SDK owns MCP and SSE protocol behavior."""
 
     def __init__(

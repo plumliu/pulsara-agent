@@ -111,24 +111,48 @@ function subscribeToModalChange(onChange: () => void): () => void {
 
 const noModalSubscription = () => () => {};
 
+function Toast({ toast, onDismiss }: { toast: ToastMessage; onDismiss: (id: number) => void }) {
+  const button = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    // A toast can move out of a closing modal. Animate its lifetime once,
+    // rather than restarting a CSS entrance animation when it is reattached.
+    const animation = button.current?.animate?.([
+      { opacity: 0, transform: 'translateY(8px) scale(.985)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: 'ease-out' });
+    return () => animation?.cancel();
+  }, []);
+  return <button ref={button} className={`toast toast--${toast.tone ?? 'neutral'}`} onClick={() => onDismiss(toast.id)}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span><X size={11} /></button>;
+}
+
 export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDismiss: (id: number) => void }) {
   const stackRef = useRef<HTMLDivElement>(null);
+  const [portalHost] = useState<HTMLDivElement | null>(() => (
+    typeof window === 'undefined' ? null : window.document.createElement('div')
+  ));
   const hasToasts = toasts.length > 0;
   const modal = useSyncExternalStore(hasToasts ? subscribeToModalChange : noModalSubscription, activeModal, () => null);
 
+  useLayoutEffect(() => () => { portalHost?.remove(); }, [portalHost]);
+
   useLayoutEffect(() => {
+    // Wait for the modal observer if this commit has just detached its target.
+    if (!portalHost || (modal && !modal.isConnected)) return;
+    // Keep the React portal target stable so rehoming preserves toast nodes,
+    // their entrance animations and their existing dismissal lifetime.
+    const parent = modal ?? window.document.body;
+    parent.appendChild(portalHost);
     const stack = stackRef.current;
-    // A modal can detach during this commit before its MutationObserver updates
-    // the portal target. The next modal snapshot rehomes the notification.
     if (!stack?.isConnected || !hasToasts || typeof stack.showPopover !== 'function') return;
     stack.showPopover();
     return () => { if (stack.isConnected && stack.matches(':popover-open')) stack.hidePopover(); };
-  }, [modal, hasToasts]);
+  }, [modal, hasToasts, portalHost]);
 
   const content = (
     <div ref={stackRef} className="toast-stack" popover="manual" aria-live="polite">
-      {toasts.map((toast) => <button className={`toast toast--${toast.tone ?? 'neutral'}`} key={toast.id} onClick={() => onDismiss(toast.id)}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span><X size={11} /></button>)}
+      {toasts.map((toast) => <Toast key={toast.id} toast={toast} onDismiss={onDismiss} />)}
     </div>
   );
-  return modal ? createPortal(content, modal) : content;
+  return portalHost && hasToasts ? createPortal(content, portalHost) : null;
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import {
-  Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, House, KeyRound,
+  Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, House,
   LoaderCircle, Moon, Palette, Pencil, Plus, RefreshCw,
   SlidersHorizontal, Sun, Trash2, X,
 } from 'lucide-react';
@@ -13,13 +13,13 @@ import type {
   RuntimeAdapter, RuntimeBootstrap,
 } from '../lib/runtime-adapter';
 import type { RuntimeStatus, SessionSummary } from '../lib/pulsara-types';
+import { MemoryRetrievalSettingsPanel } from './memory-retrieval-settings';
 import { ArchivedSessions } from './archived-sessions';
 import { RuntimeApiError } from '../lib/runtime-adapter';
 
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 
 export type SettingsSection = 'general' | 'models' | 'service' | 'archived';
-type CredentialKind = 'embedding' | 'rerank';
 type ModelConfigurationSource = 'models_dev' | 'user_declared';
 type CustomReasoningKind = CustomReasoningProfile;
 
@@ -148,61 +148,6 @@ function reasoningProfilePayload(
     return { kind: profile, values };
   }
   return { kind: profile };
-}
-
-function DashScopeCredentialRow({ adapter, kind, state, onChanged, onNotify }: {
-  adapter: RuntimeAdapter;
-  kind: CredentialKind;
-  state: boolean;
-  onChanged: (state: boolean) => void;
-  onNotify: SettingsViewProps['onNotify'];
-}) {
-  const input = useRef<HTMLInputElement>(null);
-  const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const title = kind === 'embedding' ? 'Embedding · text-embedding-v4 · 1024 维' : 'Reranker · qwen3-rerank';
-  const detail = kind === 'embedding' ? '增强记忆的语义相关性' : '优化显式记忆搜索的排序';
-
-  const save = async () => {
-    const apiKey = input.current?.value ?? '';
-    if (!apiKey) return;
-    setBusy(true);
-    try {
-      const next = await adapter.putDashScopeCredential(kind, apiKey);
-      if (input.current) input.current.value = '';
-      setEditing(false);
-      onChanged(next);
-      onNotify('访问密钥已保存', `${title} 将在下一次相关操作中使用。`, 'success');
-    } catch (error) {
-      if (input.current) input.current.value = '';
-      onNotify('访问密钥未保存', error instanceof Error ? error.message : '请检查本机设置文件。', 'warning');
-    } finally { setBusy(false); }
-  };
-
-  const clear = async () => {
-    setBusy(true);
-    try {
-      const next = await adapter.deleteDashScopeCredential(kind);
-      onChanged(next);
-      setEditing(false);
-      onNotify('访问密钥已清除', `${title} 会回退到不依赖该远程通道的记忆路径。`, 'success');
-    } catch (error) {
-      onNotify('访问密钥未清除', error instanceof Error ? error.message : '请检查本机设置文件。', 'warning');
-    } finally { setBusy(false); }
-  };
-
-  return <div className="credential-row">
-    <span><strong>{title}</strong><small>{detail}</small></span>
-    <span className={`credential-state credential-state--${state ? 'present' : 'missing'}`}><i />{state ? '已配置' : '未配置'}</span>
-    <div className="credential-actions">{editing ? <>
-      <input ref={input} type="password" autoComplete="new-password" placeholder="阿里云百炼 API key" aria-label={`${title} API key`} />
-      <button disabled={busy} onClick={() => void save()}>{busy ? <LoaderCircle size={13} /> : <Check size={13} />}保存</button>
-      <button disabled={busy} onClick={() => { if (input.current) input.current.value = ''; setEditing(false); }}>取消</button>
-    </> : <>
-      <button disabled={busy} onClick={() => setEditing(true)}><KeyRound size={13} />填写或更新</button>
-      {state && <button className="subtle-danger" disabled={busy} onClick={() => void clear()}><Trash2 size={13} />清除</button>}
-    </>}</div>
-  </div>;
 }
 
 function DatabaseResetDialog({ target, busy, error, onClose, onConfirm }: {
@@ -507,16 +452,6 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     }
   };
 
-  const updateDashScopeConfigured = (kind: CredentialKind, state: boolean) => setSettings((current) => current ? {
-    ...current,
-    local_settings: {
-      ...current.local_settings,
-      dashscope_credentials: kind === 'embedding'
-        ? { ...current.local_settings.dashscope_credentials, embedding_configured: state }
-        : { ...current.local_settings.dashscope_credentials, rerank_configured: state },
-    },
-  } : current);
-
   const saveDatabase = async () => {
     if (!runtimeDsn.trim()) return;
     setDatabaseBusy('save'); setDatabaseMessage(undefined);
@@ -657,7 +592,10 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
               <div className="model-confirmation"><strong>用户声明的连接事实</strong>{customDeclarationReady && <dl><div><dt>配置</dt><dd>{configurationName.trim()}</dd></div><div><dt>模型</dt><dd>{modelId.trim()}</dd></div><div><dt>协议</dt><dd>{wireApi ? wireLabel(wireApi) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{baseUrl.trim()}</dd></div><div><dt>推理形状</dt><dd>{reasoningProfileLabel(customReasoning)}</dd></div><div><dt>上下文</dt><dd>{formatTokens(parsedContextTokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(inputModalities)}</dd></div><div><dt>认证</dt><dd>{authentication === 'none' ? '无需认证' : 'Bearer API key'}</dd></div></dl>}<p>这些能力由你直接声明，不会根据服务商或模型名称自动判断，也不会在失败后偷偷换参数重试。Pulsara 只使用通用 Chat / Responses adapter。</p><p>上下文窗口大小 至少为 256,000。拿不准请求形状时请选择“由服务端决定”。</p><div className="form-actions"><button onClick={closeModelForm}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}{editingConfiguration ? '保存修改' : '保存配置'}</button></div></div>
             </>}
           </section></ModelFormContainer>}
-          <section className="settings-group"><header><KeyRound size={16} /><div><h2>记忆检索 · 阿里云百炼 DashScope</h2><p>可选的相关性增强；未配置不会阻止对话或基础记忆路径。</p></div></header>{settings && <div className="credential-list"><DashScopeCredentialRow adapter={adapter} kind="embedding" state={settings.local_settings.dashscope_credentials.embedding_configured} onChanged={(state) => updateDashScopeConfigured('embedding', state)} onNotify={onNotify} /><DashScopeCredentialRow adapter={adapter} kind="rerank" state={settings.local_settings.dashscope_credentials.rerank_configured} onChanged={(state) => updateDashScopeConfigured('rerank', state)} onNotify={onNotify} /></div>}</section>
+          {settings && <MemoryRetrievalSettingsPanel adapter={adapter} value={settings.local_settings.memory_retrieval} onNotify={onNotify} onChanged={(memory_retrieval) => {
+            setSettings(current => current ? { ...current, local_settings: { ...current.local_settings, memory_retrieval } } : current);
+            void onConfigurationChanged();
+          }} />}
         </>}
         {section === 'service' && <>
           <section className="settings-group"><header><Database size={16} /><div><h2>PostgreSQL</h2><p>会话数据平面使用本机 PostgreSQL；保存不会自动连接或迁移。</p></div></header>

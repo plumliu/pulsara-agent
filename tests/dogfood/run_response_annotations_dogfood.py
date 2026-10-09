@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import httpx
+import httpx2
 
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
@@ -53,7 +53,7 @@ async def main():
     def emit():
         _write(path, report, secrets)
 
-    original_send = httpx.AsyncClient.send
+    original_send = httpx2.AsyncClient.send
 
     async def send(client, request, **kwargs):
         if request.url.path.endswith("/chat/completions"):
@@ -72,7 +72,7 @@ async def main():
     old_home = os.environ.get("PULSARA_HOME")
     core = None
     try:
-        httpx.AsyncClient.send = send
+        httpx2.AsyncClient.send = send
         with TemporaryDirectory(prefix="pulsara-annotations-") as temporary:
             root = Path(temporary)
             home = root / "home"
@@ -171,7 +171,7 @@ async def main():
                 os.environ.pop("PULSARA_HOME", None)
             else:
                 os.environ["PULSARA_HOME"] = old_home
-            httpx.AsyncClient.send = original_send
+            httpx2.AsyncClient.send = original_send
             _drop_database(saved, name)
 
 

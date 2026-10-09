@@ -1786,3 +1786,112 @@ def test_exact_tool_result_confirmation_survives_memory_page_deletion(
         candidate=candidate,
         deadline_monotonic=monotonic() + 30,
     ) == accepted
+
+
+def test_embedding_contract_overwrite_scan_and_dense_query_use_actual_binding(direct_memory_session):
+    from tests.retrieval_fixtures import connection as fixture_connection
+    repository, _lease, _invoke, remember = direct_memory_session
+    _, saved, _ = remember('Project Vermilion uses PostgreSQL for storage.')
+    fact_id = saved['memory_id']
+    binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:embedding-test')
+    old = fixture_connection('embedding', 'key', model='first').embedding_contract
+    new = fixture_connection('embedding', 'key', model='second').embedding_contract
+    assert old.contract_id != new.contract_id
+    vector = (1.0, *([0.0] * 1023))
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, row_factory=psycopg.rows.dict_row, deadline_monotonic=monotonic() + 30) as db:
+        digest = db.execute('SELECT fact_semantic_digest FROM pulsara_v3.memory_facts WHERE id=%s', (fact_id,)).fetchone()['fact_semantic_digest']
+    kwargs = dict(read_binding=binding, fact_id=fact_id, fact_semantic_digest=digest, vector=vector,
+                  embedded_at=datetime.now(timezone.utc), deadline_monotonic=monotonic() + 30)
+    assert repository.upsert_memory_embedding(**kwargs, embedding_contract=old)
+    def pending(contract):
+        return repository.list_unembedded_memory_facts(read_binding=binding, limit=100, embedding_contract=contract, deadline_monotonic=monotonic() + 30)
+    assert fact_id not in {row[0] for row in pending(old)}
+    assert fact_id in {row[0] for row in pending(new)}
+    query = PostgresMemoryQuery(repository.connection_provider)
+    def dense(contract):
+        from pulsara_agent.retrieval.config import DenseRecallPurpose
+        return query.dense_candidates(read_binding=binding, vector=vector, embedding_contract=contract,
+            kind_filter=None, limit=20, purpose=DenseRecallPurpose.EXPLICIT_SEARCH,
+            automatic=False, deadline_monotonic=monotonic() + 30).facts
+    assert fact_id in {row.fact_id for row in dense(old)}
+    assert fact_id not in {row.fact_id for row in dense(new)}
+    assert repository.upsert_memory_embedding(**kwargs, embedding_contract=new)
+    assert fact_id in {row.fact_id for row in dense(new)}
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30) as db:
+        assert db.execute('SELECT count(*) FROM pulsara_v3.memory_embeddings WHERE fact_id=%s', (fact_id,)).fetchone()[0] == 1
+    # A stale body digest never writes even when its vector was returned successfully.
+    assert not repository.upsert_memory_embedding(**{**kwargs, 'fact_semantic_digest': 'sha256:' + 'f' * 64}, embedding_contract=old)
+
+
+def test_embedding_maintainer_discards_old_binding_and_resumes_partial_overwrite(direct_memory_session, tmp_path):
+    from types import SimpleNamespace
+    from pulsara_agent.settings import LocalSettingsStore
+    from pulsara_agent.retrieval.config import EmbeddingBackendConfig
+    from pulsara_agent.conversation_kernel.memory.embedding_maintainer import MemoryEmbeddingMaintainer
+    from tests.retrieval_fixtures import save_model
+    repository, lease, _, remember = direct_memory_session
+    fact_ids = {remember(f'Project Cobalt storage fact {i} uses PostgreSQL.')[1]['memory_id'] for i in range(3)}
+    binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:maintainer-test')
+    async def exercise():
+        settings = LocalSettingsStore(tmp_path / 'local-settings.yaml')
+        await save_model(settings, 'embedding', 'fixture-key', model='first', activate=True)
+        io = KernelSessionIO()
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        async def embed_batch(texts):
+            calls.append(tuple(texts))
+            started.set()
+            await release.wait()
+            return [(1.0, *([0.0] * 1023)) for _ in texts]
+        provider = SimpleNamespace(embed_batch=embed_batch)
+        def make_port():
+            return KernelMemoryToolPort(repository=repository, session_id=lease.guard.session_id,
+                read_binding=binding, embedding_config=EmbeddingBackendConfig(),
+                embedding_provider=provider, io_owner=io, settings=settings)
+        def make_maintainer(port):
+            return MemoryEmbeddingMaintainer(repository=repository, read_binding=binding, io_owner=io,
+                deadline_factory=port._deadlines, embedding_port=port, session_id=lease.guard.session_id)
+        port = make_port()
+        try:
+            late = asyncio.create_task(make_maintainer(port)._maintain_once())
+            await started.wait()
+            await save_model(settings, 'embedding', 'fixture-key', model='second')
+            release.set()
+            assert (await late)[0] is False
+            current = settings.read().memory_retrieval.embedding.embedding_contract
+            def pending():
+                return repository.list_unembedded_memory_facts(read_binding=binding, limit=100,
+                    embedding_contract=current, deadline_monotonic=monotonic()+30)
+            initial_pending = pending()
+            expected_ids = {row[0] for row in initial_pending}
+            assert fact_ids <= expected_ids
+            original_install = port.install_memory_embedding
+            installs = 0
+            async def interrupt_after_first(connection, operation):
+                nonlocal installs
+                installs += 1
+                if installs == 2:
+                    raise asyncio.CancelledError()
+                return await original_install(connection, operation)
+            port.install_memory_embedding = interrupt_after_first
+            with pytest.raises(asyncio.CancelledError):
+                await make_maintainer(port)._maintain_once()
+            assert {row[0] for row in pending()} == expected_ids - {initial_pending[0][0]}
+            await port.aclose()
+            port = make_port()
+            while pending():
+                assert (await make_maintainer(port)._maintain_once())[0] is True
+            assert not {row[0] for row in pending()}
+            previous_calls = len(calls)
+            assert await make_maintainer(port)._maintain_once() == (False, False)
+            await settings.set_retrieval_mode(embedding_enabled=False)
+            assert await make_maintainer(port)._maintain_once() == (False, False)
+            assert len(calls) == previous_calls
+            with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as db:
+                rows = db.execute('SELECT fact_id,count(*) FROM pulsara_v3.memory_embeddings WHERE fact_id = ANY(%s) GROUP BY fact_id', (list(fact_ids),)).fetchall()
+            assert {row[0] for row in rows} == fact_ids
+            assert all(row[1] == 1 for row in rows)
+        finally:
+            await port.aclose()
+            await io.aclose(deadline_monotonic=monotonic()+10)
+    asyncio.run(exercise())

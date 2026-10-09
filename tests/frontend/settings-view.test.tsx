@@ -21,7 +21,7 @@ function modelConfiguration(index: number): ModelConfigurationSummary {
 function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelConfigurationDetail, catalog: ModelCatalogReadModel = { status: 'ready', routes: [] }) {
   const target = { runtime_dsn: 'postgresql://runtime@localhost:5432/pulsara', admin_dsn: 'postgresql://admin@localhost:5432/pulsara' };
   let settings: LocalSettingsReadModel = {
-    local_settings: { pulsara_home: '/custom/pulsara-home', postgres: target, dashscope_credentials: { embedding_configured: false, rerank_configured: false } },
+    local_settings: { pulsara_home: '/custom/pulsara-home', postgres: target, memory_retrieval: { embedding: null, embedding_enabled: false, rerank: null, decision: null, ranking_mode: 'off' } },
     database_state: 'database_reset_required', model_configurations: configurations,
   };
   const reset = vi.fn(async () => {

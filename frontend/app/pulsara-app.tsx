@@ -1011,18 +1011,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         setSessionList(sessions);
         const savedSessionId = readSavedSessionId();
         const initialSession = sessions.find((session) => session.id === savedSessionId) ?? sessions[0];
+        // Restore the session in the background; startup never owns navigation.
         if (initialSession) {
-          setActiveView('workbench');
           await openRuntimeSession(initialSession.id);
         }
         else {
           setRuntimeStatus('online');
-          setActiveView('overview');
         }
       } catch (error) {
         if (disposed) return;
         setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
-        setActiveView('workbench');
         setRuntimeError(productMessage(error instanceof Error ? error.message : undefined, 'Pulsara 启动失败。'));
       }
     })();

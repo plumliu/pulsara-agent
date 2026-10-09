@@ -1,9 +1,42 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useLayoutEffect } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ToastStack } from '../../frontend/components/overlays';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+it.each(['remove', 'close'])('preserves an existing toast and its animation when a modal %ss', async (action) => {
+  const modal = document.createElement('dialog');
+  modal.open = true;
+  document.body.append(modal);
+  const cancel = vi.fn();
+  const animate = vi.fn(() => ({ cancel }));
+  const originalAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'animate');
+  Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, value: animate });
+  const dismiss = vi.fn();
+  try {
+    const view = render(<ToastStack toasts={[{ id: 1, title: '连接测试通过' }]} onDismiss={dismiss} />);
+    const toast = (await screen.findByText('连接测试通过')).closest('button')!;
+    expect(modal.contains(toast)).toBe(true);
+    expect(animate).toHaveBeenCalledOnce();
+    await act(async () => { if (action === 'remove') modal.remove(); else modal.open = false; });
+    await waitFor(() => expect(modal.contains(toast)).toBe(false));
+    expect(screen.getByText('连接测试通过').closest('button')).toBe(toast);
+    expect(animate).toHaveBeenCalledOnce();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(dismiss).not.toHaveBeenCalled();
+    fireEvent.click(toast);
+    expect(dismiss).toHaveBeenCalledExactlyOnceWith(1);
+    view.rerender(<ToastStack toasts={[]} onDismiss={dismiss} />);
+    expect(screen.queryByText('连接测试通过')).toBeNull();
+    expect(cancel).toHaveBeenCalledOnce();
+  } finally {
+    cleanup();
+    modal.remove();
+    if (originalAnimate) Object.defineProperty(HTMLElement.prototype, 'animate', originalAnimate);
+    else Reflect.deleteProperty(HTMLElement.prototype, 'animate');
+  }
+});
 
 it('rehomes a toast when its modal detaches before the popover layout effect', async () => {
   const modal = document.createElement('dialog');

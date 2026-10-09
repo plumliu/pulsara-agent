@@ -1925,12 +1925,7 @@ async def _config_check() -> dict[str, object]:
         "local_settings": {"status": settings_status, "detail": settings_error},
         "catalog": {"status": catalog_status, "detail": catalog_error},
         "database": database,
-        "dashscope_credentials": {
-            "embedding_configured": (
-                settings.dashscope_api_key("embedding") is not None
-            ),
-            "rerank_configured": (settings.dashscope_api_key("rerank") is not None),
-        },
+        "memory_retrieval": settings.memory_retrieval.public(),
         "model_connections": connections,
     }
 

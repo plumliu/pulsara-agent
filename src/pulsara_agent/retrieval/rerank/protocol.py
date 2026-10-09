@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import Literal, NamedTuple, Protocol, runtime_checkable
+
+
+RerankPurpose = Literal["recall", "related_memory"]
 
 
 class RerankResult(NamedTuple):
@@ -20,11 +23,11 @@ class RerankProvider(Protocol):
         query: str,
         documents: Sequence[str],
         *,
-        instruction: str | None = None,
-        top_n: int | None = None,
+        candidate_ids: Sequence[str] | None = None,
+        purpose: RerankPurpose = "recall",
     ) -> list[RerankResult]: ...
 
     async def aclose(self) -> None: ...
 
 
-__all__ = ["RerankProvider", "RerankResult"]
+__all__ = ["RerankProvider", "RerankResult", "RerankPurpose"]

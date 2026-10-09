@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 import math
@@ -73,13 +73,13 @@ from pulsara_agent.retrieval.config import (
     AdvisoryMemoryFeatureConfig,
     DenseRecallPurpose,
     EmbeddingBackendConfig,
-    MEMORY_EMBEDDING_CONTRACT,
+    RetrievalConnection,
     RerankBackendConfig,
 )
 from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
 from pulsara_agent.retrieval.embedding.protocol import EmbeddingProvider
 from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
-from pulsara_agent.retrieval.rerank.protocol import RerankProvider
+from pulsara_agent.retrieval.rerank.protocol import RerankProvider, RerankPurpose
 from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
 
 if TYPE_CHECKING:
@@ -101,6 +101,12 @@ MAXIMUM_RERANK_QUERY_BYTES = 8 * 1024
 MAXIMUM_RERANK_DOCUMENT_BYTES = 8 * 1024
 MAXIMUM_RERANK_REQUEST_BYTES = 192 * 1024
 MAXIMUM_RERANK_TOKEN_FORMULA = 120_000
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenQueryEmbedding:
+    vector: tuple[float, ...]
+    connection: RetrievalConnection
 
 
 class KernelMemoryToolPort:
@@ -131,14 +137,10 @@ class KernelMemoryToolPort:
         self._deadlines = KernelExecutionDeadlineFactory()
         self._deadline_factory_bound = False
         self._embedding = embedding_provider
-        self._owns_embedding = embedding_provider is None
         self._rerank = rerank_provider
-        self._owns_rerank = rerank_provider is None
-        self._provider_lock = asyncio.Lock()
+        self._embedding_gate = asyncio.Semaphore(embedding_config.max_concurrent)
+        self._rerank_gate = asyncio.Semaphore(self._rerank_config.max_concurrent)
         self._remote_tasks: set[asyncio.Task[object]] = set()
-        self._recall_presentation_by_membership: dict[
-            tuple[tuple[str, str], ...], tuple[str, ...]
-        ] = {}
         self._write_opt_out = MemoryWriteOptOut()
         self._turn_use_opt_out = TurnMemoryUseOptOut()
         self._write_hint_matcher = CheapMemoryWriteHintMatcher()
@@ -205,11 +207,20 @@ class KernelMemoryToolPort:
             memory_use.allows_writes and self._write_hint_matcher.matches(normalized),
         )
 
+    async def install_memory_embedding(self, connection, operation):
+        return await self._settings.install_embedding_if_current(connection, operation)
+
     async def embed_memory_batch(
-        self, texts: Sequence[str], *, timeout_seconds: float
+        self,
+        texts: Sequence[str],
+        *,
+        timeout_seconds: float,
+        connection: RetrievalConnection,
     ) -> Sequence[Sequence[float]] | None:
-        provider = await self._embedding_provider()
-        if provider is None or not texts:
+        provider = self._embedding or build_embedding_provider(
+            connection, config=self._embedding_config, semaphore=self._embedding_gate
+        )
+        if self.embedding_connection() != connection or not texts:
             return None
         try:
             return await self._run_remote_exact(
@@ -265,7 +276,12 @@ class KernelMemoryToolPort:
             raise ValueError("remember requires final kind; kind_hint is not supported")
         if "cited_tool_result_handles" in arguments:
             raise ValueError("remember does not accept ToolResult citations")
-        if set(arguments) - {"statement", "context_target", "kind", "based_on_memory_ids"}:
+        if set(arguments) - {
+            "statement",
+            "context_target",
+            "kind",
+            "based_on_memory_ids",
+        }:
             raise ValueError("remember contains an unsupported argument")
         context_target = str(arguments.get("context_target") or "")
         if context_target == "GLOBAL":
@@ -333,13 +349,13 @@ class KernelMemoryToolPort:
             provider = await self._embedding_provider()
             if provider is not None:
                 embedding = await self._run_remote_exact(
-                    provider.embed(statement),
+                    self._frozen_query_embedding(provider, statement),
                     timeout_seconds=self._remaining_for(
                         deadline, KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING
                     ),
                     name="memory-remember-query-embedding",
                 )
-                dense_status = "AVAILABLE"
+                dense_status = "AVAILABLE" if embedding is not None else "UNAVAILABLE"
         except Exception:
             dense_status = "UNAVAILABLE"
         try:
@@ -348,11 +364,31 @@ class KernelMemoryToolPort:
                 read_binding=self._read_binding,
                 context_id=context_id,
                 query=statement,
-                query_embedding=embedding,
+                query_embedding=None if embedding is None else embedding.vector,
+                embedding_contract=None
+                if embedding is None
+                else embedding.connection.embedding_contract,
                 exclude_fact_id=None,
                 limit=20,
                 deadline_monotonic=deadline,
             )
+            if (
+                embedding is not None
+                and self.embedding_connection() != embedding.connection
+            ):
+                embedding = None
+                dense_status = "UNAVAILABLE"
+                related_search = await self._io.run(
+                    self._query.related_candidates,
+                    read_binding=self._read_binding,
+                    context_id=context_id,
+                    query=statement,
+                    query_embedding=None,
+                    embedding_contract=None,
+                    exclude_fact_id=None,
+                    limit=20,
+                    deadline_monotonic=deadline,
+                )
         except Exception:
             return (), {
                 "disposition": "UNAVAILABLE",
@@ -360,9 +396,15 @@ class KernelMemoryToolPort:
                 "rerank": "NOT_APPLICABLE",
                 "bounded_search_not_exhaustive": True,
             }
-        if related_search.dense_disposition is MemoryDenseCandidateDisposition.UNAVAILABLE:
+        if (
+            related_search.dense_disposition
+            is MemoryDenseCandidateDisposition.UNAVAILABLE
+        ):
             dense_status = "UNAVAILABLE"
-        elif related_search.dense_disposition is MemoryDenseCandidateDisposition.PARTIAL_BOUNDED_SCAN:
+        elif (
+            related_search.dense_disposition
+            is MemoryDenseCandidateDisposition.PARTIAL_BOUNDED_SCAN
+        ):
             dense_status = "PARTIAL"
         ranked = MemoryQueryResult(
             disposition=MemoryRetrievalDisposition.COMPLETE,
@@ -372,7 +414,7 @@ class KernelMemoryToolPort:
             dense_disposition=related_search.dense_disposition,
         )
         ranked = await self._rerank_explicit(
-            statement, ranked, total_deadline=deadline
+            statement, ranked, total_deadline=deadline, purpose="related_memory"
         )
         related = tuple(
             MemoryRelatedPreview(
@@ -451,7 +493,7 @@ class KernelMemoryToolPort:
         if embedding is not None:
             try:
                 query_embedding = await self._run_remote_exact(
-                    embedding.embed(query),
+                    self._frozen_query_embedding(embedding, query),
                     timeout_seconds=self._remaining_for(
                         total_deadline,
                         KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING,
@@ -463,6 +505,7 @@ class KernelMemoryToolPort:
         result = await self._parallel_recall(
             terms=query_terms,
             limit=limit,
+            candidate_limit=max(limit, MAXIMUM_RERANK_CANDIDATES),
             requested_kind=(None if requested_kind is None else str(requested_kind)),
             query_embedding=query_embedding,
             automatic=False,
@@ -471,6 +514,7 @@ class KernelMemoryToolPort:
         result = await self._rerank_explicit(
             query, result, total_deadline=total_deadline
         )
+        result = replace(result, facts=result.facts[:limit])
         try:
             relations = await self._io.run(
                 self._query.active_contradictions,
@@ -625,45 +669,71 @@ class KernelMemoryToolPort:
             "SUCCESS", payload, model_visible_memory_fact_ids=(item.fact_id,)
         )
 
-    async def _embedding_provider(self) -> EmbeddingProvider | None:
-        if not MEMORY_EMBEDDING_CONTRACT.accepts(self._embedding_config):
-            return None
-        if self._embedding is None and self._dashscope_key_is_configured("embedding"):
-            async with self._provider_lock:
-                if self._embedding is None and not self._closed:
-                    self._embedding = build_embedding_provider(
-                        self._embedding_config,
-                        settings=self._settings,
-                    )
-        return self._embedding
-
-    async def _rerank_provider(self) -> RerankProvider | None:
-        config = self._rerank_config
-        if (
-            not self._feature_config.explicit_rerank
-            or config.provider != "dashscope"
-            or config.model != "qwen3-rerank"
-            or not self._dashscope_key_is_configured("rerank")
-        ):
-            return None
-        if self._rerank is None:
-            async with self._provider_lock:
-                if self._rerank is None and not self._closed:
-                    self._rerank = build_rerank_provider(
-                        config,
-                        settings=self._settings,
-                    )
-        return self._rerank
-
-    def _dashscope_key_is_configured(self, kind) -> bool:
+    def embedding_connection(self):
         try:
-            return self._settings.read().dashscope_api_key(kind) is not None
+            retrieval = self._settings.read().memory_retrieval
+        except LocalSettingsUnavailable:
+            return None
+        return retrieval.embedding if retrieval.embedding_enabled else None
+
+    def ranking_enabled(self):
+        try:
+            return self._settings.read().memory_retrieval.ranking_mode != "off"
         except LocalSettingsUnavailable:
             return False
 
-    async def _rerank_explicit(self, query: str, result, *, total_deadline: float):
+    async def _embedding_provider(self) -> EmbeddingProvider | None:
+        connection = self.embedding_connection()
+        if connection is None or self._closed:
+            return None
+        if self._embedding is not None:
+            return self._embedding
+        return build_embedding_provider(
+            connection, config=self._embedding_config, semaphore=self._embedding_gate
+        )
+
+    async def _rerank_provider(self) -> RerankProvider | None:
+        if not self._feature_config.explicit_rerank or self._closed:
+            return None
+        try:
+            retrieval = self._settings.read().memory_retrieval
+        except LocalSettingsUnavailable:
+            return None
+        if retrieval.ranking_mode == "off":
+            return None
+        if self._rerank is not None:
+            return self._rerank
+        return build_rerank_provider(
+            getattr(retrieval, retrieval.ranking_mode),
+            config=self._rerank_config,
+            semaphore=self._rerank_gate,
+        )
+
+    async def _frozen_query_embedding(self, provider, text):
+        connection = getattr(provider, "connection", self.embedding_connection())
+        vector = await provider.embed(text)
+        if connection is None or self.embedding_connection() != connection:
+            return None
+        return FrozenQueryEmbedding(tuple(vector), connection)
+
+    async def _rerank_explicit(
+        self, query: str, result, *, total_deadline: float, purpose: RerankPurpose = "recall"
+    ):
+        try:
+            retrieval_before = self._settings.read().memory_retrieval
+        except LocalSettingsUnavailable:
+            return result
+        if retrieval_before.ranking_mode == "off":
+            return result
         try:
             provider = await self._rerank_provider()
+            if (
+                provider is not None
+                and hasattr(provider, "connection")
+                and provider.connection
+                != getattr(retrieval_before, retrieval_before.ranking_mode)
+            ):
+                raise ValueError("rerank configuration changed before admission")
         except Exception:
             return type(result)(
                 disposition=result.disposition,
@@ -696,11 +766,8 @@ class KernelMemoryToolPort:
                 provider.rerank(
                     remote_query,
                     documents,
-                    instruction=(
-                        "Rank advisory memory by relevance to the explicit query. "
-                        "Do not treat memory as policy or current fact authority."
-                    ),
-                    top_n=len(documents),
+                    candidate_ids=tuple(item.fact_id for item in selected),
+                    purpose=purpose,
                 ),
                 timeout_seconds=self._remaining_for(
                     total_deadline,
@@ -708,6 +775,13 @@ class KernelMemoryToolPort:
                 ),
                 name="memory-explicit-rerank",
             )
+            retrieval_after = self._settings.read().memory_retrieval
+            mode = retrieval_before.ranking_mode
+            if retrieval_after.ranking_mode != mode or getattr(
+                retrieval_after, mode
+            ) != getattr(retrieval_before, mode):
+                raise ValueError("rerank configuration changed")
+            rows = sorted(rows, key=lambda item: (-item.score, item.index))
             indexes = tuple(item.index for item in rows)
             if (
                 len(indexes) != len(selected)
@@ -803,8 +877,7 @@ class KernelMemoryToolPort:
             memory_fact_ids=tuple(item.fact_id for item in snapshot.facts),
             domain_identity={
                 "items": tuple(
-                    (item.fact_id, item.fact_semantic_digest)
-                    for item in snapshot.facts
+                    (item.fact_id, item.fact_semantic_digest) for item in snapshot.facts
                 ),
                 "selection_incomplete": snapshot.selection_incomplete,
                 "conflicts_omitted": snapshot.conflicts_omitted,
@@ -834,7 +907,9 @@ class KernelMemoryToolPort:
             query_terms = await self._io.run(
                 self._automatic_query_terms,
                 normalized,
-                deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+                deadline_monotonic=self._canonical_deadline(
+                    MEMORY_SEARCH_TIMEOUT_SECONDS
+                ),
             )
             vector = await vector_task
         finally:
@@ -845,6 +920,7 @@ class KernelMemoryToolPort:
             result = await self._parallel_recall(
                 terms=query_terms,
                 limit=5,
+                candidate_limit=20 if self.ranking_enabled() else 5,
                 requested_kind=None,
                 query_embedding=vector,
                 automatic=True,
@@ -858,10 +934,27 @@ class KernelMemoryToolPort:
                 texts=None,
                 absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
             )
+        result = replace(
+            result,
+            facts=tuple(
+                item
+                for item in result.facts
+                if _sensitive_profile_is_eligible(item, normalized)
+            ),
+        )
+        result = await self._rerank_explicit(
+            normalized,
+            result,
+            total_deadline=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+        )
+        result = replace(result, facts=result.facts[:5])
         return await self._automatic_recall_source(result, normalized)
 
     def _automatic_query_terms(
-        self, text: str, *, deadline_monotonic: float,
+        self,
+        text: str,
+        *,
+        deadline_monotonic: float,
     ) -> tuple[str, ...]:
         try:
             return self._query.tokenize_query(text)
@@ -869,7 +962,9 @@ class KernelMemoryToolPort:
             # A lexical resource-bound input disables only the sparse channel.
             return ()
 
-    async def _automatic_query_embedding(self, normalized: str) -> Sequence[float] | None:
+    async def _automatic_query_embedding(
+        self, normalized: str
+    ) -> FrozenQueryEmbedding | None:
         embedding = None
         if self._feature_config.automatic_dense:
             try:
@@ -881,7 +976,7 @@ class KernelMemoryToolPort:
         if embedding is not None:
             try:
                 return await self._run_remote_exact(
-                    embedding.embed(normalized),
+                    self._frozen_query_embedding(embedding, normalized),
                     timeout_seconds=self._deadlines.policy.seconds_for(
                         KernelWatchdogOwner.MEMORY_AUTO_QUERY_EMBEDDING
                     ),
@@ -892,7 +987,9 @@ class KernelMemoryToolPort:
         return None
 
     async def _automatic_recall_source(
-        self, result: MemoryQueryResult, normalized: str,
+        self,
+        result: MemoryQueryResult,
+        normalized: str,
     ) -> ContextSourceCandidate | ContextSourceAbsentFact:
         filtered_facts = tuple(
             item
@@ -941,18 +1038,7 @@ class KernelMemoryToolPort:
         membership = tuple(
             sorted((item.fact_id, item.fact_semantic_digest) for item in filtered_facts)
         )
-        prior_order = self._recall_presentation_by_membership.get(membership)
-        by_id = {item.fact_id: item for item in filtered_facts}
-        if prior_order is None:
-            presentation = filtered_facts
-            self._recall_presentation_by_membership[membership] = tuple(
-                item.fact_id for item in presentation
-            )
-            if len(self._recall_presentation_by_membership) > 128:
-                oldest = next(iter(self._recall_presentation_by_membership))
-                self._recall_presentation_by_membership.pop(oldest, None)
-        else:
-            presentation = tuple(by_id[item_id] for item_id in prior_order)
+        presentation = filtered_facts
         relations, exposed_ids = _bounded_memory_relations(
             tuple(item.fact_id for item in presentation), relations
         )
@@ -994,7 +1080,11 @@ class KernelMemoryToolPort:
             kind=ContextSourceKind.MEMORY_RECALL,
             texts=(render(full_items), render(compact_items), render(ref_items)),
             memory_fact_ids=exposed_ids,
-            domain_identity={"membership": membership, "warnings": warning_identity},
+            domain_identity={
+                "membership": membership,
+                "order": tuple(item.fact_id for item in presentation),
+                "warnings": warning_identity,
+            },
         )
 
     async def aclose(self) -> None:
@@ -1004,10 +1094,6 @@ class KernelMemoryToolPort:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        if self._rerank is not None and self._owns_rerank:
-            await self._rerank.aclose()
-        if self._embedding is not None and self._owns_embedding:
-            await self._embedding.aclose()
 
     async def _run_remote_exact(
         self,
@@ -1041,8 +1127,9 @@ class KernelMemoryToolPort:
         *,
         terms: Sequence[str],
         limit: int,
+        candidate_limit: int,
         requested_kind: str | None,
-        query_embedding: Sequence[float] | None,
+        query_embedding: FrozenQueryEmbedding | None,
         automatic: bool,
         deadline_monotonic: float,
     ) -> MemoryQueryResult:
@@ -1050,11 +1137,16 @@ class KernelMemoryToolPort:
 
         No PostgreSQL transaction spans the two channels or any remote call.
         KernelSessionIO retains physical ownership of both channel reads.
+        ``limit`` controls filter relaxation; ``candidate_limit`` preserves the
+        explicit Top-20 rerank pool independently of the final result count.
         """
 
-        stages = self._query.filter_stages(
-            self._read_binding, requested_kind
-        )
+        if (
+            query_embedding is not None
+            and self.embedding_connection() != query_embedding.connection
+        ):
+            query_embedding = None
+        stages = self._query.filter_stages(self._read_binding, requested_kind)
         gathered = []
         seen: set[str] = set()
         attempted: list[MemorySearchStageResult] = []
@@ -1062,9 +1154,7 @@ class KernelMemoryToolPort:
         sparse_ok = True
         dense_ok = query_embedding is not None
         dense_dispositions: list[MemoryDenseCandidateDisposition] = []
-        for ordinal, (kind_filter, label, relaxed_field) in enumerate(
-            stages
-        ):
+        for ordinal, (kind_filter, label, relaxed_field) in enumerate(stages):
             if monotonic() >= deadline_monotonic:
                 break
             if relaxed_field is not None:
@@ -1084,7 +1174,8 @@ class KernelMemoryToolPort:
                 else self._io.run(
                     self._query.dense_candidates,
                     read_binding=self._read_binding,
-                    vector=query_embedding,
+                    vector=query_embedding.vector,
+                    embedding_contract=query_embedding.connection.embedding_contract,
                     kind_filter=kind_filter,
                     limit=20 if automatic else 30,
                     purpose=(
@@ -1157,10 +1248,23 @@ class KernelMemoryToolPort:
         final = await self._io.run(
             self._query.canonical_refetch,
             read_binding=self._read_binding,
-            ranked=gathered[:limit],
+            ranked=gathered[:candidate_limit],
             automatic=automatic,
             deadline_monotonic=deadline_monotonic,
         )
+        if (
+            query_embedding is not None
+            and self.embedding_connection() != query_embedding.connection
+        ):
+            return await self._parallel_recall(
+                terms=terms,
+                limit=limit,
+                candidate_limit=candidate_limit,
+                requested_kind=requested_kind,
+                query_embedding=None,
+                automatic=automatic,
+                deadline_monotonic=deadline_monotonic,
+            )
         if final:
             disposition = (
                 MemoryRetrievalDisposition.COMPLETE
@@ -1276,11 +1380,7 @@ def _retrieval_summary(
 
     relaxed = set(result.relaxed_fields)
     expanded_filters = [
-        field
-        for field, present in (
-            ("KIND", "kind" in relaxed),
-        )
-        if present
+        field for field, present in (("KIND", "kind" in relaxed),) if present
     ]
 
     if result.rerank_disposition == "APPLIED":
@@ -1375,17 +1475,9 @@ def _prepare_rerank_projection(query: str, facts) -> tuple[str, tuple[str, ...]]
     documents: list[str] = []
     document_token_ceilings: list[int] = []
     for fact in facts:
-        raw = canonical_json_bytes(
-            {
-                "kind": fact.fact_kind,
-                "context_product_label": memory_context_product_label(
-                    fact.context_id
-                ),
-                "statement": fact.statement,
-                "recorded_at": fact.recorded_at,
-            }
-        )
-        projected = _utf8_head_tail(raw, MAXIMUM_RERANK_DOCUMENT_BYTES)
+        projected = _rerank_document_projection(fact)
+        if projected is None:
+            return None
         projected_text = projected.decode("utf-8")
         token_ceiling = estimator.estimate_text(projected_text)
         if token_ceiling > 4_000:
@@ -1404,26 +1496,44 @@ def _prepare_rerank_projection(query: str, facts) -> tuple[str, tuple[str, ...]]
     return query, tuple(documents)
 
 
-def _utf8_head_tail(value: bytes, maximum_bytes: int) -> bytes:
-    if len(value) <= maximum_bytes:
-        return value
-    marker = b"\n...[rerank projection omitted]...\n"
-    available = maximum_bytes - len(marker)
-    head = value[: available // 2]
-    while head:
-        try:
-            head.decode("utf-8")
-            break
-        except UnicodeDecodeError:
-            head = head[:-1]
-    tail = value[-(available - len(head)) :]
-    while tail:
-        try:
-            tail.decode("utf-8")
-            break
-        except UnicodeDecodeError:
-            tail = tail[1:]
-    return head + marker + tail
+def _rerank_document_projection(fact) -> bytes | None:
+    document = {
+        "kind": fact.fact_kind,
+        "context_product_label": memory_context_product_label(fact.context_id),
+        "statement": fact.statement,
+        "recorded_at": fact.recorded_at,
+    }
+    encoded = canonical_json_bytes(document)
+    if len(encoded) <= MAXIMUM_RERANK_DOCUMENT_BYTES:
+        return encoded
+
+    # Bound the serialized JSON, including escaping and metadata. Slice only
+    # statement characters so metadata, JSON syntax and UTF-8 remain intact.
+    document["statement_truncated"] = True
+    marker = "\n...[memory statement truncated]...\n"
+
+    def encode(kept: int) -> bytes:
+        head = (kept + 1) // 2
+        tail = kept // 2
+        document["statement"] = (
+            fact.statement[:head]
+            + marker
+            + (fact.statement[-tail:] if tail else "")
+        )
+        return canonical_json_bytes(document)
+
+    best = encode(0)
+    if len(best) > MAXIMUM_RERANK_DOCUMENT_BYTES:
+        return None
+    low, high = 0, len(fact.statement)
+    while low < high:
+        kept = (low + high + 1) // 2
+        encoded = encode(kept)
+        if len(encoded) <= MAXIMUM_RERANK_DOCUMENT_BYTES:
+            low, best = kept, encoded
+        else:
+            high = kept - 1
+    return best
 
 
 _SENSITIVE_PROFILE_RELEVANCE: tuple[tuple[frozenset[str], frozenset[str]], ...] = (

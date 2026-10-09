@@ -18,10 +18,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     memory_relation_id,
     normalize_memory_text,
 )
-from pulsara_agent.conversation_kernel.memory.recall import (
-    MEMORY_EMBEDDING_CONTRACT_ID,
-    MEMORY_EMBEDDING_CONTRACT_VERSION,
-)
 from pulsara_agent.conversation_kernel.memory.writes import (
     PreparedMemoryMutation,
     PreparedMemoryRelationWrite,
@@ -72,7 +68,9 @@ class _MemoryOperations(_MemoryManagementOperations):
         deadline_monotonic: float,
     ) -> DirectMemoryOutcome:
         if candidate.result_state != "SUCCESS" or candidate.attempt_id is None:
-            raise ConversationKernelConflict("memory mutation needs a successful tool attempt")
+            raise ConversationKernelConflict(
+                "memory mutation needs a successful tool attempt"
+            )
         owner = connection.execute(
             "SELECT s.memory_domain_id, s.workspace_id, w.workspace_kind, "
             "w.workspace_root, w.workspace_label FROM pulsara_v3.sessions AS s "
@@ -102,14 +100,20 @@ class _MemoryOperations(_MemoryManagementOperations):
               AND b.tool_call_id=%s AND b.block_kind='TOOL_CALL'
             """,
             (
-                candidate.turn_id, candidate.session_id,
-                candidate.assistant_entry_id, candidate.tool_call_id,
+                candidate.turn_id,
+                candidate.session_id,
+                candidate.assistant_entry_id,
+                candidate.tool_call_id,
             ),
         ).fetchone()
         if call is None or str(call["conversation_scope_kind"]) != "ROOT":
-            raise ConversationKernelConflict("memory mutation is not owned by a root tool call")
+            raise ConversationKernelConflict(
+                "memory mutation is not owned by a root tool call"
+            )
         if candidate.actor_id != call["tool_name"]:
-            raise ConversationKernelConflict("memory mutation actor differs from its tool call")
+            raise ConversationKernelConflict(
+                "memory mutation actor differs from its tool call"
+            )
         arguments = call["tool_arguments"]
         if not isinstance(arguments, dict):
             raise ConversationKernelConflict("memory tool arguments are not canonical")
@@ -130,14 +134,18 @@ class _MemoryOperations(_MemoryManagementOperations):
                 or set(arguments)
                 - {"statement", "context_target", "kind", "based_on_memory_ids"}
             ):
-                raise ConversationKernelConflict("remember write does not exact-join its tool call")
+                raise ConversationKernelConflict(
+                    "remember write does not exact-join its tool call"
+                )
         elif (
             call["tool_name"] != "mark_memory_relation"
             or arguments.get("source_memory_id") != mutation.source_memory_id
             or arguments.get("target_memory_id") != mutation.target_memory_id
             or arguments.get("relation_kind") != mutation.relation_kind.value
         ):
-            raise ConversationKernelConflict("relation write does not exact-join its tool call")
+            raise ConversationKernelConflict(
+                "relation write does not exact-join its tool call"
+            )
         try:
             if isinstance(mutation, PreparedRememberWrite):
                 return self._settle_remember(
@@ -158,7 +166,9 @@ class _MemoryOperations(_MemoryManagementOperations):
             )
 
     @staticmethod
-    def _lock_remember_basis(connection, write: PreparedRememberWrite) -> tuple[dict, ...]:
+    def _lock_remember_basis(
+        connection, write: PreparedRememberWrite
+    ) -> tuple[dict, ...]:
         ids = tuple(item.target_fact_id for item in write.basis_refs)
         if not ids:
             return ()
@@ -181,7 +191,9 @@ class _MemoryOperations(_MemoryManagementOperations):
                     write.context_id, ref.target_context_id
                 )
             ):
-                raise _MemoryInputRejected("based_on memory is no longer active or visible")
+                raise _MemoryInputRejected(
+                    "based_on memory is no longer active or visible"
+                )
         return tuple(by_id[ref.target_fact_id] for ref in write.basis_refs)
 
     def _settle_remember(
@@ -212,14 +224,16 @@ class _MemoryOperations(_MemoryManagementOperations):
             for item in write.related
         ][:3]
         # Reject an oversized final body before the first fact/relationship write.
-        _body({
-            "status": "ALREADY_PRESENT",
-            "memory_id": new_id,
-            "related_memories": related_preview,
-            "retrieval_summary": thaw_json(write.retrieval_summary),
-            "advisory": True,
-            "relationship_labels_not_inferred": True,
-        })
+        _body(
+            {
+                "status": "ALREADY_PRESENT",
+                "memory_id": new_id,
+                "related_memories": related_preview,
+                "retrieval_summary": thaw_json(write.retrieval_summary),
+                "advisory": True,
+                "relationship_labels_not_inferred": True,
+            }
+        )
         while monotonic() < deadline_monotonic:
             inserted = connection.execute(
                 """
@@ -237,10 +251,16 @@ class _MemoryOperations(_MemoryManagementOperations):
                 RETURNING id
                 """,
                 (
-                    new_id, write.memory_domain_id, write.context_id,
+                    new_id,
+                    write.memory_domain_id,
+                    write.context_id,
                     candidate.result_id,
-                    write.kind.value, write.statement, write.semantic_digest,
-                    accepted_at, accepted_at, *write.search_contract,
+                    write.kind.value,
+                    write.statement,
+                    write.semantic_digest,
+                    accepted_at,
+                    accepted_at,
+                    *write.search_contract,
                     list(write.search_terms),
                 ),
             ).fetchone()
@@ -301,22 +321,33 @@ class _MemoryOperations(_MemoryManagementOperations):
                     ) VALUES (%s,%s,%s,%s,%s,%s,'BASED_ON',%s,%s,%s,NULL,%s,%s)
                     """,
                     (
-                        relation_id, write.memory_domain_id, candidate.result_id,
-                        write.context_id, memory_id, write.kind.value,
-                        ref.target_context_id, ref.target_fact_id,
-                        str(target["fact_kind"]), ref.ordinal, accepted_at,
+                        relation_id,
+                        write.memory_domain_id,
+                        candidate.result_id,
+                        write.context_id,
+                        memory_id,
+                        write.kind.value,
+                        ref.target_context_id,
+                        ref.target_fact_id,
+                        str(target["fact_kind"]),
+                        ref.ordinal,
+                        accepted_at,
                     ),
                 )
         related = [item for item in related_preview if item["memory_id"] != memory_id]
-        body = _body({
-            "status": status,
-            "memory_id": memory_id,
-            "related_memories": related,
-            "retrieval_summary": thaw_json(write.retrieval_summary),
-            "advisory": True,
-            "relationship_labels_not_inferred": True,
-        })
-        ids = tuple(dict.fromkeys((memory_id, *(item["memory_id"] for item in related))))
+        body = _body(
+            {
+                "status": status,
+                "memory_id": memory_id,
+                "related_memories": related,
+                "retrieval_summary": thaw_json(write.retrieval_summary),
+                "advisory": True,
+                "relationship_labels_not_inferred": True,
+            }
+        )
+        ids = tuple(
+            dict.fromkeys((memory_id, *(item["memory_id"] for item in related)))
+        )
         return DirectMemoryOutcome("SUCCESS", body, ids)
 
     def _settle_memory_relation(
@@ -327,8 +358,11 @@ class _MemoryOperations(_MemoryManagementOperations):
         write: PreparedMemoryRelationWrite,
     ) -> DirectMemoryOutcome:
         source_id, target_id, kind = (
-            write.source_memory_id, write.target_memory_id, write.relation_kind
+            write.source_memory_id,
+            write.target_memory_id,
+            write.relation_kind,
         )
+
         def require_existing_owner(existing):
             owner_id = existing["created_by_tool_result_id"]
             if owner_id is None:
@@ -347,11 +381,15 @@ class _MemoryOperations(_MemoryManagementOperations):
                 (owner_id,),
             ).fetchone()
             arguments = None if owner is None else owner["tool_arguments"]
-            owner_source = None if not isinstance(arguments, dict) else arguments.get(
-                "source_memory_id"
+            owner_source = (
+                None
+                if not isinstance(arguments, dict)
+                else arguments.get("source_memory_id")
             )
-            owner_target = None if not isinstance(arguments, dict) else arguments.get(
-                "target_memory_id"
+            owner_target = (
+                None
+                if not isinstance(arguments, dict)
+                else arguments.get("target_memory_id")
             )
             owner_endpoints_match = (
                 {owner_source, owner_target}
@@ -371,7 +409,9 @@ class _MemoryOperations(_MemoryManagementOperations):
                 or not owner_endpoints_match
                 or arguments.get("relation_kind") != kind.value
             ):
-                raise ConversationKernelConflict("existing memory relation owner drifted")
+                raise ConversationKernelConflict(
+                    "existing memory relation owner drifted"
+                )
 
         def existing_relation():
             if kind is MemoryRelationKind.CONTRADICTS:
@@ -382,7 +422,13 @@ class _MemoryOperations(_MemoryManagementOperations):
                       AND least(source_fact_id,target_fact_id)=least(%s,%s)
                       AND greatest(source_fact_id,target_fact_id)=greatest(%s,%s)
                     """,
-                    (write.memory_domain_id, source_id, target_id, source_id, target_id),
+                    (
+                        write.memory_domain_id,
+                        source_id,
+                        target_id,
+                        source_id,
+                        target_id,
+                    ),
                 ).fetchone()
             return connection.execute(
                 """
@@ -404,7 +450,9 @@ class _MemoryOperations(_MemoryManagementOperations):
         by_id = {str(row["id"]): row for row in rows}
         source, target = by_id.get(source_id), by_id.get(target_id)
         if source is None or target is None:
-            raise _MemoryInputRejected("relation memory is absent or outside this domain")
+            raise _MemoryInputRejected(
+                "relation memory is absent or outside this domain"
+            )
         source_context = str(source["context_id"])
         target_context = str(target["context_id"])
         if source_context != target_context:
@@ -418,17 +466,22 @@ class _MemoryOperations(_MemoryManagementOperations):
             source, target = target, source
             source_context, target_context = target_context, source_context
         mode = (
-            None if kind is MemoryRelationKind.CONTRADICTS else
-            (MemorySupersedeMode.SAME_KIND_REPLACEMENT
-             if str(source["fact_kind"]) == str(target["fact_kind"])
-             else MemorySupersedeMode.TAXONOMY_CORRECTION)
+            None
+            if kind is MemoryRelationKind.CONTRADICTS
+            else (
+                MemorySupersedeMode.SAME_KIND_REPLACEMENT
+                if str(source["fact_kind"]) == str(target["fact_kind"])
+                else MemorySupersedeMode.TAXONOMY_CORRECTION
+            )
         )
         relation_id = memory_relation_id(
             memory_domain_id=write.memory_domain_id,
             source_context_id=str(source["context_id"]),
-            source_fact_id=source_id, relation_kind=kind,
+            source_fact_id=source_id,
+            relation_kind=kind,
             target_context_id=str(target["context_id"]),
-            target_fact_id=target_id, supersede_mode=mode,
+            target_fact_id=target_id,
+            supersede_mode=mode,
         )
         lock_canonical_identities(
             connection,
@@ -445,30 +498,36 @@ class _MemoryOperations(_MemoryManagementOperations):
                 raise ConversationKernelConflict("existing supersede lifecycle drifted")
             return DirectMemoryOutcome(
                 "SUCCESS",
-                _body({
-                    "status": "ALREADY_PRESENT",
-                    "relation_id": str(existing["id"]),
-                    "source_memory_id": source_id,
-                    "target_memory_id": target_id,
-                    "relation_kind": kind.value,
-                    "advisory": True,
-                }),
+                _body(
+                    {
+                        "status": "ALREADY_PRESENT",
+                        "relation_id": str(existing["id"]),
+                        "source_memory_id": source_id,
+                        "target_memory_id": target_id,
+                        "relation_kind": kind.value,
+                        "advisory": True,
+                    }
+                ),
                 (source_id, target_id),
             )
-        if (
-            str(source["lifecycle"]) != "ACTIVE"
-            or str(target["lifecycle"]) != "ACTIVE"
-        ):
-            raise _MemoryInputRejected("new relation requires active same-context memories")
+        if str(source["lifecycle"]) != "ACTIVE" or str(target["lifecycle"]) != "ACTIVE":
+            raise _MemoryInputRejected(
+                "new relation requires active same-context memories"
+            )
         if kind is MemoryRelationKind.CONTRADICTS and (
             str(source["fact_kind"]) != str(target["fact_kind"])
         ):
             raise _MemoryInputRejected("contradiction requires the same memory kind")
-        result_body = _body({
-            "status": "SAVED", "relation_id": relation_id,
-            "source_memory_id": source_id, "target_memory_id": target_id,
-            "relation_kind": kind.value, "advisory": True,
-        })
+        result_body = _body(
+            {
+                "status": "SAVED",
+                "relation_id": relation_id,
+                "source_memory_id": source_id,
+                "target_memory_id": target_id,
+                "relation_kind": kind.value,
+                "advisory": True,
+            }
+        )
         connection.execute(
             """
             INSERT INTO pulsara_v3.memory_relations (
@@ -479,11 +538,18 @@ class _MemoryOperations(_MemoryManagementOperations):
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s)
             """,
             (
-                relation_id, write.memory_domain_id, candidate.result_id,
-                str(source["context_id"]), source_id,
-                str(source["fact_kind"]), kind.value, str(target["context_id"]),
-                target_id, str(target["fact_kind"]),
-                None if mode is None else mode.value, candidate.observed_at,
+                relation_id,
+                write.memory_domain_id,
+                candidate.result_id,
+                str(source["context_id"]),
+                source_id,
+                str(source["fact_kind"]),
+                kind.value,
+                str(target["context_id"]),
+                target_id,
+                str(target["fact_kind"]),
+                None if mode is None else mode.value,
+                candidate.observed_at,
             ),
         )
         if kind is MemoryRelationKind.SUPERSEDES:
@@ -496,13 +562,18 @@ class _MemoryOperations(_MemoryManagementOperations):
                 (candidate.observed_at, write.memory_domain_id, target_id),
             )
         return DirectMemoryOutcome(
-            "SUCCESS", result_body,
+            "SUCCESS",
+            result_body,
             (source_id, target_id),
         )
 
     def list_unembedded_memory_facts(
-        self, *, read_binding: FrozenMemoryReadContextBinding,
-        limit: int, deadline_monotonic: float,
+        self,
+        *,
+        read_binding: FrozenMemoryReadContextBinding,
+        limit: int,
+        deadline_monotonic: float,
+        embedding_contract,
     ) -> tuple[tuple[str, str, str], ...]:
         with self._provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
@@ -516,11 +587,14 @@ class _MemoryOperations(_MemoryManagementOperations):
                 LEFT JOIN pulsara_v3.memory_embeddings AS e
                   ON e.memory_domain_id=f.memory_domain_id AND e.fact_id=f.id
                  AND e.fact_semantic_digest=f.fact_semantic_digest
+                 AND e.embedding_contract_id=%s AND e.embedding_contract_version=%s
                 WHERE f.memory_domain_id=%s AND f.lifecycle='ACTIVE'
                   AND f.context_id=ANY(%s::text[]) AND e.fact_id IS NULL
                 ORDER BY f.accepted_at, f.id LIMIT %s
                 """,
                 (
+                    embedding_contract.contract_id,
+                    embedding_contract.contract_version,
                     read_binding.memory_domain_id,
                     list(read_binding.readable_context_ids),
                     max(1, min(limit, 100)),
@@ -532,9 +606,15 @@ class _MemoryOperations(_MemoryManagementOperations):
         )
 
     def upsert_memory_embedding(
-        self, *, read_binding: FrozenMemoryReadContextBinding,
-        fact_id: str, fact_semantic_digest: str, vector: Sequence[float],
-        embedded_at: datetime, deadline_monotonic: float,
+        self,
+        *,
+        read_binding: FrozenMemoryReadContextBinding,
+        fact_id: str,
+        fact_semantic_digest: str,
+        vector: Sequence[float],
+        embedded_at: datetime,
+        deadline_monotonic: float,
+        embedding_contract,
     ) -> bool:
         values = freeze_v1_embedding_vector(vector)
         literal = "[" + ",".join(format(value, ".17g") for value in values) + "]"
@@ -544,6 +624,14 @@ class _MemoryOperations(_MemoryManagementOperations):
         ) as connection:
             row = connection.execute(
                 """
+                WITH source AS (
+                    SELECT f.memory_domain_id, f.id, f.fact_semantic_digest
+                    FROM pulsara_v3.memory_facts AS f
+                    WHERE f.memory_domain_id=%s AND f.id=%s
+                      AND f.context_id=ANY(%s::text[])
+                      AND f.lifecycle='ACTIVE' AND f.fact_semantic_digest=%s
+                    FOR UPDATE
+                )
                 INSERT INTO pulsara_v3.memory_embeddings (
                     memory_domain_id, fact_id, fact_semantic_digest,
                     embedding_contract_id, embedding_contract_version,
@@ -551,10 +639,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                 )
                 SELECT f.memory_domain_id, f.id, f.fact_semantic_digest,
                        %s, %s, %s::public.vector, %s
-                FROM pulsara_v3.memory_facts AS f
-                WHERE f.memory_domain_id=%s AND f.id=%s
-                  AND f.context_id=ANY(%s::text[])
-                  AND f.lifecycle='ACTIVE' AND f.fact_semantic_digest=%s
+                FROM source AS f
                 ON CONFLICT (memory_domain_id, fact_id) DO UPDATE
                 SET fact_semantic_digest=EXCLUDED.fact_semantic_digest,
                     embedding_contract_id=EXCLUDED.embedding_contract_id,
@@ -563,10 +648,14 @@ class _MemoryOperations(_MemoryManagementOperations):
                 RETURNING fact_id
                 """,
                 (
-                    MEMORY_EMBEDDING_CONTRACT_ID,
-                    MEMORY_EMBEDDING_CONTRACT_VERSION,
-                    literal, embedded_at, read_binding.memory_domain_id, fact_id,
-                    list(read_binding.readable_context_ids), fact_semantic_digest,
+                    read_binding.memory_domain_id,
+                    fact_id,
+                    list(read_binding.readable_context_ids),
+                    fact_semantic_digest,
+                    embedding_contract.contract_id,
+                    embedding_contract.contract_version,
+                    literal,
+                    embedded_at,
                 ),
             ).fetchone()
             return row is not None

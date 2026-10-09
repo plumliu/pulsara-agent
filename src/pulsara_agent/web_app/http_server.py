@@ -88,12 +88,12 @@ from pulsara_agent.web_app.session_controller import (
     SessionWorkspaceKind,
 )
 from pulsara_agent.settings import (
-    DashScopeCredentialKind,
     LocalPostgresConfig,
     LocalSettings,
     LocalSettingsPublishIndeterminate,
     LocalSettingsStore,
     LocalSettingsUnavailable,
+    LocalSettingsSchemaUnsupported,
 )
 from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
@@ -215,12 +215,6 @@ def _wire_shape_warning(hint: str | None, wire_api: WireApi) -> bool:
         else WireApi.OPENAI_CHAT_COMPLETIONS
     )
     return wire_api is not expected
-
-
-def _dashscope_credential_kind(kind: str) -> DashScopeCredentialKind:
-    if kind in {"embedding", "rerank"}:
-        return cast(DashScopeCredentialKind, kind)
-    raise ValueError("unknown DashScope credential kind")
 
 
 def _plugin_import_strings(body, key):
@@ -455,14 +449,12 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/local-settings/postgres/reset", self._reset_postgres
         )
-        self._app.router.add_put(
-            "/api/local-settings/dashscope-credentials/{kind}",
-            self._put_dashscope_credential,
-        )
-        self._app.router.add_delete(
-            "/api/local-settings/dashscope-credentials/{kind}",
-            self._delete_dashscope_credential,
-        )
+        self._app.router.add_get("/api/local-settings/memory-retrieval", self._read_memory_retrieval)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/embedding-enabled", self._set_embedding_enabled)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/ranking-mode", self._set_ranking_mode)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/{slot}", self._put_memory_model)
+        self._app.router.add_delete("/api/local-settings/memory-retrieval/{slot}", self._delete_memory_model)
+        self._app.router.add_post("/api/local-settings/memory-retrieval/{slot}/test", self._test_memory_model)
         self._app.router.add_get("/api/capabilities", self._inspect_user_capabilities)
         self._app.router.add_post(
             "/api/capabilities/refresh", self._refresh_user_capabilities
@@ -731,6 +723,10 @@ class LocalHttpServer:
                 str(exc),
                 status=exc.status,
                 retryable=exc.status in {409, 504},
+            )
+        except LocalSettingsSchemaUnsupported as exc:
+            return self._error_response(
+                "local_settings_schema_unsupported", str(exc), status=409, retryable=False
             )
         except LocalSettingsUnavailable:
             return self._error_response(
@@ -1287,22 +1283,87 @@ class LocalHttpServer:
             )
         return web.json_response(await self._reset_postgres_data(postgres))
 
-    async def _put_dashscope_credential(self, request: web.Request) -> web.Response:
-        kind = _dashscope_credential_kind(request.match_info["kind"])
-        body = await self._json_body(request)
-        if (
-            set(body) != {"api_key"}
-            or not isinstance(body["api_key"], str)
-            or not body["api_key"]
-        ):
-            raise ValueError("DashScope credential has an invalid closed shape")
-        await self.settings.save_dashscope_api_key(kind, body["api_key"])
-        return web.json_response({"configured": True})
+    async def _read_memory_retrieval(self, _request):
+        return web.json_response(self.settings.read().memory_retrieval.public())
 
-    async def _delete_dashscope_credential(self, request: web.Request) -> web.Response:
-        kind = _dashscope_credential_kind(request.match_info["kind"])
-        await self.settings.delete_dashscope_api_key(kind)
-        return web.json_response({"configured": False})
+    async def _wake_memory_embedding(self):
+        await self.sessions.core.wake_memory_embeddings()
+
+    @staticmethod
+    def _memory_settings_error(exc):
+        message = str(exc)
+        confirmation = message.startswith("EMBEDDING_CONFIRMATION_REQUIRED:")
+        return HttpPublicError(
+            "EMBEDDING_CONFIRMATION_REQUIRED" if confirmation else "INVALID_MEMORY_MODEL",
+            message.partition(":")[2].strip() if confirmation else message,
+            status=409 if confirmation else 400,
+        )
+
+    async def _set_embedding_enabled(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise self._memory_settings_error(ValueError("Embedding 开关值无效。"))
+        try:
+            updated = await self.settings.set_retrieval_mode(embedding_enabled=body["enabled"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        if updated.memory_retrieval.embedding_enabled:
+            await self._wake_memory_embedding()
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _set_ranking_mode(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"mode"} or not isinstance(body["mode"], str) or body["mode"] not in {"off", "decision", "rerank"}:
+            raise self._memory_settings_error(ValueError("重排档位无效。"))
+        try:
+            updated = await self.settings.set_retrieval_mode(ranking_mode=body["mode"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _put_memory_model(self, request):
+        try:
+            updated = await self.settings.save_retrieval_connection(request.match_info["slot"], await self._json_body(request))
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        if request.match_info["slot"] == "embedding" and updated.memory_retrieval.embedding_enabled:
+            await self._wake_memory_embedding()
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _delete_memory_model(self, request):
+        try:
+            updated = await self.settings.clear_retrieval_connection(request.match_info["slot"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _test_memory_model(self, request):
+        from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
+        from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
+        from time import perf_counter
+        slot = request.match_info["slot"]
+        try:
+            connection = self.settings.retrieval_draft(self.settings.read(), slot, await self._json_body(request))
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        provider = build_embedding_provider(connection) if slot == "embedding" else build_rerank_provider(connection)
+        started = perf_counter()
+        try:
+            if slot == "embedding":
+                vector = await provider.embed("A short memory about using PostgreSQL.")
+                detail = {"dimensions": len(vector)}
+            else:
+                rows = await provider.rerank("Which database does the project use?", [
+                    "The project uses PostgreSQL.", "The user prefers green tea."], candidate_ids=("m1", "m2"))
+                detail = {"result_count": len(rows)}
+        except Exception as exc:
+            message = str(exc)
+            if connection.api_key:
+                message = message.replace(connection.api_key, "[REDACTED]")
+            return self._error_response("RETRIEVAL_TEST_FAILED", message, status=400, retryable=False)
+        finally:
+            await provider.aclose()
+        return web.json_response({"status": "ready", "elapsed_ms": round((perf_counter() - started) * 1000, 2), **detail})
 
     async def _read_context_usage(self, request: web.Request) -> web.Response:
         return web.json_response(await self.sessions.read_context_usage(request.match_info["session_id"]))
@@ -1337,14 +1398,7 @@ class LocalHttpServer:
                         "admin_dsn": settings.postgres.admin_dsn,
                     }
                 ),
-                "dashscope_credentials": {
-                    "embedding_configured": (
-                        settings.dashscope_api_key("embedding") is not None
-                    ),
-                    "rerank_configured": (
-                        settings.dashscope_api_key("rerank") is not None
-                    ),
-                },
+                "memory_retrieval": settings.memory_retrieval.public(),
             },
             "model_configurations": await self._connection_summaries(settings),
             "database_state": self._database_state(),

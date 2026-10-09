@@ -93,7 +93,7 @@ const bootstrap: RuntimeBootstrap = {
   local_settings: { pulsara_home: '/Users/test/custom-pulsara-home',
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
-    dashscope_credentials: { embedding_configured: false, rerank_configured: false },
+    memory_retrieval: { embedding: null, embedding_enabled: false, rerank: null, decision: null, ranking_mode: 'off' },
   },
   model_configurations: [{
     id: 'model-connection:00000000000000000000000000000000',
@@ -629,8 +629,11 @@ class FakeAdapter implements RuntimeAdapter {
   async checkPostgres() { return { database_name: 'pulsara' }; }
   async migratePostgres() { return { database_name: 'pulsara' }; }
   async resetPostgres() { return { database_name: 'pulsara', restart_required: false }; }
-  async putDashScopeCredential() { return true; }
-  async deleteDashScopeCredential() { return false; }
+  async saveMemoryModel() { return bootstrap.local_settings.memory_retrieval; }
+  async clearMemoryModel() { return bootstrap.local_settings.memory_retrieval; }
+  async testMemoryModel() { return { status: 'ready' as const, elapsed_ms: 10 }; }
+  async setEmbeddingEnabled() { return bootstrap.local_settings.memory_retrieval; }
+  async setMemoryRanking() { return bootstrap.local_settings.memory_retrieval; }
 
   async updateModelCallBinding(sessionId: string, binding: NonNullable<SessionSummary['modelCallBinding']>) {
     this.sessions = this.sessions.map((session) => session.id === sessionId
@@ -849,18 +852,65 @@ class FakeAdapter implements RuntimeAdapter {
   }
 }
 
+// Session interaction tests explicitly enter the workbench from the overview.
+function renderWorkbench(ui: Parameters<typeof render>[0]) {
+  const view = render(ui);
+  fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+  return view;
+}
+
 describe('PulsaraApp', () => {
+  it('stays on overview while restoring a saved live session and opens it only on navigation', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [{ ...initialSession, live: true }];
+    window.localStorage.setItem('pulsara-active-session', initialSession.id);
+    const pending = deferred<RuntimeBootstrap>();
+    vi.spyOn(adapter, 'bootstrap').mockImplementation(() => pending.promise);
+    render(<PulsaraApp adapter={adapter} />);
+    expect(screen.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current')).toBe('page');
+    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    await act(async () => pending.resolve(bootstrap));
+    await screen.findByText('本地服务已连接');
+    expect(adapter.connectCalls.map(call => call.sessionId)).toEqual([initialSession.id]);
+    expect(screen.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current')).toBe('page');
+    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+    await screen.findByLabelText('发送给 Pulsara');
+    expect(adapter.connectCalls).toHaveLength(1);
+  });
+
+  it('keeps startup failures on overview', async () => {
+    const adapter = new FakeAdapter();
+    vi.spyOn(adapter, 'bootstrap').mockRejectedValue(new RuntimeApiError('START_FAILED', '本地服务启动失败', false));
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByText('连接失败');
+    expect(screen.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current')).toBe('page');
+    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    expect(adapter.connectCalls).toHaveLength(0);
+  });
+
+  it('does not override user navigation when startup completes', async () => {
+    const adapter = new FakeAdapter();
+    const pending = deferred<RuntimeBootstrap>();
+    vi.spyOn(adapter, 'bootstrap').mockImplementation(() => pending.promise);
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(screen.getByRole('button', { name: '设置', exact: true }));
+    await act(async () => pending.resolve(bootstrap));
+    await waitFor(() => expect(adapter.lastConnection).toBeDefined());
+    expect(screen.getByRole('button', { name: '设置', exact: true }).getAttribute('aria-current')).toBe('page');
+  });
+
   it('restores the selected session after remounting in the same browser', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
-    const view = render(<PulsaraApp adapter={adapter} />);
+    const view = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
     fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
     await screen.findByRole('heading', { name: '历史会话' });
     expect(window.localStorage.getItem('pulsara-active-session')).toBe('session-2');
     view.unmount();
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '历史会话' });
     expect(adapter.connectCalls.map(call => call.sessionId)).toEqual([
       'session-1', 'session-2', 'session-2',
@@ -870,7 +920,7 @@ describe('PulsaraApp', () => {
   it('shows a selected session loading page immediately, including while closing the old connection', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
     const closing = deferred<void>();
     vi.spyOn(adapter.lastConnection!, 'close').mockImplementation(() => closing.promise);
@@ -903,7 +953,7 @@ describe('PulsaraApp', () => {
   it('keeps the failed target visible and retries it instead of reopening the previous session', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
     const connectSpy = vi.spyOn(adapter, 'connect').mockRejectedValueOnce(new Error('暂时无法恢复会话'));
     fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
@@ -923,7 +973,7 @@ describe('PulsaraApp', () => {
       { ...initialSession, id: 'session-3', title: '另一会话' },
     );
     adapter.connectionValues.set('session-3', projection('另一会话的正文'));
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
     const opening = deferred<void>();
     const existence = deferred<SessionSummary | null>();
@@ -962,7 +1012,7 @@ describe('PulsaraApp', () => {
       { ...initialSession, id: 'session-2', title: '历史会话' },
       { ...initialSession, id: 'session-3', title: '另一会话' },
     );
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
     const closing = deferred<void>();
     vi.spyOn(adapter.lastConnection!, 'close').mockImplementation(() => closing.promise);
@@ -977,7 +1027,7 @@ describe('PulsaraApp', () => {
   it.each(['missing', 'deleted'] as const)('exits loading when its target is %s', async outcome => {
     const adapter = new FakeAdapter();
     adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
     const opening = deferred<void>();
     const connect = adapter.connect.bind(adapter);
@@ -1015,7 +1065,7 @@ describe('PulsaraApp', () => {
       } },
     };
     adapter.connectionValue.interruptionNotices = [{ownerKind: "EXECUTED_TURN", ownerId: "turn-interrupted", reason: "FOREGROUND_EXECUTION_INTERRUPTED", terminalAtUtc: "2026-10-05T00:00:00Z", displayAfterEntrySequence: 1, displayAfterMessageId: adapter.connectionValue.messages[0].id}];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const notice = await screen.findByText('本轮回复已中断。');
     expect(notice.closest('.conversation-interruption')).toBeTruthy();
     expect(notice.closest('.runtime-banner')).toBeNull();
@@ -1025,7 +1075,7 @@ describe('PulsaraApp', () => {
   });
 
   it('opens the real workbench state supplied by its adapter', async () => {
-    render(<PulsaraApp adapter={new FakeAdapter()} />);
+    renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     expect(await screen.findByRole('heading', { name: '准备发布' })).toBeTruthy();
     expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();
     expect(await screen.findByLabelText('TODO清单')).toBeTruthy();
@@ -1043,7 +1093,7 @@ describe('PulsaraApp', () => {
 
   it('keeps the full session catalog in the composer and user-owned capabilities on the first-class page', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     fireEvent.click(await screen.findByRole('button', { name: '添加文件、技能或规划' }));
     const skillButton = await screen.findByRole('button', { name: '选择技能' });
@@ -1132,7 +1182,7 @@ describe('PulsaraApp', () => {
       },
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1'));
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
@@ -1174,7 +1224,7 @@ describe('PulsaraApp', () => {
       },
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
 
@@ -1236,7 +1286,7 @@ describe('PulsaraApp', () => {
       },
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1'));
     await waitFor(() => expect(screen.queryByRole('button', { name: '选择技能' })).toBeNull());
@@ -1244,7 +1294,7 @@ describe('PulsaraApp', () => {
 
   it('renders the project capability dialog above the app and isolates its background', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     const addButton = await within(inspector).findByRole('button', { name: '添加' });
@@ -1278,7 +1328,7 @@ describe('PulsaraApp', () => {
       finishInstallation = resolve;
     }));
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     const addButton = await within(inspector).findByRole('button', { name: '添加' });
@@ -1320,7 +1370,7 @@ describe('PulsaraApp', () => {
 
   it('refreshes project skills after model management settles without a cached pending adoption', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1'));
     expect(screen.queryByRole('switch', {name: '关闭 boundary-probe'})).toBeNull();
@@ -1362,7 +1412,7 @@ describe('PulsaraApp', () => {
     adapter.inspectCapabilities.mockResolvedValue(projectSnapshot);
     adapter.setProjectMcpEnabled.mockRejectedValueOnce(new Error('项目能力已经变化，正在读取最新状态。'));
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
@@ -1410,7 +1460,7 @@ describe('PulsaraApp', () => {
       },
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     expect(await within(inspector).findByText('部分项目连接未载入')).toBeTruthy();
@@ -1429,7 +1479,7 @@ describe('PulsaraApp', () => {
       },
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     expect(await within(inspector).findByText('项目能力配置需要处理')).toBeTruthy();
@@ -1485,7 +1535,7 @@ describe('PulsaraApp', () => {
       },
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
@@ -1544,7 +1594,7 @@ describe('PulsaraApp', () => {
       new Promise<ProjectCapabilityMutationResult>((resolve) => { finishMutation = resolve; })
     ));
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 project-review' }));
@@ -1605,7 +1655,7 @@ describe('PulsaraApp', () => {
       rejectOldMutation = reject;
     }));
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
@@ -1639,7 +1689,7 @@ describe('PulsaraApp', () => {
         adoption: { ...capabilitySnapshot.adoption, pending: false },
       });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     await within(inspector).findByRole('button', { name: /继承的能力/ });
@@ -1698,7 +1748,7 @@ describe('PulsaraApp', () => {
         },
       };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
@@ -1715,7 +1765,7 @@ describe('PulsaraApp', () => {
   it('keeps a second page stable as an observer until the user explicitly takes control', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionRole = 'observer';
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     expect((await screen.findAllByText('此窗口仅供查看')).length).toBeGreaterThan(0);
     expect(screen.queryByText('这里仍会实时显示对话、思考和任务进展。')).toBeNull();
@@ -1732,7 +1782,7 @@ describe('PulsaraApp', () => {
 
   it('explains when manual context compaction cannot shrink the current context', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     adapter.lastConnection!.compactContext = vi.fn(async (): Promise<CommandReceipt> => ({
       commandId: 'command-compact-not-needed',
@@ -1773,7 +1823,7 @@ describe('PulsaraApp', () => {
         acceptedAt: '2026-09-01T10:00:30Z',
       },
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     const before = await screen.findByText('压缩前的消息');
     const divider = screen.getByRole('separator', { name: '上下文已压缩' });
@@ -1825,7 +1875,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     expect(await screen.findByText('检查已经完成。')).toBeTruthy();
 
     expect(container.querySelectorAll('.user-heading')).toHaveLength(2);
@@ -1868,7 +1918,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     expect(screen.queryByText('terminal')).toBeNull();
     expect(screen.getByText('运行命令')).toBeTruthy();
@@ -1898,7 +1948,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     fireEvent.click(await screen.findByRole('button', { name: /展开工具详情：edit_file/ }));
 
@@ -1931,7 +1981,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     fireEvent.click(await screen.findByRole('button', { name: /展开工具详情：mcp__external__report/ }));
 
@@ -1956,7 +2006,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     fireEvent.click(expand);
@@ -2001,7 +2051,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     const active = adapter.lastConnection!;
@@ -2049,7 +2099,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValues.set('session-1', artifactProjection('{"session":"A"}'));
     adapter.connectionValues.set('session-2', artifactProjection('{"session":"B"}'));
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     const first = adapter.lastConnection!;
@@ -2084,7 +2134,7 @@ describe('PulsaraApp', () => {
             argumentsJson: '{}', resultText, meta: '' }],
         }], isRunning: false, activeTurnId: undefined,
       };
-      render(<PulsaraApp adapter={adapter} />);
+      renderWorkbench(<PulsaraApp adapter={adapter} />);
       fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
       expect(screen.queryByText('观察到 0 项能力')).toBeNull();
     },
@@ -2137,7 +2187,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     expect(screen.getByText('刷新扩展能力')).toBeTruthy();
     expect(screen.queryByText('reload_capabilities')).toBeNull();
@@ -2183,7 +2233,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const intermediate = (await screen.findByText('我先检查文件，然后继续处理。')).closest('.assistant-copy');
     const terminal = screen.getByText('最终结果已经准备好。').closest('.assistant-copy');
 
@@ -2210,7 +2260,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '复制回复' }));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(SOURCE_FIDELITY_MARKDOWN));
@@ -2231,7 +2281,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '复制 LaTeX 公式' }));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith('E=mc^2'));
@@ -2253,7 +2303,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const bodies = [
       container.querySelector<HTMLElement>('.user-message > p'),
@@ -2283,7 +2333,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '复制回复' }));
 
     expect(await screen.findByText('无法复制回复')).toBeTruthy();
@@ -2293,7 +2343,7 @@ describe('PulsaraApp', () => {
   it('dismisses a session menu outside the menu and with Escape while preserving its actions', async () => {
     const user = userEvent.setup();
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const trigger = await screen.findByLabelText(`${initialSession.title} 更多操作`);
     const menu = trigger.closest('details')!;
     await user.click(trigger);
@@ -2315,7 +2365,7 @@ describe('PulsaraApp', () => {
   it('archives only eligible sessions, restores from settings without opening, and deletes there', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [{ ...initialSession, canArchive: false }];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByLabelText(`${initialSession.title} 更多操作`));
     expect((screen.getByRole('button', { name: '归档会话' }) as HTMLButtonElement).disabled).toBe(true);
     adapter.sessions = [{ ...initialSession, canArchive: true }];
@@ -2348,7 +2398,7 @@ describe('PulsaraApp', () => {
 
   it('permanently deletes the selected session without creating a replacement', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const menu = await screen.findByLabelText(`${initialSession.title} 更多操作`);
     fireEvent.click(menu);
     fireEvent.click(screen.getByRole('button', { name: '删除会话…' }));
@@ -2373,7 +2423,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     let reject!: (error: Error) => void;
     adapter.deleteSession.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByLabelText(`${initialSession.title} 更多操作`));
     fireEvent.click(screen.getByRole('button', { name: '删除会话…' }));
     const button = within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ });
@@ -2392,7 +2442,7 @@ describe('PulsaraApp', () => {
   it('deletes another session without clearing the current conversation', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions.push({ ...initialSession, id: 'session:other', title: '待删除会话' });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByLabelText('待删除会话 更多操作'));
     fireEvent.click(screen.getAllByRole('button', { name: '删除会话…' }).at(-1)!);
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ }));
@@ -2416,7 +2466,7 @@ describe('PulsaraApp', () => {
       adapter.sessions = [{ ...initialSession, id: child }, ...adapter.sessions];
       return { outcome: 'CREATED_AND_OPENED', child_session_id: child };
     });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const button = await screen.findByRole('button', { name: '从此处分叉' });
     expect(screen.getAllByRole('button', { name: '从此处分叉' })).toHaveLength(1);
     fireEvent.click(button); fireEvent.click(button);
@@ -2438,7 +2488,7 @@ describe('PulsaraApp', () => {
       adapter.sessions = [{ ...initialSession, id: child }, ...adapter.sessions];
       throw new Error('response lost');
     });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const button = await screen.findByRole('button', { name: '从此处分叉' });
     expect(screen.getByRole('separator', { name: '已保留分叉点的有效上下文，压缩前记录请在原会话查看' })).toBeTruthy();
     fireEvent.click(button);
@@ -2453,7 +2503,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = { ...projection(''), isRunning: false, messages: [
       { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '可分叉回复', time: '18:12', status: 'completed', rootFinal: true, forkEligible: true },
     ] };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const textbox = await screen.findByRole('textbox', { name: '发送给 Pulsara' });
     await userEvent.click(textbox);
     await userEvent.type(textbox, '父会话未发送草稿', { skipClick: true });
@@ -2480,7 +2530,7 @@ describe('PulsaraApp', () => {
       { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '保留父会话', time: '18:12', status: 'completed', rootFinal: true, forkEligible: true },
     ] };
     adapter.forkConversation.mockResolvedValueOnce({ outcome, child_session_id: 'child' });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '从此处分叉' }));
     await screen.findByText(outcome === 'NOT_CREATED' ? '未创建分叉' : '分叉已创建，暂未打开');
     expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id);
@@ -2518,7 +2568,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByText('我先修正测试。');
     const turns = container.querySelectorAll('.assistant-turn');
 
@@ -2551,7 +2601,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     expect(await screen.findByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.queryByRole('tooltip')).toBeNull();
@@ -2571,7 +2621,7 @@ describe('PulsaraApp', () => {
       setItem: (key: string, value: string) => saved.set(key, value),
     });
     try {
-      let view = render(<PulsaraApp adapter={new FakeAdapter()} />);
+      let view = renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
       await screen.findByRole('heading', { name: '准备发布' });
       fireEvent.click(screen.getByRole('button', { name: '设置' }));
       fireEvent.click(screen.getByRole('button', { name: '通用' }));
@@ -2582,7 +2632,7 @@ describe('PulsaraApp', () => {
       expect(saved.get('pulsara-show-builtin-tool-results')).toBe('true');
       view.unmount();
 
-      view = render(<PulsaraApp adapter={new FakeAdapter()} />);
+      view = renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
       await screen.findByRole('heading', { name: '准备发布' });
       fireEvent.click(screen.getByRole('button', { name: '设置' }));
       fireEvent.click(screen.getByRole('button', { name: '通用' }));
@@ -2598,7 +2648,7 @@ describe('PulsaraApp', () => {
   });
 
   it('navigates between the major product surfaces', async () => {
-    render(<PulsaraApp adapter={new FakeAdapter()} />);
+    renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
     expect(screen.getByRole('heading', { level: 1, name: /准备好继续/ })).toBeTruthy();
@@ -2635,7 +2685,7 @@ describe('PulsaraApp', () => {
   it.each([false, true])('disables all creation entries after a bootstrap failure (retryable=%s)', async (retryable) => {
     const adapter = new FakeAdapter();
     vi.spyOn(adapter, 'bootstrap').mockRejectedValue(new RuntimeApiError('START_FAILED', '本地服务启动失败', retryable));
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByText('本地服务启动失败');
     expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
@@ -2688,7 +2738,7 @@ describe('PulsaraApp', () => {
         await new Promise<void>(resolve => { recover = resolve; });
         return connect(...args);
       });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     const dialog = screen.getByRole('dialog', { name: '新建会话' });
@@ -2718,7 +2768,7 @@ describe('PulsaraApp', () => {
           local_settings: {
             state: 'ready',
             postgres: null,
-            dashscope_credentials: { embedding_configured: false, rerank_configured: false },
+            memory_retrieval: { embedding: null, embedding_enabled: false, rerank: null, decision: null, ranking_mode: 'off' },
           },
           model_configurations: [],
         };
@@ -2729,7 +2779,7 @@ describe('PulsaraApp', () => {
           local_settings: {
             state: 'ready' as const,
             postgres: null,
-            dashscope_credentials: { embedding_configured: false, rerank_configured: false },
+            memory_retrieval: { embedding: null, embedding_enabled: false, rerank: null, decision: null, ranking_mode: 'off' },
           },
           model_configurations: [],
           database_state: 'database_not_configured' as const,
@@ -2738,7 +2788,7 @@ describe('PulsaraApp', () => {
     }
 
     const adapter = new ZeroConfigAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     expect(await screen.findByRole('heading', { name: '先连接 PostgreSQL，再开始会话' })).toBeTruthy();
     expect(screen.getByLabelText('PostgreSQL 配置引导')).toBeTruthy();
@@ -2774,7 +2824,7 @@ describe('PulsaraApp', () => {
     }
 
     const adapter = new UnavailableDatabaseAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: 'PostgreSQL 当前无法连接' });
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
 
@@ -2789,7 +2839,7 @@ describe('PulsaraApp', () => {
   it('adds a catalog-backed model configuration without retaining the typed API key', async () => {
     const adapter = new FakeAdapter();
     const add = vi.spyOn(adapter, 'addModelConfiguration');
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -2829,7 +2879,7 @@ describe('PulsaraApp', () => {
   it('deletes one model configuration without silently rebinding its sessions', async () => {
     const adapter = new FakeAdapter();
     const remove = vi.spyOn(adapter, 'deleteModelConfiguration');
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -2861,7 +2911,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     const add = vi.spyOn(adapter, 'addModelConfiguration');
     const test = vi.spyOn(adapter, 'testModelConfiguration');
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -2907,7 +2957,7 @@ describe('PulsaraApp', () => {
 
   it('shows only request profiles valid for the selected wire protocol', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -2934,7 +2984,7 @@ describe('PulsaraApp', () => {
   it('allows a user-declared no-auth target without rendering an API key field', async () => {
     const adapter = new FakeAdapter();
     const add = vi.spyOn(adapter, 'addModelConfiguration');
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -2961,7 +3011,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     const test = vi.spyOn(adapter, 'testModelConfiguration').mockRejectedValue(new Error('endpoint rejected test'));
     const add = vi.spyOn(adapter, 'addModelConfiguration');
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -3012,7 +3062,7 @@ describe('PulsaraApp', () => {
       };
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -3070,7 +3120,7 @@ describe('PulsaraApp', () => {
       };
     });
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
@@ -3091,7 +3141,7 @@ describe('PulsaraApp', () => {
     let matches = true;
     const removeListener = vi.spyOn(media, 'removeEventListener');
     vi.stubGlobal('matchMedia', vi.fn(() => Object.assign(media, { matches })));
-    const view = render(<PulsaraApp adapter={new FakeAdapter()} />);
+    const view = renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     try {
       await screen.findByRole('heading', { name: '准备发布' });
       const inspector = screen.getByRole('complementary', { name: '当前会话详情' });
@@ -3114,7 +3164,7 @@ describe('PulsaraApp', () => {
   });
 
   it('opens the models settings section from the picker gear and keeps the regular settings entry unchanged', async () => {
-    render(<PulsaraApp adapter={new FakeAdapter()} />);
+    renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: 'test-model' }));
     expect(screen.queryByRole('button', { name: '管理模型配置' })).toBeNull();
@@ -3130,7 +3180,7 @@ describe('PulsaraApp', () => {
   it('changes reasoning directly from the toolbar and dismisses its menu without resetting it', async () => {
     const adapter = new FakeAdapter();
     const update = vi.spyOn(adapter, 'updateModelCallBinding');
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /推理 medium/ }));
     fireEvent.click(screen.getByRole('button', { name: 'high' }));
@@ -3153,7 +3203,7 @@ describe('PulsaraApp', () => {
   it('keeps an exact reasoning selection until the user changes it again', async () => {
     const adapter = new FakeAdapter();
     const update = vi.spyOn(adapter, 'updateModelCallBinding');
-    const first = render(<PulsaraApp adapter={adapter} />);
+    const first = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
 
     fireEvent.click(screen.getByRole('button', { name: /推理 medium/ }));
@@ -3169,7 +3219,7 @@ describe('PulsaraApp', () => {
     expect(await screen.findByRole('button', { name: /推理 high/ })).toBeTruthy();
 
     first.unmount();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     expect(screen.getByRole('button', { name: /推理 high/ })).toBeTruthy();
     expect(update).toHaveBeenCalledTimes(1);
@@ -3187,7 +3237,7 @@ describe('PulsaraApp', () => {
         : session);
       return { modelCallBinding: accepted, reasoningPreferenceReset: true };
     });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
 
     fireEvent.click(screen.getByRole('button', { name: /推理 medium/ }));
@@ -3219,7 +3269,7 @@ describe('PulsaraApp', () => {
         live: false,
       },
     ];
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
 
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
@@ -3241,8 +3291,8 @@ describe('PulsaraApp', () => {
       .toEqual(['当前会话', '已载入', '可恢复']);
     const systemCard = container.querySelector('.system-card');
     expect(systemCard?.textContent).toContain('模型配置1 组可用');
-    expect(systemCard?.textContent).toContain('记忆检索DashScope Embedding未配置');
-    expect(systemCard?.textContent).toContain('结果重排DashScope Rerank未配置');
+    expect(systemCard?.textContent).toContain('记忆检索Embedding已关闭');
+    expect(systemCard?.textContent).toContain('结果重排Rerank已关闭');
     expect(systemCard?.querySelector('footer')).toBeNull();
   });
 
@@ -3262,19 +3312,19 @@ describe('PulsaraApp', () => {
       ...bootstrap,
       local_settings: {
         ...bootstrap.local_settings,
-        dashscope_credentials: { embedding_configured: true, rerank_configured: true },
+        memory_retrieval: { embedding: { endpoint: 'https://provider.example/embeddings', model_id: 'embedding-fixture', shape: 'openai_embedding', authentication: 'none', credential_configured: false }, embedding_enabled: true, rerank: { endpoint: 'https://provider.example/rerank', model_id: 'rerank-fixture', shape: 'flat_rerank', authentication: 'none', credential_configured: false }, decision: null, ranking_mode: 'rerank' },
       },
       model_configurations: adapter.modelConfigurations,
     }));
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
 
     const systemCard = screen.getByRole('heading', { name: '当前配置' }).closest('.system-card');
     expect(systemCard?.textContent).toContain('模型配置2 组可用');
-    expect(systemCard?.textContent).toContain('记忆检索DashScope Embedding已配置');
-    expect(systemCard?.textContent).toContain('结果重排DashScope Rerank已配置');
+    expect(systemCard?.textContent).toContain('记忆检索embedding-fixture已开启');
+    expect(systemCard?.textContent).toContain('结果重排Rerank已开启');
   });
 
   it('refreshes loaded session facts and distinguishes the current page connection', async () => {
@@ -3290,7 +3340,7 @@ describe('PulsaraApp', () => {
         live: false,
       },
     ];
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     await screen.findByRole('heading', { name: '准备发布' });
     expect(container.querySelector('.session-item.is-active')?.textContent).toBe('准备发布当前会话');
@@ -3328,7 +3378,7 @@ describe('PulsaraApp', () => {
       workspace: { id: 'quick-one', name: '快速开始', path: '/tmp/pulsara-quick', kind: 'quick' },
     }];
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const directoryTree = screen.getByRole('region', { name: '会话目录' });
     expect(container.querySelector('.workspace-heading')).toBeNull();
@@ -3361,7 +3411,7 @@ describe('PulsaraApp', () => {
     const preview = vi.spyOn(LocalScheduledTasksApi.prototype, 'preview').mockResolvedValue({next_run_at:'2026-10-06T00:00:00Z', local_time_fold:null});
     const create = vi.spyOn(LocalScheduledTasksApi.prototype, 'create').mockImplementation(async (session_id, values) => ({...values, session_id, id:'scheduled:test', revision:1, status:'ACTIVE', next_run_at:'2026-10-06T00:00:00Z'}));
     try {
-      render(<PulsaraApp adapter={adapter} />);
+      renderWorkbench(<PulsaraApp adapter={adapter} />);
       await screen.findByRole('heading', {name:'准备发布'});
       const connection = adapter.lastConnection;
       const connectCount = adapter.connectCalls.length;
@@ -3384,7 +3434,7 @@ describe('PulsaraApp', () => {
 
   it('creates a quick-start session before asking for the first task', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     expect(screen.getByRole('heading', { name: '新建会话' })).toBeTruthy();
@@ -3403,7 +3453,7 @@ describe('PulsaraApp', () => {
     } }];
     const picked = deferred<string | null>();
     adapter.pickWorkspaceDirectory.mockImplementationOnce(() => picked.promise);
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const tree = screen.getByRole('region', { name: '会话目录' });
     fireEvent.click(within(tree).getByRole('button', { name: 'project' }));
@@ -3436,7 +3486,7 @@ describe('PulsaraApp', () => {
     adapter.sessions = [{ ...initialSession, workspace: {
       id: 'project-workspace', name: 'project', path: '/tmp/ project ', kind: 'project',
     } }];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const tree = screen.getByRole('region', { name: '会话目录' });
     const toggleName = kind === 'quick' ? '快速开始' : 'project';
@@ -3458,7 +3508,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     if (outcome === 'cancel') adapter.pickWorkspaceDirectory.mockResolvedValueOnce(null);
     else adapter.pickWorkspaceDirectory.mockRejectedValueOnce(new Error('无法打开系统目录窗口'));
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const add = screen.getByRole('button', { name: '选择目录并创建会话' }) as HTMLButtonElement;
     fireEvent.click(add);
@@ -3472,7 +3522,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     const picked = deferred<string | null>();
     adapter.pickWorkspaceDirectory.mockImplementationOnce(() => picked.promise);
-    const view = render(<PulsaraApp adapter={adapter} />);
+    const view = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '选择目录并创建会话' }));
     const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [string, AbortSignal])[1];
@@ -3486,7 +3536,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     const creation = deferred<SessionSummary>();
     adapter.createSession.mockImplementationOnce(() => creation.promise);
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const add = screen.getByRole('button', { name: '创建快速开始会话' }) as HTMLButtonElement;
     fireEvent.click(add);
@@ -3513,7 +3563,7 @@ describe('PulsaraApp', () => {
         return connection;
       })
       .mockImplementationOnce(async (...args) => { await recovery.promise; return connect(...args); });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '选择目录并创建会话' }));
     const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [string, AbortSignal])[1];
@@ -3527,7 +3577,7 @@ describe('PulsaraApp', () => {
 
   it('binds plan and permission choices to the next composer submission', async () => {
     const adapter = new FakeAdapter();
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
@@ -3565,7 +3615,7 @@ describe('PulsaraApp', () => {
 
   it('leaves Enter to the input method while the composer is composing text', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const composer = screen.getByLabelText('发送给 Pulsara');
 
@@ -3597,7 +3647,7 @@ describe('PulsaraApp', () => {
 
   it('creates a session for an explicitly selected directory', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     fireEvent.click(screen.getByRole('radio', { name: /指定目录/ }));
@@ -3627,7 +3677,7 @@ describe('PulsaraApp', () => {
         workflowRevision: 2,
       },
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     expect(await screen.findByText(/保留/)).toBeTruthy();
     expect(screen.getAllByText('read_file').length).toBeGreaterThan(0);
@@ -3662,7 +3712,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined, interaction,
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     expect(await screen.findByText(/ROOT = "read-only"/)).toBeTruthy();
     if (_name === 'revise') {
@@ -3695,7 +3745,7 @@ describe('PulsaraApp', () => {
         deliveryMode: 'new-turn', content: textPrompt('相同\n正文'),
       }],
     };
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     const queue = await screen.findByRole('region', { name: '等待处理的输入' });
     expect([...queue.querySelectorAll('.prompt-content-body')].map((item) => item.textContent))
@@ -3732,7 +3782,7 @@ describe('PulsaraApp', () => {
         content: textPrompt('观察者看到的队列正文'), permission: 'ask-permissions',
       }],
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     expect(await screen.findByText('观察者看到的队列正文')).toBeTruthy();
     const active = adapter.lastConnection!;
 
@@ -3769,7 +3819,7 @@ describe('PulsaraApp', () => {
       promptTransitions: [transition],
     };
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
 
     expect(await screen.findByText(label)).toBeTruthy();
     expect(screen.getByText('正文未能在队列终止前完成读取。')).toBeTruthy();
@@ -3783,7 +3833,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const active = adapter.lastConnection!;
     const receipt = deferred<CommandReceipt>();
@@ -3822,7 +3872,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     adapter.lastConnection?.submitPrompt.mockResolvedValueOnce({
       commandId: 'ignored-by-mock',
@@ -3851,7 +3901,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: true, queuedCount: 0, queuedPrompts: [],
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const active = adapter.lastConnection!;
     active.submitPrompt.mockResolvedValueOnce({
@@ -3907,7 +3957,7 @@ describe('PulsaraApp', () => {
         consumedEntryId: 'entry-network', deliveryMode: 'new-turn',
       },
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const original = adapter.lastConnection!;
     original.submitPrompt.mockRejectedValueOnce(
@@ -3938,7 +3988,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const active = adapter.lastConnection!;
     active.submitPrompt.mockRejectedValueOnce(new RuntimeApiError(code, reason, retryable));
@@ -3970,7 +4020,7 @@ describe('PulsaraApp', () => {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
     };
     const receipt = deferred<CommandReceipt>();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const first = adapter.lastConnection!;
     first.submitPrompt.mockImplementationOnce(() => receipt.promise);
@@ -4001,7 +4051,7 @@ describe('PulsaraApp', () => {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
     };
     const receipt = deferred<CommandReceipt>();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const first = adapter.lastConnection!;
     first.submitPrompt.mockImplementationOnce(() => receipt.promise);
@@ -4032,7 +4082,7 @@ describe('PulsaraApp', () => {
       },
     };
     const decision = deferred<CommandReceipt>();
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByText('检查契约');
     const first = adapter.lastConnection!;
     first.resolveInteraction.mockImplementationOnce(() => decision.promise);
@@ -4088,7 +4138,7 @@ describe('PulsaraApp', () => {
       activeTurnId: undefined,
     };
     adapter.taskInventory = [{id:'task-readme',label:'检查 README',role:'研究',objective:'读取 README.md 并报告一级标题。',status:'completed',color:'blue',parentId:'turn-1',batchId:'batch-1',dependencyIds:[],completionAccepted:true}];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', {name: '任务'}));
     fireEvent.click(await screen.findByRole('button', {name: /检查 README/}));
 
@@ -4139,7 +4189,7 @@ describe('PulsaraApp', () => {
       completionAccepted: false,
     }];
 
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
 
@@ -4187,7 +4237,7 @@ describe('PulsaraApp', () => {
       parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' };
     adapter.taskInventory = [source, { ...source, id: 'follow', label: '综合审阅', status: 'waiting', batchId: 'next',
       dependencyIds: ['source'], dependencies: [{ id: 'source', label: '事实核对', status: 'running' }] }];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '任务' }));
     fireEvent.click(await screen.findByRole('button', { name: /综合审阅/ }));
@@ -4240,7 +4290,7 @@ describe('PulsaraApp', () => {
         taskCount: 1, statusCounts: counts(1), singleTaskLabel: '更新后任务' },
       readEventSequence: 110, totalCount: 1,
     });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
     await act(async () => adapter.lastConnection?.emit({
       ...projection(''), eventSequence: 110, taskInvalidations: ['task-race'], taskGroupInvalidations: ['batch-race'],
@@ -4263,7 +4313,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     const oldTask: AgentTask = { id: 'snapshot-task', batchId: 'snapshot-batch', label: '快照任务', role: '通用协作', objective: 'inspect', status: 'running', parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' };
     adapter.taskInventory = [oldTask];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: '任务' }));
     fireEvent.click(await screen.findByRole('button', { name: /快照任务/ }));
@@ -4287,7 +4337,7 @@ describe('PulsaraApp', () => {
   it('does not let an older exact group read roll back the overview total', async () => {
     const adapter = new FakeAdapter();
     adapter.taskInventory = [{ id: 'a', batchId: 'batch-a', label: '总数检查', role: '通用协作', objective: 'read', status: 'running', parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' }];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: '任务' }));
     await screen.findByRole('button', { name: /总数检查/ });
@@ -4308,7 +4358,7 @@ describe('PulsaraApp', () => {
       { id: 'a', batchId: 'batch-a', label: '前置 A', role: '通用协作', objective: 'read', status: 'running', parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' },
       { id: 'b', batchId: 'batch-b', label: '等待两个来源', role: '通用协作', objective: 'read', status: 'waiting', parentId: 'turn-1', dependencyIds: ['a', 'c'], completionAccepted: false, color: 'blue' },
     ];
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: '任务' }));
     fireEvent.click(await screen.findByRole('button', { name: /等待两个来源/ }));
@@ -4328,7 +4378,7 @@ describe('PulsaraApp', () => {
     adapter.readSessionTaskGroup.mockResolvedValue({group:fresh,totalCount:1,readEventSequence:120});
     adapter.listSessionTaskGroups.mockResolvedValueOnce({groups:[group('old-first')],totalCount:2,remainingCount:1,nextCursor:'old-cursor',readEventSequence:100});
     adapter.listSessionTaskGroups.mockImplementationOnce(()=>delayed.promise);
-    render(<PulsaraApp adapter={adapter}/>);
+    renderWorkbench(<PulsaraApp adapter={adapter}/>);
     fireEvent.click(await screen.findByRole('button',{name:'任务'}));
     const more = await screen.findByRole('button',{name:'加载更多任务组'});
     fireEvent.click(more);
@@ -4350,7 +4400,7 @@ describe('PulsaraApp', () => {
       totalCount: count, readEventSequence: count, remainingCount: cursor ? 0 : count - 50,
       nextCursor: cursor ? undefined : 'after-49',
     }));
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: '任务' }));
     fireEvent.click(await screen.findByRole('button', { name: '加载更多任务组' }));
@@ -4375,7 +4425,7 @@ describe('PR04 atomic queue action ownership', () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), messages: [], queuedCount: 1, queuedPrompts: [source],
       control: { active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }] } };
-    const view = render(<PulsaraApp adapter={adapter} />);
+    const view = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('region', { name: '等待处理的输入' });
     return { adapter, active: adapter.lastConnection!, ...view };
   }
@@ -4540,7 +4590,7 @@ describe('PR04 atomic queue action ownership', () => {
         active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }],
       },
     };
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     const queue = await screen.findByRole('region', { name: '等待处理的输入' });
     expect(within(queue).getAllByRole('button', { name: /^打开 Figure [12]$/ }))
       .toHaveLength(2);
@@ -4738,7 +4788,7 @@ it.each([
 ] as const)('PR05 original command survives unknown ACK and card remount, projected busy=%s, code=%s', async (busy, code) => {
   const adapter = new FakeAdapter();
   adapter.connectionValue = pr05Projection();
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   const allow = await screen.findByRole('button', { name: /允许本次操作/ });
   const first = adapter.lastConnection!;
   const reconnects = code === 'PROTOCOL_TRANSPORT_CLOSED';
@@ -4761,7 +4811,7 @@ it.each([
 it('PR05 projection prevents deciding while another controller is writing or confirming', async () => {
   const adapter = new FakeAdapter();
   adapter.connectionValue = pr05Projection(true);
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   const allow = await screen.findByRole('button', { name: /允许本次操作/ });
   expect(allow.hasAttribute('disabled')).toBe(true);
   expect(await screen.findByText('正在处理确认')).toBeTruthy();
@@ -4774,7 +4824,7 @@ it('PR05 late tool decision stays with A while B retains its draft and buttons',
   adapter.sessions = [initialSession, { ...initialSession, id: 'session-2', title: '另一个会话', live: false }];
   adapter.connectionValue = pr05Projection();
   const pending = deferred<CommandReceipt>();
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   const allow = await screen.findByRole('button', { name: /允许本次操作/ });
   const first = adapter.lastConnection!;
   first.resolveInteraction.mockImplementationOnce(() => pending.promise);
@@ -4793,7 +4843,7 @@ it('PR05 late tool decision stays with A while B retains its draft and buttons',
 it('PR05 queries a lost HTTP ACK before waiting for connection cleanup', async () => {
   const adapter = new FakeAdapter();
   adapter.connectionValue = pr05Projection();
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   const allow = await screen.findByRole('button', { name: /允许本次操作/ });
   const first = adapter.lastConnection!;
   const close = vi.spyOn(first, 'close').mockReturnValue(new Promise(() => {}));
@@ -4812,7 +4862,7 @@ it('PR05 queries a lost HTTP ACK before waiting for connection cleanup', async (
 it('PR05 confirmed non-acceptance permits a new explicit click on the same valid confirmation', async () => {
   const adapter = new FakeAdapter();
   adapter.connectionValue = pr05Projection();
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   const allow = await screen.findByRole('button', { name: /允许本次操作/ });
   const active = adapter.lastConnection!;
   active.resolveInteraction.mockRejectedValueOnce(new RuntimeApiError('INTERACTION_NOT_ACCEPTED', 'confirmed rollback', false));
@@ -4837,7 +4887,7 @@ it('PR05 confirmed non-acceptance permits a new explicit click on the same valid
 it.each([false, true])('PR05 later unknown command recovers independently of old unresolved query, pending=%s', async pending => {
   const adapter = new FakeAdapter();
   adapter.connectionValue = pr05Projection();
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   const allow = await screen.findByRole('button', { name: /允许本次操作/ });
   const active = adapter.lastConnection!;
   const blocked = deferred<CommandReceipt | undefined>();
@@ -4879,7 +4929,7 @@ it.each([false, true])('PR05 later unknown command recovers independently of old
 
 it.each(['sidebar', 'topbar'])('renames the session from %s and updates shared title displays', async (entry) => {
   const adapter = new FakeAdapter();
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByLabelText(`${initialSession.title} 更多操作`);
   if (entry === 'sidebar') fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
   else fireEvent.click(await screen.findByRole('button', { name: '更多会话操作' }));
@@ -4902,7 +4952,7 @@ it('replaces commands with session search and opens a result outside the loaded 
     return { items: [{ session: hidden, matchKind: 'recent', snippet: '' }], nextCursor: null };
   });
   adapter.readSession.mockImplementation(async id => id === hidden.id ? hidden : initialSession);
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByLabelText(`${initialSession.title} 更多操作`);
   expect(screen.queryByRole('button', { name: '命令面板' })).toBeNull();
   expect(screen.queryByText(hidden.title)).toBeNull();
@@ -4933,7 +4983,7 @@ describe('explicit runtime reopen owner', () => {
       expect(adapter.lastConnection?.closed).toBe(false);
       return accepted.promise;
     });
-    render(<PulsaraApp adapter={adapter} />);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', {name:'准备发布'});
     const original = adapter.lastConnection!;
     fireEvent.click(screen.getByRole('button', {name:'更多会话操作'}));
@@ -4958,7 +5008,7 @@ it('loads existing task groups for a cold history view without opening a runtime
     {session_id:'session-1', entries:[], control:{}, event_sequence_cut:'0'});
   vi.spyOn(adapter, 'connect').mockResolvedValue(history);
   vi.spyOn(adapter, 'workspaceAvailability').mockResolvedValue({outcome:'MISSING', path:'/tmp/project'});
-  render(<PulsaraApp adapter={adapter} />);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
   expect(await screen.findByText('工作目录已丢失')).toBeTruthy();
   await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalledWith('session-1', undefined));
   expect(adapter.lastConnection).toBeUndefined();

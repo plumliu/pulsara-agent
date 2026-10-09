@@ -8269,6 +8269,11 @@ class KernelHostCore:
             raise cancelled
         return result
 
+    async def wake_memory_embeddings(self):
+        async with self._lock:
+            for session in self._sessions.values():
+                session._memory_embedding_maintainer.offer_wake()
+
     async def execute_memory_deletion(
         self, *, memory_domain_id, selection, fact_id, additional, expected_records
     ):

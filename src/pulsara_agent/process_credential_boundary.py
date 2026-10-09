@@ -301,7 +301,9 @@ class _ProcessCredentialClientBoundary:
             item.lower() for item in credential_header_names
         )
 
-    async def _send_single_request(self, request: httpx.Request) -> httpx.Response:
+    async def _send_single_request(
+        self, request: httpx.Request | httpx2.Request
+    ) -> httpx.Response | httpx2.Response:
         inherited = _CURRENT_HTTP_ADMISSION.get()
         use_inherited = (
             inherited is not None
@@ -365,7 +367,7 @@ class ProcessCredentialBoundAsyncClient(
     """HTTPX client whose physical requests cross the process credential gate."""
 
 
-class ProcessCredentialBoundMcpClient(
+class ProcessCredentialBoundHttpx2Client(
     _ProcessCredentialClientBoundary, httpx2.AsyncClient
 ):
     """SDK-native HTTPX2 client using the same existing credential owner."""
@@ -421,7 +423,7 @@ async def admit_process_credential_http_operation(
 
 
 def _validate_http_request_secret_boundary(
-    request: httpx.Request,
+    request: httpx.Request | httpx2.Request,
     guard: ProcessCredentialGuard,
     *,
     credential_header_names: frozenset[bytes],
@@ -449,6 +451,7 @@ __all__ = [
     "ProcessCredentialBoundaryCancelled",
     "ProcessCredentialBoundaryTimedOut",
     "ProcessCredentialBoundAsyncClient",
+    "ProcessCredentialBoundHttpx2Client",
     "ProcessCredentialGuard",
     "ProcessCredentialScrubSet",
     "admit_process_credential_http_operation",

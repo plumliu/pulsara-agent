@@ -68,8 +68,8 @@ export function OverviewView({
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
   const readyModelConfigurations = modelConfigurations.filter((configuration) => configuration.status === 'ready').length;
   const unavailableModelConfigurations = modelConfigurations.length - readyModelConfigurations;
-  const embeddingConfigured = localSettings?.dashscope_credentials.embedding_configured === true;
-  const rerankConfigured = localSettings?.dashscope_credentials.rerank_configured === true;
+  const embeddingConfigured = localSettings?.memory_retrieval.embedding_enabled === true;
+  const rerankConfigured = localSettings?.memory_retrieval.ranking_mode !== undefined && localSettings.memory_retrieval.ranking_mode !== 'off';
 
   return (
     <section className="surface-view overview-view">
@@ -133,9 +133,9 @@ export function OverviewView({
             <div className="system-map">
               <div className="system-node"><Bot size={14} /><span><strong>模型配置</strong><small>{readyModelConfigurations} 组可用{unavailableModelConfigurations > 0 ? ` · ${unavailableModelConfigurations} 组不可用` : ''}</small></span><b className={modelConfigurations.length === 0 ? 'is-inactive' : undefined}>{modelConfigurations.length} 组</b></div>
               <div className="system-line" />
-              <div className="system-node"><Search size={14} /><span><strong>记忆检索</strong><small>DashScope Embedding</small></span><b className={embeddingConfigured ? undefined : 'is-inactive'}>{embeddingConfigured ? '已配置' : '未配置'}</b></div>
+              <div className="system-node"><Search size={14} /><span><strong>记忆检索</strong><small>{localSettings?.memory_retrieval.embedding?.model_id ?? 'Embedding'}</small></span><b className={embeddingConfigured ? undefined : 'is-inactive'}>{embeddingConfigured ? '已开启' : '已关闭'}</b></div>
               <div className="system-line" />
-              <div className="system-node"><ListFilter size={14} /><span><strong>结果重排</strong><small>DashScope Rerank</small></span><b className={rerankConfigured ? undefined : 'is-inactive'}>{rerankConfigured ? '已配置' : '未配置'}</b></div>
+              <div className="system-node"><ListFilter size={14} /><span><strong>结果重排</strong><small>{localSettings?.memory_retrieval.ranking_mode === 'decision' ? 'Decision' : 'Rerank'}</small></span><b className={rerankConfigured ? undefined : 'is-inactive'}>{rerankConfigured ? '已开启' : '已关闭'}</b></div>
             </div>
           </section>
         </div>

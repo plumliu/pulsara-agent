@@ -1,6 +1,7 @@
 """Runtime-neutral static root-system-prompt contract."""
 
 from pulsara_agent.memory.product_contract import (
+    MEMORY_RELATION_COMPARISON_GUIDE,
     MEMORY_COHESIVE_UNIT_GUIDE,
     MEMORY_CONTEXT_PRODUCT_GUIDE,
     MEMORY_RETRIEVAL_AUTHORING_GUIDE,
@@ -180,7 +181,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "turn. A later user correction cannot undo it. An exact duplicate returns the existing "
     "ID without changing its origin or dependencies. Up to three related items in the result "
     "are suggestions, not established conflicts. Use mark_memory_relation only when you can "
-    "justify a contradiction or a newer replacement; otherwise leave them unmarked. Marking "
+    "justify a contradiction or a newer replacement; otherwise leave them unmarked. "
+    + MEMORY_RELATION_COMPARISON_GUIDE
+    + " Marking "
     "a replacement makes the older item inactive but does not delete it. If the user wants "
     "a saved item removed, direct them to the memory page; do not claim to have deleted it "
     "through a conversation tool. Stored "

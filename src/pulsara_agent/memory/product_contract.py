@@ -41,7 +41,15 @@ MEMORY_COHESIVE_UNIT_GUIDE = (
 MEMORY_RETRIEVAL_AUTHORING_GUIDE = (
     "Write a self-contained statement faithful to what was said or observed. Name the "
     "subject and relevant project, time, conditions, quantities, negations, and "
-    "uncertainty when they matter. Do not use template labels or invent details."
+    "uncertainty when they matter. Distinguish a suggestion, tentative plan, adopted "
+    "choice, and completed action; preserve who said or did it. Resolve pronouns and "
+    "relative dates only when the available context makes them unambiguous. "
+    "Do not use template labels or invent details."
+)
+
+MEMORY_RELATION_COMPARISON_GUIDE = (
+    "Compare the same subject under the same conditions. Different dates or conditions "
+    "may explain a difference. A later save time alone does not justify SUPERSEDES."
 )
 
 

@@ -52,16 +52,10 @@ from tests.dogfood.run_round10_subagent_dogfood import (
 def _secrets(settings):
     values = [item.value for item in settings.model_api_keys]
     values.extend(item.value for item in settings.mcp_credentials)
-    if settings.dashscope_credentials:
-        values.extend(
-            filter(
-                None,
-                (
-                    settings.dashscope_credentials.embedding_api_key,
-                    settings.dashscope_credentials.rerank_api_key,
-                ),
-            )
-        )
+    for slot in ("embedding", "rerank", "decision"):
+        connection = getattr(settings.memory_retrieval, slot)
+        if connection is not None and connection.api_key:
+            values.append(connection.api_key)
 
     def tokens(value):
         if isinstance(value, dict):

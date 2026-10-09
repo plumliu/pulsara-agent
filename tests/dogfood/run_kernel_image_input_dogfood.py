@@ -22,7 +22,7 @@ from time import monotonic
 import traceback
 from uuid import uuid4
 
-import httpx
+import httpx2
 from PIL import Image, ImageDraw, ImageFont
 
 import pulsara_agent
@@ -213,7 +213,7 @@ class Observers:
 
             self.originals.append((module, name, original))
             setattr(module, name, observe)
-        original_send = httpx.AsyncClient.send
+        original_send = httpx2.AsyncClient.send
 
         async def send(client, request, *args, **kwargs):
             if request.method == "POST" and request.url.path.endswith(
@@ -231,8 +231,8 @@ class Observers:
                 return response
             return await original_send(client, request, *args, **kwargs)
 
-        self.originals.append((httpx.AsyncClient, "send", original_send))
-        httpx.AsyncClient.send = send
+        self.originals.append((httpx2.AsyncClient, "send", original_send))
+        httpx2.AsyncClient.send = send
         return self
 
     def __exit__(self, *_):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.retrieval_fixtures import save_model
 
 import asyncio
 import json
@@ -57,9 +58,9 @@ def test_mcp_settings_preserve_other_fields_and_exact_owner(tmp_path):
         await store.replace_mcp_secrets(owner, ((binding, "private-test-token"),))
         await store.replace_mcp_secrets(other, ((second, "other-token"),))
         await store.save_postgres(LocalPostgresConfig("postgresql://localhost/test"))
-        await store.save_dashscope_api_key("embedding", "embedding-token")
-        await store.save_dashscope_api_key("rerank", "rerank-token")
-        await store.delete_dashscope_api_key("embedding")
+        await save_model(store, "embedding", "embedding-token")
+        await save_model(store, "rerank", "rerank-token")
+        await store.clear_retrieval_connection("embedding")
         assert store.resolve_mcp_secret(binding) == "private-test-token"
         assert "private-test-token" not in repr(store.read())
         record = LocalMcpOAuthRecord(
@@ -79,7 +80,7 @@ def test_mcp_settings_preserve_other_fields_and_exact_owner(tmp_path):
         assert store.resolve_mcp_secret(second) == "other-token"
         assert store.read().mcp_authorization(owner) is None
         assert store.read().postgres.runtime_dsn == "postgresql://localhost/test"
-        assert store.read().dashscope_api_key("rerank") == "rerank-token"
+        assert store.read().memory_retrieval.rerank.api_key == "rerank-token"
         assert "oauth-token" not in json.dumps(local_settings_to_dict(store.read()))
         with pytest.raises(ValueError, match="crosses"):
             await store.replace_mcp_secrets(owner, ((second, "wrong"),))

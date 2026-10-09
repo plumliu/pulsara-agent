@@ -1,198 +1,122 @@
-"""OpenAI-compatible embedding provider.
-
-This fits Aliyun Bailian ``text-embedding-v4`` nicely because Bailian exposes
-an OpenAI-compatible embedding endpoint.
-"""
-
-from __future__ import annotations
+"""Minimal text embedding shape over the OpenAI SDK public POST entrypoint."""
 
 import asyncio
 from collections.abc import Sequence
 import json
-
-import httpx
 import openai
+from openai.types import CreateEmbeddingResponse
 
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
-from pulsara_agent.process_credential_boundary import (
-    ProcessCredentialBoundary,
-    ProcessCredentialBoundAsyncClient,
-    admit_process_credential_http_operation,
+from pulsara_agent.llm.adapters.openai.client import (
+    admit_provider_request,
+    openai_auth_request_options,
 )
+from pulsara_agent.retrieval.config import RetrievalConnection, EmbeddingBackendConfig
+from pulsara_agent.retrieval.http import sdk_client
 from pulsara_agent.retrieval.errors import EmbeddingServiceError
-from pulsara_agent.retrieval.embedding.validation import (
-    freeze_v1_embedding_vector,
-)
-from pulsara_agent.settings import LocalSettingsStore
-
+from pulsara_agent.retrieval.embedding.validation import freeze_v1_embedding_vector
 
 MAXIMUM_EMBEDDING_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 
 
-class OpenAICompatibleEmbeddingProvider:
-    """Async embedding provider over an OpenAI-compatible endpoint."""
-
+class HttpEmbeddingProvider:
     def __init__(
         self,
+        connection: RetrievalConnection,
         *,
-        model: str,
-        base_url: str,
-        dimensions: int = 1024,
-        timeout_seconds: float = 30.0,
-        max_retries: int = 3,
-        batch_size: int = 10,
-        max_concurrent: int = 5,
-        settings: LocalSettingsStore,
-    ) -> None:
-        if model != "text-embedding-v4" or dimensions != 1024:
-            raise ValueError("embedding configuration is outside the V1 vector space")
-        if not 1 <= batch_size <= 10 or not 1 <= max_concurrent <= 5:
+        config=EmbeddingBackendConfig(),
+        semaphore=None,
+    ):
+        if (
+            connection.shape != "openai_embedding"
+            or not connection.complete
+            or config.dimensions != 1024
+        ):
+            raise ValueError("embedding configuration is invalid")
+        if not 1 <= config.batch_size <= 10 or not 1 <= config.max_concurrent <= 5:
             raise ValueError("embedding physical bounds are invalid")
-        self.model_id = model
-        self.dimensions = dimensions
-        self._model = model
-        self._batch_size = batch_size
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._base_url = base_url
-        self._timeout_seconds = timeout_seconds
-        self._max_retries = max_retries
-        self._settings = settings
+        self.connection = connection
+        self.config = config
+        self.model_id = connection.model_id
+        self.dimensions = 1024
+        self._semaphore = semaphore or asyncio.Semaphore(config.max_concurrent)
 
-    async def aclose(self) -> None:
+    async def aclose(self):
         return None
 
-    async def embed(self, text: str) -> list[float]:
-        _validate_embedding_inputs((text,))
-        vectors = await self._embed_chunk([text])
-        return vectors[0]
+    async def embed(self, text):
+        return (await self._embed_chunk([text]))[0]
 
-    async def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        _validate_embedding_inputs(texts)
+    async def embed_batch(self, texts: Sequence[str]):
         chunks = [
-            list(texts[offset : offset + self._batch_size])
-            for offset in range(0, len(texts), self._batch_size)
+            list(texts[offset : offset + self.config.batch_size])
+            for offset in range(0, len(texts), self.config.batch_size)
         ]
         results = await asyncio.gather(*(self._embed_chunk(chunk) for chunk in chunks))
         return [vector for chunk in results for vector in chunk]
 
-    async def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
-        _validate_embedding_request_body(
-            model=self._model,
-            dimensions=self.dimensions,
-            texts=texts,
-        )
+    async def _embed_chunk(self, texts):
+        _validate_embedding_inputs(texts)
+        payload = {"model": self.model_id, "input": texts}
+        if (
+            len(json.dumps(payload, ensure_ascii=False).encode())
+            > MAXIMUM_EMBEDDING_REQUEST_BODY_BYTES
+        ):
+            raise EmbeddingServiceError("embedding request exceeds its byte bound")
         async with self._semaphore:
-            api_key = self._settings.read().require_dashscope_api_key("embedding")
-            boundary = ProcessCredentialBoundary(api_key)
-            client = openai.AsyncOpenAI(
-                api_key=api_key,
-                base_url=self._base_url,
-                timeout=self._timeout_seconds,
-                max_retries=self._max_retries,
-                http_client=ProcessCredentialBoundAsyncClient(
-                    credential_boundary=boundary,
-                    credential_header_names=frozenset({b"authorization"}),
-                    timeout=httpx.Timeout(self._timeout_seconds),
-                ),
+            client, boundary = sdk_client(
+                self.connection,
+                timeout_seconds=self.config.timeout_seconds,
+                maximum_response_bytes=MAXIMUM_EMBEDDING_REQUEST_BODY_BYTES,
             )
             try:
-                payload = {
-                    "model": self._model,
-                    "input": texts,
-                    "dimensions": self.dimensions,
-                    "encoding_format": "float",
-                }
-                encoded = json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                response = await admit_process_credential_http_operation(
-                    credential_boundary=boundary,
-                    guarded_values=(encoded,),
-                    operation=lambda: client.embeddings.create(
-                            model=self._model,
-                            input=texts,
-                            dimensions=self.dimensions,
-                            encoding_format="float",
-                        ),
+                async with client:
+                    async with asyncio.timeout(self.config.timeout_seconds):
+                        options = openai_auth_request_options(
+                            requires_api_key=self.connection.authentication != "none"
+                        )
+                        response = await admit_provider_request(
+                            credential_boundary=boundary,
+                            payload=payload,
+                            operation=lambda: client.post(
+                                self.connection.endpoint,
+                                cast_to=CreateEmbeddingResponse,
+                                body=payload,
+                                options={"headers": options.get("extra_headers", {})},
+                            ),
+                        )
+            except (ValueError, openai.OpenAIError, TimeoutError) as exc:
+                message = (
+                    str(exc).replace(self.connection.api_key, "[REDACTED]")
+                    if self.connection.api_key
+                    else str(exc)
                 )
-            except ValueError:
-                raise EmbeddingServiceError("embedding admission rejected") from None
-            except openai.OpenAIError:
-                raise EmbeddingServiceError("embedding transport failed") from None
-            finally:
-                await client.close()
-                api_key = ""
-        if getattr(response, "model", None) != self._model:
-            raise EmbeddingServiceError(
-                "Embedding response model violates the sealed V1 contract."
-            )
-        vectors: list[list[float] | None] = [None] * len(texts)
-        for item in response.data:
-            try:
-                index = int(item.index)
-            except (AttributeError, TypeError, ValueError) as exc:
                 raise EmbeddingServiceError(
-                    "Embedding response item missing index."
-                ) from exc
-            if index < 0 or index >= len(texts):
-                raise EmbeddingServiceError(
-                    f"Embedding response index out of range: {index}"
-                )
-            if vectors[index] is not None:
-                raise EmbeddingServiceError(
-                    f"Duplicate embedding response index: {index}"
-                )
-            vectors[index] = list(item.embedding)
-        if any(vector is None for vector in vectors):
-            raise EmbeddingServiceError(
-                "Embedding response missing one or more vectors."
-            )
-        result = [vector for vector in vectors if vector is not None]
-        validated: list[list[float]] = []
-        for vector in result:
-            try:
-                frozen = freeze_v1_embedding_vector(vector)
-            except ValueError as exc:
-                raise EmbeddingServiceError(
-                    "Embedding response vector violates the V1 contract."
-                ) from exc
-            validated.append(list(frozen))
-        return validated
+                    f"embedding request failed: {message}"
+                ) from None
+        vectors = [None] * len(texts)
+        try:
+            for item in response.data:
+                index = item.index
+                if (
+                    type(index) is not int
+                    or index < 0
+                    or index >= len(texts)
+                    or vectors[index] is not None
+                ):
+                    raise ValueError("embedding response index is invalid")
+                vectors[index] = list(freeze_v1_embedding_vector(item.embedding))
+            if any(item is None for item in vectors):
+                raise ValueError("embedding response omitted inputs")
+        except (TypeError, AttributeError, ValueError) as exc:
+            raise EmbeddingServiceError(f"embedding response invalid: {exc}") from exc
+        return vectors
 
 
-def _validate_embedding_inputs(texts: Sequence[str]) -> None:
+def _validate_embedding_inputs(texts):
     if not 1 <= len(texts) <= 10:
-        raise EmbeddingServiceError("Embedding batch is outside 1..10 items.")
+        raise EmbeddingServiceError("embedding batch is outside 1..10 items")
     estimator = PulsaraHeuristicTokenEstimatorV3()
-    token_ceilings = tuple(estimator.estimate_text(value) for value in texts)
-    if any(value < 1 or value > 8_192 for value in token_ceilings):
-        raise EmbeddingServiceError("Embedding item exceeds 8192 local token units.")
-    if sum(token_ceilings) > 81_920:
-        raise EmbeddingServiceError(
-            "Embedding batch exceeds the Pulsara-local aggregate token ceiling."
-        )
-
-
-def _validate_embedding_request_body(
-    *, model: str, dimensions: int, texts: Sequence[str]
-) -> None:
-    encoded = json.dumps(
-        {
-            "model": model,
-            "input": tuple(texts),
-            "dimensions": dimensions,
-            "encoding_format": "float",
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    if len(encoded) > MAXIMUM_EMBEDDING_REQUEST_BODY_BYTES:
-        raise EmbeddingServiceError(
-            "Embedding request exceeds the HTTP body bound before provider open."
-        )
+    estimates = [estimator.estimate_text(value) for value in texts]
+    if any(value < 1 or value > 8192 for value in estimates) or sum(estimates) > 81920:
+        raise EmbeddingServiceError("embedding input exceeds the local token boundary")

@@ -81,7 +81,7 @@ it('counts running tasks and shows model and retrieval configuration', () => {
     })),
     localSettings: {
       postgres: null,
-      dashscope_credentials: { embedding_configured: true, rerank_configured: false },
+      memory_retrieval: { embedding: { endpoint: 'https://provider.example/embeddings', model_id: 'embedding-fixture', shape: 'openai_embedding', authentication: 'none', credential_configured: false }, embedding_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
     },
     modelConfigurations: (['ready', 'unavailable'] as const).map((status, index) => ({
       id: `model-${index}`,
@@ -99,8 +99,8 @@ it('counts running tasks and shows model and retrieval configuration', () => {
 
   expect(container.querySelectorAll('.metric-grid article')[1]?.querySelector('strong')?.textContent).toBe('1');
   expect(screen.getByText('1 组可用 · 1 组不可用')).toBeTruthy();
-  expect(screen.getByText('已配置')).toBeTruthy();
-  expect(screen.getByText('未配置')).toBeTruthy();
+  expect(screen.getByText('已开启')).toBeTruthy();
+  expect(screen.getByText('已关闭')).toBeTruthy();
 });
 
 it('directs an unconfigured database to setup instead of showing session data', () => {

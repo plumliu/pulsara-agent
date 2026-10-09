@@ -7,13 +7,13 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
-import httpx
+import httpx2
 from openai import AsyncOpenAI, Omit
 
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
-    ProcessCredentialBoundAsyncClient,
+    ProcessCredentialBoundHttpx2Client,
     admit_process_credential_http_operation,
 )
 
@@ -80,10 +80,11 @@ def build_async_openai_client(
     timeout_policy: OpenAITransportTimeoutPolicy,
     credential_boundary: ProcessCredentialBoundary,
     max_retries: int | None = None,
+    response_hooks: list | None = None,
 ) -> AsyncOpenAI:
     """Create an AsyncOpenAI client for a model profile."""
 
-    timeout = httpx.Timeout(
+    timeout = httpx2.Timeout(
         timeout_policy.total_seconds,
         connect=timeout_policy.connect_seconds,
         write=timeout_policy.write_seconds,
@@ -97,11 +98,12 @@ def build_async_openai_client(
         "_enforce_credentials": api_key is not None,
         "base_url": base_url.rstrip("/"),
         "timeout": timeout,
-        "http_client": ProcessCredentialBoundAsyncClient(
+        "http_client": ProcessCredentialBoundHttpx2Client(
             credential_boundary=credential_boundary,
             credential_header_names=frozenset({b"authorization"}),
             timeout=timeout,
             follow_redirects=True,
+            event_hooks={"response": response_hooks or []},
         ),
     }
     if max_retries is not None:

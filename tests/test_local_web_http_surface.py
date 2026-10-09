@@ -12,6 +12,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from pulsara_agent import mcp_config
+from tests.retrieval_fixtures import input_for
 from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.web_app import http_server as http_server_module
 from pulsara_agent.web_app import session_controller as session_controller_module
@@ -746,22 +747,22 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
 
             for kind in ("embedding", "rerank"):
                 async with client.put(
-                    f"{server.origin}/api/local-settings/dashscope-credentials/{kind}",
-                    json={"api_key": f"{kind}-secret"},
+                    f"{server.origin}/api/local-settings/memory-retrieval/{kind}",
+                    json=input_for(kind, f"{kind}-secret"),
                     headers=mutation_headers,
                 ) as response:
                     assert response.status == 200
-                    assert (await response.json()) == {"configured": True}
-                assert settings.read().dashscope_api_key(kind) == f"{kind}-secret"
+                    assert (await response.json())[kind]["credential_configured"] is True
+                assert getattr(settings.read().memory_retrieval, kind).api_key == f"{kind}-secret"
 
             async with client.delete(
-                f"{server.origin}/api/local-settings/dashscope-credentials/embedding",
+                f"{server.origin}/api/local-settings/memory-retrieval/embedding",
                 headers=mutation_headers,
             ) as response:
                 assert response.status == 200
-                assert (await response.json()) == {"configured": False}
-            assert settings.read().dashscope_api_key("embedding") is None
-            assert settings.read().dashscope_api_key("rerank") == "rerank-secret"
+                assert (await response.json())["embedding"] is None
+            assert settings.read().memory_retrieval.embedding is None
+            assert settings.read().memory_retrieval.rerank.api_key == "rerank-secret"
 
             async with client.put(
                 f"{server.origin}/api/local-settings/postgres",
@@ -1702,3 +1703,40 @@ def test_settings_expose_effective_home_readonly_independently_of_cwd(tmp_path, 
     asyncio.run(exercise())
     assert marker.read_text() == "unchanged"
     assert sorted(item.name for item in home.iterdir()) == ["keep.txt"]
+
+
+def test_memory_settings_http_errors_are_specific_and_confirmation_is_atomic(tmp_path):
+    async def exercise():
+        root = tmp_path / 'static'
+        root.mkdir()
+        (root / 'index.html').write_text('Pulsara')
+        deps = _model_server_dependencies()
+        store = LocalSettingsStore(tmp_path / 'home' / 'local-settings.yaml')
+        deps['settings'] = store
+        server = LocalHttpServer(sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(LocalBrowserBridge, _Bridge()), static_root=root, requested_port=0,
+            is_ready=lambda: True, is_draining=lambda: False, **deps)
+        await server.start()
+        try:
+            async with ClientSession(headers={'X-Pulsara-Connection-Id': 'connection-1', 'X-Pulsara-Connection-Generation': '1'}) as client:
+                base = server.origin + '/api/local-settings/memory-retrieval'
+                async with client.put(base + '/ranking-mode', json={'mode': 'decision'}) as response:
+                    assert response.status == 400
+                    assert 'API key' in (await response.json())['error']['message']
+                payload = input_for('embedding', 'fixture-secret')
+                payload['connection']['endpoint'] = 'https://provider.example'
+                async with client.post(base + '/embedding/test', json=payload) as response:
+                    assert response.status == 400
+                    error = (await response.json())['error']
+                    assert 'API 路径' in error['message']
+                    assert 'fixture-secret' not in str(error)
+                payload = input_for('embedding', 'fixture-secret', activate=True)
+                payload.pop('confirm_reembed')
+                async with client.put(base + '/embedding', json=payload) as response:
+                    assert response.status == 409
+                    assert (await response.json())['error']['code'] == 'EMBEDDING_CONFIRMATION_REQUIRED'
+                assert store.read().memory_retrieval.embedding is None
+                assert store.read().memory_retrieval.embedding_enabled is False
+        finally:
+            await server.aclose()
+    asyncio.run(exercise())

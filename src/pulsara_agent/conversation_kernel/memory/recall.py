@@ -16,7 +16,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.memory.scope import FrozenMemoryReadContextBinding
 from pulsara_agent.retrieval.config import (
     MEMORY_DENSE_ELIGIBILITY_POLICY,
-    MEMORY_EMBEDDING_CONTRACT,
     DenseRecallPurpose,
 )
 from pulsara_agent.retrieval.tokenizer import MemoryRetrievalTokenizerV1
@@ -29,8 +28,6 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 MAXIMUM_MEMORY_QUERY_RESULTS = 50
 MAXIMUM_AUTOMATIC_MEMORY_RESULTS = 5
 RRF_K = 60
-MEMORY_EMBEDDING_CONTRACT_ID = MEMORY_EMBEDDING_CONTRACT.contract_id
-MEMORY_EMBEDDING_CONTRACT_VERSION = MEMORY_EMBEDDING_CONTRACT.contract_version
 
 
 class MemoryRetrievalDisposition(StrEnum):
@@ -162,6 +159,7 @@ class PostgresMemoryQuery:
         limit: int = 5,
         requested_kind: str | None = None,
         query_embedding: Sequence[float] | None = None,
+        embedding_contract=None,
         automatic: bool = False,
         deadline_monotonic: float,
     ) -> MemoryQueryResult:
@@ -196,6 +194,7 @@ class PostgresMemoryQuery:
                     dense_batch = self._dense(
                         read_binding=read_binding,
                         vector=query_embedding,
+                        embedding_contract=embedding_contract,
                         kind_filter=kind_filter,
                         limit=30 if not automatic else 20,
                         purpose=(
@@ -466,6 +465,7 @@ class PostgresMemoryQuery:
         context_id: str,
         query: str,
         query_embedding: Sequence[float] | None,
+        embedding_contract=None,
         exclude_fact_id: str | None,
         limit: int = 20,
         deadline_monotonic: float,
@@ -494,6 +494,7 @@ class PostgresMemoryQuery:
                 dense_batch = self._dense(
                     read_binding=read_binding,
                     vector=query_embedding,
+                    embedding_contract=embedding_contract,
                     context_filter=context_id,
                     kind_filter=None,
                     limit=20,
@@ -837,6 +838,7 @@ class PostgresMemoryQuery:
         *,
         read_binding,
         vector,
+        embedding_contract,
         kind_filter,
         limit,
         purpose,
@@ -875,8 +877,8 @@ class PostgresMemoryQuery:
                 (
                     literal,
                     read_binding.memory_domain_id,
-                    MEMORY_EMBEDDING_CONTRACT_ID,
-                    MEMORY_EMBEDDING_CONTRACT_VERSION,
+                    embedding_contract.contract_id,
+                    embedding_contract.contract_version,
                     *parameters,
                     automatic,
                     literal,
@@ -1044,8 +1046,6 @@ def _row(row, **extra):
 
 __all__ = [
     "MAXIMUM_MEMORY_QUERY_RESULTS",
-    "MEMORY_EMBEDDING_CONTRACT_ID",
-    "MEMORY_EMBEDDING_CONTRACT_VERSION",
     "MemoryDenseCandidateBatch",
     "MemoryDenseCandidateDisposition",
     "MemoryQueryResult",

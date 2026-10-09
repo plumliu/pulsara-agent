@@ -15,7 +15,7 @@ from time import sleep
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import httpx
+import httpx2
 from openai import APITimeoutError
 import pytest
 
@@ -221,7 +221,7 @@ def test_round5_foreground_openai_timeout_is_typed_and_has_no_total(
     )
 
     timeout = calls[0]["timeout"]
-    assert isinstance(timeout, httpx.Timeout)
+    assert isinstance(timeout, httpx2.Timeout)
     assert timeout.connect == 120.0
     assert timeout.write == 120.0
     assert timeout.pool == 120.0
@@ -377,7 +377,7 @@ def test_round5_local_sse_silent_gap_hits_read_idle(api: str) -> None:
     thread = Thread(target=server.serve_forever)
     thread.start()
     try:
-        with pytest.raises((APITimeoutError, httpx.ReadTimeout)):
+        with pytest.raises((APITimeoutError, httpx2.ReadTimeout)):
             asyncio.run(
                 _consume_local_sse(
                     api=api,

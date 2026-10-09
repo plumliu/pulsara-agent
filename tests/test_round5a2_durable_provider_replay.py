@@ -659,7 +659,7 @@ def test_round5a2_has_no_vendor_or_remote_state_branch_and_oracle_is_exact() -> 
         "previous_response_id",
         "openrouter",
         "deepseek",
-        "dashscope",
+        "retrieval",
         "qwen",
         "kimi",
     )

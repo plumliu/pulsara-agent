@@ -1,11 +1,11 @@
 """Embedding providers."""
 
 from .factory import build_embedding_provider
-from .openai_compatible import OpenAICompatibleEmbeddingProvider
+from .openai_compatible import HttpEmbeddingProvider
 from .protocol import EmbeddingProvider
 
 __all__ = [
     "EmbeddingProvider",
-    "OpenAICompatibleEmbeddingProvider",
+    "HttpEmbeddingProvider",
     "build_embedding_provider",
 ]

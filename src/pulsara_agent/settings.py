@@ -7,11 +7,12 @@ import os
 import stat
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Literal, TypeVar
+from typing import Callable, TypeVar
 from uuid import uuid4
 
 import yaml
 
+from pulsara_agent.retrieval.config import MemoryRetrievalSettings, connection_from_dict
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.llm.model_connections import (
     ModelConnectionConfig,
@@ -36,7 +37,9 @@ from pulsara_agent.mcp_credentials import (
 )
 
 
-LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v2"
+LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v3"
+
+
 LOCAL_SETTINGS_FILE_NAME = "local-settings.yaml"
 MAXIMUM_LOCAL_SETTINGS_BYTES = 1 << 20
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -78,44 +81,13 @@ class LocalModelApiKey:
             raise ValueError("model API key must be non-empty")
 
 
-DashScopeCredentialKind = Literal["embedding", "rerank"]
-
-
-@dataclass(frozen=True, slots=True)
-class LocalDashScopeCredentials:
-    embedding_api_key: str | None = field(default=None, repr=False)
-    rerank_api_key: str | None = field(default=None, repr=False)
-
-    def __post_init__(self) -> None:
-        for value in (self.embedding_api_key, self.rerank_api_key):
-            if value is not None and not value:
-                raise ValueError("DashScope API key must be non-empty when present")
-
-    def api_key(self, kind: DashScopeCredentialKind) -> str | None:
-        if kind == "embedding":
-            return self.embedding_api_key
-        if kind == "rerank":
-            return self.rerank_api_key
-        raise ValueError("unknown DashScope credential kind")
-
-    def replacing(
-        self, kind: DashScopeCredentialKind, value: str | None
-    ) -> "LocalDashScopeCredentials":
-        if kind == "embedding":
-            return LocalDashScopeCredentials(value, self.rerank_api_key)
-        if kind == "rerank":
-            return LocalDashScopeCredentials(self.embedding_api_key, value)
-        raise ValueError("unknown DashScope credential kind")
-
-
 @dataclass(frozen=True, slots=True)
 class LocalSettings:
     postgres: LocalPostgresConfig | None = None
     model_connections: tuple[ModelConnectionConfig, ...] = ()
     model_api_keys: tuple[LocalModelApiKey, ...] = field(default=(), repr=False)
-    dashscope_credentials: LocalDashScopeCredentials = field(
-        default_factory=LocalDashScopeCredentials,
-        repr=False,
+    memory_retrieval: MemoryRetrievalSettings = field(
+        default_factory=MemoryRetrievalSettings
     )
     mcp_credentials: tuple[LocalMcpCredential, ...] = field(default=(), repr=False)
     mcp_oauth: tuple[LocalMcpOAuthRecord, ...] = field(default=(), repr=False)
@@ -161,9 +133,6 @@ class LocalSettings:
             raise LocalSettingsSecretMissing("model API key is unavailable")
         return value
 
-    def dashscope_api_key(self, kind: DashScopeCredentialKind) -> str | None:
-        return self.dashscope_credentials.api_key(kind)
-
     def mcp_secret(self, binding: McpCredentialBinding) -> str | None:
         return next(
             (item.value for item in self.mcp_credentials if item.binding == binding),
@@ -175,15 +144,13 @@ class LocalSettings:
     ) -> LocalMcpOAuthRecord | None:
         return next((item for item in self.mcp_oauth if item.owner == owner), None)
 
-    def require_dashscope_api_key(self, kind: DashScopeCredentialKind) -> str:
-        value = self.dashscope_api_key(kind)
-        if value is None:
-            raise LocalSettingsSecretMissing("DashScope API key is unavailable")
-        return value
-
 
 class LocalSettingsUnavailable(RuntimeError):
     pass
+
+
+class LocalSettingsSchemaUnsupported(LocalSettingsUnavailable, ValueError):
+    """An explicit offline conversion must preserve the existing document."""
 
 
 class LocalSettingsPublishIndeterminate(RuntimeError):
@@ -220,10 +187,7 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
             }
             for item in settings.model_connections
         ],
-        "dashscope_credentials": {
-            "embedding_api_key": settings.dashscope_credentials.embedding_api_key,
-            "rerank_api_key": settings.dashscope_credentials.rerank_api_key,
-        },
+        "memory_retrieval": settings.memory_retrieval.private(),
         "mcp_credentials": [
             {"binding": binding_to_dict(item.binding), "value": item.value}
             for item in settings.mcp_credentials
@@ -247,11 +211,19 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
 
 
 def local_settings_from_dict(value: object) -> LocalSettings:
+    if (
+        isinstance(value, dict)
+        and isinstance(value.get("schema"), str)
+        and value["schema"] != LOCAL_SETTINGS_SCHEMA
+    ):
+        raise LocalSettingsSchemaUnsupported(
+            "本机设置版本需显式转换，请勿以空配置覆盖。"
+        )
     if not isinstance(value, dict) or set(value) != {
         "schema",
         "postgres",
         "model_connections",
-        "dashscope_credentials",
+        "memory_retrieval",
         "mcp_credentials",
         "mcp_oauth",
     }:
@@ -292,27 +264,11 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         connections.append(connection)
         if api_key is not None:
             model_api_keys.append(LocalModelApiKey(connection.id, api_key))
-    raw_dashscope = value["dashscope_credentials"]
-    if not isinstance(raw_dashscope, dict) or set(raw_dashscope) != {
-        "embedding_api_key",
-        "rerank_api_key",
-    }:
-        raise ValueError("DashScope credentials have an invalid closed shape")
-    embedding_api_key = raw_dashscope["embedding_api_key"]
-    rerank_api_key = raw_dashscope["rerank_api_key"]
-    if any(
-        item is not None and (not isinstance(item, str) or not item)
-        for item in (embedding_api_key, rerank_api_key)
-    ):
-        raise ValueError("DashScope API key is invalid")
     return LocalSettings(
         postgres=postgres,
         model_connections=tuple(connections),
         model_api_keys=tuple(model_api_keys),
-        dashscope_credentials=LocalDashScopeCredentials(
-            embedding_api_key=embedding_api_key,
-            rerank_api_key=rerank_api_key,
-        ),
+        memory_retrieval=MemoryRetrievalSettings.from_dict(value["memory_retrieval"]),
         mcp_credentials=_mcp_credentials_from_dict(value["mcp_credentials"]),
         mcp_oauth=_mcp_oauth_from_dict(value["mcp_oauth"]),
     )
@@ -400,6 +356,8 @@ def read_local_settings(path: Path | None = None) -> LocalSettings:
         decoded = yaml.safe_load(raw.decode("utf-8"))
         return local_settings_from_dict(decoded)
     except (UnicodeError, yaml.YAMLError, ValueError) as exc:
+        if isinstance(exc, LocalSettingsSchemaUnsupported):
+            raise
         raise LocalSettingsUnavailable("local settings are invalid") from exc
 
 
@@ -562,6 +520,8 @@ class LocalSettingsStore:
 
         try:
             return self.read()
+        except LocalSettingsSchemaUnsupported:
+            raise
         except LocalSettingsUnavailable:
             return LocalSettings()
 
@@ -574,7 +534,7 @@ class LocalSettingsStore:
                     postgres=postgres,
                     model_connections=current.model_connections,
                     model_api_keys=current.model_api_keys,
-                    dashscope_credentials=current.dashscope_credentials,
+                    memory_retrieval=current.memory_retrieval,
                     mcp_credentials=current.mcp_credentials,
                     mcp_oauth=current.mcp_oauth,
                 ),
@@ -619,7 +579,7 @@ class LocalSettingsStore:
                 postgres=current.postgres,
                 model_connections=(*current.model_connections, connection),
                 model_api_keys=(*current.model_api_keys, *key),
-                dashscope_credentials=current.dashscope_credentials,
+                memory_retrieval=current.memory_retrieval,
                 mcp_credentials=current.mcp_credentials,
                 mcp_oauth=current.mcp_oauth,
             ),
@@ -643,7 +603,7 @@ class LocalSettingsStore:
                         for item in current.model_api_keys
                         if item.connection_id != connection_id
                     ),
-                    dashscope_credentials=current.dashscope_credentials,
+                    memory_retrieval=current.memory_retrieval,
                     mcp_credentials=current.mcp_credentials,
                     mcp_oauth=current.mcp_oauth,
                 ),
@@ -672,11 +632,9 @@ class LocalSettingsStore:
             if not api_key:
                 raise ValueError("API key 不能为空。")
             return api_key
-        if (
-            not previous.requires_api_key
-            or canonicalize_endpoint(previous.base_url)
-            != canonicalize_endpoint(connection.base_url)
-        ):
+        if not previous.requires_api_key or canonicalize_endpoint(
+            previous.base_url
+        ) != canonicalize_endpoint(connection.base_url):
             raise ValueError("服务地址或认证方式已改变，请重新填写 API key。")
         return current.model_api_key(connection.id)
 
@@ -692,9 +650,11 @@ class LocalSettingsStore:
                     for item in current.model_connections
                 ),
                 model_api_keys=tuple(
-                    item for item in current.model_api_keys
+                    item
+                    for item in current.model_api_keys
                     if item.connection_id != connection.id
-                ) + (() if key is None else (LocalModelApiKey(connection.id, key),)),
+                )
+                + (() if key is None else (LocalModelApiKey(connection.id, key),)),
             ), None
 
         updated, _ = await self._run_mutation(
@@ -702,49 +662,123 @@ class LocalSettingsStore:
         )
         return updated
 
-    async def save_dashscope_api_key(
-        self, kind: DashScopeCredentialKind, api_key: str
-    ) -> LocalSettings:
-        if not api_key:
-            raise ValueError("DashScope API key must be non-empty")
+    @staticmethod
+    def retrieval_draft(current, slot, body):
+        allowed = {
+            "connection",
+            "key_action",
+            "api_key",
+            "activate",
+            "confirm_reembed",
+            "expected_embedding",
+        }
+        if (
+            not isinstance(body, dict)
+            or set(body) - allowed
+            or not {"connection", "key_action"} <= set(body)
+        ):
+            raise ValueError("模型配置提交字段无效。")
+        connection = connection_from_dict(slot, body["connection"])
+        action = body["key_action"]
+        if not isinstance(action, str) or action not in {"keep", "replace", "clear"}:
+            raise ValueError("请选择有效的密钥操作。")
+        if "activate" in body and type(body["activate"]) is not bool:
+            raise ValueError("启用值必须为布尔值。")
+        if (action == "replace") != ("api_key" in body):
+            raise ValueError("替换密钥时请填写 API key。")
+        previous = getattr(current.memory_retrieval, slot)
+        key = (
+            body.get("api_key")
+            if action == "replace"
+            else (
+                previous.api_key if action == "keep" and previous is not None else None
+            )
+        )
+        if action == "replace" and (not isinstance(key, str) or not key):
+            raise ValueError("API key 不能为空。")
+        if connection.authentication == "none":
+            if key is not None:
+                raise ValueError("无需认证时请清除 API key。")
+        elif not key:
+            raise ValueError("请填写 API key。")
+        return replace(connection, api_key=key)
+
+    async def save_retrieval_connection(self, slot, body):
+        def mutation(current):
+            connection = self.retrieval_draft(current, slot, body)
+            before = current.memory_retrieval.embedding
+            if slot == "embedding" and (
+                before is None
+                or before.embedding_contract != connection.embedding_contract
+            ):
+                expected = (
+                    None
+                    if before is None
+                    else {
+                        name: getattr(before, name)
+                        for name in ("endpoint", "model_id", "shape")
+                    }
+                )
+                if (
+                    body.get("confirm_reembed") is not True
+                    or body.get("expected_embedding") != expected
+                ):
+                    raise ValueError(
+                        "EMBEDDING_CONFIRMATION_REQUIRED: 请确认将生成或覆盖记忆向量；配置已变更时请刷新。"
+                    )
+            retrieval = current.memory_retrieval.replacing(
+                slot, connection, activate=body.get("activate", False)
+            )
+            return replace(current, memory_retrieval=retrieval), None
+
         updated, _ = await self._run_mutation(
-            lambda current: (
-                LocalSettings(
-                    postgres=current.postgres,
-                    model_connections=current.model_connections,
-                    model_api_keys=current.model_api_keys,
-                    dashscope_credentials=current.dashscope_credentials.replacing(
-                        kind, api_key
-                    ),
-                    mcp_credentials=current.mcp_credentials,
-                    mcp_oauth=current.mcp_oauth,
-                ),
-                None,
-            ),
-            name=f"save-dashscope-{kind}-api-key",
+            mutation, name="save-memory-model", repair=False
         )
         return updated
 
-    async def delete_dashscope_api_key(
-        self, kind: DashScopeCredentialKind
-    ) -> LocalSettings:
+    async def clear_retrieval_connection(self, slot):
         updated, _ = await self._run_mutation(
             lambda current: (
-                LocalSettings(
-                    postgres=current.postgres,
-                    model_connections=current.model_connections,
-                    model_api_keys=current.model_api_keys,
-                    dashscope_credentials=current.dashscope_credentials.replacing(
-                        kind, None
-                    ),
-                    mcp_credentials=current.mcp_credentials,
-                    mcp_oauth=current.mcp_oauth,
+                replace(
+                    current,
+                    memory_retrieval=current.memory_retrieval.replacing(slot, None),
                 ),
                 None,
             ),
-            name=f"delete-dashscope-{kind}-api-key",
+            name="clear-memory-model",
+            repair=False,
         )
         return updated
+
+    async def set_retrieval_mode(self, *, embedding_enabled=None, ranking_mode=None):
+        if (embedding_enabled is None) == (ranking_mode is None):
+            raise ValueError("请提交一个记忆检索开关。")
+        changes = (
+            {"embedding_enabled": embedding_enabled}
+            if embedding_enabled is not None
+            else {"ranking_mode": ranking_mode}
+        )
+        updated, _ = await self._run_mutation(
+            lambda current: (
+                replace(
+                    current,
+                    memory_retrieval=replace(current.memory_retrieval, **changes),
+                ),
+                None,
+            ),
+            name="set-memory-retrieval-mode",
+            repair=False,
+        )
+        return updated
+
+    async def install_embedding_if_current(self, connection, operation):
+        # Settings publication and the physical DB write share this short lane.
+        # The remote call is completed before acquiring the mutation lock.
+        async with self._lock:
+            retrieval = self.read().memory_retrieval
+            if not retrieval.embedding_enabled or retrieval.embedding != connection:
+                return False
+            return await operation()
 
     async def _run_mutation(
         self,
@@ -812,8 +846,6 @@ def _validate_postgres_dsn(value: str) -> None:
 __all__ = [
     "LOCAL_SETTINGS_FILE_NAME",
     "LOCAL_SETTINGS_SCHEMA",
-    "DashScopeCredentialKind",
-    "LocalDashScopeCredentials",
     "LocalModelApiKey",
     "LocalPostgresConfig",
     "LocalSettings",
@@ -821,6 +853,7 @@ __all__ = [
     "LocalSettingsSecretMissing",
     "LocalSettingsStore",
     "LocalSettingsUnavailable",
+    "LocalSettingsSchemaUnsupported",
     "default_local_settings_path",
     "local_settings_from_dict",
     "local_settings_to_dict",

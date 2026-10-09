@@ -87,6 +87,8 @@ clean-v0 保留 `memory_facts` 到**创建该事实的 canonical `remember` Tool
 
 普通 `memory_search`／`memory_get` 的 sparse、dense、rerank、canonical refetch、精确可见性与 truthful fallback 保留；关系候选只复用这套检索 owner 的阶段，不复制一套治理专用排序器。`remember` 一提交，稀疏索引与精确 ID 读取即可使用；embedding 未就绪只降低 dense 完整性，不改变写入成功状态。
 
+显式 `memory_search.limit` 只约束最终返回数量，不得提前缩小既有 Top-20 rerank 候选池。按 RRF 和 filter-relaxation ordinal 收集候选后，对前 `max(limit, 20)` 条执行 canonical refetch，再将其中前 20 条交给可选 reranker；远程重排只在同一 ordinal 内生效，其余候选保留原顺序，最后才按 `limit` 截断并查询返回项的关系。未配置、失败或超出远程投影资源边界时，同样在保留 RRF 顺序后按 `limit` 截断。filter relaxation 的停止条件仍为原始请求的 `min(limit, 3)`，不得为了填满 rerank 池而额外放宽 kind。20 是既有显式 rerank 单次资源边界，`limit` 仍为 1..50，不新增总记忆容量限制。自动召回保持 RRF 排序后最多 5 条且不调用 reranker；`remember` 的相关旧记忆保持候选检索和可选 rerank 后最多返回三条。
+
 取消回答偏好**存储总容量拒绝**：同 context 超过 16 条或完整 JSON 超过 7 KiB 仍可写入，删除恢复也不做此项阻断。单次 `MEMORY_RESPONSE_PREFERENCE_HEAD` 仍需有界。首版用查询独立的稳定选择：每个可读 context 中，先排除与任何仍 ACTIVE 的同 context 偏好有显式 `CONTRADICTS` 关系的双方，再按 `accepted_at DESC, id DESC` 取最新前缀，分别遵守现有每 context 最多 16 条／7 KiB 和整体 source 16 KiB 的投影资源边界；current-project 与 global 各自选择，不以 project 内容无声挤掉 global。用 SQL `EXISTS`／有界多取一条判定是否还有未入选偏好，不读取或序列化无限完整集合；若因条数、字节或显式冲突而省略，投影明示 `selection_incomplete`／`conflicts_omitted`，不把缺席说成不存在。若库读取失败则用现有 `UNAVAILABLE` absence，真正无偏好才是 `EXPLICIT_EMPTY`。未标定的语义冲突仍可能同时入选，模型按 advisory 数据处理。此规则只选择一次 provider 输入，不是新入库上限或长期记忆淘汰策略。
 
 将 governor 当前附带的 embedding 扫描／写入原地搬到独立的 Host-local `MemoryEmbeddingMaintainer`（具体类名可随代码风格调整）：维护范围沿用该 Host 可读的 global／当前 project contexts，Host 启动时唤醒，`SAVED` 提交后 best-effort 唤醒；单次维持现有批量、deadline 和资源边界。若本批确有写入进展且有下一页未嵌入 ACTIVE 事实，可继续排队一次 process-local 自唤醒；整批失败或无进展时不热循环，等待下一次写入／Host 启动等普通唤醒。重启后重新扫描未嵌入事实，不设全库或工作生命周期上限；崩溃丢失一次 wake 可以接受，不引入 durable job、lease 或完成回执。没有 embedding 服务时 sparse／精确读取仍可用，降级应可观察。

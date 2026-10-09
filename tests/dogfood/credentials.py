@@ -10,8 +10,10 @@ def secret_scrubber(settings: LocalSettings) -> ProcessCredentialScrubSet:
     scrub = ProcessCredentialScrubSet()
     for item in settings.model_api_keys + settings.mcp_credentials:
         scrub.observe(item.value)
-    scrub.observe(settings.dashscope_credentials.embedding_api_key)
-    scrub.observe(settings.dashscope_credentials.rerank_api_key)
+    for slot in ("embedding", "rerank", "decision"):
+        connection = getattr(settings.memory_retrieval, slot)
+        if connection is not None:
+            scrub.observe(connection.api_key)
 
     def oauth_values(value: object) -> None:
         if isinstance(value, dict):

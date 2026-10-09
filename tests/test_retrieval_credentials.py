@@ -1,23 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from types import SimpleNamespace
-
+import httpx2
 import pytest
 
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
-from pulsara_agent.retrieval.config import (
-    EmbeddingBackendConfig,
-    RerankBackendConfig,
-)
-from pulsara_agent.retrieval.embedding.openai_compatible import (
-    OpenAICompatibleEmbeddingProvider,
-)
+from pulsara_agent.retrieval.config import EmbeddingBackendConfig, RerankBackendConfig
 from pulsara_agent.settings import LocalSettingsStore
+from tests.retrieval_fixtures import save_model
+from tests.test_memory_retrieval_adapters import VECTOR
 
 
-def _memory_port(settings: LocalSettingsStore) -> KernelMemoryToolPort:
+def _memory_port(settings):
     return KernelMemoryToolPort(
         repository=SimpleNamespace(connection_provider=object()),
         session_id="session:test",
@@ -29,106 +24,123 @@ def _memory_port(settings: LocalSettingsStore) -> KernelMemoryToolPort:
     )
 
 
-def test_embedding_and_rerank_keys_are_independent(tmp_path: Path) -> None:
-    async def exercise() -> None:
+def test_embedding_and_rerank_slots_are_independent_and_switches_keep_config(tmp_path):
+    async def exercise():
         settings = LocalSettingsStore(tmp_path / "local-settings.yaml")
         port = _memory_port(settings)
         assert await port._embedding_provider() is None
         assert await port._rerank_provider() is None
-
-        await settings.save_dashscope_api_key("embedding", "embedding-secret")
+        await save_model(settings, "embedding", "embedding-secret", activate=True)
         assert await port._embedding_provider() is not None
         assert await port._rerank_provider() is None
-
-        await settings.save_dashscope_api_key("rerank", "rerank-secret")
+        await save_model(settings, "rerank", "rerank-secret", activate=True)
         assert await port._rerank_provider() is not None
+        await settings.set_retrieval_mode(embedding_enabled=False)
+        await settings.set_retrieval_mode(ranking_mode="off")
+        assert settings.read().memory_retrieval.embedding.api_key == "embedding-secret"
+        assert settings.read().memory_retrieval.rerank.api_key == "rerank-secret"
+        assert await port._embedding_provider() is None
+        assert await port._rerank_provider() is None
         await port.aclose()
 
     asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("unreadable", (False, True))
-def test_missing_or_unreadable_retrieval_settings_degrade_without_opening_provider(
-    tmp_path: Path,
-    unreadable: bool,
-) -> None:
-    async def exercise() -> None:
+def test_missing_or_unreadable_settings_degrade_without_opening_provider(
+    tmp_path, unreadable
+):
+    async def exercise():
         path = tmp_path / "local-settings.yaml"
         if unreadable:
-            path.write_text("schema: [\n", encoding="utf-8")
-        settings = LocalSettingsStore(path)
-        port = _memory_port(settings)
+            path.write_text("schema: [\n")
+        port = _memory_port(LocalSettingsStore(path))
         assert await port._embedding_provider() is None
         assert await port._rerank_provider() is None
-        pre_rerank = SimpleNamespace(facts=("pre-rerank-result",))
+        result = SimpleNamespace(facts=("original",))
         assert (
-            await port._rerank_explicit(
-                "query",
-                pre_rerank,
-                total_deadline=999_999_999.0,
-            )
-            is pre_rerank
+            await port._rerank_explicit("query", result, total_deadline=999999999)
+            is result
         )
         await port.aclose()
 
     asyncio.run(exercise())
 
 
-def test_retrieval_operation_reads_once_and_next_operation_uses_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import pulsara_agent.retrieval.embedding.openai_compatible as embedding_module
+def test_frozen_request_replacement_and_late_result_discard(tmp_path, monkeypatch):
+    async def exercise():
+        started, release = asyncio.Event(), asyncio.Event()
 
-    started = asyncio.Event()
-    release = asyncio.Event()
-    observed_keys: list[str] = []
-
-    class _Embeddings:
-        def __init__(self, key: str) -> None:
-            self._key = key
-
-        async def create(self, **_kwargs):
-            observed_keys.append(self._key)
+        async def respond(request):
+            observed_keys.append(request.headers["authorization"])
             started.set()
             await release.wait()
-            vector = [1.0, *([0.0] * 1023)]
-            return SimpleNamespace(
-                model="text-embedding-v4",
-                data=(SimpleNamespace(index=0, embedding=vector),),
+            return httpx2.Response(
+                200, json={"data": [{"index": 0, "embedding": VECTOR}]}
             )
 
-    class _Client:
-        def __init__(self, *, api_key: str, http_client, **_kwargs) -> None:
-            self.embeddings = _Embeddings(api_key)
-            self._http_client = http_client
+        def injected(**kwargs):
+            from pulsara_agent.process_credential_boundary import (
+                ProcessCredentialBoundHttpx2Client,
+            )
 
-        async def close(self) -> None:
-            await self._http_client.aclose()
+            return ProcessCredentialBoundHttpx2Client(
+                **kwargs, transport=httpx2.MockTransport(respond), trust_env=False
+            )
 
-    monkeypatch.setattr(embedding_module.openai, "AsyncOpenAI", _Client)
+        from pulsara_agent.llm.adapters.openai import client
 
-    async def exercise() -> None:
-        settings = LocalSettingsStore(tmp_path / "local-settings.yaml")
-        await settings.save_dashscope_api_key("embedding", "first-secret")
-        provider = OpenAICompatibleEmbeddingProvider(
-            model="text-embedding-v4",
-            base_url="https://dashscope.example/v1",
-            settings=settings,
+        monkeypatch.setattr(client, "ProcessCredentialBoundHttpx2Client", injected)
+        settings = LocalSettingsStore(tmp_path / "settings.yaml")
+        port = _memory_port(settings)
+        await save_model(settings, "embedding", "first-secret", activate=True)
+        provider = await port._embedding_provider()
+        first = asyncio.create_task(port._frozen_query_embedding(provider, "first"))
+        await started.wait()
+        await save_model(settings, "embedding", "second-secret")
+        release.set()
+        assert await first is None
+        second_provider = await port._embedding_provider()
+        second = await port._frozen_query_embedding(second_provider, "second")
+        assert second.vector == tuple(VECTOR)
+        assert observed_keys == ["Bearer first-secret", "Bearer second-secret"]
+        # Frozen operation still retains its own key; only a new operation uses replacement.
+        assert provider.connection.api_key == "first-secret"
+        await port.aclose()
+
+    observed_keys = []
+    asyncio.run(exercise())
+
+
+def test_embedding_write_and_settings_publication_share_mutation_lane(tmp_path):
+    async def exercise():
+        settings = LocalSettingsStore(tmp_path / "settings.yaml")
+        await save_model(settings, "embedding", "key", activate=True)
+        old = settings.read().memory_retrieval.embedding
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def install():
+            entered.set()
+            await release.wait()
+            return True
+
+        write = asyncio.create_task(settings.install_embedding_if_current(old, install))
+        await entered.wait()
+        change = asyncio.create_task(
+            save_model(settings, "embedding", "new-key", model="new-model")
         )
-
-        first = asyncio.create_task(provider.embed("first operation"))
-        await started.wait()
-        await settings.save_dashscope_api_key("embedding", "second-secret")
+        await asyncio.sleep(0)
+        assert not change.done()
         release.set()
-        assert len(await first) == 1024
+        assert await write is True
+        await change
+        called = False
 
-        started.clear()
-        release.clear()
-        second = asyncio.create_task(provider.embed("second operation"))
-        await started.wait()
-        release.set()
-        assert len(await second) == 1024
-        assert observed_keys == ["first-secret", "second-secret"]
+        async def forbidden():
+            nonlocal called
+            called = True
+
+        assert await settings.install_embedding_if_current(old, forbidden) is False
+        assert called is False
 
     asyncio.run(exercise())

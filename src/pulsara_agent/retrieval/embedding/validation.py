@@ -14,6 +14,11 @@ def freeze_v1_embedding_vector(values: Sequence[float]) -> tuple[float, ...]:
 
     if len(values) != MEMORY_EMBEDDING_DIMENSIONS:
         raise ValueError("memory embedding dimension is invalid")
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in values
+    ):
+        raise ValueError("memory embedding contains a non-number")
     try:
         frozen = tuple(float(value) for value in values)
     except (TypeError, ValueError, OverflowError) as exc:

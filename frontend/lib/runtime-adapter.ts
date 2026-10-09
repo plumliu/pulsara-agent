@@ -210,14 +210,30 @@ export interface ModelCatalogReadModel {
   routes: ModelCatalogRoute[];
 }
 
+export type MemoryModelSlot = 'embedding' | 'decision' | 'rerank';
+export type RetrievalShape = 'openai_embedding' | 'flat_rerank' | 'nested_rerank' | 'system_one' | 'openai_decisions';
+export type RankingMode = 'off' | 'decision' | 'rerank';
+export interface RetrievalConnection {
+  endpoint: string; model_id: string; shape: RetrievalShape;
+  authentication: 'bearer_api_key' | 'none'; credential_configured: boolean;
+}
+export interface MemoryRetrievalSettings {
+  embedding: RetrievalConnection | null; embedding_enabled: boolean;
+  decision: RetrievalConnection | null; rerank: RetrievalConnection | null; ranking_mode: RankingMode;
+}
+export interface RetrievalModelInput {
+  connection: Omit<RetrievalConnection, 'credential_configured'>;
+  key_action: 'keep' | 'replace' | 'clear'; api_key?: string; activate: boolean;
+  confirm_reembed?: boolean;
+  expected_embedding?: Pick<RetrievalConnection, 'endpoint' | 'model_id' | 'shape'> | null;
+}
+export interface RetrievalTestResult { status: 'ready'; elapsed_ms: number; dimensions?: number; result_count?: number }
+
 export interface LocalSettingsSummary {
   state?: 'ready' | 'unavailable';
   pulsara_home?: string;
   postgres: { runtime_dsn: string; admin_dsn: string | null } | null;
-  dashscope_credentials: {
-    embedding_configured: boolean;
-    rerank_configured: boolean;
-  };
+  memory_retrieval: MemoryRetrievalSettings;
 }
 
 export interface LocalSettingsReadModel {
@@ -543,8 +559,11 @@ export interface RuntimeAdapter {
   checkPostgres(): Promise<Record<string, unknown>>;
   migratePostgres(): Promise<Record<string, unknown>>;
   resetPostgres(target: NonNullable<LocalSettingsSummary['postgres']>): Promise<{ database_name: string; restart_required: boolean }>;
-  putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean>;
-  deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<boolean>;
+  saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings>;
+  clearMemoryModel(slot: MemoryModelSlot): Promise<MemoryRetrievalSettings>;
+  testMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<RetrievalTestResult>;
+  setEmbeddingEnabled(enabled: boolean): Promise<MemoryRetrievalSettings>;
+  setMemoryRanking(mode: RankingMode): Promise<MemoryRetrievalSettings>;
   contextUsage(sessionId: string, signal?: AbortSignal): Promise<ContextUsagePreview>;
   updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
   reopenRuntime(sessionId: string): Promise<{
@@ -1435,20 +1454,20 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
-  async putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean> {
-    const value = await apiRequest<{ configured: boolean }>(
-      `/api/local-settings/dashscope-credentials/${kind}`,
-      { method: 'PUT', body: JSON.stringify({ api_key: apiKey }) },
-    );
-    return value.configured;
+  async saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings> {
+    return apiRequest(`/api/local-settings/memory-retrieval/${slot}`, { method: 'PUT', body: JSON.stringify(input) });
   }
-
-  async deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<boolean> {
-    const value = await apiRequest<{ configured: boolean }>(
-      `/api/local-settings/dashscope-credentials/${kind}`,
-      { method: 'DELETE' },
-    );
-    return value.configured;
+  async clearMemoryModel(slot: MemoryModelSlot): Promise<MemoryRetrievalSettings> {
+    return apiRequest(`/api/local-settings/memory-retrieval/${slot}`, { method: 'DELETE' });
+  }
+  async testMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<RetrievalTestResult> {
+    return apiRequest(`/api/local-settings/memory-retrieval/${slot}/test`, { method: 'POST', body: JSON.stringify(input) });
+  }
+  async setEmbeddingEnabled(enabled: boolean): Promise<MemoryRetrievalSettings> {
+    return apiRequest('/api/local-settings/memory-retrieval/embedding-enabled', { method: 'PUT', body: JSON.stringify({ enabled }) });
+  }
+  async setMemoryRanking(mode: RankingMode): Promise<MemoryRetrievalSettings> {
+    return apiRequest('/api/local-settings/memory-retrieval/ranking-mode', { method: 'PUT', body: JSON.stringify({ mode }) });
   }
 
   async contextUsage(sessionId: string, signal?: AbortSignal): Promise<ContextUsagePreview> {

@@ -13,6 +13,8 @@ from typing import Any, Literal
 from pulsara_agent.capability.management_intent import capability_management_input_schema
 
 from pulsara_agent.memory.product_contract import (
+    MEMORY_RELATION_COMPARISON_GUIDE,
+    MEMORY_RETRIEVAL_AUTHORING_GUIDE,
     MEMORY_CONTEXT_PRODUCT_GUIDE,
     memory_kind_product_guide,
 )
@@ -233,10 +235,9 @@ def _remember_parameters() -> dict[str, Any]:
                 "minLength": 1,
                 "maxLength": 8192,
                 "description": (
-                    "One self-contained, source-faithful memory, at most 8192 UTF-8 bytes. Name "
-                    "the subject; include project, time, conditions, quantities, negations and "
-                    "uncertainty when relevant. Use natural language without template labels or "
-                    "invented details."
+                    "One self-contained, source-faithful memory, at most 8192 UTF-8 bytes "
+                    "(2048 for RESPONSE_PREFERENCE). "
+                    + MEMORY_RETRIEVAL_AUTHORING_GUIDE
                 ),
             },
             "context_target": {
@@ -291,7 +292,8 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
                 "profile, preference, fact, or decision you need, using at most 32768 "
                 "UTF-8 "
                 "bytes. Ask for the needed subject rather than guessing the exact stored "
-                "wording."
+                "wording. Include the known project and distinguishing details; resolve "
+                "vague references from available context without guessing missing facts."
             ),
         },
         "kind": {
@@ -367,6 +369,7 @@ _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
                 "CONTRADICTS keeps two incompatible same-kind memories active when no "
                 "winner is justified. SUPERSEDES makes an older same-context memory "
                 "inactive when the source is the supported newer state. This is not deletion."
+                " " + MEMORY_RELATION_COMPARISON_GUIDE
             ),
         },
     },
@@ -1886,7 +1889,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "them. Use CONTRADICTS only for incompatible same-kind, same-context items "
             "without a justified winner; both stay active. Use SUPERSEDES only when the "
             "source is the supported newer state and the target should leave active "
-            "recall. A successful mark does not delete either memory. Related results "
+            "recall. A successful mark does not delete either memory. "
+            + MEMORY_RELATION_COMPARISON_GUIDE
+            + " Related results "
             "from remember are hints, not an obligation to mark. If uncertain, inspect "
             "the memories or ask the user. Users delete memory in the Memory page."
         ),

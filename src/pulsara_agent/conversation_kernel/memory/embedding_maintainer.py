@@ -23,8 +23,12 @@ MAXIMUM_EMBEDDING_BATCH = 10
 
 
 class MemoryEmbeddingMaintenancePort(Protocol):
+    def embedding_connection(self): ...
+
+    async def install_memory_embedding(self, connection, operation): ...
+
     async def embed_memory_batch(
-        self, texts: Sequence[str], *, timeout_seconds: float
+        self, texts: Sequence[str], *, timeout_seconds: float, connection
     ) -> Sequence[Sequence[float]] | None: ...
 
 
@@ -73,7 +77,9 @@ class MemoryEmbeddingMaintainer:
         expired = max(0.0, deadline_monotonic - monotonic())
         done, _ = await asyncio.wait((task,), timeout=expired)
         if not done:
-            raise TimeoutError("memory embedding maintainer exceeded Host close deadline")
+            raise TimeoutError(
+                "memory embedding maintainer exceeded Host close deadline"
+            )
         await asyncio.gather(task, return_exceptions=True)
 
     async def _run(self) -> None:
@@ -85,6 +91,9 @@ class MemoryEmbeddingMaintainer:
                 self._wake.set()
 
     async def _maintain_once(self) -> tuple[bool, bool]:
+        connection = self._embedding_port.embedding_connection()
+        if connection is None:
+            return False, False
         deadline = self._deadlines.deadline(
             KernelWatchdogOwner.MEMORY_FACT_EMBEDDING_BATCH
         )
@@ -93,6 +102,7 @@ class MemoryEmbeddingMaintainer:
                 self._repository.list_unembedded_memory_facts,
                 read_binding=self._read_binding,
                 limit=MAXIMUM_EMBEDDING_SCAN,
+                embedding_contract=connection.embedding_contract,
                 deadline_monotonic=deadline,
             )
         except Exception:
@@ -108,7 +118,9 @@ class MemoryEmbeddingMaintainer:
                 break
             try:
                 vectors = await self._embedding_port.embed_memory_batch(
-                    tuple(item[2] for item in batch), timeout_seconds=remaining
+                    tuple(item[2] for item in batch),
+                    timeout_seconds=remaining,
+                    connection=connection,
                 )
             except Exception:
                 break
@@ -118,14 +130,21 @@ class MemoryEmbeddingMaintainer:
                 batch, vectors, strict=True
             ):
                 try:
-                    installed = await self._io.run(
-                        self._repository.upsert_memory_embedding,
-                        read_binding=self._read_binding,
-                        fact_id=fact_id,
-                        fact_semantic_digest=semantic_digest,
-                        vector=vector,
-                        embedded_at=datetime.now(timezone.utc),
-                        deadline_monotonic=deadline,
+
+                    async def install():
+                        return await self._io.run(
+                            self._repository.upsert_memory_embedding,
+                            read_binding=self._read_binding,
+                            fact_id=fact_id,
+                            fact_semantic_digest=semantic_digest,
+                            vector=vector,
+                            embedded_at=datetime.now(timezone.utc),
+                            deadline_monotonic=deadline,
+                            embedding_contract=connection.embedding_contract,
+                        )
+
+                    installed = await self._embedding_port.install_memory_embedding(
+                        connection, install
                     )
                 except Exception:
                     continue

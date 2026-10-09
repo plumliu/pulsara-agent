@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.memory.recall import MemoryQueryResult, M
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
 from pulsara_agent.memory.scope import MemoryDomainContext, freeze_memory_read_context_binding
 from pulsara_agent.model_input.contracts import ContextSourceKind, ContextSourceAbsenceKind
+from tests.retrieval_fixtures import save_model
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
 from pulsara_agent.settings import LocalSettingsStore
 
@@ -30,6 +31,7 @@ def test_embedding_overlaps_tokenizer_and_cancellation_drains_both(tmp_path, can
             ), embedding_config=EmbeddingBackendConfig(), io_owner=io,
             settings=LocalSettingsStore(tmp_path / "settings.yaml"),
         )
+        await save_model(port._settings, "embedding", "test-key", activate=True)
         embedding_started, tokenize_started, release_tokenize, tokenize_done = Event(), Event(), Event(), Event()
         embedding_done = asyncio.Event()
 
@@ -57,7 +59,7 @@ def test_embedding_overlaps_tokenizer_and_cancellation_drains_both(tmp_path, can
 
         async def recall(**kwargs):
             assert kwargs["terms"] == ("runtime",)
-            assert kwargs["query_embedding"] == [1.0]
+            assert kwargs["query_embedding"].vector == (1.0,)
             return MemoryQueryResult(MemoryRetrievalDisposition.NO_MATCH, (), ())
 
         port._query.tokenize_query = tokenize
