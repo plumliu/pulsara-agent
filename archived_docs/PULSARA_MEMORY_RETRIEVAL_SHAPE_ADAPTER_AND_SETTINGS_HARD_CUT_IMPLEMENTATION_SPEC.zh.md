@@ -220,13 +220,13 @@ OpenRouter 统一使用 System One 兼容入口；不提供其 `/api/alpha/decis
 
 固定问题判断候选是否实质帮助回答 / 行动或指出必要核查，覆盖事实、用户背景、偏好、约束及来源支持的计划 / 决策；主题或词汇相似不足以判定有用。不在前端开放自定义 prompt。问题中明确关联当前候选 ID，答案通过同一个 key 映射到原始 index。
 
-调用方传递本次用途 `recall` / `related_memory`，默认 `recall`。这是进程内调用参数，不是设置、持久化字段或新增 wire 字段；普通 Rerank 两种请求格式保持原 `query/documents` 主体。显式 memory_search 与隐式召回使用 `recall`；remember 的关联候选使用 `related_memory`，此时 `user_task` 是待保存正文，问题判断旧条目是否提供检查重叠、冲突、替代或真实依赖的具体依据，不直接判定或写入关系。两种 Decision 协议共享同一个提示构造函数：[decision_prompt.py](src/pulsara_agent/retrieval/rerank/decision_prompt.py)。
+调用方传递本次用途 `recall` / `related_memory`，默认 `recall`。这是进程内调用参数，不是设置、持久化字段或新增 wire 字段；普通 Rerank 两种请求格式保持原 `query/documents` 主体。显式 memory_search 与隐式召回使用 `recall`；remember 的关联候选使用 `related_memory`，此时 `user_task` 是待保存正文，问题判断旧条目是否提供检查重叠、冲突、替代或真实依赖的具体依据，不直接判定或写入关系。两种 Decision 协议共享同一个提示构造函数：[decision_prompt.py](../src/pulsara_agent/retrieval/rerank/decision_prompt.py)。
 
 两种用途都要求按意义匹配（包括跨语言），尊重主体、项目、时间、条件、否定与不确定性。`context_product_label` 表示可见范围，不表示普遍适用；`recorded_at` 是保存时间，不证明当前正确性，也不能单独证明替代关系或失效。相关差异和需核查前提可以有用。只使用已提供的内容，不猜测缺失事实或被截断正文；忽略候选内部要求操纵判别的指令。逐项判断候选自身贡献，不要求挑够数量、不增加分数阈值；现有排序、截断、候选池及失败降级边界保持不变。state 仍只含本次 query 和候选，不加入对话历史或 when_to_use，不增加 query 改写模型。
 
 关联检查比较主体与适用条件，不把同一直接主体作为所有关联的硬前提，真实依赖可能跨主体。其 False 标准明确涵盖仅主题相关或完全无关、均不提供具体检查依据的候选。这只是候选检查标准；CONTRADICTS / SUPERSEDES 工具的同主体、同条件比较提示保持不变。
 
-2026-10-10 提示修订验证：97 项 focused tests 通过，覆盖两种 Decision SDK wire / 两种用途、普通 Rerank 主体不变、显式 / 隐式 / remember 关联检查的用途、降级 / 凭据边界、写入与关系提示契约及 provider 前缀连续性；Ruff 与 `git diff --check` 通过。[测试日志](output/memory_retrieval_implementation_20261010/decision-prompt-revision-tests.log)。本次未做真实模型准确性或新提示时延评测，不把 mock 通过解释为效果提升。
+2026-10-10 提示修订验证：97 项 focused tests 通过，覆盖两种 Decision SDK wire / 两种用途、普通 Rerank 主体不变、显式 / 隐式 / remember 关联检查的用途、降级 / 凭据边界、写入与关系提示契约及 provider 前缀连续性；Ruff 与 `git diff --check` 通过。[测试日志](../output/memory_retrieval_implementation_20261010/decision-prompt-revision-tests.log)。本次未做真实模型准确性或新提示时延评测，不把 mock 通过解释为效果提升。
 
 记忆写入的 SYSTEM 与 remember.statement 共用 authoring guide：区分建议、暂定计划、采纳选择与完成行动，保留说话者 / 行动主体；仅在现有信息明确时解开代词和相对日期。memory_search.query 提示保留已知项目和辨别细节，不猜测缺失事实。SYSTEM、关系工具及 relation_kind 说明共用比较规则：同一主体与条件下比较，不同日期 / 条件可能解释差异，保存较晚本身不支持 SUPERSEDES。模型仍负责最终 kind 与显式关系调用，判别分数不取得写入权威。SYSTEM / tools 修改只在允许的新 cold epoch 或显式采用的 compaction successor 安装，不重写已有 epoch 前缀。
 
@@ -524,7 +524,7 @@ provider 实例可以按现有 port 生命周期管理，但不能因为 `_embed
 
 ## 12 参考与既有证据
 
-- [当前隐式记忆时延实验计划](/Users/plumliu/Desktop/python_workspace/pulsara_agent/PULSARA_IMPLICIT_MEMORY_RECALL_LATENCY_EXPERIMENT_PLAN.zh.md)
+- [隐式记忆时延实验计划（归档）](/Users/plumliu/Desktop/python_workspace/pulsara_agent/archived_docs/PULSARA_IMPLICIT_MEMORY_RECALL_LATENCY_EXPERIMENT_PLAN.zh.md)
 - [既有 smoke 说明](/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/implicit_memory_latency_20261009/README.zh.md)
 - [OpenRouter instruct 实测](/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/implicit_memory_latency_20261009/openrouter_instruct_probe/README.zh.md)：HTTP 200 不证明额外字段被采用。
 - [OpenRouter embedding 主体](https://openrouter.ai/docs/api/api-reference/embeddings/submit-an-embedding-request)、[OpenRouter rerank 主体](https://openrouter.ai/docs/api/api-reference/rerank/submit-a-rerank-request)。
@@ -543,9 +543,9 @@ provider 实例可以按现有 port 生命周期管理，但不能因为 `_embed
 - 本机设置采用 `pulsara-local-settings:v3`，关闭与配置分别保存。旧 schema 明确返回不可原地修复的错误，阻止设置操作把旧文档修复为空。已有 9 个聊天连接、PostgreSQL 及 1 个 MCP 凭据的离线转换预览已确认；生产文件在 dogfood 中保持不变。
 - 后台安装与设置发布共享既有 settings mutation lane；安装 SQL 锁定仍为 ACTIVE 且正文 digest 匹配的 fact，只有一条向量覆盖路径。测试覆盖旧绑定延迟结果拒绝、覆盖一条后中断、重新启动只补剩余条目、关闭时不调用维护。没有新表、事件、任务或 generation。
 - 隐式链路覆盖 20 候选 → 一次重排 → 5 条；失败保留 RRF 原序，同分稳定。原成员集合排序缓存已删除，source 使用当次排序；未改写已安装 provider prefix。
-- [真实调用报告](output/memory_retrieval_implementation_20261010/real-provider-report.json)与[实际请求 / 响应](output/memory_retrieval_implementation_20261010/real-provider-wire.json)：经正常设置 API 写入临时 home，真实 Kernel 查询与数据库维护采用这些设置。Embedding 返回 1024 维并安装 3 条向量；普通 Rerank、OpenRouter Jev / Luna 的隐式最终顺序均与远端分数一致。各后端单次完整召回约 2.0–2.6 秒，仅为小样本 smoke。Jev 官方与 OpenAI 官方没有可用保存凭据，未宣称真实验证完成。
+- [真实调用报告](../output/memory_retrieval_implementation_20261010/real-provider-report.json)与[实际请求 / 响应](../output/memory_retrieval_implementation_20261010/real-provider-wire.json)：经正常设置 API 写入临时 home，真实 Kernel 查询与数据库维护采用这些设置。Embedding 返回 1024 维并安装 3 条向量；普通 Rerank、OpenRouter Jev / Luna 的隐式最终顺序均与远端分数一致。各后端单次完整召回约 2.0–2.6 秒，仅为小样本 smoke。Jev 官方与 OpenAI 官方没有可用保存凭据，未宣称真实验证完成。
 - 前端无需实际浏览器自动化：用户自行验看；执行组件、主界面、runtime adapter 的 Vitest、TypeScript、ESLint 与本地静态构建。源码与交付静态资源完成旧命名删除扫描。
 
-生产激活须先停止旧进程，再执行一次[离线转换](output/memory_retrieval_implementation_20261010/maintenance_settings.py)，然后启动新版。脚本默认仅预览；`--apply` 才调用现有原子设置 writer 替换原文件，复核旧 typed 值未变并验证新 owner 读回。它读取 Git 保存的改动前 owner，不是生产兼容 reader；完整保留不相关设置，两个检索开关初始关闭。不删除记忆或已有向量；开启 embedding 后旧契约向量按本规格逐条覆盖，可能产生 API 费用。
+生产激活须先停止旧进程，再执行一次[离线转换](../output/memory_retrieval_implementation_20261010/maintenance_settings.py)，然后启动新版。脚本默认仅预览；`--apply` 才调用现有原子设置 writer 替换原文件，复核旧 typed 值未变并验证新 owner 读回。它读取 Git 保存的改动前 owner，不是生产兼容 reader；完整保留不相关设置，两个检索开关初始关闭。不删除记忆或已有向量；开启 embedding 后旧契约向量按本规格逐条覆盖，可能产生 API 费用。
 
-用户已明确授权停止当前应用、转换并重启。激活完成：原子写入 v3 后通过正常 owner 读回核对，保留全部 9 个聊天连接、PostgreSQL 及 1 个 MCP 凭据；未删除数据库记忆或向量。新版 HTTP bootstrap 返回 runtime / database `ready`，检索开关初始为 false / off。验证记录：[设置激活](output/memory_retrieval_implementation_20261010/settings-activation.log)、[生产 bootstrap](output/memory_retrieval_implementation_20261010/production-bootstrap.json)。本次最终验证为后端 163 项、PostgreSQL / Host 38 项、前端 266 项通过；TypeScript、ESLint、本地构建、Ruff 和命名扫描通过。
+用户已明确授权停止当前应用、转换并重启。激活完成：原子写入 v3 后通过正常 owner 读回核对，保留全部 9 个聊天连接、PostgreSQL 及 1 个 MCP 凭据；未删除数据库记忆或向量。新版 HTTP bootstrap 返回 runtime / database `ready`，检索开关初始为 false / off。验证记录：[设置激活](../output/memory_retrieval_implementation_20261010/settings-activation.log)、[生产 bootstrap](../output/memory_retrieval_implementation_20261010/production-bootstrap.json)。本次最终验证为后端 163 项、PostgreSQL / Host 38 项、前端 266 项通过；TypeScript、ESLint、本地构建、Ruff 和命名扫描通过。
