@@ -87,7 +87,7 @@ if TYPE_CHECKING:
         MemoryEmbeddingMaintainer,
     )
 
-MEMORY_READ_TOOL_NAMES = frozenset({"memory_search", "memory_get", "memory_explain"})
+MEMORY_READ_TOOL_NAMES = frozenset({"memory_search", "memory_get"})
 MEMORY_WRITE_TOOL_NAMES = frozenset({"remember", "mark_memory_relation"})
 MEMORY_TOOL_NAMES = MEMORY_READ_TOOL_NAMES | MEMORY_WRITE_TOOL_NAMES
 MAXIMUM_MEMORY_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -255,9 +255,7 @@ class KernelMemoryToolPort:
             if tool_name == "memory_search":
                 return await self._search(arguments)
             if tool_name == "memory_get":
-                return await self._get(arguments, explain=False)
-            if tool_name == "memory_explain":
-                return await self._get(arguments, explain=True)
+                return await self._get(arguments)
         except (TypeError, ValueError) as exc:
             # invoke runs after a canonical attempt has been admitted. A bad
             # basis is a known application rejection, not a preflight
@@ -568,9 +566,7 @@ class KernelMemoryToolPort:
             model_visible_memory_fact_ids=ids,
         )
 
-    async def _get(
-        self, arguments: Mapping[str, object], *, explain: bool
-    ) -> KernelToolResult:
+    async def _get(self, arguments: Mapping[str, object]) -> KernelToolResult:
         memory_id = str(arguments.get("memory_id") or "")
         if not memory_id:
             raise ValueError("memory_id is required")
@@ -616,55 +612,8 @@ class KernelMemoryToolPort:
         if item.user_edited_at is not None:
             payload["user_edit"] = {
                 "edited_at": item.user_edited_at,
-                "note": "The user edited this memory's text. Its source is the original save, and existing relations were not re-evaluated.",
+                "note": "The user edited this memory's text. Existing relations were not re-evaluated.",
             }
-        if explain:
-            provenance = await self._io.run(
-                self._query.provenance,
-                read_binding=self._read_binding,
-                fact_id=memory_id,
-                relation_ids=tuple(item.relation_id for item in relations),
-                deadline_monotonic=self._canonical_deadline(
-                    MEMORY_POINT_READ_TIMEOUT_SECONDS
-                ),
-            )
-            if provenance is None:
-                return _json_result("APPLICATION_ERROR", {"error": "memory not found"})
-            projection: dict[str, object] = {
-                "availability": provenance.source_availability,
-                "disposition": provenance.provenance_disposition,
-                "write_tool": provenance.write_tool,
-                "reviewed_by_second_model": False,
-                "relation_owners": [
-                    {
-                        "relation_id": item.relation_id,
-                        "availability": item.source_availability,
-                        "disposition": item.provenance_disposition,
-                        "write_tool": item.write_tool,
-                        "owner_session_id": item.owner_session_id,
-                        "owner_entry_id": item.owner_entry_id,
-                        "owner_tool_call_id": item.owner_tool_call_id,
-                    }
-                    for item in provenance.relation_owners
-                ],
-            }
-            if (
-                provenance.source_availability == "OPEN"
-                and provenance.provenance_disposition == "SAME_ORIGIN"
-            ):
-                projection["producer_locator"] = {
-                    "session_id": provenance.producer_session_id,
-                    "turn_id": provenance.producer_turn_id,
-                    "entry_id": provenance.producer_entry_id,
-                    "tool_call_id": provenance.producer_tool_call_id,
-                }
-            elif provenance.source_availability == "DELETED":
-                projection["origin_context"] = "SOURCE_DELETED"
-            elif provenance.provenance_disposition == "CROSS_ORIGIN_REDACTED":
-                projection["origin_context"] = "WORKSPACE_REDACTED"
-            else:
-                projection["origin_context"] = "SOURCE_SESSION_CLOSED"
-            payload["provenance"] = projection
         return _json_result(
             "SUCCESS", payload, model_visible_memory_fact_ids=(item.fact_id,)
         )

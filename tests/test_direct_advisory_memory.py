@@ -305,7 +305,7 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
     assert query_row is not None and query_row.user_edited_at == changed["user_edited_at"]
     assert query_row.statement == changed["fact"]["statement"]
 
-    async def inspect_model_explanation():
+    async def inspect_model_memory():
         io = KernelSessionIO()
         port = KernelMemoryToolPort(
             repository=repository, session_id=lease.guard.session_id,
@@ -314,16 +314,18 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
         )
         try:
             return json.loads((await port._get(
-                {"memory_id": current["memory_id"]}, explain=True,
+                {"memory_id": current["memory_id"]},
             )).content)
         finally:
             await port.aclose()
             await io.aclose(deadline_monotonic=monotonic() + 10)
 
-    explanation = asyncio.run(inspect_model_explanation())
-    assert explanation["user_edit"]["edited_at"] == changed["user_edited_at"]
-    assert "original save" in explanation["user_edit"]["note"]
-    assert explanation["statement"] == changed["fact"]["statement"]
+    memory = asyncio.run(inspect_model_memory())
+    assert memory["user_edit"]["edited_at"] == changed["user_edited_at"]
+    assert "relations were not re-evaluated" in memory["user_edit"]["note"]
+    assert "original save" not in memory["user_edit"]["note"]
+    assert memory["statement"] == changed["fact"]["statement"]
+    assert "provenance" not in memory
     assert repository.memory_management_edit_statement(
         memory_domain_id="u_local", selection=selection,
         fact_id=current["memory_id"], statement=changed["fact"]["statement"],
@@ -719,7 +721,7 @@ def test_owner_is_immutable_until_tool_result_deletion_then_projects_deleted_sou
         host_workspace_id=str(workspace_id),
     )
 
-    async def explain_deleted_source():
+    async def read_memory_after_source_deletion():
         io = KernelSessionIO()
         port = KernelMemoryToolPort(
             repository=repository,
@@ -731,16 +733,17 @@ def test_owner_is_immutable_until_tool_result_deletion_then_projects_deleted_sou
         )
         try:
             return json.loads(
-                (await port._get({"memory_id": current["memory_id"]}, explain=True)).content
+                (await port._get({"memory_id": current["memory_id"]})).content
             )
         finally:
             await port.aclose()
             await io.aclose(deadline_monotonic=monotonic() + 10)
 
-    explanation = asyncio.run(explain_deleted_source())
-    assert explanation["provenance"]["availability"] == "DELETED"
-    assert explanation["provenance"]["disposition"] is None
-    assert explanation["provenance"]["origin_context"] == "SOURCE_DELETED"
+    memory = asyncio.run(read_memory_after_source_deletion())
+    assert memory["statement"] == edited["fact"]["statement"]
+    assert memory["lifecycle"] == "ACTIVE"
+    assert memory["relations"][0]["relation_id"] == relation["relation_id"]
+    assert "provenance" not in memory
 
     _, repeated, _ = invoke(
         "mark_memory_relation",
@@ -1560,8 +1563,8 @@ def test_remember_related_preview_returns_three_exact_context_facts(
     assert coverage["bounded_search_not_exhaustive"] is True
 
 
-def test_direct_source_provenance_is_visible_only_in_its_origin_workspace(
-    direct_memory_session,
+def test_memory_get_omits_source_in_every_workspace_and_after_archival(
+    direct_memory_session, tmp_path,
 ):
     repository, lease, _invoke, remember = direct_memory_session
     _, saved, _ = remember("The design review is on Tuesday.")
@@ -1573,32 +1576,34 @@ def test_direct_source_provenance_is_visible_only_in_its_origin_workspace(
             "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
             (lease.guard.session_id,),
         ).fetchone()[0]
-    query = PostgresMemoryQuery(repository.connection_provider)
-    same = query.provenance(
-        read_binding=freeze_memory_read_context_binding(
-            domain=MemoryDomainContext("u_local", "transient"),
-            host_workspace_id=workspace_id,
-        ),
-        fact_id=saved["memory_id"],
-        deadline_monotonic=monotonic() + 30,
-    )
-    foreign = query.provenance(
-        read_binding=freeze_memory_read_context_binding(
-            domain=MemoryDomainContext("u_local", "transient"),
-            host_workspace_id="workspace:foreign",
-        ),
-        fact_id=saved["memory_id"],
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert same is not None and same.source_availability == "OPEN"
-    assert same.provenance_disposition == "SAME_ORIGIN"
-    assert same.producer_session_id == lease.guard.session_id
-    assert not hasattr(same, "tool_result_ids")
-    assert foreign is not None
-    assert foreign.source_availability == "OPEN"
-    assert foreign.provenance_disposition == "CROSS_ORIGIN_REDACTED"
-    assert foreign.producer_session_id is None
-    assert foreign.producer_entry_id is None
+    async def read_memory(host_workspace_id):
+        io = KernelSessionIO()
+        port = KernelMemoryToolPort(
+            repository=repository,
+            session_id=lease.guard.session_id,
+            read_binding=freeze_memory_read_context_binding(
+                domain=MemoryDomainContext("u_local", "transient"),
+                host_workspace_id=host_workspace_id,
+            ),
+            embedding_config=EmbeddingBackendConfig(),
+            io_owner=io,
+            settings=LocalSettingsStore(tmp_path / "settings.yaml"),
+        )
+        try:
+            return json.loads((await port._get({"memory_id": saved["memory_id"]})).content)
+        finally:
+            await port.aclose()
+            await io.aclose(deadline_monotonic=monotonic() + 10)
+
+    same = asyncio.run(read_memory(workspace_id))
+    foreign = asyncio.run(read_memory("workspace:foreign"))
+    assert same == foreign
+    assert same["statement"] == "The design review is on Tuesday."
+    assert set(same) == {
+        "memory_id", "kind", "context_product_label", "current_context",
+        "lifecycle", "statement", "recorded_at", "relations",
+        "advisory", "may_be_stale_or_incomplete",
+    }
 
     page_detail = repository.memory_management_detail(
         memory_domain_id="u_local",
@@ -1620,18 +1625,8 @@ def test_direct_source_provenance_is_visible_only_in_its_origin_workspace(
         session_id=lease.guard.session_id, memory_domain_id='u_local', closed_writer=lease.guard,
         deadline_monotonic=monotonic() + 30,
     )
-    closed = query.provenance(
-        read_binding=freeze_memory_read_context_binding(
-            domain=MemoryDomainContext("u_local", "transient"),
-            host_workspace_id=workspace_id,
-        ),
-        fact_id=saved["memory_id"],
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert closed is not None
-    assert closed.source_availability == "ARCHIVED"
-    assert closed.provenance_disposition == "SAME_ORIGIN"
-    assert closed.producer_session_id is None
+    closed = asyncio.run(read_memory(workspace_id))
+    assert closed == same
     closed_page = repository.memory_management_detail(
         memory_domain_id="u_local",
         selection=MemoryManagementSelection(),
@@ -1644,7 +1639,7 @@ def test_direct_source_provenance_is_visible_only_in_its_origin_workspace(
     }
 
 
-def test_provenance_rejects_fact_and_relation_owners_from_another_domain(
+def test_memory_page_rejects_fact_and_relation_owners_from_another_domain(
     direct_memory_session,
     stage2_migrated_postgres_database,
 ):
@@ -1673,22 +1668,16 @@ def test_provenance_rejects_fact_and_relation_owners_from_another_domain(
             relation_kind=MemoryRelationKind.CONTRADICTS,
         ),
     )
-    binding = freeze_memory_read_context_binding(
-        domain=MemoryDomainContext("u_local", "transient"),
-        host_workspace_id=other_workspace_id,
-    )
-    query = PostgresMemoryQuery(repository.connection_provider)
-    assert query.provenance(
-        read_binding=binding,
-        fact_id=other_fact["memory_id"],
-        deadline_monotonic=monotonic() + 30,
-    ) is not None
-    assert query.provenance(
-        read_binding=binding,
-        fact_id=left["memory_id"],
-        relation_ids=(relation["relation_id"],),
-        deadline_monotonic=monotonic() + 30,
-    ) is not None
+    def page_detail(memory_id):
+        return repository.memory_management_detail(
+            memory_domain_id="u_local",
+            selection=MemoryManagementSelection(),
+            fact_id=memory_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    assert page_detail(other_fact["memory_id"])["source"]["availability"] == "OPEN"
+    assert page_detail(left["memory_id"])["relations"][0]["relation_id"] == relation["relation_id"]
 
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         connection.execute(
@@ -1704,19 +1693,10 @@ def test_provenance_rejects_fact_and_relation_owners_from_another_domain(
             (other_lease.guard.session_id,),
         )
 
-    with pytest.raises(RuntimeError, match="memory fact owner lineage is broken"):
-        query.provenance(
-            read_binding=binding,
-            fact_id=other_fact["memory_id"],
-            deadline_monotonic=monotonic() + 30,
-        )
-    with pytest.raises(RuntimeError, match="memory relation owner lineage is broken"):
-        query.provenance(
-            read_binding=binding,
-            fact_id=left["memory_id"],
-            relation_ids=(relation["relation_id"],),
-            deadline_monotonic=monotonic() + 30,
-        )
+    with pytest.raises(RuntimeError, match="memory owner lineage is broken"):
+        page_detail(other_fact["memory_id"])
+    with pytest.raises(RuntimeError, match="memory owner lineage is broken"):
+        page_detail(left["memory_id"])
 
 
 def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(

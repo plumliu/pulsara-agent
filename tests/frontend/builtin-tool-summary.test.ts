@@ -37,7 +37,6 @@ describe('builtin tool summaries', () => {
     ['exit_plan', { plan_control: 'DRAFT_SUBMITTED_FOR_REVIEW' }, {}, '提交方案', '方案已提交，等待你的确认'],
     ['memory_search', { memories: [{ statement: 'RAW MEMORY' }] }, { query: '偏好' }, '搜索记忆', '本次找到 1 条相关记忆'],
     ['memory_get', { statement: 'RAW MEMORY' }, { memory_id: 'private-id' }, '读取记忆', '已读取记忆'],
-    ['memory_explain', { statement: 'RAW MEMORY', decision: {} }, {}, '查看记忆来源', '已读取记忆的来源与审核记录'],
     ['remember', { status: 'SAVED', memory_id: 'private-id' }, {}, '提交记忆', '已提交记忆'],
     ['mark_memory_relation', { status: 'SAVED', relation_kind: 'SUPERSEDES', source_memory_id: 'private-id', target_memory_id: 'private-id' }, {}, '标记记忆关系', '已标记取代关系'],
     ['mark_memory_relation', { status: 'SAVED', relation_kind: 'CONTRADICTS' }, {}, '标记记忆关系', '已标记冲突关系'],

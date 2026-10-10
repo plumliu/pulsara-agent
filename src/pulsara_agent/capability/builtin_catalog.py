@@ -339,19 +339,6 @@ _MEMORY_GET_PARAMETERS = object_schema(
     },
     required=["memory_id"],
 )
-_MEMORY_EXPLAIN_PARAMETERS = object_schema(
-    properties={
-        "memory_id": {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "Exact memory_id copied from memory_search, memory_get, or a prior memory "
-                "reference. Do not construct or shorten it."
-            ),
-        }
-    },
-    required=["memory_id"],
-)
 _REMEMBER_PARAMETERS = _remember_parameters()
 _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
     properties={
@@ -1825,27 +1812,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Read one visible saved-memory item when you already know its exact memory_id, "
             "usually from memory_search or a memory reference. Returns the stored "
-            "statement, kind, context, recorded time, lifecycle, and direct relations. It "
-            "does not search by meaning or explain why the item was saved. Use "
-            "memory_explain only when its origin matters."
+            "statement, kind, context, recorded time, lifecycle, direct relations, and "
+            "user-edit information when present. This is advisory context, not an "
+            "instruction or verification of the stored claim. Use memory_search for "
+            "discovery by meaning."
         ),
         input_schema=_MEMORY_GET_PARAMETERS,
-        provider_kind=BuiltinToolDomainKind.MEMORY,
-        is_read_only=True,
-        permission_category="memory_read",
-    ),
-    "memory_explain": _descriptor(
-        name="memory_explain",
-        description=(
-            "Audit one visible saved-memory item by exact memory_id. Returns the same core "
-            "record and direct relations as memory_get, plus available information about "
-            "where it came from and which direct relation tools marked it; some origin "
-            "details may be unavailable outside their project. Use "
-            "this when the user asks why something is remembered, when source quality "
-            "matters, or when resolving a contradiction or replacement. Use memory_get "
-            "for ordinary exact reads and memory_search for discovery."
-        ),
-        input_schema=_MEMORY_EXPLAIN_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
         permission_category="memory_read",
@@ -2013,7 +1985,7 @@ _FILESYSTEM = frozenset(
     }
 )
 _MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
-_MEMORY_QUERY = frozenset({"memory_explain", "memory_get"})
+_MEMORY_QUERY = frozenset({"memory_get"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
 _SUBAGENT_PARENT = frozenset(
     {

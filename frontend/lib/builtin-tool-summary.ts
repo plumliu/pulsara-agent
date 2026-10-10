@@ -28,7 +28,6 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   exit_plan: ['提交方案', '正在提交方案', '方案已提交，等待你的确认'],
   memory_search: ['搜索记忆', '正在查找相关记忆', '记忆搜索已结束'],
   memory_get: ['读取记忆', '正在读取已保存的记忆', '已读取记忆'],
-  memory_explain: ['查看记忆来源', '正在查看记忆的来源与审核记录', '已读取记忆的来源与审核记录'],
   remember: ['提交记忆', '正在提交记忆', '已提交记忆'],
   mark_memory_relation: ['标记记忆关系', '正在标记记忆关系', '已处理记忆关系'],
   list_capabilities: ['查看能力', '正在查看能力及来源', '已读取能力清单'],

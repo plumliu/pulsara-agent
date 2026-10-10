@@ -1163,15 +1163,15 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
         fact_id=saved["memory_id"],
         deadline_monotonic=monotonic() + 30,
     ) is not None
-    provenance = memory_query.provenance(
-        read_binding=read_binding,
+    detail = repo.memory_management_detail(
+        memory_domain_id="u_local",
+        selection=MemoryManagementSelection("project", workspace_id),
         fact_id=saved["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
-    assert provenance is not None
-    assert provenance.provenance_disposition == "SAME_ORIGIN"
-    assert provenance.producer_session_id == lease.guard.session_id
-    assert provenance.producer_session_id != created.child_session_id
+    assert detail["source"]["availability"] == "OPEN"
+    assert detail["source"]["locator"]["session_id"] == lease.guard.session_id
+    assert detail["source"]["locator"]["session_id"] != created.child_session_id
 
 
 def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(repo):

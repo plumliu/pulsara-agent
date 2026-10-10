@@ -72,3 +72,5 @@ blob-report/
 
 # Explicitly prepared platform-native dependency
 src/pulsara_agent/_vendor/ripgrep/
+
+papers/
