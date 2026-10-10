@@ -42,7 +42,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
     if name in {"search_sessions", "search_session_content"}:
         properties["query"] = {
             "type": "string",
-            "description": "Literal keywords; all must match in one entry. Required on the first content search.",
+            "description": "Natural-language or technical-identifier relevance query. Required on the first content search.",
         }
         if name == "search_session_content":
             properties["query"].update(minLength=1, pattern=r"\S")
@@ -118,3 +118,17 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
             },
         ],
     }
+
+
+def session_content_range(facts):
+    """Use the actual installed compile cut; never read latest compaction here."""
+    from pulsara_agent.model_input.contracts import ContextBindingBaseKind, CompactionSnapshotCarrier
+    binding=facts.context_binding_fact
+    if binding.base_kind is ContextBindingBaseKind.FULL_HISTORY:
+        return SessionContentRange(0)
+    carriers=[item.content for item in facts.canonical_input.items if isinstance(item.content,CompactionSnapshotCarrier)]
+    if len(carriers)!=1:
+        raise RuntimeError('session query lost the installed snapshot carrier')
+    active=carriers[0].active_request
+    excluded=active.entry_id if active is not None and active.location.value=='SNAPSHOT_EXACT' else None
+    return SessionContentRange(binding.source_through_sequence,excluded)

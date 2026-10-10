@@ -450,6 +450,7 @@ class LocalHttpServer:
             "/api/local-settings/postgres/reset", self._reset_postgres
         )
         self._app.router.add_get("/api/local-settings/memory-retrieval", self._read_memory_retrieval)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/history-enabled", self._set_history_enabled)
         self._app.router.add_put("/api/local-settings/memory-retrieval/embedding-enabled", self._set_embedding_enabled)
         self._app.router.add_put("/api/local-settings/memory-retrieval/ranking-mode", self._set_ranking_mode)
         self._app.router.add_put("/api/local-settings/memory-retrieval/{slot}", self._put_memory_model)
@@ -1298,6 +1299,16 @@ class LocalHttpServer:
             message.partition(":")[2].strip() if confirmation else message,
             status=409 if confirmation else 400,
         )
+
+    async def _set_history_enabled(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise self._memory_settings_error(ValueError("历史会话检索开关值无效。"))
+        try:
+            updated = await self.settings.set_retrieval_mode(history_enabled=body["enabled"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        return web.json_response(updated.memory_retrieval.public())
 
     async def _set_embedding_enabled(self, request):
         body = await self._json_body(request)

@@ -657,6 +657,32 @@ class _RepositoryKernel:
             )
             for offset, draft in enumerate(drafts)
         )
+        # Existing canonical writer transaction owns disposable search maintenance;
+        # accepted occurrences are not replayed and no search event is introduced.
+        from pulsara_agent.conversation_kernel.history_projection import (
+            history_projection_savepoint,
+            refresh_history_projection,
+        )
+
+        entry_ids = [
+            draft.subject.subject_id
+            for draft in drafts if draft.subject.slot is SubjectSlot.ENTRY
+        ]
+        if entry_ids:
+            with history_projection_savepoint(connection, session_id=session_id):
+                with connection.cursor(row_factory=dict_row) as cursor:
+                    changed = cursor.execute(
+                        """SELECT entry_sequence FROM pulsara_v3.transcript_entries
+                           WHERE session_id=%s AND id=ANY(%s)
+                             AND conversation_scope_kind='ROOT'
+                           ORDER BY entry_sequence""",
+                        (session_id, entry_ids),
+                    ).fetchall()
+                    for entry in changed:
+                        refresh_history_projection(
+                            connection, session_id=session_id,
+                            entry_sequence=entry["entry_sequence"],
+                        )
         self._record_event_batch(events)
         return events
 
@@ -872,7 +898,7 @@ class _RepositoryKernel:
         connection.execute(
             """
             INSERT INTO pulsara_v3.transcript_entries (
-                entry_owner_kind, id, session_id, workspace_id, turn_id, entry_sequence,
+                entry_owner_kind, id, origin_entry_id, session_id, workspace_id, turn_id, entry_sequence,
                 entry_kind, conversation_scope_kind, scope_subagent_task_id,
                 context_binding_revision_id, provider_input_through_sequence,
                 source_subagent_task_id,
@@ -881,11 +907,12 @@ class _RepositoryKernel:
                 source_plan_handoff_kind, scheduled_input,
                 inline_content, blob_id, content_digest, content_size,
                 content_media_type, content_codec
-            ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s)
             """,
             (
+                entry_id,
                 entry_id,
                 session_id,
                 workspace_id,

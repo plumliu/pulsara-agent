@@ -22,10 +22,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.memory.scope import is_valid_context_id
 from pulsara_agent.primitives.context import FrozenJsonObjectFact
 from pulsara_agent.primitives.context import thaw_json
-from pulsara_agent.retrieval.tokenizer import (
-    MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_ID,
-    MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_VERSION,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +42,6 @@ class PreparedRememberWrite:
     basis_refs: tuple[PreparedMemoryBasisReference, ...]
     related: tuple[MemoryRelatedPreview, ...]
     retrieval_summary: FrozenJsonObjectFact
-    search_terms: tuple[str, ...]
 
     def __post_init__(self) -> None:
         statement = normalize_memory_text(self.statement)
@@ -77,19 +72,9 @@ class PreparedRememberWrite:
             raise ValueError("related memory IDs are duplicated")
         if not isinstance(self.retrieval_summary, FrozenJsonObjectFact):
             raise TypeError("remember retrieval coverage must be frozen")
-        if len(self.search_terms) > 256:
-            raise ValueError("remember search terms are invalid")
-
     @property
     def semantic_digest(self) -> str:
         return memory_fact_semantic_digest(kind=self.kind, statement=self.statement)
-
-    @property
-    def search_contract(self) -> tuple[str, int]:
-        return (
-            MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_ID,
-            MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_VERSION,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,5 +131,4 @@ def memory_mutation_manifest(value: PreparedMemoryMutation) -> dict[str, object]
             for item in value.related
         ),
         "retrieval_summary": thaw_json(value.retrieval_summary),
-        "search_terms": value.search_terms,
     }

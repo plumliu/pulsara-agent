@@ -40,10 +40,6 @@ from pulsara_agent.conversation_kernel.memory.management import (
     with_end,
 )
 from pulsara_agent.memory.scope import CTX_GLOBAL
-from pulsara_agent.retrieval.tokenizer import (
-    MemoryRetrievalTokenizerV1,
-    MemoryRetrievalTokenBoundError,
-)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .locking import lock_canonical_identities
@@ -409,7 +405,7 @@ class _MemoryManagementOperations:
                 raise ValueError
         except ValueError as exc:
             raise ValueError("记忆版本无效，请刷新详情") from exc
-        # Use the same sealed tokenizer as remember; do not leave stale lexical
+        # The generated pg_search fields follow the canonical statement; no stale lexical
         # search terms or a dense vector representing the pre-edit statement.
         try:
             with self._management_connection(
@@ -443,10 +439,6 @@ class _MemoryManagementOperations:
                         if row["user_edited_at"] is not None else None,
                         "changed": False,
                     }
-                try:
-                    search_terms = MemoryRetrievalTokenizerV1().tokenize(normalized)
-                except MemoryRetrievalTokenBoundError as exc:
-                    raise ValueError("记忆正文超出检索资源边界") from exc
                 edited_at = c.execute(
                     "SELECT GREATEST(clock_timestamp(), %s::timestamptz + interval '1 microsecond')",
                     (row["updated_at"],),
@@ -458,11 +450,11 @@ class _MemoryManagementOperations:
                 )
                 updated = c.execute(
                     """UPDATE pulsara_v3.memory_facts
-                       SET statement=%s, fact_semantic_digest=%s, search_terms=%s,
+                       SET statement=%s, fact_semantic_digest=%s,
                            updated_at=%s, user_edited_at=%s
                        WHERE memory_domain_id=%s AND context_id=%s AND id=%s
                        RETURNING *""",
-                    (normalized, digest, list(search_terms), edited_at, edited_at,
+                    (normalized, digest, edited_at, edited_at,
                      memory_domain_id, context, fact_id),
                 ).fetchone()
                 c.execute("SET CONSTRAINTS ALL IMMEDIATE")

@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.history_search import (
+    PostgresHistoryQuery,
+    FrozenHistoryReadScope,
+)
+from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
+from pulsara_agent.ports.session_content import session_content_range
+
 import asyncio
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -130,6 +137,7 @@ class KernelMemoryToolPort:
         self._session_id = session_id
         self._read_binding = read_binding
         self._query = PostgresMemoryQuery(repository.connection_provider)
+        self._history = PostgresHistoryQuery(repository.connection_provider)
         self._embedding_config = embedding_config
         self._rerank_config = rerank_config or RerankBackendConfig()
         self._feature_config = feature_config or AdvisoryMemoryFeatureConfig()
@@ -304,7 +312,6 @@ class KernelMemoryToolPort:
             basis_refs=basis_refs,
             related=(),
             retrieval_summary=freeze_json({"disposition": "NOT_STARTED"}),
-            search_terms=self._query.tokenize_query(statement),
         )
         related, retrieval_summary = await self._related_for_remember(
             admitted.statement, context_id=context_id
@@ -479,7 +486,6 @@ class KernelMemoryToolPort:
             MemoryFactKind(str(requested_kind))
         # Query lexical bounds are an admission fence.  A malformed/overbound
         # query must not open the optional embedding or rerank transports.
-        query_terms = self._query.tokenize_query(query)
         embedding = None
         try:
             embedding = await self._embedding_provider()
@@ -501,7 +507,7 @@ class KernelMemoryToolPort:
             except Exception:
                 pass
         result = await self._parallel_recall(
-            terms=query_terms,
+            query=query,
             limit=limit,
             candidate_limit=max(limit, MAXIMUM_RERANK_CANDIDATES),
             requested_kind=(None if requested_kind is None else str(requested_kind)),
@@ -666,7 +672,12 @@ class KernelMemoryToolPort:
         return FrozenQueryEmbedding(tuple(vector), connection)
 
     async def _rerank_explicit(
-        self, query: str, result, *, total_deadline: float, purpose: RerankPurpose = "recall"
+        self,
+        query: str,
+        result,
+        *,
+        total_deadline: float,
+        purpose: RerankPurpose = "recall",
     ):
         try:
             retrieval_before = self._settings.read().memory_retrieval
@@ -715,7 +726,7 @@ class KernelMemoryToolPort:
                 provider.rerank(
                     remote_query,
                     documents,
-                    candidate_ids=tuple(item.fact_id for item in selected),
+                    candidate_ids=tuple(str(index) for index in range(len(selected))),
                     purpose=purpose,
                 ),
                 timeout_seconds=self._remaining_for(
@@ -748,12 +759,12 @@ class KernelMemoryToolPort:
             by_tier: dict[int, list] = {}
             for row in rows:
                 item = selected[row.index]
-                by_tier.setdefault(item.match_tier, []).append(item)
+                by_tier.setdefault(getattr(item, "match_tier", 0), []).append(item)
             reranked = tuple(item for tier in sorted(by_tier) for item in by_tier[tier])
-            selected_ids = {item.fact_id for item in selected}
+            selected_ids = {id(item) for item in selected}
             ordered = (
                 *reranked,
-                *(item for item in result.facts if item.fact_id not in selected_ids),
+                *(item for item in result.facts if id(item) not in selected_ids),
             )
             disposition = "APPLIED"
         return type(result)(
@@ -833,83 +844,161 @@ class KernelMemoryToolPort:
             },
         )
 
-    async def freeze_automatic_recall_source(
-        self,
-        query: str,
-    ) -> ContextSourceCandidate | ContextSourceAbsentFact:
+    async def freeze_automatic_recall_source(self, query: str, *, canonical_facts=None):
         normalized = " ".join(query.split())
-        if self.classify_automatic_trigger(normalized) is not (
-            AutomaticMemoryTriggerDisposition.ELIGIBLE
+        if (
+            self.classify_automatic_trigger(normalized)
+            is not AutomaticMemoryTriggerDisposition.ELIGIBLE
         ):
             return build_memory_context_source(
                 kind=ContextSourceKind.MEMORY_RECALL,
                 texts=None,
                 absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             )
-        # The query text is already frozen. Remote embedding and local Chinese
-        # tokenization are independent; a cold tokenizer must not delay HTTP.
-        vector_task = asyncio.create_task(
-            self._automatic_query_embedding(normalized),
-            name="memory-automatic-query-vector",
-        )
+        deadline = self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS)
+        scope = None
         try:
-            query_terms = await self._io.run(
-                self._automatic_query_terms,
-                normalized,
-                deadline_monotonic=self._canonical_deadline(
-                    MEMORY_SEARCH_TIMEOUT_SECONDS
-                ),
+            enabled = self._settings.read().memory_retrieval.history_enabled
+            if enabled and canonical_facts is not None:
+                scope = FrozenHistoryReadScope(
+                    self._session_id,
+                    self._read_binding.memory_domain_id,
+                    session_content_range(canonical_facts),
+                    tuple(
+                        dict.fromkeys(
+                            i.source_entry_id
+                            for i in canonical_facts.canonical_input.items
+                            if i.source_entry_id is not None
+                        )
+                    ),
+                )
+        except Exception:
+            pass
+
+        async def history_route():
+            if scope is None:
+                return ()
+            try:
+                return await self._io.run(
+                    self._history.automatic_candidates,
+                    scope=scope,
+                    query=normalized,
+                    deadline_monotonic=deadline,
+                )
+            except Exception:
+                return ()
+
+        # Local sparse/history start before remote embedding completes. Their IO
+        # remains owned by KernelSessionIO and all tasks settle on cancellation.
+        tasks = [
+            asyncio.create_task(
+                self._io.run(
+                    self._query.sparse_candidates,
+                    read_binding=self._read_binding,
+                    query=normalized,
+                    kind_filter=None,
+                    limit=20,
+                    automatic=True,
+                    deadline_monotonic=deadline,
+                )
+            ),
+            asyncio.create_task(history_route()),
+            asyncio.create_task(self._automatic_query_embedding(normalized)),
+        ]
+        try:
+            sparse, history, vector = await asyncio.gather(
+                *tasks, return_exceptions=True
             )
-            vector = await vector_task
         finally:
-            if not vector_task.done():
-                vector_task.cancel()
-            await asyncio.gather(vector_task, return_exceptions=True)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        sparse_ok = not isinstance(sparse, BaseException)
+        sparse = () if not sparse_ok else sparse
+        history = () if isinstance(history, BaseException) else history
+        # Each post-retrieval operation keeps its existing watchdog budget.
+        # A failed sibling must not consume admission time for successful
+        # candidates' canonical checks (or the optional ranking request).
+        dense = ()
+        if (
+            not isinstance(vector, BaseException)
+            and vector is not None
+            and self.embedding_connection() == vector.connection
+        ):
+            try:
+                dense = (
+                    await self._io.run(
+                        self._query.dense_candidates,
+                        read_binding=self._read_binding,
+                        vector=vector.vector,
+                        embedding_contract=vector.connection.embedding_contract,
+                        kind_filter=None,
+                        limit=20,
+                        purpose=DenseRecallPurpose.AUTOMATIC_ROOT,
+                        automatic=True,
+                        deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+                    )
+                ).facts
+            except Exception:
+                pass
         try:
-            result = await self._parallel_recall(
-                terms=query_terms,
-                limit=5,
-                candidate_limit=20 if self.ranking_enabled() else 5,
-                requested_kind=None,
-                query_embedding=vector,
+            memory = await self._io.run(
+                self._query.canonical_refetch,
+                read_binding=self._read_binding,
+                ranked=self._query.fuse_candidates(sparse, dense),
                 automatic=True,
-                deadline_monotonic=self._canonical_deadline(
-                    MEMORY_SEARCH_TIMEOUT_SECONDS
-                ),
+                deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
             )
         except Exception:
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RECALL,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
-            )
-        result = replace(
-            result,
-            facts=tuple(
-                item
-                for item in result.facts
-                if _sensitive_profile_is_eligible(item, normalized)
-            ),
+            memory = ()
+        memory = tuple(
+            item for item in memory if _sensitive_profile_is_eligible(item, normalized)
+        )
+        # Independent history projection is all-or-nothing, before pool quotas.
+        history = tuple(
+            item for item in history if _rerank_document_projection(item) is not None
+        )
+        pool = _elastic_candidates(memory, history, 15, 5)
+        result = MemoryQueryResult(
+            disposition=MemoryRetrievalDisposition.COMPLETE
+            if pool
+            else MemoryRetrievalDisposition.NO_MATCH,
+            facts=pool,
+            attempted_stages=(),
+            sparse_available=sparse_ok,
+            dense_available=bool(dense),
         )
         result = await self._rerank_explicit(
-            normalized,
-            result,
-            total_deadline=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+            normalized, result,
+            total_deadline=self._deadlines.deadline(KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK)
         )
-        result = replace(result, facts=result.facts[:5])
-        return await self._automatic_recall_source(result, normalized)
-
-    def _automatic_query_terms(
-        self,
-        text: str,
-        *,
-        deadline_monotonic: float,
-    ) -> tuple[str, ...]:
-        try:
-            return self._query.tokenize_query(text)
-        except ValueError:
-            # A lexical resource-bound input disables only the sparse channel.
-            return ()
+        selected = (
+            result.facts[:5]
+            if result.rerank_disposition == "APPLIED"
+            else _elastic_candidates(memory, history, 4, 1)
+        )
+        selected_history = tuple(
+            item for item in selected if isinstance(item, HistoryCandidate)
+        )
+        if scope is not None and selected_history:
+            try:
+                valid = await self._io.run(
+                    self._history.canonical_refetch,
+                    scope=scope,
+                    candidates=selected_history,
+                    deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+                )
+            except Exception:
+                valid = ()
+            selected = tuple(
+                item
+                for item in selected
+                if not isinstance(item, HistoryCandidate) or item in valid
+            )
+        return await self._automatic_recall_source(
+            replace(result, facts=selected), normalized
+        )
 
     async def _automatic_query_embedding(
         self, normalized: str
@@ -940,12 +1029,16 @@ class KernelMemoryToolPort:
         result: MemoryQueryResult,
         normalized: str,
     ) -> ContextSourceCandidate | ContextSourceAbsentFact:
+        history = tuple(
+            item for item in result.facts if isinstance(item, HistoryCandidate)
+        )
         filtered_facts = tuple(
             item
             for item in result.facts
-            if _sensitive_profile_is_eligible(item, normalized)
+            if not isinstance(item, HistoryCandidate)
+            and _sensitive_profile_is_eligible(item, normalized)
         )
-        if not filtered_facts:
+        if not filtered_facts and not history:
             absence = (
                 ContextSourceAbsenceKind.UNAVAILABLE
                 if result.disposition.value == "UNAVAILABLE"
@@ -966,13 +1059,16 @@ class KernelMemoryToolPort:
                 ),
             )
         except Exception:
-            # Without the same-context contradiction join we cannot safely
-            # present a seemingly complete automatic advisory projection.
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RECALL,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
-            )
+            # Contradiction read failure invalidates only the memory source.
+            # Already selected history remains available, with no final refill.
+            if not history:
+                return build_memory_context_source(
+                    kind=ContextSourceKind.MEMORY_RECALL,
+                    texts=None,
+                    absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
+                )
+            filtered_facts = ()
+            relations = ()
 
         def item_payload(item):
             return {
@@ -997,7 +1093,13 @@ class KernelMemoryToolPort:
                 for relation in relations
             )
         )
-        full_items = tuple(item_payload(item) for item in presentation)
+        full_items = tuple(
+            item.projection()
+            if isinstance(item, HistoryCandidate)
+            else {"source": "memory", **item_payload(item)}
+            for item in result.facts
+            if isinstance(item, HistoryCandidate) or item in presentation
+        )
         compact_items = full_items[: min(3, len(full_items))]
         ref_items = tuple(
             {
@@ -1032,6 +1134,7 @@ class KernelMemoryToolPort:
             domain_identity={
                 "membership": membership,
                 "order": tuple(item.fact_id for item in presentation),
+                "history": tuple(item.document for item in history),
                 "warnings": warning_identity,
             },
         )
@@ -1074,7 +1177,7 @@ class KernelMemoryToolPort:
     async def _parallel_recall(
         self,
         *,
-        terms: Sequence[str],
+        query: str,
         limit: int,
         candidate_limit: int,
         requested_kind: str | None,
@@ -1111,7 +1214,7 @@ class KernelMemoryToolPort:
             sparse_operation = self._io.run(
                 self._query.sparse_candidates,
                 read_binding=self._read_binding,
-                terms=terms,
+                query=query,
                 kind_filter=kind_filter,
                 limit=20 if automatic else 40,
                 automatic=automatic,
@@ -1206,7 +1309,7 @@ class KernelMemoryToolPort:
             and self.embedding_connection() != query_embedding.connection
         ):
             return await self._parallel_recall(
-                terms=terms,
+                query=query,
                 limit=limit,
                 candidate_limit=candidate_limit,
                 requested_kind=requested_kind,
@@ -1446,6 +1549,17 @@ def _prepare_rerank_projection(query: str, facts) -> tuple[str, tuple[str, ...]]
 
 
 def _rerank_document_projection(fact) -> bytes | None:
+    if isinstance(fact, HistoryCandidate):
+        encoded = canonical_json_bytes(fact.projection())
+        return (
+            encoded
+            if len(encoded) <= MAXIMUM_RERANK_DOCUMENT_BYTES
+            and PulsaraHeuristicTokenEstimatorV3().estimate_text(
+                encoded.decode("utf-8")
+            )
+            <= 4000
+            else None
+        )
     document = {
         "kind": fact.fact_kind,
         "context_product_label": memory_context_product_label(fact.context_id),
@@ -1465,9 +1579,7 @@ def _rerank_document_projection(fact) -> bytes | None:
         head = (kept + 1) // 2
         tail = kept // 2
         document["statement"] = (
-            fact.statement[:head]
-            + marker
-            + (fact.statement[-tail:] if tail else "")
+            fact.statement[:head] + marker + (fact.statement[-tail:] if tail else "")
         )
         return canonical_json_bytes(document)
 
@@ -1655,3 +1767,12 @@ __all__ = [
     "MEMORY_TOOL_NAMES",
     "MEMORY_WRITE_TOOL_NAMES",
 ]
+
+
+def _elastic_candidates(memory, history, memory_quota, history_quota):
+    total = memory_quota + history_quota
+    m = min(len(memory), memory_quota)
+    h = min(len(history), history_quota)
+    m += min(len(memory) - m, total - m - h)
+    h += min(len(history) - h, total - m - h)
+    return (*memory[:m], *history[:h])

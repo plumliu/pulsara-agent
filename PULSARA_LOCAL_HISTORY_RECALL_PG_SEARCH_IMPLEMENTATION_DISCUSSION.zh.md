@@ -2,7 +2,7 @@
 
 日期：2026-10-11
 
-状态：采用 Q-A-Q 搜索文档与候选单位，只允许完整 QAQ 或完整 QA 两种合格形态，Q₁/A 部分不合格则整单元排除；单个候选正文上限 1024 个启发式 tokens，超长时按 512＋256＋256 初始软配额截取并固定顺序回流；保留批注屏障，取消跨候选窗口合并，重排取前 5 条直接展示且不补位。多命中的中心采用所选合法检索文本中最早的实际命中；fork 通过规范原始身份和完整可见内容识别精确副本。已确定的搜索范围、弹性候选配额、内容资格、`include_tools`、前端独立开关及 `MEMORY_RECALL` 接入继续保留。历史检索默认开启；历史路初选固定最多 20 个单元，剔除无效候选后不补查，不向用户暴露数量配置。产品参数已确定；固定扩展版本的定位接口与规范身份接入仍需实施核验。本文只更新方案，不修改代码、数据库或运行配置。
+状态：采用 Q-A-Q 搜索文档与候选单位，只允许完整 QAQ 或完整 QA 两种合格形态，Q₁/A 部分不合格则整单元排除；单个候选正文上限 1024 个启发式 tokens，超长时按 512＋256＋256 初始软配额截取并固定顺序回流；保留批注屏障，取消跨候选窗口合并，重排取前 5 条直接展示且不补位。多命中的中心采用所选合法检索文本中最早的实际命中；fork 通过规范原始身份和完整可见内容识别精确副本。已确定的搜索范围、弹性候选配额、内容资格、`include_tools`、前端独立开关及 `MEMORY_RECALL` 接入继续保留。历史检索默认开启；历史路初选固定最多 20 个单元，剔除无效候选后不补查，不向用户暴露数量配置。产品参数和生产路径已完成硬切；PostgreSQL 17 / pg_search 0.26.1 的真实查询、规范身份、混合 Decision 与主模型集成已验证。部署与验证记录见第 9 节。
 
 相关讨论：[记忆链路的实用改进方向](PULSARA_MEMORY_PRACTICAL_IMPROVEMENT_DISCUSSION.zh.md)。
 
@@ -21,31 +21,17 @@
 
 本方案优先改善覆盖与检索质量。第三路并行执行可以避免串行增加本地查询耗时，但只要本轮仍需等待远程 query embedding，秒级等待就可能继续由 embedding 主导。本文不承诺增加第三路后自动降低总时延，也暂不引入“本地命中后跳过 embedding”的策略。
 
-## 2. 当前代码基线
+## 2. 当前生产实现
 
-### 隐式记忆召回
+[`memory_tools.py`](src/pulsara_agent/conversation_kernel/memory_tools.py) 使用本轮输入并行启动本地 BM25 记忆查询、历史查询与可选 query embedding；向量返回后执行现有记忆融合和规范回读。历史资格、精确副本折叠和初选最多 20 个单元由共享 SQL 所有者处理，再完成摘录；无效项不向后补查。混合候选按 15＋5 弹性配额交给一次 Decision / Rerank；成功取前 5，否则使用 4＋1 弹性选择。所选历史再次规范回读，失效整条省略，不补位。
 
-[`memory_tools.py`](src/pulsara_agent/conversation_kernel/memory_tools.py) 中的 `freeze_automatic_recall_source` 使用本轮用户输入，启动 query embedding 与本地分词；得到向量后，进入稀疏与向量候选查询、融合、规范正文回读和可选重排。
+[`history_projection.py`](src/pulsara_agent/conversation_kernel/history_projection.py)、[`history_search.py`](src/pulsara_agent/conversation_kernel/history_search.py) 与 [`history_excerpt.py`](src/pulsara_agent/conversation_kernel/history_excerpt.py) 分别负责规范内容投影、资格与 BM25 查询、最早实际命中映射及正文预算。`search_session_content` 共用这些所有者；按 BM25 分数与规范代表键实时分页。`read_session_content` 的精确锚点读取保留。`search_sessions` 的列表搜索尚未改为相关性搜索，不属于本次硬切。
 
-启用重排时，现有判别池最多 20 条，最终召回最多 5 条；未启用重排时，当前候选截断更早。最终还受实际提示词预算约束。这些是每次操作的预算，不是记忆或历史的总量限制。
+普通记忆直接索引规范 `statement`，显式搜索、隐式召回和写入相关记忆查询共用 [`memory/recall.py`](src/pulsara_agent/conversation_kernel/memory/recall.py) 与 [`retrieval/pg_search.py`](src/pulsara_agent/retrieval/pg_search.py)。旧 `search_terms`、合成 `search_document`、GIN / `ts_rank_cd`、SQL 查询 helper、Python Jieba 与旧 tokenizer 契约已删除。规范正文的不可变检查继续由 `seal_memory_fact` 保持。
 
-当前普通记忆正文的保存上限是 8 KiB UTF-8 字节，`RESPONSE_PREFERENCE` 为 2 KiB，定义见 [`memory/contracts.py`](src/pulsara_agent/conversation_kernel/memory/contracts.py)。此前实验中的“约 70 汉字 / 50 words”是模拟语料长度，不是生产限制。
+普通记忆正文仍限制为 8 KiB UTF-8，`RESPONSE_PREFERENCE` 为 2 KiB。它原有的重排首尾投影和完整正文 / 回读 ID 展示降级保留；历史使用独立完整投影，只允许保留已经判别的摘录或整条省略。1024 启发式 tokens 仅约束每个历史候选正文，不计标题、角色、时间、批注身份标签和省略标记；完整协议包装仍受现有字节与 token 边界检查。
 
-普通记忆送入重排时默认使用完整正文；包含元数据的候选 JSON 超过 8 KiB 时才截取正文首尾并标记截断，另有每份候选 4000 启发式 tokens 与整个请求的资源检查。最终召回通常提供所选条目的完整正文；提示词预算不足时可以减少到最多 3 条完整正文或仅提供回读 ID。本方案的历史片段预算不改变普通记忆的这些正文处理边界。
-
-[`memory/recall.py`](src/pulsara_agent/conversation_kernel/memory/recall.py) 的稀疏路径使用 `search_terms` 与 `search_document`，先按命中词项数，再按 `ts_rank_cd` 排序。当前 `search_document` 来自去重词项的拼接，不是原始正文，因此没有忠实保留正文的词频与词语位置。
-
-这涉及 [`memory_v1.py`](src/pulsara_agent/retrieval/tokenizer/memory_v1.py) 和 [clean-v0 SQL 基线](src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql)。`ts_rank_cd` 本身支持覆盖密度排序，但当前输入限制了它能利用的信息；它也不是 BM25。
-
-### 会话搜索
-
-[`session_search.py`](src/pulsara_agent/conversation_kernel/session_search.py) 的会话搜索按 memory domain 读取会话，以应用层关键词匹配处理正文。当前默认范围没有按工作目录过滤。
-
-[`session_content.py`](src/pulsara_agent/conversation_kernel/session_content.py) 的 `search_session_content` 对授权会话的条目做关键词匹配，保留分页和当前会话可读范围约束。它与 `read_session_content` 当前还支持 `include_tools`。
-
-[`session_text.py`](src/pulsara_agent/conversation_kernel/session_text.py) 已有规范保存文本的解码与正文提取能力。后续应复用这些规范读取边界，避免另造一套历史内容解析器。
-
-当前批注由 [`PromptAnnotationPart`](src/pulsara_agent/llm/input.py) 保存 `quote`、`comment` 与内部 `source` 定位；搜索文本提取只保留新增正文与 `comment`。这个索引边界保留，命中后的片段组装则需要恢复所属用户消息的全部引用、批注及普通正文，作为不可拆文本整体处理，不能直接把索引文本当成最终展示正文。
+历史批注复用现有规范 PromptAnnotationPart 解码：只有新增正文与 comment 进入索引；展示恢复 quote、comment 与整条普通正文，整条消息原子保留。查询工具自身的参数与结果、思考和排除的数据块不参与历史正文索引。
 
 ## 3. 依赖与 Pulsara 的职责
 
@@ -167,7 +153,7 @@ BM25 使用词频、文档长度和语料统计。词项位置支持短语及邻
 
 游标只表达续查位置，不是授权证明。每页复核调用者与查询范围，不能通过修改游标扩大权限；改变 query 或搜索范围需要重新开始查询。新搜索不接受旧的历史序号/文本偏移游标，不保留两套搜索分页兼容路径。优先使用数据库与扩展支持的排序、过滤和分页能力，具体 SQL 及执行计划在固定版本上核验，不在应用层扫描全历史后排序。
 
-采用实时查询分页：语料及评分统计不变时，连续分页应无重复、无遗漏且同分顺序稳定；翻页期间新增、修改、删除或评分统计变化可能改变位置，不承诺跨页数据库快照一致性。需要刷新结果时重新搜索，不为此新增持久搜索快照、结果注册表或跨模型调用保持的数据库事务。原始可读范围仍受冻结边界约束，后续页面不能借实时查询扩大它。
+采用实时查询分页：语料及评分统计不变时，连续分页应无重复、无遗漏且同分顺序稳定；翻页期间新增、修改、删除或评分统计变化（包括 VACUUM 清理旧索引版本）可能改变位置，不承诺跨页数据库快照一致性。需要刷新结果时重新搜索，不为此新增持久搜索快照、结果注册表或跨模型调用保持的数据库事务。原始可读范围仍受冻结边界约束，后续页面不能借实时查询扩大它。
 
 ## 5. 搜索范围与结果预算
 
@@ -333,6 +319,8 @@ BM25 使用词频、文档长度和语料统计。词项位置支持短语及邻
 - 未命中的普通问题继续从开头、结尾向中间增加；两部分相遇后只保留一份原文，不重复计量。
 - 未命中的 A 沿初始所选开头或结尾继续增长。
 
+命中批注消息预先整体保留后，扩展游标移到该消息的两侧外边界，再按相同方向与屏障继续；已选完整批注不能被当作整个命中区域的终点，也不重复计入预算。
+
 已保留的正文不撤回，不为换入另一个区域重新裁短它。回流不突破 Q-A-Q 单元、批注屏障或可读范围，不从相邻问答单元借入正文。1024 是上限，允许因边界而不足额返回。
 
 例如命中 A，Q₁ 和 Q₂ 的完整正文各为 100，A 足够长：
@@ -420,7 +408,7 @@ Decision / Rerank 使用按 Q-A-Q 配额完成截取的候选及必要的说话�
 | 英文词形变化 | 英文分析字段使用内置 stemming，验证单复数和常见词形 |
 | 技术标识 | 使用合适的原形分析字段，验证路径、模型 ID、下划线、连字符及版本号 |
 
-同一列的多分析字段由引擎提供，不在业务层复制多份规范正文。技术标识的完整匹配和拆词匹配需要一起验证；不能只对整段正文使用 literal 分析，就声称能检索其中任意完整标识。
+分析由引擎提供。固定版本的命中位置接口要求物理列，因此 clean-v0 使用由原始正文生成的 `_en`、`_tech` 列作为最小适配；它们不构成第二份规范正文，不能由业务写入。技术标识的完整匹配和拆词匹配需要一起验证；不能只对整段正文使用 literal 分析，就声称能检索其中任意完整标识。
 
 自然语言 query 不应默认要求所有词全部命中。普通召回、用户明确输入的短语与技术标识分别如何构造查询、是否增加邻近权重，要依据实际中英文样例选择，不复制旧的“所有关键词都必须命中”行为作为新引擎的默认。
 
@@ -443,11 +431,13 @@ Decision / Rerank 使用按 Q-A-Q 配额完成截取的候选及必要的说话�
 
 ### 扩展接入
 
-当前 [`docker-compose.yml`](docker-compose.yml) 的 PostgreSQL 镜像包含 pgvector，不能据此假定已包含 pg_search。后续需选择并固定实际验证过的 PostgreSQL / pg_search 版本，更新开发及测试镜像，并核查本地运行实例的扩展安装条件。
+[`docker-compose.yml`](docker-compose.yml) 固定 `paradedb/paradedb:0.26.1-pg17`，包含 pg_search、pgvector 和所需预加载配置。PG17 数据目录不能直接复用 PG16 目录；按本项目开发硬切规则重建经过核验的可丢弃数据库。
 
-官方部署说明涉及扩展二进制、服务器配置与重启；仅写 `CREATE EXTENSION` 不足以安装缺失的二进制。本文没有执行安装，也没有确认当前生产数据库已具备该能力。
+本机 Homebrew PostgreSQL 17.9 已安装官方 pg_search 0.26.1 Apple arm64 发布包，并设置 `shared_preload_libraries='pg_search'` 后重启服务器。扩展二进制与 control / SQL 文件必须安装到实际运行的服务器目录；仅写 `CREATE EXTENSION` 无法安装它们。clean-v0 创建并验证精确扩展版本，不提供旧引擎回退。迁移 runner / verifier 同时检查引擎可用性和运行角色权限。
 
-新路径不静默退回全历史应用层扫描或被替代的 `ts_rank_cd`。部署时检查引擎可用性；运行中单路搜索失败按已有 advisory recall 边界处理，其他成功路径仍可使用，显式搜索向调用者报告具体不可用原因。取消、超时和 IO 收尾继续由现有所有者负责，不留下脱离请求的后台查询。
+本轮核验并重置了保存配置指向的本地 `localhost:5432/pulsara`，使用现有 clean-v0 所有者重建。保存设置仅按用户明确例外增加默认开启的 `history_enabled`，其余配置值保持不变；设置 schema 硬切为 v4，无旧版本读取路径。
+
+新路径不静默退回全历史应用层扫描或被替代的 `ts_rank_cd`。部署时检查引擎可用性；运行中单路搜索失败按已有 advisory recall 边界处理，其他成功路径仍可使用，显式搜索向调用者报告具体不可用原因。取消、超时和 IO 收尾继续由现有所有者负责，不留下脱离请求的后台查询。隐式召回初选结束后，向量查询、普通记忆规范回读和历史最终回读分别在操作启动时取得既有 canonical watchdog 预算，重排使用既有 rerank watchdog 预算；失败支路不能耗尽成功来源后续操作的 admission 预算，也不能通过删除真实性检查保留结果。
 
 ### 已确定的产品参数与实施核验
 
@@ -456,7 +446,7 @@ Decision / Rerank 使用按 Q-A-Q 配额完成截取的候选及必要的说话�
 1. **历史初选固定 20，不补查。** 每次只处理资格过滤、精确去重后的最多 20 个 QAQ/QA 单元，剔除无效摘录后不查后续排名；不向用户暴露候选数量配置。此限制约束单次处理工作量，不限制历史总量。
 2. **历史检索默认开启。** 独立开关先放在“设置 → 模型 → 记忆检索”，用户可以配置启停，页面归属后续另行调整。
 
-索引到规范展示正文的区间映射、实际安装上下文的冻结范围传递、历史候选独立投影与整条省略、显式搜索的相关性键集分页也已确定。实施核验另行覆盖：固定扩展版本的命中位置接口与最早命中提取、位置映射正确性、`origin_entry_id` 在规范写入与 fork 中的事务接入、精确副本折叠及稳定代表选择的查询实现，以及分页 SQL 的执行计划。判别请求的具体字段与冻结范围的调用接入点同样需要代码验证；这些细节尚未验证，不表示上述产品行为仍待决定。内部定位继续保留，不能因模型侧省略 ID 而削弱授权与去重。本节不再保留产品待定参数；实施验证仍须如实报告依赖或集成上的实际缺口。
+索引到规范展示正文的区间映射、实际安装上下文的冻结范围传递、历史候选独立投影与整条省略、显式搜索的相关性键集分页也已确定。实际实现与测试覆盖：固定扩展版本的命中位置接口与最早命中提取、位置映射正确性、`origin_entry_id` 在规范写入与 fork 中的事务接入、精确副本折叠及稳定代表选择的查询实现，以及分页 SQL 的执行计划。判别请求的具体字段与冻结范围的调用接入点同样需要代码验证；真实 PostgreSQL 测试与 provider dogfood 已完成主要边界验证。内部定位继续保留，不能因模型侧省略 ID 而削弱授权与去重。本节不再保留产品待定参数；实施验证仍须如实报告依赖或集成上的实际缺口。
 
 ### 验证重点
 
@@ -508,4 +498,43 @@ Decision / Rerank 使用按 Q-A-Q 配额完成截取的候选及必要的说话�
 - [扩展部署](https://www.paradedb.com/docs/operate/deploy/self-hosted/extension)
 - [引擎限制](https://www.paradedb.com/docs/concepts/limitations)
 
-具体 SQL API 与配置以实施时固定并验证的版本为准。本文引用官方能力，不表示相应功能已经在 Pulsara 安装、接入或完成验证。
+具体 SQL API 与配置以实施时固定并验证的版本为准。Pulsara 使用的 API、配置和实际验证范围见以下实施记录。
+
+
+## 9. 实施与验证记录（2026-10-11）
+
+### 固定依赖的实际边界
+
+- pg_search 0.26.1 的 `snippet_positions` 返回原始 UTF-8 byte intervals；Pulsara 通过规范 entry / block / part 映射还原展示字符坐标。只读取实际匹配字段的区间，并排除拼接分隔符、quote 与未选中版本。
+- 该版本的 analyzer alias 无法直接用于物理 Var 的位置接口，真实探针报错；因此使用生成列。各语料索引采用相同 `WITH(text_fields=...)` JSON 配置：Jieba search mode、英文 stemming、技术标识 regex，保持自然语言 query 原文并进行字段 OR 查询。
+- 该版本 typmod 配置中的 `stopwords` 尚未接入（官方实现保留 TODO）。采用依赖支持的 JSON tokenizer 配置去除标点与空白，避免连字符和冒号使无关正文命中。`alpha_num_only` 会过滤中文，未采用。没有复制分词器或搜索引擎。
+- QA 与 QAQ 同索引、同正文布局；资格分支互斥，在单次统一评分与精确副本折叠之后才 LIMIT。命中位置随后仅为已经入选的 ID 查询，不增加候选、不查第 21 名。
+- 分页以 `score::double precision` 和 `(session_id,q1_entry_id)` 排序，游标用 float.hex 保留精度。每页实时核验权限、范围、规范内容和副本代表；它不是冻结语料快照，语料和引擎统计变化可能改变后续可见顺序。旧关键词搜索游标不兼容。
+
+### 唯一新增关系的产品理由
+
+`history_search_documents` 是可丢弃的 BM25 投影，需要同时表达 QA / QAQ 与 include_tools 两种正文布局，以便在 top K 前选择合法版本并由数据库统一评分。规范权威仍是 transcript、turn / imported group、tool result 和现有完整 artifact；投影在现有规范写入及 fork 事务内更新，无新增事件或任务。Q₁ / A 无法完整解码或回读时整单元排除；仅 Q₂ 不可恢复时选 QA。include_tools 下无法找到工具结果规范归属时不能猜测排除类别，整单元不合格。投影维护置于现有规范事务的独立 savepoint 内；可恢复 SQL 错误、statement timeout 或投影适配异常只回滚本次派生写入并记录诊断，不阻止合法规范记录提交。回滚保留的旧投影仍须通过规范正文比较，失效候选不返回；后续规范写入或显式重建可以恢复投影，不新增修复任务。连接断开等使外层规范事务本身无法提交的故障，仍由现有规范写入所有者报告，不伪称提交成功。会话与 Q₁ / Q₂ 删除级联移除投影，不将它作为限制规范删除的持久语义关系。重建按规范 Q₁ 键集分页，没有历史总量上限。
+
+关系数由 30 增至 31；committed events 30、live events 24、subject slots 11、append guards 1 均不变。`origin_entry_id` 是规范 entry 字段：原生条目使用自身身份，fork 继承最初身份，不对父条目建立外键。精确副本比较规范身份与完整可见内容，先过滤资格再选择稳定代表；删除父会话不影响子会话。
+
+### 验证证据与范围
+
+`output/history-recall-20261011/query-plan.json` 记录真实 EXPLAIN ANALYZE：16 个父/子副本在 LIMIT 前折叠为 8 个单元，使用 ParadeDB Custom Scan；该小型探针的资格与折叠查询为 5.217 ms，仅所选 ID 的命中位置查询为 1.460 ms，不代表规模化时延保证。
+
+真实 PostgreSQL 测试覆盖中英文词形、混合技术标识、emoji byte offsets、资格与可读范围、QAQ / QA 互斥、当前可见副本排除、fork 折叠与父删除、键集分页、超长摘录配额回流及批注屏障；混合候选测试覆盖 15＋5 / 4＋1 缺额互补和选后失效不补位。
+
+真实 provider 使用保存的生产连接，通过现有只读设置注入到隔离 home 和已核验的可丢弃本地数据库。DeepSeek 主模型和保存的 OpenRouter System One Decision 完成同一轮普通记忆与历史混合判别；主模型正确引用紫色纸船方案及 API_key 安全设置，未另调检索工具。`output/history-recall-20261011/automatic-recall.json` 保留实际候选、判别响应与主模型输出，实际凭据已逐值移除。
+
+`output/history-recall-20261011/session-content-query.json` 记录跨会话检索、锚点读取、实际 compaction successor、自会话范围和长条目游标续读，6 次工具调用成功；工具和消息前缀连续性断言通过。前端回归 659 项通过，打包静态资源已经更新。Docker 镜像配置核验了固定发布版本的官方 Dockerfile 与 tag 工作流，本机没有运行 Docker daemon；真实数据库验证使用上述 Homebrew PostgreSQL。规模化 P50 / P95 与全面召回率基准不由本轮小规模 dogfood 代替，仍按第 8 节的方法开展。
+
+Python 当前收集 3124 项；全仓前缀、剩余文件批次及失败项定点复验覆盖全部测试。初始批次中旧关系计数、手写 origin_entry_id 缺失、旧模拟接口与跨测试域污染已按硬切契约修复，未增加 skip / xfail 或放宽断言。最后会话与历史组 52 项通过，后半段 528 项及新增投影删除 oracle 定点验证通过；三路取消收尾、设置独立性与 HTTP 原子性检查通过。TypeScript、任务涉及 Python Ruff 和 git diff --check 通过。详细批次记录见 `output/history-recall-20261011/verification.json`。应用最终已重启运行全部收尾变更，实际版本、开关和进程记录见 `activation.json`。
+
+### 实现复审后的修复与冻结
+
+实现复审确认并修复三项问题：派生投影失败通过规范事务内 savepoint 隔离；成功来源的后续回读与重排不复用已被失败支路耗尽的预算；已整体保留的中心批注从两侧外边界继续扩展，不重复计费。没有增加兼容路径、持久修复任务或新的超时常量。
+
+新增回归先复现旧行为失败，再验证修复：规范消息与 fork 的投影部分写入后注入 SQL 错误、真实 statement timeout 和解码异常，规范写入仍提交；旧投影回滚后必须由规范回读拒绝；历史/稀疏双向超时下另一来源保留且仍可重排；中心批注在初始软额度内外均保持完整并扩展两侧、接收余量。
+
+最终受影响回归四个文件共 100 项通过：`test_history_recall.py`、`test_memory_search_rerank_selection.py`、`test_prompt_startup_parallel.py`、`test_conversation_fork.py`。Ruff 与 diff-check 通过。分页精确断言在隔离测试库重建索引以固定统计后验证，未减弱断言；实时系统仍接受既定的评分统计变化，pg_search 的死行与 VACUUM 可影响分数。
+
+History recall design review 独立只读复审认可三项修复，并完成 61 项定点测试；最终 100 项回归补齐其提出的固定统计核验条件。实施者与 reviewer 均认为本轮实现可以冻结。此结论不替代此前明确未进行的 Docker 部署与规模化质量/时延基准。

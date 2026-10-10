@@ -51,7 +51,6 @@ from pulsara_agent.ports.artifact import (
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.retrieval.tokenizer import MemoryRetrievalTokenizerV1
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
 from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -191,7 +190,6 @@ def _open_direct_memory_session(repository, *, workspace_root: str | None = None
             ),
             related=(),
             retrieval_summary=freeze_json({"status": "COMPLETE"}),
-            search_terms=MemoryRetrievalTokenizerV1().tokenize(statement),
         )
         return invoke(
             "remember",
@@ -283,9 +281,9 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         row = connection.execute(
-            """SELECT f.search_terms,
-                      f.search_document @@ plainto_tsquery('pg_catalog.simple', 'violet') AS new_match,
-                      f.search_document @@ plainto_tsquery('pg_catalog.simple', 'amber') AS old_match,
+            """SELECT f.statement,
+                      f.statement_en ||| 'violet' AS new_match,
+                      f.statement_en ||| 'amber' AS old_match,
                       e.fact_id AS embedding_fact_id
                FROM pulsara_v3.memory_facts f LEFT JOIN pulsara_v3.memory_embeddings e
                  ON e.memory_domain_id=f.memory_domain_id AND e.fact_id=f.id
@@ -1366,7 +1364,6 @@ def test_direct_writer_rejects_a_memory_body_not_owned_by_the_tool_call(
         basis_refs=(),
         related=(),
         retrieval_summary=freeze_json({"status": "COMPLETE"}),
-        search_terms=MemoryRetrievalTokenizerV1().tokenize("The actual fact."),
     )
     with pytest.raises(ConversationKernelConflict, match="does not exact-join"):
         invoke(
@@ -1404,16 +1401,13 @@ def test_memory_insert_cannot_commit_without_its_final_tool_result(
             connection.execute(
                 "INSERT INTO pulsara_v3.memory_facts "
                 "(id,memory_domain_id,context_id,created_by_tool_result_id,"
-                "lifecycle,fact_kind,statement,fact_semantic_digest,"
-                "search_contract_id,search_contract_version,search_terms) "
-                "VALUES (%s,'u_local','ctx:global',%s,'ACTIVE','FACT',%s,%s,"
-                "'pulsara.memory-retrieval-tokenizer',2,%s)",
+                "lifecycle,fact_kind,statement,fact_semantic_digest) "
+                "VALUES (%s,'u_local','ctx:global',%s,'ACTIVE','FACT',%s,%s)",
                 (
                     fact_id,
                     missing_result_id,
                     "This row has no final ToolResult.",
                     "sha256:" + "1" * 64,
-                    ["final", "toolresult"],
                 ),
             )
     with repository.connection_provider.connection(
@@ -1723,7 +1717,6 @@ def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(
             ),
             related=(),
             retrieval_summary=freeze_json({"status": "COMPLETE"}),
-            search_terms=MemoryRetrievalTokenizerV1().tokenize(statement),
         ),
     )
     assert accepted.result_state == "APPLICATION_ERROR"

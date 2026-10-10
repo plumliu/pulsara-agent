@@ -154,6 +154,7 @@ class PostgresMigrationRunner:
                 if rows is not None:
                     _validate_clean_ledger(rows, definition)
                     _verify_vector_capability(connection)
+                    _verify_search_capability(connection)
                     _verify_product_relations(connection)
                     _verify_runtime_grants(
                         connection, runtime_identity.runtime_role
@@ -660,3 +661,10 @@ __all__ = [
     "classify_clean_baseline_confirmation",
     "read_migration_ledger",
 ]
+
+
+def _verify_search_capability(connection):
+    row=connection.execute("SELECT extversion FROM pg_catalog.pg_extension WHERE extname='pg_search'").fetchone()
+    if row is None or _cell(row,0,'extversion')!='0.26.1':
+        raise PostgresSchemaError(PostgresSchemaFailureCode.EXTENSION_MISSING,
+            'pg_search 0.26.1 must be installed and preloaded on this PostgreSQL server')

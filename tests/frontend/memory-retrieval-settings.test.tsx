@@ -6,7 +6,7 @@ import type { MemoryRetrievalSettings, RuntimeAdapter, RetrievalModelInput, Memo
 
 beforeEach(() => { Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function(this: HTMLDialogElement) { this.setAttribute('open', ''); } }); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
-const empty: MemoryRetrievalSettings = { embedding: null, embedding_enabled: false, decision: null, rerank: null, ranking_mode: 'off' };
+const empty: MemoryRetrievalSettings = { embedding: null, embedding_enabled: false, history_enabled: true, decision: null, rerank: null, ranking_mode: 'off' };
 const conn = (slot: MemoryModelSlot) => ({ endpoint: `https://provider.example/${slot}`, model_id: `${slot}-fixture`, shape: slot === 'embedding' ? 'openai_embedding' as const : slot === 'decision' ? 'system_one' as const : 'flat_rerank' as const, authentication: 'none' as const, credential_configured: false });
 
 function setup(initial = empty) {
@@ -19,6 +19,7 @@ function setup(initial = empty) {
   });
   const test = vi.fn(async () => ({ status: 'ready' as const, elapsed_ms: 15, result_count: 2, dimensions: 1024 }));
   const setEmbedding = vi.fn(async (enabled: boolean) => (saved = { ...saved, embedding_enabled: enabled }));
+  const setHistory = vi.fn(async (enabled: boolean) => (saved = { ...saved, history_enabled: enabled }));
   const setRanking = vi.fn(async (mode: 'off' | 'decision' | 'rerank') => (saved = { ...saved, ranking_mode: mode }));
   const clear = vi.fn(async (slot: MemoryModelSlot) => {
     saved = { ...saved, [slot]: null };
@@ -27,12 +28,12 @@ function setup(initial = empty) {
     return saved;
   });
   const adapter = { saveMemoryModel: save, testMemoryModel: test, setEmbeddingEnabled: setEmbedding,
-    setMemoryRanking: setRanking, clearMemoryModel: clear,
+    setHistoryEnabled: setHistory, setMemoryRanking: setRanking, clearMemoryModel: clear,
     memory: { catalog: async () => ({ items: [], next_cursor: null }), projects: async () => ({ items: [], next_cursor: null }) },
   } as unknown as RuntimeAdapter;
   function Harness() { const [value, setValue] = useState(initial); return <MemoryRetrievalSettingsPanel adapter={adapter} value={value} onChanged={setValue} onNotify={notify} />; }
   const rendered = render(<Harness />);
-  return { ...rendered, save, test, setEmbedding, setRanking, clear, notify, saved: () => saved };
+  return { ...rendered, save, test, setEmbedding, setHistory, setRanking, clear, notify, saved: () => saved };
 }
 
 it('shows matching channel headings and two collapsed switches with one concise subtitle', () => {
@@ -92,7 +93,7 @@ it('OpenRouter preset uses System One; Save and Enable commits one slot and sele
 });
 
 it('disabling embedding and ranking preserves all three configured model slots', async () => {
-  const { saved } = setup({ embedding: conn('embedding'), embedding_enabled: true, decision: conn('decision'), rerank: conn('rerank'), ranking_mode: 'decision' });
+  const { saved } = setup({ embedding: conn('embedding'), embedding_enabled: true, history_enabled: true, decision: conn('decision'), rerank: conn('rerank'), ranking_mode: 'decision' });
   fireEvent.click(screen.getByRole('switch', { name: '启用 Embedding' }));
   await waitFor(() => expect(saved().embedding_enabled).toBe(false));
   fireEvent.click(screen.getByRole('switch', { name: '启用重排' }));
@@ -314,4 +315,16 @@ it('failed selection of a missing backend retains the previous actual path and s
   expect(saved().ranking_mode).toBe('rerank');
   expect((screen.getByRole('radio', { name: 'Rerank' }) as HTMLInputElement).checked).toBe(true);
   expect(screen.queryByRole('button', { name: '重排 配置不完整' })).toBeNull();
+});
+
+
+it('history is independently enabled and toggles without configuring remote models', async () => {
+  const { setHistory, setEmbedding, setRanking, save, saved } = setup();
+  const toggle = screen.getByRole('switch', { name: '启用历史会话检索' });
+  expect(toggle.getAttribute('aria-checked')).toBe('true');
+  fireEvent.click(toggle);
+  await waitFor(() => expect(saved().history_enabled).toBe(false));
+  expect(setHistory).toHaveBeenCalledWith(false);
+  expect(setEmbedding).not.toHaveBeenCalled(); expect(setRanking).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+  expect(screen.queryByRole('dialog')).toBeNull();
 });

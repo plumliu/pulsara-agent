@@ -18,7 +18,7 @@ from pulsara_agent.retrieval.config import (
     MEMORY_DENSE_ELIGIBILITY_POLICY,
     DenseRecallPurpose,
 )
-from pulsara_agent.retrieval.tokenizer import MemoryRetrievalTokenizerV1
+from pulsara_agent.retrieval.pg_search import lexical_predicate, lexical_parameters
 from pulsara_agent.retrieval.embedding.validation import (
     freeze_v1_embedding_vector,
 )
@@ -110,9 +110,9 @@ class MemoryResponsePreferenceSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryQueryResult:
+class MemoryQueryResult[Candidate]:
     disposition: MemoryRetrievalDisposition
-    facts: tuple[MemoryQueryRow, ...]
+    facts: tuple[Candidate, ...]
     attempted_stages: tuple[MemorySearchStageResult, ...]
     relaxed_fields: tuple[str, ...] = ()
     sparse_available: bool = True
@@ -124,9 +124,8 @@ class MemoryQueryResult:
 
 
 class PostgresMemoryQuery:
-    def __init__(self, provider, *, tokenizer: MemoryRetrievalTokenizerV1 | None = None) -> None:
+    def __init__(self, provider) -> None:
         self._provider = provider
-        self._tokenizer = tokenizer or MemoryRetrievalTokenizerV1()
 
     def search(
         self,
@@ -141,7 +140,6 @@ class PostgresMemoryQuery:
         deadline_monotonic: float,
     ) -> MemoryQueryResult:
         limit = max(1, min(int(limit), MAXIMUM_MEMORY_QUERY_RESULTS))
-        terms = self._tokenizer.tokenize(query)
         stages = _filter_stages(read_binding, requested_kind)
         gathered: list[MemoryQueryRow] = []
         seen: set[str] = set()
@@ -156,7 +154,7 @@ class PostgresMemoryQuery:
             try:
                 sparse = self._sparse(
                     read_binding=read_binding,
-                    terms=terms,
+                    query=query,
                     kind_filter=kind_filter,
                     limit=40 if not automatic else 20,
                     automatic=automatic,
@@ -242,11 +240,6 @@ class PostgresMemoryQuery:
                 query_embedding is not None, dense_dispositions
             ),
         )
-
-    def tokenize_query(self, query: str) -> tuple[str, ...]:
-        """Apply the same sealed lexical contract used by accepted facts."""
-
-        return self._tokenizer.tokenize(query)
 
     @staticmethod
     def filter_stages(
@@ -454,10 +447,9 @@ class PostgresMemoryQuery:
                 (), MemoryDenseCandidateDisposition.NOT_REQUESTED
             )
         bounded_limit = max(1, min(int(limit), 20))
-        terms = self._tokenizer.tokenize(query)
         sparse = self._sparse(
             read_binding=read_binding,
-            terms=terms,
+            query=query,
             context_filter=context_id,
             kind_filter=None,
             limit=20,
@@ -611,52 +603,23 @@ class PostgresMemoryQuery:
             for row in rows
         )
 
-    def _sparse(
-        self,
-        *,
-        read_binding,
-        terms,
-        kind_filter,
-        limit,
-        automatic,
-        deadline_monotonic,
-        context_filter=None,
-    ):
-        if not terms:
+    def _sparse(self, *, read_binding, query, kind_filter, limit, automatic,
+                deadline_monotonic, context_filter=None):
+        if not query.strip():
             return ()
-        conditions, parameters = _visibility_sql(
-            read_binding, kind_filter, context_filter=context_filter
-        )
-        with self._provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
-            rows = connection.execute(
-                f"""
-                SELECT id, memory_domain_id, context_id, fact_kind,
-                       lifecycle, statement, accepted_at, fact_semantic_digest,
-                       ts_rank_cd(search_document, pulsara_v3.memory_terms_to_tsquery(%s::text[])) AS rank
+        conditions, parameters = _visibility_sql(read_binding, kind_filter, context_filter=context_filter)
+        with self._provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY,
+                row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
+            rows=connection.execute(f"""
+                SELECT id,memory_domain_id,context_id,fact_kind,lifecycle,
+                       statement,accepted_at,fact_semantic_digest,paradedb.score(id) AS rank
                 FROM pulsara_v3.memory_facts
-                WHERE memory_domain_id = %s AND lifecycle = 'ACTIVE'
-                  AND ({conditions})
-                  AND search_terms && %s::text[]
-                  AND search_document @@ pulsara_v3.memory_terms_to_tsquery(%s::text[])
-                  AND (%s = false OR fact_kind <> 'RESPONSE_PREFERENCE')
-                ORDER BY cardinality(ARRAY(
-                           SELECT unnest(search_terms)
-                           INTERSECT SELECT unnest(%s::text[])
-                         )) DESC,
-                         rank DESC, id ASC LIMIT %s
-                """,
-                (
-                    list(terms),
-                    read_binding.memory_domain_id,
-                    *parameters,
-                    list(terms),
-                    list(terms),
-                    automatic,
-                    list(terms),
-                    limit,
-                ),
-            ).fetchall()
-        return tuple(_row(row, sparse_rank=index + 1) for index, row in enumerate(rows))
+                WHERE {lexical_predicate('statement')}
+                  AND memory_domain_id=%s AND lifecycle='ACTIVE' AND ({conditions})
+                  AND (%s=false OR fact_kind<>'RESPONSE_PREFERENCE')
+                ORDER BY paradedb.score(id) DESC,id ASC LIMIT %s
+                """,(*lexical_parameters(query),read_binding.memory_domain_id,*parameters,automatic,limit)).fetchall()
+        return tuple(_row(row,sparse_rank=i+1) for i,row in enumerate(rows))
 
     def _dense(
         self,

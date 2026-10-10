@@ -218,7 +218,7 @@ export interface RetrievalConnection {
   authentication: 'bearer_api_key' | 'none'; credential_configured: boolean;
 }
 export interface MemoryRetrievalSettings {
-  embedding: RetrievalConnection | null; embedding_enabled: boolean;
+  embedding: RetrievalConnection | null; embedding_enabled: boolean; history_enabled: boolean;
   decision: RetrievalConnection | null; rerank: RetrievalConnection | null; ranking_mode: RankingMode;
 }
 export interface RetrievalModelInput {
@@ -562,6 +562,7 @@ export interface RuntimeAdapter {
   saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings>;
   clearMemoryModel(slot: MemoryModelSlot): Promise<MemoryRetrievalSettings>;
   testMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<RetrievalTestResult>;
+  setHistoryEnabled(enabled: boolean): Promise<MemoryRetrievalSettings>;
   setEmbeddingEnabled(enabled: boolean): Promise<MemoryRetrievalSettings>;
   setMemoryRanking(mode: RankingMode): Promise<MemoryRetrievalSettings>;
   contextUsage(sessionId: string, signal?: AbortSignal): Promise<ContextUsagePreview>;
@@ -1462,6 +1463,9 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
   async testMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<RetrievalTestResult> {
     return apiRequest(`/api/local-settings/memory-retrieval/${slot}/test`, { method: 'POST', body: JSON.stringify(input) });
+  }
+  async setHistoryEnabled(enabled: boolean): Promise<MemoryRetrievalSettings> {
+    return apiRequest('/api/local-settings/memory-retrieval/history-enabled', { method: 'PUT', body: JSON.stringify({ enabled }) });
   }
   async setEmbeddingEnabled(enabled: boolean): Promise<MemoryRetrievalSettings> {
     return apiRequest('/api/local-settings/memory-retrieval/embedding-enabled', { method: 'PUT', body: JSON.stringify({ enabled }) });

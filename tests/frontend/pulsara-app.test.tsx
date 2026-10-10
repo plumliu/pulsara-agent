@@ -93,7 +93,7 @@ const bootstrap: RuntimeBootstrap = {
   local_settings: { pulsara_home: '/Users/test/custom-pulsara-home',
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
-    memory_retrieval: { embedding: null, embedding_enabled: false, rerank: null, decision: null, ranking_mode: 'off' },
+    memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
   },
   model_configurations: [{
     id: 'model-connection:00000000000000000000000000000000',
@@ -632,6 +632,7 @@ class FakeAdapter implements RuntimeAdapter {
   async saveMemoryModel() { return bootstrap.local_settings.memory_retrieval; }
   async clearMemoryModel() { return bootstrap.local_settings.memory_retrieval; }
   async testMemoryModel() { return { status: 'ready' as const, elapsed_ms: 10 }; }
+  async setHistoryEnabled() { return bootstrap.local_settings.memory_retrieval; }
   async setEmbeddingEnabled() { return bootstrap.local_settings.memory_retrieval; }
   async setMemoryRanking() { return bootstrap.local_settings.memory_retrieval; }
 
@@ -2768,7 +2769,7 @@ describe('PulsaraApp', () => {
           local_settings: {
             state: 'ready',
             postgres: null,
-            memory_retrieval: { embedding: null, embedding_enabled: false, rerank: null, decision: null, ranking_mode: 'off' },
+            memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
           },
           model_configurations: [],
         };
@@ -2779,7 +2780,7 @@ describe('PulsaraApp', () => {
           local_settings: {
             state: 'ready' as const,
             postgres: null,
-            memory_retrieval: { embedding: null, embedding_enabled: false, rerank: null, decision: null, ranking_mode: 'off' },
+            memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
           },
           model_configurations: [],
           database_state: 'database_not_configured' as const,
@@ -3312,7 +3313,7 @@ describe('PulsaraApp', () => {
       ...bootstrap,
       local_settings: {
         ...bootstrap.local_settings,
-        memory_retrieval: { embedding: { endpoint: 'https://provider.example/embeddings', model_id: 'embedding-fixture', shape: 'openai_embedding', authentication: 'none', credential_configured: false }, embedding_enabled: true, rerank: { endpoint: 'https://provider.example/rerank', model_id: 'rerank-fixture', shape: 'flat_rerank', authentication: 'none', credential_configured: false }, decision: null, ranking_mode: 'rerank' },
+        memory_retrieval: { embedding: { endpoint: 'https://provider.example/embeddings', model_id: 'embedding-fixture', shape: 'openai_embedding', authentication: 'none', credential_configured: false }, embedding_enabled: true, history_enabled: true, rerank: { endpoint: 'https://provider.example/rerank', model_id: 'rerank-fixture', shape: 'flat_rerank', authentication: 'none', credential_configured: false }, decision: null, ranking_mode: 'rerank' },
       },
       model_configurations: adapter.modelConfigurations,
     }));

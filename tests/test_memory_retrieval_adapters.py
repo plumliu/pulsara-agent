@@ -95,8 +95,8 @@ def test_twenty_truncated_projections_remain_valid_on_each_sdk_wire(monkeypatch,
         wire_documents = body["input"]["documents"]
     else:
         state = body["state"] if shape == "system_one" else json.loads(body["input"])
-        assert [item["memory_id"] for item in state["candidates"]] == list(names)
-        wire_documents = [item["memory"] for item in state["candidates"]]
+        assert [item["candidate_number"] for item in state["candidates"]] == list(names)
+        wire_documents = [item["candidate"] for item in state["candidates"]]
     assert wire_documents == list(documents)
     assert all(json.loads(text)["statement_truncated"] for text in wire_documents)
 
@@ -218,7 +218,7 @@ def test_decisions_batch_named_candidates_native_or_public_sdk(
         state = body["state"]
     for name, question in zip(("a", "b"), questions, strict=True):
         instructions = question["instructions"]
-        assert f"For memory_id {name}," in instructions
+        assert f"For candidate_number {name}," in instructions
         assert "shared words alone" in instructions
         assert "across languages" in instructions
         assert "not universal applicability" in instructions
@@ -240,9 +240,9 @@ def test_decisions_batch_named_candidates_native_or_public_sdk(
             assert f"False: {question['criteria']['false']}" in instructions
     assert state == {
         "user_task": "query",
-        "candidates": [{"memory_id": "a", "memory": "first"}, {"memory_id": "b", "memory": "second"}],
+        "candidates": [{"candidate_number": "a", "candidate": "first"}, {"candidate_number": "b", "candidate": "second"}],
     }
-    assert [c["memory_id"] for c in state["candidates"]] == ["a", "b"]
+    assert [c["candidate_number"] for c in state["candidates"]] == ["a", "b"]
 
 
 @pytest.mark.parametrize(

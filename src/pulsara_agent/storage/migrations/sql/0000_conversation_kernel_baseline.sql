@@ -1,4 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS pg_search VERSION '0.26.1';
 
 CREATE TABLE public.pulsara_schema_migrations (
     universe_id text NOT NULL CHECK (universe_id = 'pulsara.conversation-kernel.v1'),
@@ -471,6 +472,7 @@ CREATE TABLE pulsara_v3.imported_history_groups (
 
 CREATE TABLE pulsara_v3.transcript_entries (
     id text PRIMARY KEY,
+    origin_entry_id text NOT NULL CHECK (origin_entry_id <> ''),
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     entry_owner_kind text NOT NULL CHECK (entry_owner_kind IN ('EXECUTED_TURN', 'IMPORTED_HISTORY')),
@@ -1535,15 +1537,8 @@ CREATE TABLE pulsara_v3.memory_facts (
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     user_edited_at timestamptz,
-    search_contract_id text NOT NULL CHECK (
-        search_contract_id = 'pulsara.memory-retrieval-tokenizer'
-    ),
-    search_contract_version integer NOT NULL CHECK (search_contract_version = 2),
-    search_terms text[] NOT NULL CHECK (
-        cardinality(search_terms) <= 256
-        AND octet_length(array_to_json(search_terms)::text) <= 16384
-    ),
-    search_document tsvector NOT NULL,
+    statement_en text GENERATED ALWAYS AS (statement) STORED,
+    statement_tech text GENERATED ALWAYS AS (statement) STORED,
     UNIQUE (memory_domain_id, id),
     UNIQUE (memory_domain_id, context_id, id),
     FOREIGN KEY (memory_domain_id, project_workspace_id)
@@ -1564,10 +1559,9 @@ CREATE UNIQUE INDEX uq_pulsara_v3_memory_active_semantic
     ON pulsara_v3.memory_facts (
         memory_domain_id, context_id, fact_semantic_digest
     ) WHERE lifecycle = 'ACTIVE';
-CREATE INDEX idx_pulsara_v3_memory_search_document_gin
-    ON pulsara_v3.memory_facts USING gin (search_document);
-CREATE INDEX idx_pulsara_v3_memory_search_terms_gin
-    ON pulsara_v3.memory_facts USING gin (search_terms);
+CREATE INDEX idx_pulsara_v3_memory_bm25 ON pulsara_v3.memory_facts USING bm25
+    (id,statement,statement_en,statement_tech)
+    WITH (key_field='id',text_fields='{"statement":{"tokenizer":{"type":"jieba","search_mode":true,"stopwords":["!","\"","#","$","%","&","''","(",")","*","+",",","-",".","/",":",";","<","=",">","?","@","[","\\","]","^","_","`","{","|","}","~"," ","\t","\n","\r","，","。","！","？","；","：","、","（","）","【","】","《","》","“","”","‘","’","—","…"]}},"statement_en":{"tokenizer":{"type":"default","stemmer":"English"}},"statement_tech":{"tokenizer":{"type":"regex","pattern":"[./:@+-]*[A-Za-z0-9_][A-Za-z0-9_./:@+-]*"}}}');
 
 CREATE TABLE pulsara_v3.memory_relations (
     id text PRIMARY KEY,
@@ -1660,28 +1654,7 @@ CREATE TABLE pulsara_v3.memory_embeddings (
 CREATE INDEX idx_pulsara_v3_memory_embeddings_hnsw
     ON pulsara_v3.memory_embeddings USING hnsw (embedding public.vector_cosine_ops);
 
-CREATE FUNCTION pulsara_v3.memory_terms_to_tsquery(terms text[])
-RETURNS tsquery
-LANGUAGE sql
-IMMUTABLE
-STRICT
-SET search_path = pg_catalog, pg_temp
-AS $$
-    SELECT COALESCE(
-        to_tsquery(
-            'pg_catalog.simple'::regconfig,
-            string_agg(
-                '(' || plainto_tsquery('pg_catalog.simple'::regconfig, term)::text || ')',
-                ' | ' ORDER BY ordinal
-            )
-        ),
-        ''::tsquery
-    )
-    FROM unnest(terms) WITH ORDINALITY AS value(term, ordinal)
-    WHERE plainto_tsquery('pg_catalog.simple'::regconfig, term) <> ''::tsquery;
-$$;
-
-CREATE FUNCTION pulsara_v3.seal_memory_fact_search_document()
+CREATE FUNCTION pulsara_v3.seal_memory_fact()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
@@ -1698,9 +1671,6 @@ BEGIN
             )
         ) OR
         OLD.fact_kind IS DISTINCT FROM NEW.fact_kind OR
-        OLD.search_contract_id IS DISTINCT FROM NEW.search_contract_id OR
-        OLD.search_contract_version IS DISTINCT FROM NEW.search_contract_version OR
-        OLD.search_document IS DISTINCT FROM NEW.search_document OR
         (OLD.statement IS DISTINCT FROM NEW.statement AND (
             NEW.user_edited_at IS NULL OR
             NEW.user_edited_at IS DISTINCT FROM NEW.updated_at OR
@@ -1709,22 +1679,17 @@ BEGIN
         )) OR
         (OLD.statement IS NOT DISTINCT FROM NEW.statement AND (
             OLD.fact_semantic_digest IS DISTINCT FROM NEW.fact_semantic_digest OR
-            OLD.search_terms IS DISTINCT FROM NEW.search_terms OR
             OLD.user_edited_at IS DISTINCT FROM NEW.user_edited_at
         ))
     ) THEN
         RAISE EXCEPTION 'memory fact immutable fields changed' USING ERRCODE = '23514';
     END IF;
-    NEW.search_document := to_tsvector(
-        'pg_catalog.simple'::regconfig,
-        array_to_string(NEW.search_terms, ' ')
-    );
     RETURN NEW;
 END;
 $$;
-CREATE TRIGGER trg_pulsara_v3_memory_fact_search_document
+CREATE TRIGGER trg_pulsara_v3_memory_fact
 BEFORE INSERT OR UPDATE ON pulsara_v3.memory_facts
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_memory_fact_search_document();
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_memory_fact();
 
 CREATE FUNCTION pulsara_v3.seal_memory_relation()
 RETURNS trigger
@@ -1887,8 +1852,7 @@ BEGIN
     RETURN NEW;
 END;
 $$;
-REVOKE ALL ON FUNCTION pulsara_v3.memory_terms_to_tsquery(text[]) FROM PUBLIC;
-REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_fact_search_document() FROM PUBLIC;
+REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_fact() FROM PUBLIC;
 REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_relation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION pulsara_v3.enforce_direct_memory_lineage() FROM PUBLIC;
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_fact_lineage
@@ -2909,3 +2873,26 @@ CREATE INDEX idx_pulsara_v3_events_session_sequence
 CREATE INDEX idx_pulsara_v3_queue_pending
     ON pulsara_v3.prompt_queue_items (session_id, queue_sequence, id) WHERE status = 'PENDING';
 REVOKE ALL ON ALL TABLES IN SCHEMA pulsara_v3 FROM PUBLIC;
+
+-- Disposable search projection. Canonical entry/block rows alone own content.
+-- QA and QAQ share one body layout and one index, selected mutually exclusively.
+CREATE TABLE pulsara_v3.history_search_documents (
+    id text PRIMARY KEY,
+    session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
+    q1_entry_id text NOT NULL REFERENCES pulsara_v3.transcript_entries(id) ON DELETE CASCADE,
+    q2_entry_id text REFERENCES pulsara_v3.transcript_entries(id) ON DELETE CASCADE,
+    variant text NOT NULL CHECK (variant IN ('QA','QAQ')),
+    include_tools boolean NOT NULL,
+    entry_ids text[] NOT NULL,
+    identity jsonb NOT NULL,
+    body text NOT NULL,
+    body_en text GENERATED ALWAYS AS(body) STORED,
+    body_tech text GENERATED ALWAYS AS(body) STORED,
+    positions jsonb NOT NULL,
+    messages jsonb NOT NULL,
+    UNIQUE(session_id,q1_entry_id,variant,include_tools)
+);
+CREATE INDEX idx_pulsara_v3_history_session ON pulsara_v3.history_search_documents(session_id,q1_entry_id);
+CREATE INDEX idx_pulsara_v3_history_bm25 ON pulsara_v3.history_search_documents USING bm25
+    (id,body,body_en,body_tech)
+    WITH (key_field='id',text_fields='{"body":{"tokenizer":{"type":"jieba","search_mode":true,"stopwords":["!","\"","#","$","%","&","''","(",")","*","+",",","-",".","/",":",";","<","=",">","?","@","[","\\","]","^","_","`","{","|","}","~"," ","\t","\n","\r","，","。","！","？","；","：","、","（","）","【","】","《","》","“","”","‘","’","—","…"]}},"body_en":{"tokenizer":{"type":"default","stemmer":"English"}},"body_tech":{"tokenizer":{"type":"regex","pattern":"[./:@+-]*[A-Za-z0-9_][A-Za-z0-9_./:@+-]*"}}}');

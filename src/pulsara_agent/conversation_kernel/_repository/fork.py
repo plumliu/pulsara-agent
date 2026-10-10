@@ -230,6 +230,7 @@ class _ForkOperations:
                     source_id = str(entry["id"])
                     values.update(
                         id=entry_map[source_id],
+                        origin_entry_id=entry["origin_entry_id"],
                         session_id=child_session_id,
                         workspace_id=material.workspace_id,
                         entry_owner_kind="IMPORTED_HISTORY",
@@ -513,6 +514,16 @@ class _ForkOperations:
                         "context_snapshot_id": snapshot_id,
                     },
                 )
+                from pulsara_agent.conversation_kernel.history_projection import (
+                    history_projection_savepoint,
+                    refresh_history_question,
+                )
+                with history_projection_savepoint(connection, session_id=child_session_id):
+                    for entry in material.entries:
+                        if entry["entry_kind"] == "USER_MESSAGE":
+                            refresh_history_question(
+                                connection, child_session_id, entry_map[str(entry["id"])],
+                            )
                 # Force all deferred exact joins before the commit acknowledgement.
                 connection.execute("SET CONSTRAINTS ALL IMMEDIATE")
         except Exception as error:

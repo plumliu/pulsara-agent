@@ -133,6 +133,11 @@ export function MemoryRetrievalSettingsPanel({ adapter, value, onChanged, onNoti
     {rankingOpen && <div className="retrieval-drawer">
     <div className="model-card-list">{card(preferredRanking)}</div></div>}
     </section>
+    <section className="retrieval-channel" aria-labelledby="retrieval-history-heading">
+      <div className="retrieval-channel-heading"><h3 id="retrieval-history-heading">历史会话检索</h3>
+        <div className="retrieval-channel-controls"><button type="button" role="switch" aria-label="启用历史会话检索" aria-checked={value.history_enabled} className="settings-switch" disabled={busy} onClick={() => void update(() => adapter.setHistoryEnabled(!value.history_enabled))}><span /></button></div>
+      </div>
+    </section>
     {editor && <MemoryModelDialog key={editor.slot} slot={editor.slot} activate={editor.activate} value={value} adapter={adapter} onChanged={adopt} onNotify={onNotify} onClose={() => setEditor(undefined)} />}
   </section>;
 }

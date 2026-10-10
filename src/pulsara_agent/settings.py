@@ -37,7 +37,7 @@ from pulsara_agent.mcp_credentials import (
 )
 
 
-LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v3"
+LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v4"
 
 
 LOCAL_SETTINGS_FILE_NAME = "local-settings.yaml"
@@ -750,12 +750,13 @@ class LocalSettingsStore:
         )
         return updated
 
-    async def set_retrieval_mode(self, *, embedding_enabled=None, ranking_mode=None):
-        if (embedding_enabled is None) == (ranking_mode is None):
+    async def set_retrieval_mode(self, *, embedding_enabled=None, ranking_mode=None, history_enabled=None):
+        if sum(value is not None for value in (embedding_enabled,ranking_mode,history_enabled)) != 1:
             raise ValueError("请提交一个记忆检索开关。")
         changes = (
             {"embedding_enabled": embedding_enabled}
             if embedding_enabled is not None
+            else {"history_enabled": history_enabled} if history_enabled is not None
             else {"ranking_mode": ranking_mode}
         )
         updated, _ = await self._run_mutation(

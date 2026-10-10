@@ -81,7 +81,7 @@ it('counts running tasks and shows model and retrieval configuration', () => {
     })),
     localSettings: {
       postgres: null,
-      memory_retrieval: { embedding: { endpoint: 'https://provider.example/embeddings', model_id: 'embedding-fixture', shape: 'openai_embedding', authentication: 'none', credential_configured: false }, embedding_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
+      memory_retrieval: { embedding: { endpoint: 'https://provider.example/embeddings', model_id: 'embedding-fixture', shape: 'openai_embedding', authentication: 'none', credential_configured: false }, embedding_enabled: true, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
     },
     modelConfigurations: (['ready', 'unavailable'] as const).map((status, index) => ({
       id: `model-${index}`,

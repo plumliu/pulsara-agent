@@ -8,12 +8,9 @@ from time import monotonic
 
 from pulsara_agent.conversation_kernel.session_search import (
     search_session_page,
-    SNIPPET_CHARACTERS,
 )
 from pulsara_agent.conversation_kernel.session_text import (
     decode_saved_text,
-    keyword_patterns,
-    match_position,
 )
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     ARTIFACT_READ_DEFAULT_CHARS,
@@ -50,7 +47,12 @@ def _encode(value):
 def _decode(cursor, operation):
     try:
         value = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
-        expected = operation if operation == "search_sessions" else operation + ".v2"
+        expected = (
+            operation
+            if operation == "search_sessions"
+            else operation
+            + (".bm25.v1" if operation == "search_session_content" else ".v2")
+        )
         if not isinstance(value, dict) or value.get("operation") != expected:
             raise ValueError()
         return value
@@ -189,6 +191,16 @@ class SessionContentQuery:
             self._authorized(connection, self.session_id)
             if operation == "search_sessions":
                 payload = self._sessions(
+                    connection,
+                    arguments,
+                    cursor,
+                    current_range,
+                    limit,
+                    tool_call_id,
+                    deadline_monotonic,
+                )
+            elif operation == "search_session_content":
+                payload = self._search_content_bm25(
                     connection,
                     arguments,
                     cursor,
@@ -413,12 +425,7 @@ class SessionContentQuery:
             raise SessionQueryError(
                 "INVALID_REQUEST", "Invalid content filter or direction."
             )
-        if operation == "search_session_content":
-            if not isinstance(query, str) or not query.strip() or direction != "older":
-                raise SessionQueryError(
-                    "INVALID_REQUEST", "A first content search needs literal keywords."
-                )
-        elif query is not None:
+        if query is not None:
             raise SessionQueryError(
                 "CURSOR_INVALID", "Read cursor cannot contain a search query."
             )
@@ -462,10 +469,6 @@ class SessionContentQuery:
                 cursor["position"], "cursor position", minimum=1, maximum=end
             )
             offset = _integer(cursor["offset"], "cursor offset")
-            if operation == "search_session_content" and offset:
-                raise SessionQueryError(
-                    "CURSOR_INVALID", "Search cursor has a text offset."
-                )
             if target == self.session_id:
                 self._check_range(connection, end, excluded, actual)
             elif excluded is not None:
@@ -517,18 +520,6 @@ class SessionContentQuery:
                     raise SessionQueryError(
                         "CURSOR_INVALID", "Text cursor entry is no longer readable."
                     )
-            if operation == "search_session_content":
-                return self._search_page(
-                    connection,
-                    stream,
-                    query,
-                    event_cut,
-                    token,
-                    limit,
-                    call_id,
-                    deadline,
-                    tools,
-                )
             return self._read_page(
                 connection,
                 stream,
@@ -543,9 +534,7 @@ class SessionContentQuery:
                 tools,
             )
 
-    def _document(
-        self, connection, entry, event_cut, deadline, include_tools, *, for_search=False
-    ):
+    def _document(self, connection, entry, event_cut, deadline, include_tools):
         if monotonic() >= deadline:
             raise TimeoutError("session content query deadline exceeded")
         kind = entry["entry_kind"]
@@ -578,8 +567,6 @@ class SessionContentQuery:
             ).fetchone()
             if fact is None:
                 raise RuntimeError("saved tool result has no canonical edge")
-            if for_search and fact["tool_name"] in SESSION_QUERY_TOOL_NAMES:
-                return None
         bounds = ()
         if role == "assistant":
             blocks = connection.execute(
@@ -672,76 +659,139 @@ class SessionContentQuery:
                 item["interruption"]["detail"] = notice.public_detail
         return item, text, segments, bounds
 
-    def _search_page(
-        self,
-        connection,
-        rows,
-        query,
-        event_cut,
-        token,
-        limit,
-        call_id,
-        deadline,
-        include_tools,
+    def _search_content_bm25(
+        self, connection, arguments, cursor, actual, limit, call_id, deadline
     ):
-        patterns = keyword_patterns(query)
-        items = []
-        for entry in rows:
-            document = self._document(
-                connection, entry, event_cut, deadline, include_tools, for_search=True
-            )
-            if document is None:
-                continue
-            item, text, segments, bounds = document
-            hit = match_position(patterns, segments)
-            if hit is None:
-                continue
-            if len(items) == limit:
-                return {
-                    "items": items,
-                    "next_cursor": token(entry["entry_sequence"], 0),
-                }
-            start = max(0, hit - 70)
-            end = start + SNIPPET_CHARACTERS
-            if bounds:
-                block_start, block_end = next(
-                    span for span in bounds if span[0] <= hit < span[1]
+        import math
+        from pulsara_agent.conversation_kernel.history_search import (
+            FrozenHistoryReadScope,
+            search_history,
+            refetch_history,
+        )
+
+        if cursor is None:
+            query = arguments.get("query")
+            target = arguments.get("session_id", self.session_id)
+            tools = arguments.get("include_tools", False)
+            end, excluded = actual.through_sequence, actual.excluded_entry_id
+            after = None
+        else:
+            if set(cursor) != {
+                "operation",
+                "query",
+                "session_id",
+                "include_tools",
+                "range_end",
+                "excluded",
+                "after",
+            }:
+                raise SessionQueryError(
+                    "CURSOR_INVALID", "Invalid relevance cursor fields."
                 )
-                start = max(start, block_start)
-                end = min(start + SNIPPET_CHARACTERS, block_end)
-            snippet = text[start:end]
-            item["text"] = snippet
-            if start or len(snippet) < len(text):
-                item["partial"] = True
-            payload = {
-                "items": [*items, item],
-                "next_cursor": token(entry["entry_sequence"], 0),
+            query, target, tools = (
+                cursor["query"],
+                cursor["session_id"],
+                cursor["include_tools"],
+            )
+            end, excluded = cursor["range_end"], cursor["excluded"]
+            self._check_range(connection, end, excluded, actual)
+            raw = cursor["after"]
+            if raw is None:
+                after = None
+            else:
+                try:
+                    if not isinstance(raw, list) or len(raw) != 3:
+                        raise ValueError()
+                    score = float.fromhex(raw[0])
+                    if not math.isfinite(score):
+                        raise ValueError()
+                    after = (
+                        score,
+                        _string(raw[1], "cursor session"),
+                        _string(raw[2], "cursor question"),
+                    )
+                except (ValueError, TypeError) as exc:
+                    raise SessionQueryError(
+                        "CURSOR_INVALID", "Invalid relevance position."
+                    ) from exc
+        if not isinstance(query, str) or not query.strip() or type(tools) is not bool:
+            raise SessionQueryError(
+                "INVALID_REQUEST",
+                "A content search needs a query and valid content filter.",
+            )
+        target = _string(target, "session_id")
+        self._authorized(connection, target)
+        scope = FrozenHistoryReadScope(
+            self.session_id, self.memory_domain_id, SessionContentRange(end, excluded)
+        )
+
+        def token(position):
+            return _encode(
+                {
+                    "operation": "search_session_content.bm25.v1",
+                    "query": query,
+                    "session_id": target,
+                    "include_tools": tools,
+                    "range_end": end,
+                    "excluded": excluded,
+                    "after": None
+                    if position is None
+                    else [float(position[0]).hex(), position[1], position[2]],
+                }
+            )
+
+        try:
+            rows = search_history(
+                connection,
+                scope=scope,
+                query=query,
+                limit=limit + 1,
+                target_session_id=target,
+                include_tools=tools,
+                after=after,
+            )
+        except Exception as exc:
+            raise SessionQueryError(
+                "SEARCH_UNAVAILABLE", f"pg_search history query unavailable: {exc}"
+            ) from exc
+        items = []
+        consumed = after
+        for row in rows:
+            if monotonic() >= deadline:
+                raise TimeoutError("session search deadline exceeded")
+            position = (row["score"], row["session_id"], row["q1_entry_id"])
+            if len(items) == limit:
+                return {"items": items, "next_cursor": token(consumed)}
+            candidate = refetch_history(
+                connection, row, scope=scope, include_tools=tools
+            )
+            if candidate is None:
+                consumed = position
+                continue
+            item = {
+                "session_id": candidate.session_id,
+                "entry_id": candidate.q1_entry_id,
+                "title": candidate.title,
+                "score": candidate.score,
+                "messages": [
+                    {k: m[k] for k in ("entry_id", "role", "label", "at", "text")}
+                    for m in candidate.messages
+                ],
             }
+            payload = {"items": [*items, item], "next_cursor": token(position)}
             if not _fits(payload, call_id):
-                if items:
-                    return {
-                        "items": items,
-                        "next_cursor": token(entry["entry_sequence"], 0),
-                    }
-                # Preserve the locator and a real snippet when only the text
-                # must shrink; metadata alone exceeding admission is an error.
-                low, high, winner = 1, len(snippet), None
-                while low <= high:
-                    length = (low + high) // 2
-                    smaller = {**item, "text": snippet[:length], "partial": True}
-                    if _fits(
-                        {"items": [smaller], "next_cursor": payload["next_cursor"]},
-                        call_id,
-                    ):
-                        winner = smaller
-                        low = length + 1
-                    else:
-                        high = length - 1
-                if winner is None:
+                if not items:
                     raise _resource_error()
-                item = winner
+                return {"items": items, "next_cursor": token(consumed)}
             items.append(item)
-        return {"items": items, "next_cursor": None}
+            consumed = position
+        # A full admission page may have lost excerpts after qualification.
+        # Its consumed key still permits live continuation; an empty valid page
+        # must not claim that lower-ranked units were exhausted.
+        return {
+            "items": items,
+            "next_cursor": token(consumed) if len(rows) == limit + 1 else None,
+        }
 
     def _read_page(
         self,

@@ -11,7 +11,9 @@ import pytest
 
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.memory.recall import (
-    MemoryDenseCandidateDisposition, MemoryQueryRow, MemoryRelatedSearchResult,
+    MemoryDenseCandidateDisposition,
+    MemoryQueryRow,
+    MemoryRelatedSearchResult,
 )
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
 from pulsara_agent.memory.scope import (
@@ -26,7 +28,19 @@ from pulsara_agent.settings import LocalSettingsStore
 
 
 async def _search(
-    tmp_path, monkeypatch, *, limit, mode="success", exact_count=None, automatic=False, rank_automatic=False, related=False
+    tmp_path,
+    monkeypatch,
+    *,
+    limit,
+    mode="success",
+    exact_count=None,
+    automatic=False,
+    rank_automatic=False,
+    related=False,
+    history_count=0,
+    memory_count=40,
+    invalidate_history=False,
+    timed_out_route=None,
 ):
     io = KernelSessionIO()
     port = KernelMemoryToolPort(
@@ -58,17 +72,59 @@ async def _search(
             fact_semantic_digest="sha256:" + f"{index:064x}",
             sparse_rank=index + 1,
         )
-        for index in range(40)
+        for index in range(memory_count)
     )
-    observed = SimpleNamespace(stages=[], candidates=(), documents=(), relations=(), purpose=None)
+    from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
+    from pulsara_agent.model_input.contracts import ContextBindingBaseKind
+
+    history = tuple(
+        HistoryCandidate(
+            session_id=f"session:history:{i}",
+            q1_entry_id=f"entry:q:{i}",
+            title=f"history {i}",
+            score=float(100 - i),
+            document={"identity": [i]},
+            messages=(
+                {
+                    "role": "assistant",
+                    "label": "助手回答",
+                    "at": "2026-01-01",
+                    "text": f"Historical Orion observation {i}",
+                },
+            ),
+        )
+        for i in range(history_count)
+    )
+    def route_result(name, value, kwargs):
+        if timed_out_route == name:
+            from time import sleep
+            sleep(max(0, kwargs["deadline_monotonic"] - monotonic()) + 0.01)
+            raise TimeoutError(f"{name} query timed out")
+        return value
+
+    if timed_out_route is not None:
+        monkeypatch.setattr(port, "_canonical_deadline", lambda _: monotonic() + 0.1)
+    port._history.automatic_candidates = lambda **kwargs: route_result("history", history, kwargs)
+    port._history.canonical_refetch = lambda **kwargs: (
+        () if invalidate_history else kwargs["candidates"]
+    )
+    canonical_facts = SimpleNamespace(
+        context_binding_fact=SimpleNamespace(
+            base_kind=ContextBindingBaseKind.FULL_HISTORY
+        ),
+        canonical_input=SimpleNamespace(items=()),
+    )
+    observed = SimpleNamespace(
+        stages=[], candidates=(), documents=(), relations=(), purpose=None
+    )
 
     def sparse(**kwargs):
         observed.stages.append(kwargs["kind_filter"])
+        route_result("sparse", None, kwargs)
         return tuple(
             fact
             for fact in facts
-            if kwargs["kind_filter"] is None
-            or fact.fact_kind == kwargs["kind_filter"]
+            if kwargs["kind_filter"] is None or fact.fact_kind == kwargs["kind_filter"]
         )[: kwargs["limit"]]
 
     def canonical(**kwargs):
@@ -96,19 +152,21 @@ async def _search(
             promoted,
             *(index for index in range(len(documents)) if index != promoted),
         )
-        return [RerankResult(index, 1.0 / rank) for rank, index in enumerate(indexes, 1)]
+        return [
+            RerankResult(index, 1.0 / rank) for rank, index in enumerate(indexes, 1)
+        ]
 
     async def rerank_provider():
         return None if mode == "unconfigured" else SimpleNamespace(rerank=rerank)
 
-    monkeypatch.setattr(port._query, "tokenize_query", lambda _: ("orion",))
     monkeypatch.setattr(port._query, "sparse_candidates", sparse)
     monkeypatch.setattr(port._query, "canonical_refetch", canonical)
     monkeypatch.setattr(port._query, "active_contradictions", contradictions)
     monkeypatch.setattr(
-        port._query, "related_candidates",
+        port._query,
+        "related_candidates",
         lambda **kwargs: MemoryRelatedSearchResult(
-            facts[:kwargs["limit"]], MemoryDenseCandidateDisposition.NOT_REQUESTED
+            facts[: kwargs["limit"]], MemoryDenseCandidateDisposition.NOT_REQUESTED
         ),
     )
     monkeypatch.setattr(port, "_embedding_provider", embedding_provider)
@@ -120,10 +178,18 @@ async def _search(
         arguments["query"] = "x" * (9 * 1024)
     try:
         if related:
-            return await port._related_for_remember(arguments["query"], context_id=CTX_GLOBAL), observed
+            return await port._related_for_remember(
+                arguments["query"], context_id=CTX_GLOBAL
+            ), observed
         if automatic:
-            source = await port.freeze_automatic_recall_source(arguments["query"])
-            return json.loads(source.variants[0].text), observed
+            source = await port.freeze_automatic_recall_source(
+                arguments["query"], canonical_facts=canonical_facts
+            )
+            return (
+                {"items": []}
+                if not hasattr(source, "variants")
+                else json.loads(source.variants[0].text)
+            ), observed
         result = await port._search(arguments)
         assert result.state == "SUCCESS"
         return json.loads(result.content), observed
@@ -171,10 +237,18 @@ def test_rerank_pool_preserves_requested_kind_priority_and_relaxation_threshold(
         assert observed.stages == ["DECISION", None]
         assert len(observed.documents) == 20
         assert [item["memory_id"] for item in body["memories"]] == [
-            "memory:0", "memory:1", "memory:11", "memory:2", "memory:3"
+            "memory:0",
+            "memory:1",
+            "memory:11",
+            "memory:2",
+            "memory:3",
         ]
         assert [item["filter_match"] for item in body["memories"]] == [
-            "EXACT", "EXACT", "KIND_RELAXED", "KIND_RELAXED", "KIND_RELAXED"
+            "EXACT",
+            "EXACT",
+            "KIND_RELAXED",
+            "KIND_RELAXED",
+            "KIND_RELAXED",
         ]
     else:
         # Enough exact matches stop relaxation even if the rerank pool is small.
@@ -192,14 +266,25 @@ def test_automatic_recall_still_selects_five_rrf_results_without_rerank(
     )
     ids = tuple(item["memory_id"] for item in body["items"])
     assert ids == tuple(f"memory:{index}" for index in range(5))
-    assert observed.candidates == ids
+    assert observed.candidates == tuple(f"memory:{index}" for index in range(20))
     assert observed.documents == ()
     assert observed.relations == ids
 
 
 @pytest.mark.parametrize("mode", ("success", "failure", "malformed"))
-def test_implicit_recall_ranks_twenty_before_injecting_five(tmp_path, monkeypatch, mode):
-    body, observed = asyncio.run(_search(tmp_path, monkeypatch, limit=5, automatic=True, rank_automatic=True, mode=mode))
+def test_implicit_recall_ranks_twenty_before_injecting_five(
+    tmp_path, monkeypatch, mode
+):
+    body, observed = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            rank_automatic=True,
+            mode=mode,
+        )
+    )
     ids = tuple(item["memory_id"] for item in body["items"])
     assert len(observed.candidates) == 20
     assert len(observed.documents) == 20
@@ -211,11 +296,106 @@ def test_implicit_recall_ranks_twenty_before_injecting_five(tmp_path, monkeypatc
     assert observed.relations == ids
 
 
-def test_remember_related_rerank_uses_relation_inspection_purpose(tmp_path, monkeypatch):
+def test_remember_related_rerank_uses_relation_inspection_purpose(
+    tmp_path, monkeypatch
+):
     (related, coverage), observed = asyncio.run(
         _search(tmp_path, monkeypatch, limit=5, related=True)
     )
     assert observed.purpose == "related_memory"
     assert len(observed.documents) == 20
-    assert tuple(item.memory_id for item in related) == ("memory:11", "memory:0", "memory:1")
+    assert tuple(item.memory_id for item in related) == (
+        "memory:11",
+        "memory:0",
+        "memory:1",
+    )
     assert coverage["rerank"] == "APPLIED"
+
+
+@pytest.mark.parametrize(
+    "memory_count,history_count,expected_pool",
+    [(40, 20, (15, 5)), (2, 20, (2, 18)), (40, 2, (18, 2)), (0, 20, (0, 20))],
+)
+def test_mixed_pool_is_elastic_and_one_decision_selects_directly(
+    tmp_path, monkeypatch, memory_count, history_count, expected_pool
+):
+    body, seen = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            rank_automatic=True,
+            memory_count=memory_count,
+            history_count=history_count,
+        )
+    )
+    assert (
+        sum("statement" in x for x in seen.documents),
+        sum(x.get("source") == "session_history" for x in seen.documents),
+    ) == expected_pool
+    assert len(body["items"]) == 5
+    for x in body["items"]:
+        if x.get("source") == "session_history":
+            assert "memory_id" not in x
+
+
+@pytest.mark.parametrize("mode", ["failure", "malformed", "unconfigured"])
+@pytest.mark.parametrize(
+    "memory_count,history_count,expected",
+    [(40, 20, (4, 1)), (2, 20, (2, 3)), (40, 0, (5, 0)), (0, 20, (0, 5))],
+)
+def test_mixed_no_decision_fallback_has_elastic_four_plus_one(
+    tmp_path, monkeypatch, mode, memory_count, history_count, expected
+):
+    body, seen = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            rank_automatic=True,
+            mode=mode,
+            memory_count=memory_count,
+            history_count=history_count,
+        )
+    )
+    assert (
+        sum("memory_id" in x for x in body["items"]),
+        sum(x.get("source") == "session_history" for x in body["items"]),
+    ) == expected
+
+
+def test_selected_invalid_history_is_omitted_without_final_refill(
+    tmp_path, monkeypatch
+):
+    body, _ = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            rank_automatic=True,
+            memory_count=0,
+            history_count=20,
+            invalidate_history=True,
+        )
+    )
+    assert body["items"] == []
+
+
+@pytest.mark.parametrize("timed_out_route", ["history", "sparse"])
+@pytest.mark.parametrize("rank_automatic", [False, True])
+def test_automatic_route_timeout_preserves_other_source(tmp_path, monkeypatch, timed_out_route, rank_automatic):
+    body, observed = asyncio.run(_search(
+        tmp_path, monkeypatch, limit=5, automatic=True,
+        history_count=1, memory_count=1, timed_out_route=timed_out_route,
+        rank_automatic=rank_automatic,
+    ))
+    assert len(body["items"]) == 1
+    assert len(observed.documents) == int(rank_automatic)
+    if timed_out_route == "history":
+        assert body["items"][0]["memory_id"] == "memory:0"
+        assert observed.candidates == ("memory:0",)
+    else:
+        assert body["items"][0]["source"] == "session_history"

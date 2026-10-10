@@ -159,10 +159,8 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
-    CompactionSnapshotCarrier,
-    ContextBindingBaseKind,
 )
-from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES, SessionContentRange
+from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
 from pulsara_agent.model_input.lowering import project_tool_result_public_value
 
 from pulsara_agent.model_input.continuity import (
@@ -355,27 +353,9 @@ class ToolBatchExecutor:
     """Own authorize → attempt → physical invoke → exact result settlement."""
 
     @staticmethod
-    def _session_content_range(
-        facts: FrozenCanonicalCompileSnapshot,
-    ) -> SessionContentRange:
-        binding = facts.context_binding_fact
-        if binding.base_kind is ContextBindingBaseKind.FULL_HISTORY:
-            # Revision-zero source_through is genesis, never a history floor.
-            return SessionContentRange(0)
-        carriers = [
-            item.content
-            for item in facts.canonical_input.items
-            if isinstance(item.content, CompactionSnapshotCarrier)
-        ]
-        if len(carriers) != 1:
-            raise RuntimeError("session query lost the installed snapshot carrier")
-        active = carriers[0].active_request
-        excluded = (
-            active.entry_id
-            if active is not None and active.location.value == "SNAPSHOT_EXACT"
-            else None
-        )
-        return SessionContentRange(binding.source_through_sequence, excluded)
+    def _session_content_range(facts):
+        from pulsara_agent.ports.session_content import session_content_range
+        return session_content_range(facts)
 
     def __init__(
         self,

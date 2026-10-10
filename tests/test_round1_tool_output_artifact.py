@@ -157,7 +157,7 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
@@ -950,11 +950,13 @@ def _install_tool_call(
     tool_name="terminal",
     arguments=None,
     attempted=True,
+    memory_domain_id="u_local",
 ):
     session_id = _name("session")
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
+        memory_domain_id=memory_domain_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,

@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:5346cb0126a1fa19b8cb9f1a1e17a51161260fc17f70c661740061ff5bd62b1e",
+  "observed_catalog_fingerprint": "sha256:f90a2ca502dddb3526f8b0c6e91e4bbb16a9838f9d7fad6f9f3a415a4808114b",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -8,6 +8,12 @@
       "schema_name": "public",
       "required_type": "vector",
       "required_operator": "<=>"
+    },
+    {
+      "extension_name": "pg_search",
+      "exact_version": "0.26.1",
+      "schema_name": "paradedb",
+      "required_access_method": "bm25"
     }
   ],
   "product_schema": "pulsara_v3",
@@ -41,7 +47,8 @@
     "memory_relations",
     "memory_embeddings",
     "blobs",
-    "agent_events"
+    "agent_events",
+    "history_search_documents"
   ],
   "infrastructure_relations": [
     "public.pulsara_schema_migrations"
@@ -50,8 +57,7 @@
     "pulsara_v3.enforce_conversation_kernel_invariants",
     "pulsara_v3.enforce_imported_history_invariants",
     "pulsara_v3.enforce_direct_memory_lineage",
-    "pulsara_v3.memory_terms_to_tsquery",
-    "pulsara_v3.seal_memory_fact_search_document",
+    "pulsara_v3.seal_memory_fact",
     "pulsara_v3.seal_memory_relation"
   ]
 }

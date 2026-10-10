@@ -1140,7 +1140,7 @@ class _PolicyMemoryProjection:
             texts=(' {"items":[]} ',),
         )
 
-    async def freeze_automatic_recall_source(self, _query: str):
+    async def freeze_automatic_recall_source(self, _query: str, *, canonical_facts=None):
         self.recall_calls += 1
         return build_memory_context_source(
             kind=ContextSourceKind.MEMORY_RECALL,

@@ -173,16 +173,20 @@ def test_mixed_call_search_uses_sources_and_snippet_block_boundaries(
     args = {"session_id": target.guard.session_id, "include_tools": True}
     for keyword in ("terminal", "command", "ordinary-arg", "second-arg"):
         hits = query("search_session_content", query=keyword, **args)["items"]
-        assert len(hits) == 1 and hits[0]["entry_id"] == anchor
-        assert keyword in hits[0]["text"]
-        assert "excluded-sentinel" not in hits[0]["text"]
-        assert "read_session_content" not in hits[0]["text"]
+        assert len(hits) == 1 and anchor in {m["entry_id"] for m in hits[0]["messages"]}
+        assert keyword in "\n".join(m["text"] for m in hits[0]["messages"])
+        assert "excluded-sentinel" not in "\n".join(
+            m["text"] for m in hits[0]["messages"]
+        )
+        assert (
+            "read_session_content" in "\n".join(m["text"] for m in hits[0]["messages"])
+        ) == with_text
     hits = query("search_session_content", query="ordinary-arg second-arg", **args)[
         "items"
     ]
-    assert len(hits) == 1 and hits[0]["entry_id"] == anchor
-    for keyword in ("excluded-sentinel", "hidden-data", "Arguments:", "Tool call:"):
-        assert query("search_session_content", query=keyword, **args)["items"] == []
+    assert len(hits) == 1 and anchor in {m["entry_id"] for m in hits[0]["messages"]}
+    for keyword in ("excluded-sentinel", "hidden-data", "Arguments:"):
+        assert query("search_session_content", query=keyword, **args)["items"] == [], keyword
     assert query("search_sessions", query="ordinary-arg")["items"] == []
     default = {"session_id": target.guard.session_id, "entry_id": anchor, "limit": 1}
     if with_text:
@@ -230,7 +234,9 @@ def test_query_only_calls_do_not_match_or_consume_search_limit(repo, context):
         query="genuine-needle",
         limit=1,
     )
-    assert hit["items"][0]["role"] == "user" and hit["next_cursor"] is None
+    assert (
+        hit["items"][0]["messages"][0]["role"] == "user" and hit["next_cursor"] is None
+    )
     assert hit["items"][0]["entry_id"] != old
 
 
@@ -275,6 +281,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v2_hard_cut(repo, c
     assert error.value.code == "CURSOR_INVALID"
     other = new()
     turn(repo, other.guard, "needle", answer="needle")
+    turn(repo, other.guard, "needle again", answer="needle answer")
     page = query(
         "search_session_content",
         session_id=other.guard.session_id,
@@ -283,7 +290,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v2_hard_cut(repo, c
     )
     new_cursor = page["next_cursor"]
     old = _decode(new_cursor, "search_session_content")
-    assert old["operation"] == "search_session_content.v2"
+    assert old["operation"] == "search_session_content.bm25.v1"
     assert query("search_session_content", cursor=new_cursor)["items"]
     old["operation"] = "search_session_content"
     with pytest.raises(SessionQueryError) as error:
@@ -299,15 +306,16 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v2_hard_cut(repo, c
     "state", ["SUCCESS", "SYSTEM_ERROR", "PERMISSION_DENIED", "CANCELLED"]
 )
 def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_results(
-    repo, stage2_migrated_postgres_database, tool_name, state, monkeypatch
+    repo, stage2_migrated_postgres_database, tool_name, state, monkeypatch, context
 ):
     from tests.test_round1_tool_output_artifact import _install_tool_call
     from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
 
-    caller = new_session(repo)
+    caller, _, _ = context
+    domain = rows(repo, "SELECT memory_domain_id FROM pulsara_v3.sessions WHERE id=%s", (caller.guard.session_id,))[0]["memory_domain_id"]
     workspace = identity("workspace")
     lease, turn_id, request, call, attempt = _install_tool_call(
-        repo, workspace, tool_name=tool_name, attempted=state != "PERMISSION_DENIED"
+        repo, workspace, tool_name=tool_name, attempted=state != "PERMISSION_DENIED", memory_domain_id=domain
     )
     result_id = identity("entry")
     text = 'result-needle read_session_content {"items":["ordinary output"]}'
@@ -349,7 +357,7 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
         lease.guard, candidate=accepted, deadline_monotonic=monotonic() + 30
     )
     owner = SessionContentQuery(
-        repo, session_id=caller.guard.session_id, memory_domain_id="u_local"
+        repo, session_id=caller.guard.session_id, memory_domain_id=domain
     )
 
     def invoke(name="read_session_content", **args):
@@ -365,7 +373,10 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
     hits = invoke("search_session_content", query="result-needle", **args)["items"]
     assert bool(hits) == (tool_name not in SESSION_QUERY_TOOL_NAMES)
     if hits:
-        assert hits[0]["entry_id"] == result_id and hits[0]["result_state"] == state
+        assert any(
+            m["entry_id"] == result_id and "result-needle" in m["text"]
+            for m in hits[0]["messages"]
+        )
     assert invoke("search_sessions", query="result-needle")["items"] == []
     read = invoke(entry_id=result_id, limit=1, **args)["items"][0]
     assert (
@@ -387,20 +398,32 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
             return original(row)
 
         monkeypatch.setattr(module, "decode_saved_text", forbidden)
+        from pulsara_agent.conversation_kernel import history_projection
+        monkeypatch.setattr(history_projection, "decode_saved_text", forbidden)
         assert (
             invoke("search_session_content", query="result-needle", **args)["items"]
             == []
         )
-        # Canonical edge loss must still fail before a category can be guessed.
-        import psycopg
+    # Canonical edge loss must still fail before a category can be guessed.
+    import psycopg
 
-        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-            connection.execute(
-                "DELETE FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s",
-                (lease.guard.session_id, result_id),
-            )
-        with pytest.raises(RuntimeError, match="canonical edge"):
-            invoke("search_session_content", query="result-needle", **args)
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute(
+            "DELETE FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s",
+            (lease.guard.session_id, result_id),
+        )
+    with pytest.raises(RuntimeError, match="canonical edge"):
+        invoke(entry_id=result_id, limit=1, **args)
+
+    # Rebuilding a disposable projection cannot turn a missing canonical edge
+    # into a guessed category exclusion or a partially qualified answer process.
+    from pulsara_agent.conversation_kernel.history_projection import refresh_history_question
+    from psycopg.rows import dict_row
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    question = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]['id']
+    with repo.connection_provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
+        refresh_history_question(connection, lease.guard.session_id, question)
+    assert invoke('search_session_content', query='run', **args)['items'] == []
 
 
 def test_full_history_uses_zero_not_genesis_and_explicit_self_cannot_bypass(
@@ -461,7 +484,7 @@ def test_snapshot_range_excludes_carried_active_request_and_not_retained_summary
     actual = ToolBatchExecutor._session_content_range(facts)
     assert actual.through_sequence == head and actual.excluded_entry_id is not None
     found = query("search_session_content", scope=actual, query="needle")
-    assert {i["entry_id"] for i in found["items"]} == {
+    assert {m["entry_id"] for i in found["items"] for m in i["messages"]} == {
         old,
         rows(
             repo,
@@ -507,9 +530,14 @@ def test_entry_projection_matches_across_blocks_without_data_or_fake_snippet(
         session_id=target.guard.session_id,
         query="FIRST second",
     )
-    assert len(result["items"]) == 1 and result["items"][0]["entry_id"] == entry
+    assert len(result["items"]) == 1
     expected = body + "\nsecond keyword"
-    assert result["items"][0]["text"] == expected
+    assert (
+        next(
+            m["text"] for m in result["items"][0]["messages"] if m["entry_id"] == entry
+        )
+        == expected
+    )
     read = query(session_id=target.guard.session_id, entry_id=entry, limit=1)
     assert read["items"][0]["text"] == expected
     ui, _ = search_session_page(
@@ -555,7 +583,7 @@ def test_anchor_direction_shows_later_revision_without_matching_original_keyword
     hit = query(
         "search_session_content", session_id=target.guard.session_id, query="scheme"
     )
-    assert hit["items"][0]["entry_id"] == anchor
+    assert any(m["entry_id"] == anchor for m in hit["items"][0]["messages"])
     page = query(session_id=target.guard.session_id, entry_id=anchor)
     assert (
         page["items"][0]["entry_id"] == anchor
@@ -750,7 +778,7 @@ def test_cross_session_tool_public_metadata_and_full_artifact_are_one_stable_vie
     workspace = identity("workspace")
     lease, turn_id, request, call, attempt = _install_tool_call(repo, workspace)
     source = (
-        "begin\n" + "x" * 50000 + "\nunique-middle-needle\n" + "z" * 50000 + "\nend"
+        "begin\n" + "x" * 50000 + "\nuniquemiddleneedle\n" + "z" * 50000 + "\nend"
     )
     result_id = identity("entry")
     candidate = ToolOutputArtifactCandidate(
@@ -828,14 +856,14 @@ def test_cross_session_tool_public_metadata_and_full_artifact_are_one_stable_vie
         invoke(
             "search_session_content",
             session_id=lease.guard.session_id,
-            query="unique-middle-needle",
+            query="uniquemiddleneedle",
         )["items"]
         == []
     )
     found = invoke(
         "search_session_content",
         session_id=lease.guard.session_id,
-        query="unique-middle-needle",
+        query="uniquemiddleneedle",
         include_tools=True,
     )
     if unavailable:
@@ -855,19 +883,12 @@ def test_cross_session_tool_public_metadata_and_full_artifact_are_one_stable_vie
         assert page["items"][0]["source_coverage"] == "COMPLETE"
         assert page["next_cursor"] is None
         return
-    assert (
-        found["items"][0]["entry_id"] == result_id
-        and "unique-middle-needle" in found["items"][0]["text"]
+    assert any(
+        m["entry_id"] == result_id and "uniquemiddleneedle" in m["text"]
+        for m in found["items"][0]["messages"]
     )
-    assert (
-        invoke(
-            "search_session_content",
-            session_id=lease.guard.session_id,
-            query="Saved tool result:",
-            include_tools=True,
-        )["items"]
-        == []
-    )
+    projection_body = rows(repo, "SELECT body FROM pulsara_v3.history_search_documents WHERE session_id=%s AND include_tools=true", (lease.guard.session_id,))
+    assert all("Saved tool result:" not in r["body"] for r in projection_body)
     page = invoke(
         session_id=lease.guard.session_id,
         entry_id=result_id,

@@ -64,14 +64,11 @@ class HttpRerankProvider:
             state = {
                 "user_task": query,
                 "candidates": [
-                    {"memory_id": name, "memory": text}
+                    {"candidate_number": name, "candidate": text}
                     for name, text in zip(names, documents, strict=True)
                 ],
             }
-            questions = {
-                name: decision_question(name, purpose)
-                for name in names
-            }
+            questions = {name: decision_question(name, purpose) for name in names}
             if shape == "system_one":
                 payload.update(
                     state=state,
@@ -79,7 +76,10 @@ class HttpRerankProvider:
                         name: {
                             "type": "noul",
                             "instructions": questions[name][0],
-                            "criteria": {"true": questions[name][1], "false": questions[name][2]},
+                            "criteria": {
+                                "true": questions[name][1],
+                                "false": questions[name][2],
+                            },
                         }
                         for name in names
                     },

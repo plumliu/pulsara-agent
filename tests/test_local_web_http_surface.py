@@ -1720,6 +1720,18 @@ def test_memory_settings_http_errors_are_specific_and_confirmation_is_atomic(tmp
         try:
             async with ClientSession(headers={'X-Pulsara-Connection-Id': 'connection-1', 'X-Pulsara-Connection-Generation': '1'}) as client:
                 base = server.origin + '/api/local-settings/memory-retrieval'
+                assert store.read().memory_retrieval.history_enabled is True
+                before = store.read().memory_retrieval
+                for enabled in (False, True):
+                    async with client.put(base + '/history-enabled', json={'enabled': enabled}) as response:
+                        assert response.status == 200
+                    assert store.read().memory_retrieval.history_enabled is enabled
+                    assert store.read().memory_retrieval.embedding == before.embedding
+                    assert store.read().memory_retrieval.ranking_mode == before.ranking_mode
+                for malformed in ({'enabled': 'yes'}, {'enabled': True, 'extra': 1}, {}):
+                    async with client.put(base + '/history-enabled', json=malformed) as response:
+                        assert response.status == 400
+                    assert store.read().memory_retrieval == before
                 async with client.put(base + '/ranking-mode', json={'mode': 'decision'}) as response:
                     assert response.status == 400
                     assert 'API key' in (await response.json())['error']['message']

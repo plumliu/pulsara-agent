@@ -11,7 +11,6 @@ import pytest
 
 from pulsara_agent.conversation_kernel.context_sources import build_memory_context_source
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
-from pulsara_agent.conversation_kernel.memory.recall import MemoryQueryResult, MemoryRetrievalDisposition
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
 from pulsara_agent.memory.scope import MemoryDomainContext, freeze_memory_read_context_binding
 from pulsara_agent.model_input.contracts import ContextSourceKind, ContextSourceAbsenceKind
@@ -21,7 +20,7 @@ from pulsara_agent.settings import LocalSettingsStore
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_embedding_overlaps_tokenizer_and_cancellation_drains_both(tmp_path, cancel):
+def test_embedding_overlaps_sparse_and_history_and_cancellation_drains_all(tmp_path, cancel):
     async def scenario():
         io = KernelSessionIO()
         port = KernelMemoryToolPort(
@@ -32,18 +31,19 @@ def test_embedding_overlaps_tokenizer_and_cancellation_drains_both(tmp_path, can
             settings=LocalSettingsStore(tmp_path / "settings.yaml"),
         )
         await save_model(port._settings, "embedding", "test-key", activate=True)
-        embedding_started, tokenize_started, release_tokenize, tokenize_done = Event(), Event(), Event(), Event()
+        embedding_started, sparse_started, release_search, sparse_done = Event(), Event(), Event(), Event()
         embedding_done = asyncio.Event()
 
-        def tokenize(_text):
-            tokenize_started.set()
+        def sparse(**kwargs):
+            sparse_started.set()
             try:
-                assert embedding_started.wait(5), "remote request waited for tokenization"
+                assert embedding_started.wait(5), "remote request waited for local sparse search"
                 if cancel:
-                    assert release_tokenize.wait(5)
-                return ("runtime",)
+                    assert release_search.wait(5)
+                assert kwargs["query"] == "请测试一下runtime的启动速度"
+                return ()
             finally:
-                tokenize_done.set()
+                sparse_done.set()
 
         async def embed(_text):
             embedding_started.set()
@@ -57,31 +57,47 @@ def test_embedding_overlaps_tokenizer_and_cancellation_drains_both(tmp_path, can
         async def provider():
             return SimpleNamespace(embed=embed)
 
-        async def recall(**kwargs):
-            assert kwargs["terms"] == ("runtime",)
-            assert kwargs["query_embedding"].vector == (1.0,)
-            return MemoryQueryResult(MemoryRetrievalDisposition.NO_MATCH, (), ())
+        history_started, history_done = Event(), Event()
+        def history(**kwargs):
+            history_started.set()
+            try:
+                assert embedding_started.wait(5), "remote request waited for history"
+                if cancel:
+                    assert release_search.wait(5)
+                return ()
+            finally:
+                history_done.set()
 
-        port._query.tokenize_query = tokenize
+        from pulsara_agent.model_input.contracts import ContextBindingBaseKind
+        canonical_facts = SimpleNamespace(
+            context_binding_fact=SimpleNamespace(base_kind=ContextBindingBaseKind.FULL_HISTORY),
+            canonical_input=SimpleNamespace(items=()),
+        )
+        port._history.automatic_candidates = history
+        port._query.sparse_candidates = sparse
+        port._query.canonical_refetch = lambda **kwargs: ()
         port._embedding_provider = provider
-        port._parallel_recall = recall
-        task = asyncio.create_task(port.freeze_automatic_recall_source("请测试一下runtime的启动速度"))
+
+        task = asyncio.create_task(port.freeze_automatic_recall_source("请测试一下runtime的启动速度", canonical_facts=canonical_facts))
         try:
             if cancel:
-                assert await asyncio.to_thread(tokenize_started.wait, 5)
+                assert await asyncio.to_thread(sparse_started.wait, 5)
                 assert await asyncio.to_thread(embedding_started.wait, 5)
+                assert await asyncio.to_thread(history_started.wait, 5)
                 task.cancel()
-                release_tokenize.set()
+                release_search.set()
                 with pytest.raises(asyncio.CancelledError):
                     await task
-                assert tokenize_done.is_set()
+                assert sparse_done.is_set()
+                assert history_done.is_set()
                 assert embedding_done.is_set()
                 assert not port._remote_tasks
             else:
                 result = await asyncio.wait_for(task, 5)
                 assert result.absence_kind is ContextSourceAbsenceKind.EXPLICIT_EMPTY
+                assert history_done.is_set()
         finally:
-            release_tokenize.set()
+            release_search.set()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await port.aclose()
@@ -114,7 +130,7 @@ def test_real_admission_overlaps_compile_and_recall_without_detached_tasks(
             recall_started, recall_done = Event(), Event()
             recall_calls = 0
 
-            async def recall(_text):
+            async def recall(_text, *, canonical_facts):
                 nonlocal recall_calls
                 recall_calls += 1
                 recall_started.set()

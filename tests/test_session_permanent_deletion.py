@@ -27,6 +27,7 @@ from tests.test_direct_advisory_memory import _open_direct_memory_session
 
 
 DIRECT = {
+    "history_search_documents",
     "scheduled_tasks",
     "context_snapshots",
     "subagent_tasks",
@@ -72,7 +73,7 @@ def exists(repo, sid, domain="u_local"):
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
     fks = rows(
         repo,
         """SELECT c.conrelid::regclass::text AS child,
@@ -105,6 +106,13 @@ def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
             assert f["indexed"], f
             owned.append(child)
         elif child in DIRECT | INDIRECT.keys() and parent in DIRECT | INDIRECT.keys():
+            if child == "history_search_documents":
+                # Disposable documents disappear with their canonical questions;
+                # this is not a durable semantic edge that restrains deletion.
+                assert parent == "transcript_entries"
+                assert f["columns"] in (["q1_entry_id"], ["q2_entry_id"])
+                assert (f["action"], f["deferred"], f["initially_deferred"]) == ("c", False, False)
+                continue
             if (
                 child in {"canonical_image_refs", "assistant_visualizations"}
                 and f["action"] == "c"

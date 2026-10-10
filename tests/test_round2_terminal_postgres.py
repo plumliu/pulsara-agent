@@ -478,14 +478,15 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.transcript_entries (
-                    entry_owner_kind, id, session_id, workspace_id, turn_id, entry_sequence,
+                    entry_owner_kind, id, origin_entry_id, session_id, workspace_id, turn_id, entry_sequence,
                     entry_kind, conversation_scope_kind, inline_content,
                     content_digest, content_size, content_media_type,
                     content_codec
-                ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, 'USER_STEER', 'ROOT',
+                ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, 'USER_STEER', 'ROOT',
                           %s, %s, %s, %s, %s)
                 """,
                 (
+                    wrong_kind_entry,
                     wrong_kind_entry,
                     session_id,
                     workspace_id,
@@ -574,14 +575,15 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.transcript_entries (
-                    entry_owner_kind, id, session_id, workspace_id, turn_id, entry_sequence,
+                    entry_owner_kind, id, origin_entry_id, session_id, workspace_id, turn_id, entry_sequence,
                     entry_kind, conversation_scope_kind, inline_content,
                     content_digest, content_size, content_media_type,
                     content_codec
-                ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, 'USER_MESSAGE', 'ROOT',
+                ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, 'USER_MESSAGE', 'ROOT',
                           %s, %s, %s, %s, %s)
                 """,
                 (
+                    cross_scope_entry,
                     cross_scope_entry,
                     session_id,
                     workspace_id,

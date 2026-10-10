@@ -241,10 +241,9 @@ class _MemoryOperations(_MemoryManagementOperations):
                     id, memory_domain_id, context_id,
                     created_by_tool_result_id,
                     lifecycle, fact_kind, statement, fact_semantic_digest,
-                    accepted_at, updated_at, search_contract_id,
-                    search_contract_version, search_terms
+                    accepted_at, updated_at
                 ) VALUES (
-                    %s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s
+                    %s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s
                 )
                 ON CONFLICT (memory_domain_id, context_id, fact_semantic_digest)
                     WHERE lifecycle='ACTIVE' DO NOTHING
@@ -260,8 +259,6 @@ class _MemoryOperations(_MemoryManagementOperations):
                     write.semantic_digest,
                     accepted_at,
                     accepted_at,
-                    *write.search_contract,
-                    list(write.search_terms),
                 ),
             ).fetchone()
             if inserted is not None:

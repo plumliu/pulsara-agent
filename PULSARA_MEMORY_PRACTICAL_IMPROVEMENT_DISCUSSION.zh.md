@@ -2,7 +2,7 @@
 
 日期：2026-10-10
 
-状态：改进方向讨论稿；记忆工具简化已按用户决定实施，其余方向尚未实施，不作为直接改变生产行为的实施规格。
+状态：改进方向讨论稿；记忆工具简化已按用户决定实施，第三路历史检索与统一 BM25 已按[实施规格](PULSARA_LOCAL_HISTORY_RECALL_PG_SEARCH_IMPLEMENTATION_DISCUSSION.zh.md)完成，其他方向尚未实施，不作为直接改变生产行为的实施规格。
 
 ## 目标与范围
 
@@ -71,7 +71,7 @@ Decision 可以辅助判断是否值得比较，以及两条记忆之间的语�
 
 记忆条目的 embedding 在落库后异步生成，记忆库增大不会导致每次查询重新 embedding 全库。
 
-但是，本轮 query 的 embedding 仍是远程调用。当前隐式召回将 query embedding 与本地分词并行启动，在得到向量后执行候选检索。即使本地关键词已经足以找到有关条目，这一轮仍会等待 query embedding。
+但是，本轮 query 的 embedding 仍是远程调用。当前隐式召回将 query embedding、本地 BM25 记忆查询与历史查询并行启动，向量返回后再执行向量候选查询和融合。即使本地关键词已经足以找到有关条目，这一轮仍会等待 query embedding。
 
 ### 借鉴方式
 

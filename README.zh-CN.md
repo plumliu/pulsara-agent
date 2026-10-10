@@ -158,3 +158,5 @@ Pulsara 会启动本地服务并打开浏览器工作台。在界面中选择工
 基于带类型约束的 Python 运行时、React 工作台和 PostgreSQL 构建，提供持久会话与记忆，以及 ripgrep 驱动的文件搜索。
 
 [分享想法或反馈问题](https://github.com/plumliu/pulsara-agent/issues) · [参与贡献](https://github.com/plumliu/pulsara-agent/pulls)
+
+本地历史检索默认开启，与普通记忆共用 pg_search BM25 和现有可选重排；独立开关位于“设置 → 模型 → 记忆检索”。PostgreSQL 需要 pg_search **0.26.1** 与 pgvector。compose 镜像固定 PostgreSQL 17；已有本地服务器须先安装扩展二进制并配置预加载，再重建 clean-v0。详见[实施与部署说明](PULSARA_LOCAL_HISTORY_RECALL_PG_SEARCH_IMPLEMENTATION_DISCUSSION.zh.md)。

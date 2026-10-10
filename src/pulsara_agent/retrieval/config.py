@@ -94,6 +94,7 @@ def connection_from_dict(slot: str, value: object, *, private: bool = False):
 class MemoryRetrievalSettings:
     embedding: RetrievalConnection | None = None
     embedding_enabled: bool = False
+    history_enabled: bool = True
     rerank: RetrievalConnection | None = None
     decision: RetrievalConnection | None = None
     ranking_mode: str = "off"
@@ -101,6 +102,7 @@ class MemoryRetrievalSettings:
     def __post_init__(self):
         if (
             type(self.embedding_enabled) is not bool
+            or type(self.history_enabled) is not bool
             or not isinstance(self.ranking_mode, str)
             or self.ranking_mode not in {"off", "decision", "rerank"}
         ):
@@ -127,6 +129,7 @@ class MemoryRetrievalSettings:
                 for slot in SLOT_SHAPES
             },
             "embedding_enabled": self.embedding_enabled,
+            "history_enabled": self.history_enabled,
             "ranking_mode": self.ranking_mode,
         }
 
@@ -148,6 +151,7 @@ class MemoryRetrievalSettings:
                 for slot in SLOT_SHAPES
             },
             "embedding_enabled": self.embedding_enabled,
+            "history_enabled": self.history_enabled,
             "ranking_mode": self.ranking_mode,
         }
 
@@ -156,6 +160,7 @@ class MemoryRetrievalSettings:
         if not isinstance(value, dict) or set(value) != {
             *SLOT_SHAPES,
             "embedding_enabled",
+            "history_enabled",
             "ranking_mode",
         }:
             raise ValueError("memory retrieval settings have an invalid closed shape")

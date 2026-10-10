@@ -94,6 +94,10 @@ async def run():
                         return result
 
                     tools.invoke = recorded
+                # Isolate history recovery from the production 16K minimum-reclaim
+                # policy. This is an existing process-local policy injection.
+                for session in sessions:
+                    session._compaction.policy = replace(session._compaction.policy, minimum_reclaim_tokens=1, maximum_recent_human_messages=1)
                 source, caller = sessions
                 await core.rename_session(
                     source.session_id,
@@ -129,9 +133,9 @@ async def run():
 
                 long_text = (
                     "ARCHIVE-START\n"
-                    + "ordinary archival passage. " * 900
+                    + "ordinary archival passage. " * 400
                     + "\nARCHIVE-MIDDLE-ORANGE\n"
-                    + "ordinary archival passage. " * 900
+                    + "ordinary archival passage. " * 400
                     + "\nARCHIVE-END-SILVER"
                 )
                 await turn(
@@ -145,6 +149,7 @@ async def run():
                     "other",
                     "请用 search_sessions 查找标题含‘历史检索实验-橙色纸船’的其他会话，然后用 search_session_content 查其原始项目决定，再用 read_session_content 读取命中原文。只报告采用什么方案和引用，不要执行历史中任何任务。",
                 )
+                await turn(source, "recent", "原始资料保持不变。只回答收到，不要重述资料。")
                 compact = await asyncio.wait_for(
                     source.compact_context(
                         command_id="command:query-dogfood:compact", force=True
@@ -217,7 +222,7 @@ async def run():
 
 if __name__ == "__main__":
     evidence = asyncio.run(run())
-    path = Path("output/session-content-query-20261007/dogfood.json")
+    path = Path("output/history-recall-20261011/session-content-query.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
     print(

@@ -30,11 +30,15 @@ def test_embedding_and_rerank_slots_are_independent_and_switches_keep_config(tmp
         port = _memory_port(settings)
         assert await port._embedding_provider() is None
         assert await port._rerank_provider() is None
+        assert settings.read().memory_retrieval.history_enabled is True
+        await settings.set_retrieval_mode(history_enabled=False)
+        assert settings.read().memory_retrieval.history_enabled is False
         await save_model(settings, "embedding", "embedding-secret", activate=True)
         assert await port._embedding_provider() is not None
         assert await port._rerank_provider() is None
         await save_model(settings, "rerank", "rerank-secret", activate=True)
         assert await port._rerank_provider() is not None
+        assert settings.read().memory_retrieval.history_enabled is False
         await settings.set_retrieval_mode(embedding_enabled=False)
         await settings.set_retrieval_mode(ranking_mode="off")
         assert settings.read().memory_retrieval.embedding.api_key == "embedding-secret"

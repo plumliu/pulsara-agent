@@ -121,6 +121,8 @@ class PostgresSchemaVerifier:
         definition = POSTGRES_MIGRATION_REGISTRY.definition(0)
         _validate_clean_ledger(rows, definition)
         _verify_vector_capability(connection)
+        from pulsara_agent.storage.migrations.runner import _verify_search_capability
+        _verify_search_capability(connection)
         _verify_product_relations(connection)
         _verify_runtime_grants(connection, identity.runtime_role)
 

@@ -9,8 +9,6 @@ from time import monotonic
 from pulsara_agent.conversation_kernel.memory.recall import (
     MemoryDenseCandidateDisposition,
     MemoryQueryRow,
-    MemoryQueryResult,
-    MemoryRetrievalDisposition,
     PostgresMemoryQuery,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
@@ -97,14 +95,8 @@ def test_five_recalled_facts_keep_source_variants_monotone(tmp_path, monkeypatch
             settings=LocalSettingsStore(tmp_path / "settings.yaml"),
         )
 
-        async def recall(**_):
-            return MemoryQueryResult(
-                disposition=MemoryRetrievalDisposition.COMPLETE,
-                facts=facts,
-                attempted_stages=(),
-            )
-
-        monkeypatch.setattr(port, "_parallel_recall", recall)
+        monkeypatch.setattr(port._query, "sparse_candidates", lambda **_: ())
+        monkeypatch.setattr(port._query, "canonical_refetch", lambda **_: facts)
         monkeypatch.setattr(port._query, "active_contradictions", lambda **_: ())
         try:
             return await port.freeze_automatic_recall_source(

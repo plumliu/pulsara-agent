@@ -73,7 +73,7 @@ class MemoryContextProjectionPort(Protocol):
     ) -> ContextSourceCandidate | ContextSourceAbsentFact: ...
 
     async def freeze_automatic_recall_source(
-        self, query: str
+        self, query: str, *, canonical_facts: FrozenCanonicalCompileSnapshot | None = None
     ) -> ContextSourceCandidate | ContextSourceAbsentFact: ...
 
     def classify_automatic_trigger(
@@ -388,6 +388,7 @@ class MemoryDispatchSupport:
         activation_subject: CapabilityActivationSubjectKind | None,
         activation_text: str,
         include_recall: bool,
+        canonical_facts: FrozenCanonicalCompileSnapshot | None = None,
         frozen_preference: ContextSourceCandidate
         | ContextSourceAbsentFact
         | None = None,
@@ -435,7 +436,7 @@ class MemoryDispatchSupport:
             else:
                 replacements.append(
                     await self._memory_projection.freeze_automatic_recall_source(
-                        activation_text
+                        activation_text, canonical_facts=canonical_facts
                     )
                 )
         return replace_memory_context_sources(sources, tuple(replacements))

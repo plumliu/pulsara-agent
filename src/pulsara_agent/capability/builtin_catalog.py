@@ -1166,11 +1166,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "search_session_content": _descriptor(
         name="search_session_content",
         description=(
-            "Search saved message text; all literal, case-insensitive keywords must match in one entry. "
-            "Omit session_id for this session's earlier raw history; other sessions use all authorized saved ROOT content. "
-            "include_tools also searches tool names, arguments and results, excluding these three session query tools' own calls and results. "
-            "Returns one original snippet per matching entry, newest first. Use session_id + entry_id with read_session_content "
-            "to expand a hit. partial marks a snippet, not source completeness. Continue with only cursor and optional limit."
+            "Search saved ROOT questions and their answer process by BM25 relevance using Chinese, English or technical identifiers. "
+            "Returns QAQ or QA items ordered by relevance, with messages preserving speakers, time and historical quotes/comments. "
+            "Omit session_id for this session's earlier raw history; other sessions use authorized saved content. "
+            "include_tools also searches saved tool names, arguments and results, excluding these three query tools' own calls and results. "
+            "Each item's entry_id starts the question; messages carry their own entry_id for read_session_content expansion. "
+            "[truncated] marks omitted original text. Continue with only cursor and optional limit."
         ),
         input_schema=session_query_input_schema(
             "search_session_content",
