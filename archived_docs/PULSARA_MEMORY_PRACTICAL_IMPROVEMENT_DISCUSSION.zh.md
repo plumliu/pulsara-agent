@@ -2,6 +2,8 @@
 
 日期：2026-10-10
 
+归档：2026-10-11。已实现部分保留为记录；其余改进方向暂缓，继续沿用现有写入及按需关系维护，不引入保存前语义去重。
+
 状态：改进方向讨论稿；记忆工具简化已按用户决定实施，第三路历史检索与统一 BM25 已按[实施规格](PULSARA_LOCAL_HISTORY_RECALL_PG_SEARCH_IMPLEMENTATION_DISCUSSION.zh.md)完成，其他方向尚未实施，不作为直接改变生产行为的实施规格。
 
 ## 目标与范围
@@ -247,12 +249,12 @@ MemForest 的增量维护思路与现有 canonical facts 和派生向量维护�
 
 与上述现状有关的生产代码：
 
-- [记忆工具、隐式召回与重排](src/pulsara_agent/conversation_kernel/memory_tools.py)
-- [记忆写入提示词与关系比较语义](src/pulsara_agent/memory/product_contract.py)
-- [记忆关系库与重复写入处理](src/pulsara_agent/conversation_kernel/_repository/memory.py)
-- [异步 embedding 维护](src/pulsara_agent/conversation_kernel/memory/embedding_maintainer.py)
-- [用户记忆正文编辑与并发检查](src/pulsara_agent/conversation_kernel/_repository/memory_management.py)
+- [记忆工具、隐式召回与重排](../src/pulsara_agent/conversation_kernel/memory_tools.py)
+- [记忆写入提示词与关系比较语义](../src/pulsara_agent/memory/product_contract.py)
+- [记忆关系库与重复写入处理](../src/pulsara_agent/conversation_kernel/_repository/memory.py)
+- [异步 embedding 维护](../src/pulsara_agent/conversation_kernel/memory/embedding_maintainer.py)
+- [用户记忆正文编辑与并发检查](../src/pulsara_agent/conversation_kernel/_repository/memory_management.py)
 
 Code Mode 参考来自 `experiment/quickjs-code-mode` 分支的 `PULSARA_CODE_MODE_HARD_CUT_IMPLEMENTATION_SPEC.zh.md` 与 `experiments/quickjs-code-mode/`；这些文件不在当前 main 工作区中，本稿不将实验通过或规格冻结视为生产已启用。
 
-论文 PDF 位于 [papers/mem](papers/mem/)，本轮新增 22 篇，与此前下载的 9 篇合计 31 篇。本文依据论文方法与当前代码提出工程方向，不将论文成绩视为 Pulsara 的实测收益。
+论文 PDF 位于 [papers/mem](../papers/mem/)，本轮新增 22 篇，与此前下载的 9 篇合计 31 篇。本文依据论文方法与当前代码提出工程方向，不将论文成绩视为 Pulsara 的实测收益。

@@ -23,11 +23,11 @@
 
 ## 2. 当前生产实现
 
-[`memory_tools.py`](src/pulsara_agent/conversation_kernel/memory_tools.py) 使用本轮输入并行启动本地 BM25 记忆查询、历史查询与可选 query embedding；向量返回后执行现有记忆融合和规范回读。历史资格、精确副本折叠和初选最多 20 个单元由共享 SQL 所有者处理，再完成摘录；无效项不向后补查。混合候选按 15＋5 弹性配额交给一次 Decision / Rerank；成功取前 5，否则使用 4＋1 弹性选择。所选历史再次规范回读，失效整条省略，不补位。
+[`memory_tools.py`](../src/pulsara_agent/conversation_kernel/memory_tools.py) 使用本轮输入并行启动本地 BM25 记忆查询、历史查询与可选 query embedding；向量返回后执行现有记忆融合和规范回读。历史资格、精确副本折叠和初选最多 20 个单元由共享 SQL 所有者处理，再完成摘录；无效项不向后补查。混合候选按 15＋5 弹性配额交给一次 Decision / Rerank；成功取前 5，否则使用 4＋1 弹性选择。所选历史再次规范回读，失效整条省略，不补位。
 
-[`history_projection.py`](src/pulsara_agent/conversation_kernel/history_projection.py)、[`history_search.py`](src/pulsara_agent/conversation_kernel/history_search.py) 与 [`history_excerpt.py`](src/pulsara_agent/conversation_kernel/history_excerpt.py) 分别负责规范内容投影、资格与 BM25 查询、最早实际命中映射及正文预算。`search_session_content` 共用这些所有者；按 BM25 分数与规范代表键实时分页。`read_session_content` 的精确锚点读取保留。`search_sessions` 的列表搜索尚未改为相关性搜索，不属于本次硬切。
+[`history_projection.py`](../src/pulsara_agent/conversation_kernel/history_projection.py)、[`history_search.py`](../src/pulsara_agent/conversation_kernel/history_search.py) 与 [`history_excerpt.py`](../src/pulsara_agent/conversation_kernel/history_excerpt.py) 分别负责规范内容投影、资格与 BM25 查询、最早实际命中映射及正文预算。`search_session_content` 共用这些所有者；按 BM25 分数与规范代表键实时分页。`read_session_content` 的精确锚点读取保留。`search_sessions` 的列表搜索尚未改为相关性搜索，不属于本次硬切。
 
-普通记忆直接索引规范 `statement`，显式搜索、隐式召回和写入相关记忆查询共用 [`memory/recall.py`](src/pulsara_agent/conversation_kernel/memory/recall.py) 与 [`retrieval/pg_search.py`](src/pulsara_agent/retrieval/pg_search.py)。旧 `search_terms`、合成 `search_document`、GIN / `ts_rank_cd`、SQL 查询 helper、Python Jieba 与旧 tokenizer 契约已删除。规范正文的不可变检查继续由 `seal_memory_fact` 保持。
+普通记忆直接索引规范 `statement`，显式搜索、隐式召回和写入相关记忆查询共用 [`memory/recall.py`](../src/pulsara_agent/conversation_kernel/memory/recall.py) 与 [`retrieval/pg_search.py`](../src/pulsara_agent/retrieval/pg_search.py)。旧 `search_terms`、合成 `search_document`、GIN / `ts_rank_cd`、SQL 查询 helper、Python Jieba 与旧 tokenizer 契约已删除。规范正文的不可变检查继续由 `seal_memory_fact` 保持。
 
 普通记忆正文仍限制为 8 KiB UTF-8，`RESPONSE_PREFERENCE` 为 2 KiB。它原有的重排首尾投影和完整正文 / 回读 ID 展示降级保留；历史使用独立完整投影，只允许保留已经判别的摘录或整条省略。1024 启发式 tokens 仅约束每个历史候选正文，不计标题、角色、时间、批注身份标签和省略标记；完整协议包装仍受现有字节与 token 边界检查。
 
@@ -78,7 +78,7 @@ BM25 使用词频、文档长度和语料统计。词项位置支持短语及邻
 
 第三路只纳入人类与助手的可见对话正文。资格由内容的规范来源和职责确定，`role` 只用于展示说话者，不能把 provider 请求中所有 `user` 或 `assistant` 载体都当作对话原文。
 
-复用 prompt compiler 已有的 [`CanonicalInputOriginKind` 与 `ContextSourceKind`](src/pulsara_agent/model_input/contracts.py) 分类语义，从规范保存的消息和文本块提取语料，不对组装好的 provider 请求做全文索引，也不重新运行旧 prompt compiler 来恢复历史请求。
+复用 prompt compiler 已有的 [`CanonicalInputOriginKind` 与 `ContextSourceKind`](../src/pulsara_agent/model_input/contracts.py) 分类语义，从规范保存的消息和文本块提取语料，不对组装好的 provider 请求做全文索引，也不重新运行旧 prompt compiler 来恢复历史请求。
 
 | 规范来源 | 第三路处理 |
 | --- | --- |
@@ -121,7 +121,7 @@ BM25 使用词频、文档长度和语料统计。词项位置支持短语及邻
 
 ### 复用实际安装上下文的冻结范围
 
-范围由现有 provider 输入连续性与规范编译快照所有者提供。复用 [`tool_execution.py`](src/pulsara_agent/conversation_kernel/tool_execution.py) 中从 `FrozenCanonicalCompileSnapshot` 推导 `SessionContentRange` 的规则，让显式会话工具与隐式召回使用同一份范围推导实现，不各自复制判断逻辑。
+范围由现有 provider 输入连续性与规范编译快照所有者提供。复用 [`tool_execution.py`](../src/pulsara_agent/conversation_kernel/tool_execution.py) 中从 `FrozenCanonicalCompileSnapshot` 推导 `SessionContentRange` 的规则，让显式会话工具与隐式召回使用同一份范围推导实现，不各自复制判断逻辑。
 
 隐式召回接口需要接收与本次 dispatch 对应的冻结范围及原始可见正文定位，不能继续只传 query 后自行读取“数据库最新 compaction”。已有 epoch 使用实际已安装上下文的快照；冷 epoch 或已明确采用的 compaction successor 使用该次安装规划所拥有的快照。尚未采用的新快照不能提前改变本轮搜索资格。
 
@@ -174,7 +174,7 @@ BM25 使用词频、文档长度和语料统计。词项位置支持短语及邻
 
 项目会话的自动第三路不混入其他项目或快速开始正文，快速开始也不自动混入项目正文。跨项目回查继续通过现有显式会话搜索工具完成。共享引擎不强迫显式工具和隐式召回采用相同的默认范围。
 
-普通记忆的读取范围仍遵守现有 [`memory/scope.py`](src/pulsara_agent/memory/scope.py)：项目读取全局与当前项目，快速开始读取全局。新增会话路不能顺带扩大普通记忆作用域。
+普通记忆的读取范围仍遵守现有 [`memory/scope.py`](../src/pulsara_agent/memory/scope.py)：项目读取全局与当前项目，快速开始读取全局。新增会话路不能顺带扩大普通记忆作用域。
 
 排除本轮输入与已经处在模型原始可见上下文中的内容；允许搜索当前会话中已离开原始可见上下文、且仍满足现有可读范围约束的早期历史。具体接入应复用当前可见范围的规范所有者，不另造一套上下文边界。导入、继承或 fork 历史也要防止同一原始条目重复占位。
 
@@ -284,7 +284,7 @@ BM25 使用词频、文档长度和语料统计。词项位置支持短语及邻
 
 ### 正文预算与 512＋256＋256 初始配额
 
-每个历史候选的正文合计最多 **1024 个启发式 tokens**，沿用 [`PulsaraHeuristicTokenEstimatorV3`](src/pulsara_agent/llm/estimator.py) 的本地估算口径。标题、说话者、时间、Q-A-Q 标签和生成的省略标记属于包装，另计入整个请求与提示词预算；1024 不是字符数，也不是 provider tokenizer 的精确 token 数。
+每个历史候选的正文合计最多 **1024 个启发式 tokens**，沿用 [`PulsaraHeuristicTokenEstimatorV3`](../src/pulsara_agent/llm/estimator.py) 的本地估算口径。标题、说话者、时间、Q-A-Q 标签和生成的省略标记属于包装，另计入整个请求与提示词预算；1024 不是字符数，也不是 provider tokenizer 的精确 token 数。
 
 先恢复允许展示的规范正文，包括带批注用户消息的完整 quote/comment/普通正文。整个合格 Q-A-Q 不超过 1024 时，全文保留；超过时按命中区域分配初始软额度：
 
@@ -431,7 +431,7 @@ Decision / Rerank 使用按 Q-A-Q 配额完成截取的候选及必要的说话�
 
 ### 扩展接入
 
-[`docker-compose.yml`](docker-compose.yml) 固定 `paradedb/paradedb:0.26.1-pg17`，包含 pg_search、pgvector 和所需预加载配置。PG17 数据目录不能直接复用 PG16 目录；按本项目开发硬切规则重建经过核验的可丢弃数据库。
+[`docker-compose.yml`](../docker-compose.yml) 固定 `paradedb/paradedb:0.26.1-pg17`，包含 pg_search、pgvector 和所需预加载配置。PG17 数据目录不能直接复用 PG16 目录；按本项目开发硬切规则重建经过核验的可丢弃数据库。
 
 本机 Homebrew PostgreSQL 17.9 已安装官方 pg_search 0.26.1 Apple arm64 发布包，并设置 `shared_preload_libraries='pg_search'` 后重启服务器。扩展二进制与 control / SQL 文件必须安装到实际运行的服务器目录；仅写 `CREATE EXTENSION` 无法安装它们。clean-v0 创建并验证精确扩展版本，不提供旧引擎回退。迁移 runner / verifier 同时检查引擎可用性和运行角色权限。
 
