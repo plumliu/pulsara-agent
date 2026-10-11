@@ -290,7 +290,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v2_hard_cut(repo, c
     )
     new_cursor = page["next_cursor"]
     old = _decode(new_cursor, "search_session_content")
-    assert old["operation"] == "search_session_content.bm25.v1"
+    assert old["operation"] == "search_session_content.bm25.v2"
     assert query("search_session_content", cursor=new_cursor)["items"]
     old["operation"] = "search_session_content"
     with pytest.raises(SessionQueryError) as error:

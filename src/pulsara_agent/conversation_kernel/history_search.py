@@ -35,7 +35,7 @@ def search_history(
     target_session_id=None,
     automatic=False,
     include_tools=False,
-    after=None,
+    excluded_question_ids=(),
 ):
     current = connection.execute(
         "SELECT s.*,w.workspace_kind FROM pulsara_v3.sessions s JOIN pulsara_v3.workspaces w ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id WHERE s.id=%s AND s.memory_domain_id=%s",
@@ -116,13 +116,14 @@ def search_history(
             "NOT EXISTS(SELECT 1 FROM jsonb_array_elements(d.identity) m JOIN jsonb_array_elements(%s::jsonb) v ON m-'region'=v)"
         )
         params.append(Jsonb(visible))
-    continuation = ""
-    if after is not None:
-        score, session, q1 = after
-        continuation = (
-            " AND (score<%s OR (score=%s AND (session_id,q1_entry_id)>(%s,%s)))"
-        )
-        params.extend([score, score, session, q1])
+    # Re-score unseen units on each page. Neither old scores nor ordinal
+    # offsets survive corpus-statistic changes between model/tool calls.
+    unconsumed = ""
+    if excluded_question_ids:
+        # Apply after scoring and copy folding: consumed IDs must not become
+        # part of the lexical engine query and change the scoring expression.
+        unconsumed = " AND NOT (q1_entry_id=ANY(%s::text[]))"
+        params.append(list(excluded_question_ids))
     params.append(limit)
     rows = connection.execute(
         f"""WITH matched AS MATERIALIZED (
@@ -131,7 +132,7 @@ def search_history(
        JOIN pulsara_v3.workspaces w ON w.id=s.workspace_id AND w.memory_domain_id=s.memory_domain_id
       WHERE {lexical_predicate("d.body")} AND {" AND ".join(filters)}
     ), folded AS (SELECT *,row_number() OVER(PARTITION BY identity ORDER BY session_id,q1_entry_id) AS representative FROM matched)
-    SELECT * FROM folded WHERE representative=1 {continuation}
+    SELECT * FROM folded WHERE representative=1 {unconsumed}
     ORDER BY score DESC,session_id,q1_entry_id LIMIT %s""",
         params,
     ).fetchall()

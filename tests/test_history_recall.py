@@ -587,3 +587,108 @@ def test_failed_projection_refresh_leaves_old_rows_but_never_returns_stale_body(
     found, candidates = search(repo, scope, "stale-projection-needle", automatic=True)
     assert found  # Savepoint restored the old derived rows.
     assert candidates == ()  # Canonical comparison rejects their stale body.
+
+
+def test_relevance_paging_survives_corpus_score_drift(repo):
+    """Unrelated canonical writes must not strand results above an old score."""
+    domain = identity('domain').replace(':', '_')
+    caller, target = new(repo, domain), new(repo, domain)
+    for i in range(2):
+        turn(repo, target.guard, f'scoredriftneedle question {i}', answer='scoredriftneedle answer')
+    owner = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
+
+    def invoke(args):
+        return owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:drift', deadline_monotonic=monotonic()+30)
+
+    args = {'session_id': target.guard.session_id, 'query': 'scoredriftneedle'}
+    before = invoke(args)['items']
+    first = invoke({**args, 'limit': 1})
+    assert len(before) == 2 and first['next_cursor']
+    unrelated = new(repo, identity('domain').replace(':', '_'))
+    for i in range(20):
+        turn(repo, unrelated.guard, f'unrelated corpus document {i}', answer='independent background material ' * 400)
+    now = invoke(args)['items']
+    assert [item['entry_id'] for item in now] == [item['entry_id'] for item in before]
+    # This is the actual failure condition, not merely a mock score change:
+    # the old score cursor would now exclude *both* unchanged source units.
+    assert min(item['score'] for item in now) > first['items'][0]['score']
+    second = invoke({'cursor': first['next_cursor'], 'limit': 1})
+    assert [item['entry_id'] for item in first['items'] + second['items']] == [item['entry_id'] for item in before]
+    assert second['next_cursor'] is None
+
+
+def test_relevance_cursor_does_not_consume_budget_rejected_item(repo, monkeypatch):
+    from pulsara_agent.conversation_kernel import session_content
+    domain = identity('domain').replace(':', '_')
+    caller, target = new(repo, domain), new(repo, domain)
+    for i in range(3):
+        turn(repo, target.guard, f'pagebudgetneedle question {i}', answer='pagebudgetneedle answer')
+    owner = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
+
+    def invoke(args):
+        return owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:budget', deadline_monotonic=monotonic()+30)
+
+    args = {'session_id': target.guard.session_id, 'query': 'pagebudgetneedle'}
+    expected = [i['entry_id'] for i in invoke(args)['items']]
+    real_fits = session_content._fits
+    monkeypatch.setattr(session_content, '_fits', lambda payload, call_id: len(payload.get('items', [])) <= 1 and real_fits(payload, call_id))
+    page = invoke({**args, 'limit': 2})
+    items = list(page['items'])
+    while page['next_cursor']:
+        page = invoke({'cursor': page['next_cursor'], 'limit': 2})
+        items.extend(page['items'])
+    assert [i['entry_id'] for i in items] == expected
+
+
+def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo, monkeypatch):
+    from pulsara_agent.conversation_kernel import history_search
+    from pulsara_agent.conversation_kernel.session_content import _decode, _encode, SessionQueryError
+    domain = identity('domain').replace(':', '_')
+    caller, target = new(repo, domain), new(repo, domain)
+    for i in range(4):
+        turn(repo, target.guard, f'reorderneedle question {i}', answer='reorderneedle answer')
+    owner = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
+
+    def invoke(args, query_owner=owner):
+        return query_owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:reorder', deadline_monotonic=monotonic()+30)
+
+    args = {'session_id': target.guard.session_id, 'query': 'reorderneedle'}
+    expected = [i['entry_id'] for i in invoke(args)['items']]
+    first = invoke({**args, 'limit': 1})
+    first_cursor = first['next_cursor']
+    original = history_search.search_history
+    # Force the relative order to change, independent of engine statistics.
+    # The real SQL still owns qualification, consumed-ID exclusion and refetch.
+    def changed_order(connection, **kwargs):
+        limit = kwargs.pop('limit')
+        found = original(connection, **kwargs, limit=20)
+        return sorted(found, key=lambda row: expected.index(row['q1_entry_id']), reverse=True)[:limit]
+    monkeypatch.setattr(history_search, 'search_history', changed_order)
+    second = invoke({'cursor': first_cursor, 'limit': 1})
+    assert second['items'][0]['entry_id'] == expected[-1]
+    replay = invoke({'cursor': first_cursor, 'limit': 1})
+    assert replay['items'] == second['items']
+    items = first['items'] + second['items']
+    page = second
+    while page['next_cursor']:
+        page = invoke({'cursor': page['next_cursor'], 'limit': 1})
+        items.extend(page['items'])
+    assert len(items) == len(expected)
+    assert {i['entry_id'] for i in items} == set(expected)
+    # No cross-restart recovery or cursor authority: restart explicitly, and
+    # never permit a real continuation to be paired with changed query values.
+    restarted = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
+    with pytest.raises(SessionQueryError) as error:
+        invoke({'cursor': first_cursor}, restarted)
+    assert error.value.code == 'CURSOR_EXPIRED'
+    token = _decode(first_cursor, 'search_session_content')
+    for key, value in [('query', 'another'), ('session_id', caller.guard.session_id), ('include_tools', True)]:
+        with pytest.raises(SessionQueryError) as error:
+            invoke({'cursor': _encode(dict(token, **{key: value}))})
+        assert error.value.code == 'CURSOR_INVALID'
+    token['operation'] = 'search_session_content.bm25.v1'
+    token['after'] = ['0x1.0p+0', target.guard.session_id, expected[0]]
+    del token['consumed_page']
+    with pytest.raises(SessionQueryError) as error:
+        invoke({'cursor': _encode(token)})
+    assert error.value.code == 'CURSOR_INVALID'

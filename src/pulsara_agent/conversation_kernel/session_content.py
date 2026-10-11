@@ -1,10 +1,12 @@
-"""Cold ROOT history queries over canonical records; cursors are positions only."""
+"""Cold ROOT history queries with advisory process-local search continuation."""
 
 from __future__ import annotations
 
 import base64
 import json
+from dataclasses import dataclass
 from time import monotonic
+from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.session_search import (
     search_session_page,
@@ -32,6 +34,24 @@ from pulsara_agent.primitives.tool_result_projection import (
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoryConsumedPage:
+    # Only consumed canonical IDs, never saved text/results or DB snapshots.
+    # Immutable deltas let retrying an earlier cursor retain its original prefix
+    # without copying the complete seen set into every cursor or page record.
+    query: tuple[str, str, bool, int, str | None]
+    question_ids: tuple[str, ...]
+    previous: _HistoryConsumedPage | None
+
+    def consumed_ids(self) -> set[str]:
+        result = set()
+        page = self
+        while page is not None:
+            result.update(page.question_ids)
+            page = page.previous
+        return result
+
+
 class SessionQueryError(ValueError):
     def __init__(self, code, message):
         self.code = code
@@ -51,7 +71,7 @@ def _decode(cursor, operation):
             operation
             if operation == "search_sessions"
             else operation
-            + (".bm25.v1" if operation == "search_session_content" else ".v2")
+            + (".bm25.v2" if operation == "search_session_content" else ".v2")
         )
         if not isinstance(value, dict) or value.get("operation") != expected:
             raise ValueError()
@@ -142,6 +162,9 @@ class SessionContentQuery:
         self.session_id = session_id
         self.memory_domain_id = memory_domain_id
         self.reader = CanonicalProtocolReader(repository.connection_provider)
+        # Advisory continuation belongs to this loaded session owner. Restart /
+        # owner disposal loses it explicitly; no durable search registry or cap.
+        self._history_consumed_pages: dict[str, _HistoryConsumedPage] = {}
 
     def invoke(
         self,
@@ -662,7 +685,6 @@ class SessionContentQuery:
     def _search_content_bm25(
         self, connection, arguments, cursor, actual, limit, call_id, deadline
     ):
-        import math
         from pulsara_agent.conversation_kernel.history_search import (
             FrozenHistoryReadScope,
             search_history,
@@ -674,7 +696,7 @@ class SessionContentQuery:
             target = arguments.get("session_id", self.session_id)
             tools = arguments.get("include_tools", False)
             end, excluded = actual.through_sequence, actual.excluded_entry_id
-            after = None
+            previous = None
         else:
             if set(cursor) != {
                 "operation",
@@ -683,7 +705,7 @@ class SessionContentQuery:
                 "include_tools",
                 "range_end",
                 "excluded",
-                "after",
+                "consumed_page",
             }:
                 raise SessionQueryError(
                     "CURSOR_INVALID", "Invalid relevance cursor fields."
@@ -695,25 +717,13 @@ class SessionContentQuery:
             )
             end, excluded = cursor["range_end"], cursor["excluded"]
             self._check_range(connection, end, excluded, actual)
-            raw = cursor["after"]
-            if raw is None:
-                after = None
-            else:
-                try:
-                    if not isinstance(raw, list) or len(raw) != 3:
-                        raise ValueError()
-                    score = float.fromhex(raw[0])
-                    if not math.isfinite(score):
-                        raise ValueError()
-                    after = (
-                        score,
-                        _string(raw[1], "cursor session"),
-                        _string(raw[2], "cursor question"),
-                    )
-                except (ValueError, TypeError) as exc:
-                    raise SessionQueryError(
-                        "CURSOR_INVALID", "Invalid relevance position."
-                    ) from exc
+            previous = self._history_consumed_pages.get(
+                _string(cursor["consumed_page"], "consumed page")
+            )
+            if previous is None:
+                raise SessionQueryError(
+                    "CURSOR_EXPIRED", "Search continuation is no longer available; restart the query."
+                )
         if not isinstance(query, str) or not query.strip() or type(tools) is not bool:
             raise SessionQueryError(
                 "INVALID_REQUEST",
@@ -725,20 +735,31 @@ class SessionContentQuery:
             self.session_id, self.memory_domain_id, SessionContentRange(end, excluded)
         )
 
-        def token(position):
-            return _encode(
-                {
-                    "operation": "search_session_content.bm25.v1",
-                    "query": query,
-                    "session_id": target,
-                    "include_tools": tools,
-                    "range_end": end,
-                    "excluded": excluded,
-                    "after": None
-                    if position is None
-                    else [float(position[0]).hex(), position[1], position[2]],
-                }
-            )
+        binding = (query, target, tools, end, excluded)
+        if previous is not None and previous.query != binding:
+            raise SessionQueryError("CURSOR_INVALID", "Search continuation parameters changed.")
+        seen = set() if previous is None else previous.consumed_ids()
+        consumed = []
+        page_id = uuid4().hex
+        next_cursor = _encode({
+            "operation": "search_session_content.bm25.v2",
+            "query": query,
+            "session_id": target,
+            "include_tools": tools,
+            "range_end": end,
+            "excluded": excluded,
+            "consumed_page": page_id,
+        })
+
+        def finish(items, more):
+            payload = {"items": items, "next_cursor": next_cursor if more else None}
+            if not _fits(payload, call_id):
+                raise _resource_error()
+            if more:
+                self._history_consumed_pages[page_id] = _HistoryConsumedPage(
+                    binding, tuple(consumed), previous
+                )
+            return payload
 
         try:
             rows = search_history(
@@ -748,25 +769,23 @@ class SessionContentQuery:
                 limit=limit + 1,
                 target_session_id=target,
                 include_tools=tools,
-                after=after,
+                excluded_question_ids=seen,
             )
         except Exception as exc:
             raise SessionQueryError(
                 "SEARCH_UNAVAILABLE", f"pg_search history query unavailable: {exc}"
             ) from exc
         items = []
-        consumed = after
         for row in rows:
             if monotonic() >= deadline:
                 raise TimeoutError("session search deadline exceeded")
-            position = (row["score"], row["session_id"], row["q1_entry_id"])
             if len(items) == limit:
-                return {"items": items, "next_cursor": token(consumed)}
+                return finish(items, True)
             candidate = refetch_history(
                 connection, row, scope=scope, include_tools=tools
             )
             if candidate is None:
-                consumed = position
+                consumed.append(row["q1_entry_id"])
                 continue
             item = {
                 "session_id": candidate.session_id,
@@ -778,20 +797,16 @@ class SessionContentQuery:
                     for m in candidate.messages
                 ],
             }
-            payload = {"items": [*items, item], "next_cursor": token(position)}
+            payload = {"items": [*items, item], "next_cursor": next_cursor}
             if not _fits(payload, call_id):
                 if not items:
                     raise _resource_error()
-                return {"items": items, "next_cursor": token(consumed)}
+                return finish(items, True)
             items.append(item)
-            consumed = position
-        # A full admission page may have lost excerpts after qualification.
-        # Its consumed key still permits live continuation; an empty valid page
-        # must not claim that lower-ranked units were exhausted.
-        return {
-            "items": items,
-            "next_cursor": token(consumed) if len(rows) == limit + 1 else None,
-        }
+            consumed.append(row["q1_entry_id"])
+        # Invalid excerpts also consume identities; the bounded admission page
+        # can continue without returning them forever or skipping unseen units.
+        return finish(items, len(rows) == limit + 1)
 
     def _read_page(
         self,
