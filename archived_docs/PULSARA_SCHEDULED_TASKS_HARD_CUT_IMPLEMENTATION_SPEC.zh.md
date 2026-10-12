@@ -4,7 +4,7 @@
 
 本规格记录产品讨论、本地 Codex 源码参考及本次完整实施。生产代码、依赖、clean-v0、协议、前端静态构建和行为测试已同步硬切；保存生产配置仅作为只读输入。
 
-2026-10-13 语义修订：暂停、运行一次、一次性计划成功入队后自动移除、唯一活跃计划、显式切换与模型指引以 [定时任务产品语义规格](../PULSARA_SCHEDULED_TASK_PRODUCT_SEMANTICS_SPEC.zh.md) 为准。可信来源贯通、once 自动移除、原子切换和界面入口现已同批实现。下文 COMPLETED 留存与 ENABLED 分组、manual/timer 二分及逐项替换只保留为历史基线，不是现行合同；现行 TIMER / RUN_ONCE 双来源合同及仅 UI 运行一次入口见新规格第 13 节，历史验证见第 11 节。
+2026-10-13 语义修订：暂停、运行一次、一次性计划成功入队后自动移除、唯一活跃计划、显式切换与模型指引以 [定时任务产品语义规格](PULSARA_SCHEDULED_TASK_PRODUCT_SEMANTICS_SPEC.zh.md) 为准。可信来源贯通、once 自动移除、原子切换和界面入口现已同批实现。下文 COMPLETED 留存与 ENABLED 分组、manual/timer 二分及逐项替换只保留为历史基线，不是现行合同；现行 TIMER / RUN_ONCE 双来源合同及仅 UI 运行一次入口见新规格第 13 节，历史验证见第 11 节。
 
 两项普通会话前置均已在 main 完成。第一项为 [会话统一只读与工作目录恢复规格](PULSARA_SESSION_READ_ONLY_WORKSPACE_RECOVERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)：普通会话已落地冷历史、显式目录恢复与具体非抢占 writer 接缝，代码验收见其 §15。定时入口复用这些 owner，不静默 mkdir、不另写恢复路径。
 
