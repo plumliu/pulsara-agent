@@ -13,7 +13,9 @@ excludes native binaries: consumers unpack it, explicitly run
 build hosts; wheel users do not need binutils, a system `rg`, or Node.js.
 
 `.github/workflows/ubuntu-tests.yml` runs the complete Python suite on native
-Ubuntu 24.04 x86_64 and ARM64 runners with PostgreSQL 16 + pgvector and Chromium.
+Ubuntu 24.04 x86_64 and ARM64 runners with PostgreSQL 17, pg_search 0.26.1,
+pgvector and Chromium. Both workflows and the local test Compose use the pinned
+`paradedb/paradedb:0.26.1-pg17` image, matching the root Compose configuration.
 The suite includes PTY/process cancellation, local MCP, hooks, Skill/Plugin
 publication, search, HTTP, storage and canonical conversation behavior. It also
 checks wheel/editable/sdist builds. The final gate installs the actual wheel in

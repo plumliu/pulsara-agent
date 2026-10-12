@@ -1,6 +1,6 @@
 services:
   database:
-    image: pgvector/pgvector:pg16
+    image: paradedb/paradedb:0.26.1-pg17
     environment:
       POSTGRES_USER: pulsara_admin
       POSTGRES_PASSWORD: pulsara_admin

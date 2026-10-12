@@ -29,7 +29,7 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/src
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: paradedb/paradedb:0.26.1-pg17
         env:
           POSTGRES_DB: pulsara
           POSTGRES_USER: pulsara_admin
