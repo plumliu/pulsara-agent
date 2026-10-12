@@ -1593,7 +1593,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
 def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stage2_migrated_postgres_database,
+    isolated_migrated_postgres_database,
 ) -> None:
     import pulsara_agent.conversation_kernel.host as kernel_host
 
@@ -1619,8 +1619,10 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
     monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
+        # Synchronize this lifecycle scenario against its own corpus; global
+        # BM25 work from earlier tests is unrelated to Hook ordering.
         core = KernelHostCore.production(
-            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(isolated_migrated_postgres_database.runtime_dsn)
         )
         session = None
         running = None
@@ -1633,11 +1635,14 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
                 test_model_binding(core._model_runtime)  # noqa: SLF001
             )
             for index in range(3):
-                await session.run_turn(
+                result = await session.run_turn(
                     PromptContent.text(f"active history {index}: " + ("context " * 4096)),
                     command_id=f"command:round9-2-active-history:{index}",
                     requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                 )
+                assert result.final_text == (
+                    "ACTIVE_HISTORY_ONE", "ACTIVE_HISTORY_TWO", "ACTIVE_HISTORY_THREE"
+                )[index]
             running = asyncio.create_task(
                 session.run_turn(
                     PromptContent.text("active compaction request: " + ("context " * 4096)),
