@@ -386,7 +386,7 @@ export interface Message {
   entrySequence?: number;
   role: 'user' | 'assistant';
   userKind?: 'prompt' | 'scheduled' | 'steer' | 'plan-continuation' | 'subagent-completion';
-  scheduledInput?: { taskId: string; taskRevision: number; dueAtUtc: string };
+  scheduledInput?: { taskId: string; taskRevision: number; dueAtUtc: string; triggerSource: 'TIMER' | 'RUN_ONCE' };
   inputSource?: {
     queueItemId: string;
     commandId: string;

@@ -2688,14 +2688,14 @@ class KernelHostSession:
 
     async def apply_scheduled_management(self, method: str, arguments: dict):
         """Compose configuration/queue management with this Host's canonical writer."""
-        if method not in {"create_scheduled_task", "mutate_scheduled_task", "observe_scheduled_due", "merge_scheduled_manual"}:
+        if method not in {"create_scheduled_task", "mutate_scheduled_task", "switch_scheduled_task", "observe_scheduled_due", "merge_scheduled_manual"}:
             raise ValueError("unsupported scheduled management operation")
         async with self._lock:
             self._require_open()
             reservation = self._reserve_compaction_write_locked(
                 scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None)
         cancelled: list[QueuedPromptAction] = []
-        if method == "mutate_scheduled_task":
+        if method in {"mutate_scheduled_task", "switch_scheduled_task"}:
             arguments = {**arguments, "cancelled_candidates": cancelled}
         try:
             result = await self._io.run(getattr(self.repository, method),

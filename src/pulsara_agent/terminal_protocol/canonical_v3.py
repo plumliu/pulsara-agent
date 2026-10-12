@@ -1272,7 +1272,8 @@ class CanonicalProtocolReader:
             if row["input_origin"] == "SCHEDULED_TASK":
                 target.scheduled_input.CopyFrom(wire.ScheduledInputProvenance(
                     task_id=str(row["scheduled_task_id"]), task_revision=int(row["scheduled_task_revision"]),
-                    due_at_utc=_utc(row["scheduled_due_at"])))
+                    due_at_utc=_utc(row["scheduled_due_at"]),
+                    trigger_source=row["scheduled_trigger_source"]))
             if row["permission_snapshot_id"] is not None:
                 target.permission.CopyFrom(_permission_projection(row))
         for row in attempts:

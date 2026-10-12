@@ -164,7 +164,7 @@ async def run(args, report, saved, save):
                     (
                         "Exercise scheduled_tasks in this isolated test. First list with explicit session_id:null. "
                         f"Create one new once task named Null contract fixture for UTC {future}, Asia/Shanghai, "
-                        "read-only permissions, prompt 'Reply SOURCE_TASK only.', also with session_id:null. "
+                        "read-only permissions, status:ACTIVE, prompt 'Reply SOURCE_TASK only.', also with session_id:null. "
                         "Then list this session with session_id:null and list the reference session "
                         f"{reference.session_id}. Get the created source task, pause it using its revision, "
                         "then delete that source task using the updated revision. Do not modify the reference task. "

@@ -25,28 +25,50 @@ beforeEach(() => {
 });
 
 describe('visualization occurrence layout', () => {
-  it('groups occurrences by message and only reads the selected HTML after opening', async () => {
+  it('renders bound occurrences at the body marker, reads only selected HTML, and reuses resident frames', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
     const read = vi.fn(async () => '<h1>Chart</h1>');
+    const visualizations = [0, 1].map(ordinal => ({
+      ordinal, state: 'READY' as const, visualizationRef: `sha256:${String(ordinal).repeat(64)}`, contentSize: 14,
+    }));
     const view = render(<ConversationMessages canFork={true}
       messages={[{ id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
-        time: '13:04', body: '图表如下。', visualizations: [0, 1].map(ordinal => ({
-          ordinal, state: 'READY', visualizationRef: 'sha256:test', contentSize: 14,
-        })) }]}
+        time: '13:04', body: '图表如下。\n\n```pulsara-visualization\nfirst.html\nsecond.html\n```\n\n图表之后的说明。', visualizations }]}
       artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
-    expect(read).not.toHaveBeenCalled();
-    expect(view.container.querySelectorAll('.assistant-visualization')).toHaveLength(1);
-    fireEvent.click(screen.getByRole('button', { name: '展开可视化图集' }));
+    expect(screen.getAllByRole('region', { name: '可视化图集' })).toHaveLength(1);
     await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
     expect(read).toHaveBeenCalledOnce();
+    expect(read).toHaveBeenCalledWith('chart-answer', 0, visualizations[0].visualizationRef, 14);
     const frame = view.container.querySelector('iframe');
-    fireEvent.click(screen.getByRole('button', { name: '收起可视化图集' }));
-    fireEvent.click(screen.getByRole('button', { name: '展开可视化图集' }));
-    expect(view.container.querySelector('iframe')).toBe(frame);
-    expect(read).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole('button', { name: '下一张可视化' }));
+    const gallery = screen.getByRole('region', { name: '可视化图集' });
+    expect(screen.getByText('图表如下。').compareDocumentPosition(gallery) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(gallery.compareDocumentPosition(screen.getByText('图表之后的说明。')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('button', { name: '查看可视化 1' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: '查看可视化 2' }).getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(screen.getByRole('button', { name: '查看可视化 2' }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(read).toHaveBeenLastCalledWith('chart-answer', 1, visualizations[1].visualizationRef, 14);
+    expect(view.container.querySelector('[data-visualization-ordinal="0"]')?.hasAttribute('hidden')).toBe(true);
+    expect(view.container.querySelector('[data-visualization-ordinal="0"]')?.hasAttribute('inert')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '查看可视化 1' }));
+    expect(view.container.querySelector('[data-visualization-ordinal="0"] iframe')).toBe(frame);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not append a gallery or read occurrences when the assistant body has no marker', () => {
+    const read = vi.fn();
+    const view = render(<ConversationMessages canFork={true}
+      messages={[{ id: 'unmarked-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
+        time: '13:04', body: '只有文字说明。', visualizations: [{
+          ordinal: 0, state: 'READY', visualizationRef: `sha256:${'a'.repeat(64)}`, contentSize: 14,
+        }] }]}
+      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
+    expect(screen.getByText('只有文字说明。')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '可视化图集' })).toBeNull();
+    expect(view.container.querySelector('iframe')).toBeNull();
+    expect(read).not.toHaveBeenCalled();
   });
 });
 afterEach(() => {

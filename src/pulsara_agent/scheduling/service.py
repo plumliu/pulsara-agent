@@ -9,6 +9,7 @@ import logging
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.session_text import display_title
 from pulsara_agent.scheduling.requests import validate_action
 from pulsara_agent.conversation_kernel.host import (
     PromptBlockedByHook,
@@ -21,6 +22,7 @@ from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.scheduling.contracts import (
     ScheduledAdmission,
+    ScheduledTriggerSource,
     ScheduledTaskError,
     utc_instant,
     validate_rule,
@@ -94,6 +96,8 @@ class ScheduledTaskService:
 
     def _payload(self, row):
         payload = task_payload(row)
+        if "session_title" in row:
+            payload["session_title"] = display_title({"id": row["session_id"], "title": row["session_title"]})
         error = self._prepare_errors.get(row["id"])
         payload["prepare_error"] = (
             error[1] if error is not None and error[0] == row["revision"] else None
@@ -120,18 +124,23 @@ class ScheduledTaskService:
         )
         return {"tasks": [self._payload(row) for row in rows], "next_cursor": cursor}
 
+    async def list_sessions(self, *, query="", cursor=None):
+        rows, cursor = await self._read("list_scheduled_task_sessions", query=query, cursor=cursor)
+        return {"sessions": rows, "next_cursor": cursor}
+
     async def get(self, task_id):
         row = await self._read("read_scheduled_task", task_id=task_id)
         if row is None:
             raise KeyError(task_id)
         return self._payload(row)
 
-    async def create(self, *, session_id, values):
+    async def create(self, *, session_id, values, status=None):
         row = await self._manage(
             "create_scheduled_task",
             session_id=session_id,
             task_id=f"scheduled:{uuid4().hex}",
             values=values,
+            status=status,
             model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
         )
         self.wake()
@@ -151,19 +160,50 @@ class ScheduledTaskService:
         self.wake()
         return None if result is None else self._payload(result)
 
+    async def switch(self, *, task_id, expected_revision, target):
+        validate_action(
+            dict(
+                action="switch",
+                task_id=task_id,
+                expected_revision=expected_revision,
+                target=target,
+            )
+        )
+        source = await self.get(task_id)
+        paused, active = await self._manage(
+            "switch_scheduled_task",
+            session_id=source["session_id"],
+            task_id=task_id,
+            expected_revision=expected_revision,
+            target=target,
+            new_task_id=f"scheduled:{uuid4().hex}",
+            model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
+        )
+        self._prepare_errors.pop(task_id, None)
+        self._prepare_errors.pop(active["id"], None)
+        self.wake()
+        return {"paused": self._payload(paused), "active": self._payload(active)}
+
     async def invoke(self, arguments, *, default_session_id, permission_mode):
         value = dict(arguments)
         # Tool-only default: service/HTTP list(None) still means all sessions.
         # Never discard null on a branch where session_id is forbidden.
         if (
-            value.get("action") in ("list", "create", "run_now")
+            value.get("action") in ("list", "create")
             and value.get("session_id") is None
         ):
             value["session_id"] = default_session_id
         value = dict(validate_action(value))
         action = value.pop("action")
-        if action in {"create", "update"}:
-            values = value["values"]
+        if action in {"create", "update", "switch"}:
+            values = value.get("values")
+            if action == "switch":
+                target = value["target"]
+                values = (
+                    target["values"]
+                    if target["kind"] == "create"
+                    else await self.get(target["task_id"])
+                )
             # A model can preserve or narrow its current preset, never grant
             # itself broader future permissions by saving task text/config.
             modes = list(PermissionMode)
@@ -172,7 +212,8 @@ class ScheduledTaskService:
             requested = PermissionMode(values["permission_mode"])
             if modes.index(requested) > modes.index(permission_mode):
                 raise ScheduledTaskError(
-                    "PERMISSION_ESCALATION", "当前会话权限不足以保存此任务配置，请由用户调整会话权限后再试。"
+                    "PERMISSION_ESCALATION",
+                    "当前会话权限不足以保存此任务配置，请由用户调整会话权限后再试。",
                 )
         if action == "list":
             return await self.list(**value)
@@ -180,8 +221,8 @@ class ScheduledTaskService:
             return await self.get(**value)
         if action == "create":
             return await self.create(**value)
-        if action == "run_now":
-            return await self.run_now(value)
+        if action == "switch":
+            return await self.switch(**value)
         return await self.mutate(action=action, **value)
 
     async def preview(self, *, schedule, timezone):
@@ -243,7 +284,7 @@ class ScheduledTaskService:
             "expected_revision",
             "request_at_utc",
         }:
-            raise ScheduledTaskError("INVALID_REQUEST", "立即运行参数无效。")
+            raise ScheduledTaskError("INVALID_REQUEST", "运行一次参数无效。")
         if (
             any(
                 not isinstance(request[k], str) or not request[k]
@@ -252,19 +293,32 @@ class ScheduledTaskService:
             or type(request["expected_revision"]) is not int
             or request["expected_revision"] < 1
         ):
-            raise ScheduledTaskError("INVALID_REQUEST", "立即运行身份无效。")
+            raise ScheduledTaskError("INVALID_REQUEST", "运行一次身份无效。")
         return {
             **request,
             "request_at_utc": utc_instant(request["request_at_utc"]).isoformat(),
         }
 
+    @staticmethod
+    def _run_result(row, request):
+        return {
+            "queue_item_id": row["id"],
+            "status": "RUNNING" if row.get("execution_status") == "RUNNING" else row["status"],
+            "coalesced": row["command_id"] != request["client_command_id"],
+        }
+
     async def run_now(self, request):
-        request = self._run_request(request)
+        # UI-only operation. Model management cannot dispatch a future turn;
+        # a request to execute saved work in chat belongs to that current turn.
+        request = {
+            **self._run_request(request),
+            "trigger_source": ScheduledTriggerSource.RUN_ONCE.value,
+        }
         # Confirmation precedes current task existence/revision/configuration.
         prior = await self._read("confirm_scheduled_action", request=request)
         if prior is not None:
             self.wake()
-            return {"queue_item_id": prior["id"], "status": prior["status"]}
+            return self._run_result(prior, request)
         task = await self.get(request["task_id"])
         if task["session_id"] != request["session_id"]:
             raise ScheduledTaskError("INVALID_REQUEST", "任务不属于指定会话。")
@@ -275,7 +329,7 @@ class ScheduledTaskService:
             utc_instant(request["request_at_utc"]),
             task["prompt"],
             PermissionMode(task["permission_mode"]),
-            manual=True,
+            trigger_source=ScheduledTriggerSource.RUN_ONCE,
             client_command_id=request["client_command_id"],
         )
         merged = await self._manage(
@@ -283,7 +337,10 @@ class ScheduledTaskService:
         )
         if merged is not None:
             self.wake()
-            return {"queue_item_id": merged["id"], "status": merged["status"]}
+            confirmed = await self._read("confirm_scheduled_action", request=request)
+            if confirmed is None:
+                raise RuntimeError("merged run-once command has no queue target")
+            return self._run_result(confirmed, request)
         host = (
             await self.sessions.resume_session(a.session_id, scheduled=True)
         ).session
@@ -294,12 +351,10 @@ class ScheduledTaskService:
                 outcome.public_message or "任务未被接受。",
             )
         self.wake()
-        return {
-            "queue_item_id": outcome.prompt_delivery.queue_item_id
-            if outcome.prompt_delivery is not None
-            else outcome.target_id,
-            "status": outcome.status,
-        }
+        accepted = await self._read("confirm_scheduled_action", request=request)
+        if accepted is None:
+            raise RuntimeError("accepted run-once command has no queue target")
+        return self._run_result(accepted, request)
 
     async def _submit(self, host, admission):
         command = admission.client_command_id or _stable_id(

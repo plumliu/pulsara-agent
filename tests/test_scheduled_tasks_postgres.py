@@ -16,6 +16,7 @@ from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.scheduling.contracts import (
     ScheduledAdmission,
+    ScheduledTriggerSource,
     ScheduledTaskError,
 )
 from tests.test_stage2_conversation_kernel_postgres import (
@@ -59,6 +60,7 @@ def task(owner, kind="interval"):
         schedule.update(anchor_at_utc="2020-01-01T00:00:00+00:00", seconds=60)
     return repo.create_scheduled_task(
         task_id=_name("scheduled"),
+        status="ACTIVE",
         session_id=lease.guard.session_id,
         memory_domain_id="u_local",
         guard=lease.guard,
@@ -74,6 +76,29 @@ def task(owner, kind="interval"):
     )
 
 
+@pytest.mark.parametrize("status_fields", [{}, {"status": None}, {"status": "PAUSED"}])
+@pytest.mark.parametrize("kind", ["interval", "once"])
+def test_create_paused_alongside_active_does_not_change_existing_plan(owner, status_fields, kind):
+    repo, lease, cut = owner
+    active = task(owner, kind)
+    row = repo.create_scheduled_task(
+        task_id=_name("paused"),
+        session_id=active["session_id"], memory_domain_id="u_local", guard=lease.guard,
+        values={k: active[k] for k in ("name", "prompt", "schedule", "timezone", "permission_mode")},
+        model_resolution_snapshot=cut, deadline_monotonic=monotonic() + 30,
+        **status_fields,
+    )
+    assert row["status"] == "PAUSED"
+    assert row["next_run_at"] is None
+    unchanged = read(owner, active["id"])
+    assert (unchanged["status"], unchanged["revision"], unchanged["next_run_at"]) == (
+        "ACTIVE", active["revision"], active["next_run_at"],
+    )
+    with pytest.raises(ScheduledTaskError) as error:
+        task(owner, kind)
+    assert error.value.code == "ACTIVE_TASK_CONFLICT"
+
+
 def admission(task, manual=False, command=None):
     return ScheduledAdmission(
         task["id"],
@@ -84,7 +109,9 @@ def admission(task, manual=False, command=None):
         else task["next_run_at"].astimezone(timezone.utc),
         task["prompt"],
         DEFAULT_PERMISSION_MODE,
-        manual=manual,
+        trigger_source=ScheduledTriggerSource.RUN_ONCE
+        if manual
+        else ScheduledTriggerSource.TIMER,
         client_command_id=command,
     )
 
@@ -183,7 +210,9 @@ def mutate(owner, t, action, values=None):
     )
 
 
-def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(owner, monkeypatch):
+def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
+    owner, monkeypatch
+):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
@@ -193,13 +222,20 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(owner
 
     # Small page fixture exercises the existing keyset boundary without adding
     # a product inventory/lifetime limit or creating 129 unrelated task rows.
-    monkeypatch.setattr(scheduling, "STAGE2_LIMITS", replace(scheduling.STAGE2_LIMITS, history_page_default_entries=1))
+    monkeypatch.setattr(
+        scheduling,
+        "STAGE2_LIMITS",
+        replace(scheduling.STAGE2_LIMITS, history_page_default_entries=1),
+    )
     repo, lease, cut = owner
-    current = [task(owner) for _ in range(3)]
-    paused = mutate(owner, current.pop(), "pause")
+    current = [mutate(owner, task(owner), "pause") for _ in range(3)]
+    active = task(owner)
     other_lease = repo.acquire_host_writer(
-        intent="NEW", session_id=_name("session"), workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"), lease_seconds=120,
+        intent="NEW",
+        session_id=_name("session"),
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=120,
         deadline_monotonic=monotonic() + 30,
     )
     _, binding, _ = _two_connection_resolution_cut()
@@ -212,21 +248,35 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(owner
         service = ScheduledTaskService(SimpleNamespace())
 
         async def read_repository(method, **kwargs):
-            return getattr(repo, method)(memory_domain_id="u_local", deadline_monotonic=monotonic() + 30, **kwargs)
+            return getattr(repo, method)(
+                memory_domain_id="u_local",
+                deadline_monotonic=monotonic() + 30,
+                **kwargs,
+            )
 
         service._read = read_repository
-        arguments = {"action": "list", "session_id": None, "status": "ACTIVE"}
+        arguments = {"action": "list", "session_id": None, "status": "PAUSED"}
         ids = []
         while True:
-            page = await service.invoke(arguments, default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+            page = await service.invoke(
+                arguments,
+                default_session_id=lease.guard.session_id,
+                permission_mode=DEFAULT_PERMISSION_MODE,
+            )
             ids.extend(row["id"] for row in page["tasks"])
-            assert all(row["session_id"] == lease.guard.session_id for row in page["tasks"])
+            assert all(
+                row["session_id"] == lease.guard.session_id for row in page["tasks"]
+            )
             if page["next_cursor"] is None:
                 break
             arguments = {**arguments, "cursor": page["next_cursor"]}
         assert ids == sorted(row["id"] for row in current)
-        assert paused["id"] not in ids and other["id"] not in ids
-        selected = await service.invoke({"action": "list", "session_id": other_lease.guard.session_id}, default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+        assert active["id"] not in ids and other["id"] not in ids
+        selected = await service.invoke(
+            {"action": "list", "session_id": other_lease.guard.session_id},
+            default_session_id=lease.guard.session_id,
+            permission_mode=DEFAULT_PERMISSION_MODE,
+        )
         assert [row["id"] for row in selected["tasks"]] == [other["id"]]
         all_ids = []
         cursor = None
@@ -236,7 +286,11 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(owner
             cursor = page["next_cursor"]
             if cursor is None:
                 break
-        assert set(all_ids) >= {*(row["id"] for row in current), paused["id"], other["id"]}
+        assert set(all_ids) >= {
+            *(row["id"] for row in current),
+            active["id"],
+            other["id"],
+        }
 
     asyncio.run(run())
 
@@ -287,39 +341,38 @@ def test_atomic_enqueue_cursor_coalescing_and_old_snapshot(owner):
     )
 
 
-def test_enabled_group_includes_dispatched_once_without_making_it_due_again(owner):
-    active = make_due(owner, task(owner))
+def test_once_retirement_leaves_only_active_and_paused_filters(owner):
     paused = mutate(owner, task(owner), "pause")
     once = make_due(owner, task(owner, "once"))
-    enqueue(owner, admission(once))
-    completed = read(owner, once["id"])
-    assert completed["status"] == "COMPLETED" and completed["next_run_at"] is None
+    first, _ = enqueue(owner, admission(once))
+    assert read(owner, once["id"]) is None
+    active = make_due(owner, task(owner))
 
     def listing(status, **kwargs):
         rows, _ = owner[0].list_scheduled_tasks(
-            memory_domain_id="u_local", session_id=active["session_id"],
-            status=status, deadline_monotonic=monotonic() + 30, **kwargs,
+            memory_domain_id="u_local",
+            session_id=active["session_id"],
+            status=status,
+            deadline_monotonic=monotonic() + 30,
+            **kwargs,
         )
         return {row["id"] for row in rows}
 
-    enabled_ids = {active["id"], completed["id"]}
-    assert listing("ENABLED") == enabled_ids
+    assert listing(None) == {active["id"], paused["id"]}
     assert listing("ACTIVE") == {active["id"]}
-    assert listing("COMPLETED") == {completed["id"]}
     assert listing("PAUSED") == {paused["id"]}
-    # Group filtering remains inside the cursor query and cannot widen due admission.
-    assert listing("ENABLED", cursor=min(enabled_ids)) == {max(enabled_ids)}
-    assert listing("ENABLED", due_only=True) == {active["id"]}
+    assert listing("ACTIVE", due_only=True) == {active["id"]}
+    for removed_status in ("ENABLED", "COMPLETED"):
+        with pytest.raises(ScheduledTaskError, match="任务状态无效"):
+            listing(removed_status)
     with pytest.raises(ScheduledTaskError) as rejected:
         enqueue(owner, admission(once))
-    assert rejected.value.code == "TASK_CUT_CHANGED"
+    assert rejected.value.code == "TASK_NOT_FOUND"
 
 
 def test_manual_merged_action_survives_consumption_and_task_deletion(owner):
-    t = make_due(owner, task(owner, "once"))
+    t = make_due(owner, task(owner))
     first, _ = enqueue(owner, admission(t))
-    assert read(owner, t["id"])["status"] == "COMPLETED"
-    assert read(owner, t["id"])["revision"] == 2
     manual = admission(read(owner, t["id"]), True, _name("command"))
     merged = owner[0].merge_scheduled_manual(
         session_id=t["session_id"],
@@ -529,12 +582,12 @@ def test_archive_failure_preserves_plans_success_deletes_every_status(owner):
     from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy
 
     repo, lease, _ = owner
-    active = task(owner)
     paused = mutate(owner, task(owner), "pause")
     once = make_due(owner, task(owner, "once"))
-    enqueue(owner, admission(once))
-    completed = read(owner, once["id"])
-    before = [read(owner, t["id"]) for t in (active, paused, completed)]
+    pending, _ = enqueue(owner, admission(once))
+    assert read(owner, once["id"]) is None
+    active = task(owner)
+    before = [read(owner, t["id"]) for t in (active, paused)]
     with pytest.raises(SessionDeletionBusy):
         repo.archive_session(
             session_id=active["session_id"],
@@ -542,10 +595,20 @@ def test_archive_failure_preserves_plans_success_deletes_every_status(owner):
             closed_writer=lease.guard,
             deadline_monotonic=monotonic() + 30,
         )
-    assert [read(owner, t["id"]) for t in (active, paused, completed)] == before
-    # Completed once can still own pending input: pause cancels that input while
-    # leaving the once definition completed, as in the closed status matrix.
-    mutate(owner, completed, "pause")
+    assert [read(owner, t["id"]) for t in (active, paused)] == before
+    from pulsara_agent.conversation_kernel.queued_prompt_actions import (
+        QueuedPromptAction,
+    )
+
+    repo.apply_queued_prompt_action(
+        lease.guard,
+        candidate=QueuedPromptAction(
+            active["session_id"], _name("cancel"), pending.queue_item_id
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="test",
+        deadline_monotonic=monotonic() + 30,
+    )
     repo.release_host_writer(lease.guard, deadline_monotonic=monotonic() + 30)
     assert (
         repo.archive_session(
@@ -556,18 +619,18 @@ def test_archive_failure_preserves_plans_success_deletes_every_status(owner):
         )
         == "ARCHIVED"
     )
-    assert all(read(owner, t["id"]) is None for t in (active, paused, completed))
+    assert all(read(owner, t["id"]) is None for t in (active, paused))
     repo.unarchive_session(
         session_id=active["session_id"],
         memory_domain_id="u_local",
         deadline_monotonic=monotonic() + 30,
     )
-    assert all(read(owner, t["id"]) is None for t in (active, paused, completed))
+    assert all(read(owner, t["id"]) is None for t in (active, paused))
 
 
 def test_large_task_pages_obey_existing_wire_budget_without_total_task_cap(owner):
     repo, lease, cut = owner
-    template = task(owner)
+    template = mutate(owner, task(owner), "pause")
     ids = {template["id"]}
     for _ in range(9):
         values = {
@@ -584,6 +647,7 @@ def test_large_task_pages_obey_existing_wire_budget_without_total_task_cap(owner
             model_resolution_snapshot=cut,
             deadline_monotonic=monotonic() + 30,
         )
+        assert row["status"] == "PAUSED"
         ids.add(row["id"])
     cursor = None
     seen = []
@@ -609,3 +673,384 @@ def test_large_task_pages_obey_existing_wire_budget_without_total_task_cap(owner
         if cursor is None:
             break
     assert set(seen) == ids and len(seen) == len(ids) and pages > 1
+
+
+@pytest.mark.parametrize("operation", ["create", "resume"])
+def test_one_active_plan_rejects_conflict_without_changing_existing_rows(
+    owner, operation
+):
+    inactive = mutate(owner, task(owner), "pause")
+    active = task(owner)
+    before = [read(owner, row["id"]) for row in (inactive, active)]
+    with pytest.raises(ScheduledTaskError) as error:
+        if operation == "create":
+            task(owner)
+        elif operation == "resume":
+            mutate(owner, inactive, "resume")
+
+    assert error.value.code == "ACTIVE_TASK_CONFLICT"
+    assert [read(owner, row["id"]) for row in (inactive, active)] == before
+    # Editing and idempotently resuming the same ACTIVE row remain allowed.
+    assert mutate(owner, active, "resume")["revision"] == active["revision"]
+    mutate(owner, active, "pause")
+    if operation == "create":
+        assert task(owner)["status"] == "ACTIVE"
+    elif operation == "resume":
+        assert mutate(owner, inactive, "resume")["status"] == "ACTIVE"
+
+
+@pytest.mark.parametrize("operation", ["create", "resume"])
+def test_concurrent_cold_management_admits_only_one_active_plan(owner, operation):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    repo, lease, cut = owner
+    paused = [mutate(owner, task(owner), "pause") for _ in range(2)]
+    repo.release_host_writer(lease.guard, deadline_monotonic=monotonic() + 30)
+    barrier = Barrier(2)
+
+    def activate(row):
+        barrier.wait(timeout=10)
+        try:
+            kwargs = dict(
+                session_id=row["session_id"],
+                memory_domain_id="u_local",
+                guard=None,
+                deadline_monotonic=monotonic() + 30,
+            )
+            if operation == "create":
+                values = {
+                    k: row[k]
+                    for k in (
+                        "name",
+                        "prompt",
+                        "schedule",
+                        "timezone",
+                        "permission_mode",
+                    )
+                }
+                return repo.create_scheduled_task(
+                    task_id=_name("race"),
+                    status="ACTIVE",
+                    values=values,
+                    model_resolution_snapshot=cut,
+                    **kwargs,
+                )["status"]
+            return repo.mutate_scheduled_task(
+                task_id=row["id"],
+                expected_revision=row["revision"],
+                action="resume",
+                **kwargs,
+            )["status"]
+        except ScheduledTaskError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(activate, paused))
+    assert sorted(results) == ["ACTIVE", "ACTIVE_TASK_CONFLICT"]
+    rows, cursor = repo.list_scheduled_tasks(
+        memory_domain_id="u_local",
+        session_id=lease.guard.session_id,
+        status="ACTIVE",
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert len(rows) == 1 and cursor is None
+
+
+def test_database_constraint_rejects_second_active_row_outside_management_owner(owner):
+    from psycopg.errors import UniqueViolation
+
+    paused = mutate(owner, task(owner), "pause")
+    task(owner)
+    repo, lease, _ = owner
+    with pytest.raises(UniqueViolation) as error:
+        with repo._writer_transaction(
+            lease.guard, deadline_monotonic=monotonic() + 30
+        ) as connection:
+            connection.execute(
+                "UPDATE pulsara_v3.scheduled_tasks SET status='ACTIVE', next_run_at=clock_timestamp() WHERE id=%s",
+                (paused["id"],),
+            )
+    assert error.value.diag.constraint_name == "scheduled_tasks_one_active_session"
+    assert read(owner, paused["id"])["status"] == "PAUSED"
+
+
+def switch(owner, source, target, **kwargs):
+    repo, lease, cut = owner
+    return repo.switch_scheduled_task(
+        task_id=source["id"],
+        session_id=source["session_id"],
+        memory_domain_id="u_local",
+        guard=lease.guard,
+        expected_revision=source["revision"],
+        target=target,
+        new_task_id=_name("replacement"),
+        model_resolution_snapshot=cut,
+        deadline_monotonic=monotonic() + 30,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("new", [False, True])
+def test_atomic_switch_cancels_only_old_pending_and_enables_target(owner, new):
+    destination = mutate(owner, task(owner), "pause")
+    source = task(owner)
+    original, _ = enqueue(owner, admission(source, True, _name("run")))
+    target = (
+        {
+            "kind": "create",
+            "values": {
+                k: destination[k]
+                for k in ("name", "prompt", "schedule", "timezone", "permission_mode")
+            },
+        }
+        if new
+        else {
+            "kind": "existing",
+            "task_id": destination["id"],
+            "expected_revision": destination["revision"],
+        }
+    )
+    paused, active = switch(owner, source, target)
+    assert paused["status"] == "PAUSED" and paused["next_run_at"] is None
+    assert paused["revision"] == source["revision"] + 1
+    assert active["status"] == "ACTIVE" and active["next_run_at"] is not None
+    assert active["session_id"] == source["session_id"]
+    with owner[0].connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30
+    ) as c:
+        assert (
+            c.execute(
+                "SELECT status FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+                (original.queue_item_id,),
+            ).fetchone()[0]
+            == "CANCELLED"
+        )
+        assert (
+            c.execute(
+                "SELECT count(*) FROM pulsara_v3.scheduled_tasks WHERE session_id=%s AND status='ACTIVE'",
+                (source["session_id"],),
+            ).fetchone()[0]
+            == 1
+        )
+
+
+@pytest.mark.parametrize(
+    "failure", ["stale_target", "invalid_time", "write_after_cancel"]
+)
+def test_switch_failure_rolls_back_both_plans_and_pending(owner, monkeypatch, failure):
+    destination = mutate(owner, task(owner), "pause")
+    source = task(owner)
+    original, _ = enqueue(owner, admission(source, True, _name("run")))
+    before = [read(owner, t["id"]) for t in (source, destination)]
+    target = {
+        "kind": "existing",
+        "task_id": destination["id"],
+        "expected_revision": destination["revision"],
+    }
+    if failure == "stale_target":
+        target["expected_revision"] += 1
+    elif failure == "invalid_time":
+        target = {
+            "kind": "create",
+            "values": {
+                k: destination[k]
+                for k in ("name", "prompt", "schedule", "timezone", "permission_mode")
+            },
+        }
+        target["values"]["schedule"] = {
+            "contract": "scheduled-rule:v1",
+            "kind": "once",
+            "run_at_utc": "2020-01-01T00:00:00+00:00",
+        }
+    else:
+        cancel = owner[0]._cancel_scheduled_pending_in_connection
+
+        def failed(*args, **kwargs):
+            cancel(*args, **kwargs)
+            raise RuntimeError("injected failure after queue cancellation")
+
+        monkeypatch.setattr(owner[0], "_cancel_scheduled_pending_in_connection", failed)
+    with pytest.raises((ScheduledTaskError, RuntimeError)):
+        switch(owner, source, target)
+    assert [read(owner, t["id"]) for t in (source, destination)] == before
+    with owner[0].connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30
+    ) as c:
+        assert (
+            c.execute(
+                "SELECT status FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+                (original.queue_item_id,),
+            ).fetchone()[0]
+            == "PENDING"
+        )
+        assert (
+            c.execute(
+                "SELECT count(*) FROM pulsara_v3.session_commands WHERE session_id=%s AND command_kind='CANCEL_PROMPT'",
+                (source["session_id"],),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_manual_once_retirement_confirmation_and_source_conflict(owner):
+    from dataclasses import replace
+
+    t = mutate(owner, task(owner, "once"), "pause")
+    a = admission(t, True, _name("once"))
+    first, _ = enqueue(owner, a)
+    assert read(owner, t["id"]) is None
+    request = a.action_value()
+    confirmed = owner[0].confirm_scheduled_action(
+        request=request, memory_domain_id="u_local", deadline_monotonic=monotonic() + 30
+    )
+    assert confirmed["id"] == first.queue_item_id and confirmed["status"] == "PENDING"
+    with pytest.raises(ScheduledTaskError) as conflict:
+        owner[0].confirm_scheduled_action(
+            request={**request, "trigger_source": "TIMER"},
+            memory_domain_id="u_local",
+            deadline_monotonic=monotonic() + 30,
+        )
+    assert conflict.value.code == "COMMAND_CONFLICT"
+    with pytest.raises(ScheduledTaskError) as removed:
+        enqueue(owner, replace(a, client_command_id=_name("different")))
+    assert removed.value.code == "TASK_NOT_FOUND"
+
+
+@pytest.mark.parametrize("original_source", list(ScheduledTriggerSource))
+def test_coalescing_never_upgrades_original_trigger_source(owner, original_source):
+    from dataclasses import replace
+
+    t = make_due(owner, task(owner))
+    initial = replace(
+        admission(
+            t,
+            original_source is not ScheduledTriggerSource.TIMER,
+            _name("first")
+            if original_source is not ScheduledTriggerSource.TIMER
+            else None,
+        ),
+        trigger_source=original_source,
+    )
+    first, _ = enqueue(owner, initial)
+    merged = owner[0].merge_scheduled_manual(
+        session_id=t["session_id"],
+        admission=admission(t, True, _name("later-user")),
+        memory_domain_id="u_local",
+        guard=owner[1].guard,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert merged["id"] == first.queue_item_id
+    assert merged["scheduled_trigger_source"] == original_source.value
+
+
+def test_scheduled_session_search_includes_paused_deduplicates_and_pages(owner, monkeypatch):
+    from dataclasses import replace
+    from pulsara_agent.conversation_kernel._repository import scheduling
+
+    repo, first, cut = owner
+    keyword = _name("分类")
+    first_task = mutate(owner, task(owner), "pause")
+    mutate(owner, task(owner), "pause")
+    repo.rename_session(session_id=first.guard.session_id, memory_domain_id="u_local",
+                        title=keyword + " 暂停_%", deadline_monotonic=monotonic() + 30)
+    second = repo.acquire_host_writer(
+        intent="NEW", session_id=_name("session"), workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"), lease_seconds=120, deadline_monotonic=monotonic() + 30,
+    )
+    _, binding, _ = _two_connection_resolution_cut()
+    repo.update_session_model_call_binding(second.guard, binding=binding, deadline_monotonic=monotonic() + 30)
+    task((repo, second, cut))
+    repo.rename_session(session_id=second.guard.session_id, memory_domain_id="u_local",
+                        title=keyword + " ACTIVE", deadline_monotonic=monotonic() + 30)
+    empty = repo.acquire_host_writer(
+        intent="NEW", session_id=_name("session"), workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"), lease_seconds=120, deadline_monotonic=monotonic() + 30,
+    )
+    repo.rename_session(session_id=empty.guard.session_id, memory_domain_id="u_local",
+                        title=keyword + " 无任务", deadline_monotonic=monotonic() + 30)
+    monkeypatch.setattr(scheduling, "STAGE2_LIMITS", replace(scheduling.STAGE2_LIMITS, history_page_default_entries=1))
+    kwargs = dict(memory_domain_id="u_local", query=keyword, deadline_monotonic=monotonic() + 30)
+    rows, cursor = repo.list_scheduled_task_sessions(**kwargs)
+    assert len(rows) == 1 and cursor == rows[0]["id"]
+    tail, cursor = repo.list_scheduled_task_sessions(**kwargs, cursor=cursor)
+    assert len(tail) == 1 and cursor is None
+    assert {row["id"] for row in rows + tail} == {first.guard.session_id, second.guard.session_id}
+    rows, _ = repo.list_scheduled_task_sessions(**{**kwargs, "query": keyword + " _%"})
+    assert [row["id"] for row in rows] == [first_task["session_id"]]
+    rows, _ = repo.list_scheduled_task_sessions(**{**kwargs, "memory_domain_id": "another_domain"})
+    assert rows == []
+
+
+@pytest.mark.parametrize('final_admission', [False, True])
+@pytest.mark.parametrize('manual_source', [False, True])
+def test_run_once_reuses_running_turn_and_reopens_after_settlement(owner, final_admission, manual_source):
+    from pulsara_agent.scheduling.service import ScheduledTaskService
+
+    repo, lease, _ = owner
+    t = make_due(owner, task(owner))
+    initial, _ = enqueue(owner, admission(t, manual_source, _name('initial') if manual_source else None))
+    candidate = repo.prepare_prompt_head_consumption(
+        session_id=t['session_id'], occurred_at=datetime.now(timezone.utc),
+        actor_id='test', deadline_monotonic=monotonic() + 30,
+    )
+    repo.consume_prepared_prompt_head(
+        lease.guard, candidate=candidate,
+        provider_input_admission=_root_provider_input_admission(candidate.provider_input_candidate),
+        deadline_monotonic=monotonic() + 30,
+    )
+    current = read(owner, t['id'])
+    assert current['last_turn_status'] == 'RUNNING'
+    request = admission(current, True, _name('repeat'))
+    if final_admission:
+        # Simulates preparation finishing after the first input was consumed.
+        _, accepted = enqueue(owner, request)
+        assert accepted.queue_item_id == initial.queue_item_id
+    else:
+        merged = repo.merge_scheduled_manual(
+            session_id=t['session_id'], admission=request, memory_domain_id='u_local',
+            guard=lease.guard, deadline_monotonic=monotonic() + 30,
+        )
+        assert merged['id'] == initial.queue_item_id
+    confirmed = repo.confirm_scheduled_action(
+        request=request.action_value(), memory_domain_id='u_local', deadline_monotonic=monotonic() + 30,
+    )
+    assert ScheduledTaskService._run_result(confirmed, request.action_value()) == {
+        'queue_item_id': initial.queue_item_id, 'status': 'RUNNING', 'coalesced': True,
+    }
+    assert read(owner, t['id'])['pending_queue_item_id'] is None
+    assert read(owner, t['id'])['revision'] == current['revision']
+    repo.interrupt_turn(
+        lease.guard, turn_id=current['last_turn_id'], reason='TEST_BOUNDARY',
+        occurred_at=datetime.now(timezone.utc), actor_id='test', deadline_monotonic=monotonic() + 30,
+    )
+    # Retrying the old command still confirms the old input after completion.
+    assert repo.confirm_scheduled_action(
+        request=request.action_value(), memory_domain_id='u_local', deadline_monotonic=monotonic() + 30,
+    )['id'] == initial.queue_item_id
+    next_request = admission(read(owner, t['id']), True, _name('after-settlement'))
+    assert repo.merge_scheduled_manual(
+        session_id=t['session_id'], admission=next_request, memory_domain_id='u_local',
+        guard=lease.guard, deadline_monotonic=monotonic() + 30,
+    ) is None
+    next_candidate, accepted = enqueue(owner, next_request)
+    next_id = accepted.queue_item_id or next_candidate.queue_item_id
+    assert next_id != initial.queue_item_id
+    assert read(owner, t['id'])['pending_queue_item_id'] == next_id
+
+
+def test_concurrent_manual_submissions_share_one_pending_input(owner):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    t = mutate(owner, task(owner), 'pause')
+    gate = Barrier(2)
+
+    def submit(_):
+        gate.wait()
+        candidate, accepted = enqueue(owner, admission(t, True, _name('concurrent')))
+        return accepted.queue_item_id or candidate.queue_item_id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = list(pool.map(submit, range(2)))
+    assert ids[0] == ids[1] == read(owner, t['id'])['pending_queue_item_id']

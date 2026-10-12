@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from enum import StrEnum
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dateutil import rrule, tz
@@ -157,6 +158,11 @@ def next_occurrence(rule: dict, timezone_name: str, after: datetime) -> datetime
         ) from None
 
 
+class ScheduledTriggerSource(StrEnum):
+    TIMER = "TIMER"
+    RUN_ONCE = "RUN_ONCE"
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduledAdmission:
     task_id: str
@@ -165,7 +171,7 @@ class ScheduledAdmission:
     due_at: datetime
     prompt: str
     permission_mode: PermissionMode
-    manual: bool = False
+    trigger_source: ScheduledTriggerSource = ScheduledTriggerSource.TIMER
     client_command_id: str | None = None
 
     def __post_init__(self):
@@ -183,14 +189,21 @@ class ScheduledAdmission:
             or self.due_at.utcoffset() != timedelta(0)
         ):
             raise ValueError("scheduled due must be an integral UTC instant")
+        if not isinstance(self.trigger_source, ScheduledTriggerSource):
+            raise ValueError("invalid scheduled trigger source")
         if self.manual != (self.client_command_id is not None):
             raise ValueError("manual command identity is incomplete")
+
+    @property
+    def manual(self) -> bool:
+        return self.trigger_source is not ScheduledTriggerSource.TIMER
 
     def provenance(self) -> dict:
         return {
             "task_id": self.task_id,
             "task_revision": self.revision,
             "due_at_utc": self.due_at.isoformat(),
+            "trigger_source": self.trigger_source.value,
         }
 
     def action_value(self) -> dict:
@@ -200,6 +213,7 @@ class ScheduledAdmission:
             "task_id": self.task_id,
             "expected_revision": self.revision,
             "request_at_utc": self.due_at.isoformat(),
+            "trigger_source": self.trigger_source.value,
         }
 
 
@@ -208,6 +222,7 @@ class ScheduledProvenance:
     task_id: str
     task_revision: int
     due_at_utc: str
+    trigger_source: ScheduledTriggerSource
 
     def __post_init__(self):
         if (
@@ -217,6 +232,8 @@ class ScheduledProvenance:
             or self.task_revision < 1
         ):
             raise ValueError("invalid scheduled provenance")
+        if not isinstance(self.trigger_source, ScheduledTriggerSource):
+            raise ValueError("invalid scheduled trigger source")
         utc_instant(self.due_at_utc)
 
     def to_dict(self):
@@ -224,6 +241,7 @@ class ScheduledProvenance:
             "task_id": self.task_id,
             "task_revision": self.task_revision,
             "due_at_utc": self.due_at_utc,
+            "trigger_source": self.trigger_source.value,
         }
 
     @classmethod
@@ -232,6 +250,12 @@ class ScheduledProvenance:
             "task_id",
             "task_revision",
             "due_at_utc",
+            "trigger_source",
         }:
             raise ValueError("scheduled provenance is not closed")
-        return cls(**value)
+        return cls(
+            **{
+                **value,
+                "trigger_source": ScheduledTriggerSource(value["trigger_source"]),
+            }
+        )

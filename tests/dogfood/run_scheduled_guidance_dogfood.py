@@ -123,6 +123,7 @@ async def run(destination: Path):
                     "time": "08:00",
                 }, first
                 assert first["timezone"] == "Asia/Shanghai", first
+                assert first["status"] == "ACTIVE", first
                 first_actions = [
                     t["arguments"]["action"]
                     for t in evidence["tools"]
@@ -130,6 +131,12 @@ async def run(destination: Path):
                 ]
                 assert first_actions.index("list") < first_actions.index("create"), (
                     first_actions
+                )
+                assert any(
+                    t["turn"] == 1 and t["name"] == "scheduled_tasks"
+                    and t["arguments"]["action"] == "create"
+                    and t["arguments"].get("status") == "ACTIVE"
+                    for t in evidence["tools"]
                 )
 
                 await ask(

@@ -681,7 +681,7 @@ class LocalHttpServer:
                 retryable=exc.retryable,
             )
         except ScheduledTaskError as exc:
-            return self._error_response(exc.code, str(exc), status=409 if exc.code in {"REVISION_CONFLICT", "COMMAND_CONFLICT", "TASK_CUT_CHANGED"} else 400, retryable=False)
+            return self._error_response(exc.code, str(exc), status=409 if exc.code in {"REVISION_CONFLICT", "COMMAND_CONFLICT", "TASK_CUT_CHANGED", "ACTIVE_TASK_CONFLICT"} else 400, retryable=False)
         except WorkspaceUnavailable as exc:
             return self._error_response("WORKSPACE_UNAVAILABLE", str(exc), status=409, retryable=False)
         except SessionWriterConflict as exc:

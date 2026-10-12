@@ -982,11 +982,13 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     scheduled_task_id text,
     scheduled_task_revision bigint,
     scheduled_due_at timestamptz,
+    scheduled_trigger_source text,
     CHECK (
         (input_origin = 'SCHEDULED_TASK' AND delivery_mode = 'NEW_TURN'
-         AND scheduled_task_id IS NOT NULL AND scheduled_task_revision >= 1 AND scheduled_due_at IS NOT NULL) OR
+         AND scheduled_task_id IS NOT NULL AND scheduled_task_revision >= 1 AND scheduled_due_at IS NOT NULL
+         AND scheduled_trigger_source IS NOT NULL AND scheduled_trigger_source IN ('TIMER', 'RUN_ONCE')) OR
         (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER') AND scheduled_task_id IS NULL
-         AND scheduled_task_revision IS NULL AND scheduled_due_at IS NULL
+         AND scheduled_task_revision IS NULL AND scheduled_due_at IS NULL AND scheduled_trigger_source IS NULL
          AND input_origin = CASE delivery_mode WHEN 'NEW_TURN' THEN 'HUMAN_MESSAGE' ELSE 'HUMAN_STEER' END)
     ),
     model_call_binding jsonb,
@@ -1114,15 +1116,16 @@ CREATE TABLE pulsara_v3.scheduled_tasks (
     schedule jsonb NOT NULL CHECK (jsonb_typeof(schedule) = 'object'),
     timezone text NOT NULL CHECK (length(timezone) > 0),
     permission_mode text NOT NULL CHECK (permission_mode IN ('read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions')),
-    status text NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED')),
+    status text NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED')),
     next_run_at timestamptz,
     revision bigint NOT NULL CHECK (revision >= 1),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    CHECK ((status = 'ACTIVE') = (next_run_at IS NOT NULL)),
-    CHECK (status <> 'COMPLETED' OR schedule->>'kind' = 'once')
+    CHECK ((status = 'ACTIVE') = (next_run_at IS NOT NULL))
 );
 CREATE INDEX scheduled_tasks_session ON pulsara_v3.scheduled_tasks(session_id, id);
+-- Product rule: one session may have at most one ACTIVE plan; inactive history is unbounded.
+CREATE UNIQUE INDEX scheduled_tasks_one_active_session ON pulsara_v3.scheduled_tasks(session_id) WHERE status = 'ACTIVE';
 CREATE INDEX scheduled_tasks_due ON pulsara_v3.scheduled_tasks(next_run_at, id) WHERE status = 'ACTIVE';
 CREATE INDEX prompt_queue_scheduled_status ON pulsara_v3.prompt_queue_items(session_id, scheduled_task_id, status);
 

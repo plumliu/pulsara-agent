@@ -388,7 +388,7 @@ class _PromptOperations:
                        delivery_mode, target_turn_id, permission_snapshot_id,
                        requested_permission_mode, model_call_binding, status,
                        inline_content, blob_id, content_digest, content_size,
-                       content_media_type, content_codec, input_origin, scheduled_task_id, scheduled_task_revision, scheduled_due_at
+                       content_media_type, content_codec, input_origin, scheduled_task_id, scheduled_task_revision, scheduled_due_at, scheduled_trigger_source
                 FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND id = %s
                 """,
@@ -712,7 +712,7 @@ class _PromptOperations:
             """
             INSERT INTO pulsara_v3.prompt_queue_items (
                 id, session_id, workspace_id, queue_sequence,
-                command_id, client_submission_id, delivery_mode, input_origin, scheduled_task_id, scheduled_task_revision, scheduled_due_at,
+                command_id, client_submission_id, delivery_mode, input_origin, scheduled_task_id, scheduled_task_revision, scheduled_due_at, scheduled_trigger_source,
                 model_call_binding, target_turn_id, status, inline_content, blob_id,
                 content_digest, content_size, content_media_type,
                 content_codec, permission_snapshot_id,
@@ -728,7 +728,7 @@ class _PromptOperations:
                 pending_plan_handoff_workflow_id,
                 pending_plan_handoff_interaction_id,
                 pending_plan_handoff_kind
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING',
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING',
                       %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s)
@@ -745,6 +745,7 @@ class _PromptOperations:
                 None if candidate.scheduled is None else candidate.scheduled.task_id,
                 None if candidate.scheduled is None else candidate.scheduled.revision,
                 None if candidate.scheduled is None else candidate.scheduled.due_at,
+                None if candidate.scheduled is None else candidate.scheduled.trigger_source.value,
                 (
                     None
                     if model_call_binding is None
@@ -790,8 +791,8 @@ class _PromptOperations:
                 ),
             ),
         )
-        if candidate.scheduled is not None and not candidate.scheduled.manual:
-            self._advance_scheduled_in_connection(connection, candidate.scheduled.task_id)
+        if candidate.scheduled is not None:
+            self._settle_scheduled_acceptance_in_connection(connection, candidate.scheduled.task_id, manual=candidate.scheduled.manual)
         return PromptIngressAccepted(
             queue_sequence,
             model_call_binding,

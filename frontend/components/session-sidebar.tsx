@@ -100,7 +100,8 @@ function SessionItem({
     <button
       className={`session-item${presence === 'current' ? ' is-active' : ''}`}
       aria-current={presence === 'current' ? 'page' : undefined}
-      onClick={() => onSelectSession(session.id)}
+      onClick={event => { if (event.detail < 2) onSelectSession(session.id); }}
+      onDoubleClick={() => onRenameSession(session)}
     >
       {opening ? <LoaderCircle size={11} className="session-item__loading" aria-hidden="true" /> : <SessionPresenceGlyph presence={presence} />}
       <span className="session-item__copy">

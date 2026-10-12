@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.scheduling.service import ScheduledTaskService
+from pulsara_agent.scheduling.contracts import ScheduledTriggerSource
 from pulsara_agent.tool_permission import default_permission_policy
 from pulsara_agent.web_app.session_controller import LocalSessionController
 from pulsara_agent.web_app.session_controller import SessionControlRejected
@@ -71,6 +72,7 @@ async def create(service, session, prompt="Scheduled report", once=False):
             .isoformat(),
         }
     return await service.create(
+        status="ACTIVE",
         session_id=session.session_id,
         values=dict(
             name="Report",
@@ -115,12 +117,17 @@ def test_quick_session_initial_model_is_ready_for_a_scheduled_task(
                     name="Quick scheduled report",
                     prompt="Inspect progress",
                     schedule={
-                        "contract": "scheduled-rule:v1", "kind": "daily",
-                        "start_date": "2026-10-05", "time": "08:00",
+                        "contract": "scheduled-rule:v1",
+                        "kind": "daily",
+                        "start_date": "2026-10-05",
+                        "time": "08:00",
                     },
-                    timezone="Asia/Shanghai", permission_mode="bypass-permissions",
+                    timezone="Asia/Shanghai",
+                    permission_mode="bypass-permissions",
                 ),
             )
+            assert task["status"] == "PAUSED"
+            assert task["next_run_at"] is None
             assert task["session_id"] == h.session_id
             assert task["timezone"] == "Asia/Shanghai"
             assert task["permission_mode"] == "bypass-permissions"
@@ -244,6 +251,8 @@ def test_busy_fifo_coalescing_pause_and_source(
             assert (
                 last.input_origin.value == "SCHEDULED_TASK"
                 and last.scheduled_input.task_id == task["id"]
+                and last.scheduled_input.trigger_source
+                is ScheduledTriggerSource.RUN_ONCE
             )
             await service.mutate(
                 task_id=task["id"],
@@ -316,7 +325,7 @@ def test_missing_workspace_auto_pauses_without_mkdir_manual_keeps_plan(
 
 
 @pytest.mark.parametrize("manual", [False, True])
-def test_restart_wakes_completed_once_and_paused_manual_pending(
+def test_restart_wakes_removed_once_pending_from_timer_or_user(
     tmp_path, stage2_migrated_postgres_database, monkeypatch, manual
 ):
     async def scenario():
@@ -346,15 +355,14 @@ def test_restart_wakes_completed_once_and_paused_manual_pending(
                         request_at_utc=datetime.now(timezone.utc)
                         .replace(microsecond=0)
                         .isoformat(),
-                    )
+                    ),
                 )
             else:
                 await due(service, h.session, task)
                 await service.tick()
             assert (await queue(service, h.session_id))[-1]["status"] == "PENDING"
-            assert (await service.get(task["id"]))["status"] == (
-                "PAUSED" if manual else "COMPLETED"
-            )
+            with pytest.raises(KeyError):
+                await service.get(task["id"])
             await service.aclose()
             await sessions.aclose()
             await core.shutdown()
@@ -404,7 +412,7 @@ def test_manual_enqueue_unknown_commit_ack_and_exact_confirmation(
             _DogfoodModelPort(),
         )
         try:
-            task = await create(service, h.session)
+            task = await create(service, h.session, once=True)
             original = h.session.repository.enqueue_prompt
             once = True
 
@@ -606,7 +614,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                         request_at_utc=datetime.now(timezone.utc)
                         .replace(microsecond=0)
                         .isoformat(),
-                    )
+                    ),
                 )
 
                 async def done():
@@ -658,7 +666,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                     request_at_utc=datetime.now(timezone.utc)
                     .replace(microsecond=0)
                     .isoformat(),
-                )
+                ),
             )
             await asyncio.wait_for(port.started.wait(), 15)
             compact = asyncio.create_task(
@@ -684,7 +692,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 == summary_calls[0].messages
             )
             assert summary_calls[1].system_prompt == summary_calls[0].system_prompt
-            assert "Runtime scheduled trigger" in str(summary_calls[0].messages)
+            assert "Runtime saved-task input" in str(summary_calls[0].messages)
             human = await h.session.run_turn(
                 PromptContent.text("Human continuation after compaction")
             )
@@ -728,7 +736,9 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             )
             scheduled = [e for e in snap.entries if e.HasField("scheduled_input")]
             assert scheduled and all(
-                e.scheduled_input.task_id == task["id"] for e in scheduled
+                e.scheduled_input.task_id == task["id"]
+                and e.scheduled_input.trigger_source == "RUN_ONCE"
+                for e in scheduled
             )
             from pulsara_agent.conversation_kernel.reader import (
                 CanonicalProviderInputReader,
@@ -745,12 +755,73 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             assert any(
                 r.input_origin.value == "SCHEDULED_TASK"
                 and r.scheduled_input.task_id == task["id"]
+                and r.scheduled_input.trigger_source is ScheduledTriggerSource.RUN_ONCE
                 for r in retained
             )
             assert all(
                 r.input_origin.value != "SCHEDULED_TASK"
                 for r in canonical.snapshot_carrier.recent_human_requests
             )
+        finally:
+            await service.aclose()
+            await sessions.aclose()
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("source", list(ScheduledTriggerSource))
+def test_saved_task_sources_do_not_trigger_automatic_memory_recall(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch, source
+):
+    async def scenario():
+        core, sessions, service, h, _ = await setup(
+            tmp_path,
+            stage2_migrated_postgres_database,
+            monkeypatch,
+            _DogfoodModelPort(),
+        )
+        try:
+            task = await create(service, h.session, once=True)
+
+            async def forbidden(*args, **kwargs):
+                raise AssertionError(
+                    "saved task must not trigger automatic memory recall"
+                )
+
+            monkeypatch.setattr(
+                h.session._memory_tools, "freeze_automatic_recall_source", forbidden
+            )
+            if source is ScheduledTriggerSource.TIMER:
+                await due(service, h.session, task)
+                await service.tick()
+            else:
+                await service.run_now(
+                    dict(
+                        client_command_id=uuid4().hex,
+                        session_id=h.session_id,
+                        task_id=task["id"],
+                        expected_revision=task["revision"],
+                        request_at_utc=datetime.now(timezone.utc)
+                        .replace(microsecond=0)
+                        .isoformat(),
+                    ),
+                )
+
+            async def done():
+                rows = await queue(service, h.session_id)
+                return (
+                    bool(rows)
+                    and rows[-1]["status"] == "CONSUMED"
+                    and h.session._active_task is None
+                )
+
+            await settled(done)
+            assert (await queue(service, h.session_id))[-1][
+                "scheduled_trigger_source"
+            ] == source.value
+            with pytest.raises(KeyError):
+                await service.get(task["id"])
         finally:
             await service.aclose()
             await sessions.aclose()

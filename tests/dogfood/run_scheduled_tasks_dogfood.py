@@ -73,6 +73,7 @@ async def run():
 
             async def scheduled(prompt, permission="bypass-permissions"):
                 value = await scheduler.create(
+                    status="ACTIVE",
                     session_id=session.session_id,
                     values=dict(
                         name="Dogfood",
@@ -190,12 +191,22 @@ async def run():
                     )
                     for c in calls[1:]
                 )
-                first_projection = await scheduler.get(first_task["id"])
-                assert first_projection["status"] == "COMPLETED"
-                assert first_projection["last_turn_status"] == "INTERRUPTED"
-                assert first_projection["last_entry_id"]
+                try:
+                    await scheduler.get(first_task["id"])
+                except KeyError:
+                    pass
+                else:
+                    raise AssertionError("accepted once plan must be removed")
                 assert any(
-                    "Runtime scheduled trigger"
+                    entry.turn_id == target
+                    and entry.HasField("scheduled_input")
+                    and entry.scheduled_input.task_id == first_task["id"]
+                    and entry.scheduled_input.trigger_source == "TIMER"
+                    for entry in before.entries
+                )
+                assert before.interruption_notices[0].turn_id == target
+                assert any(
+                    "Runtime saved-task input"
                     in json.dumps(c["provider_input"], ensure_ascii=False)
                     for c in calls
                 )
@@ -222,6 +233,7 @@ async def run():
                     "scheduled permission request waiting; installing user stop",
                     flush=True,
                 )
+                permission_turn = session._active_turn_id
                 stopped = await session.request_stop_turn(
                     command_id=f"command:control:{int(session._control_monotonic() * 1000) + 60000}:scheduled-permission-stop",
                     expected_session_id=session.session_id,
@@ -232,8 +244,12 @@ async def run():
                     stopped.user_control is not None and stopped.user_control.accepted
                 )
                 await wait_idle()
-                permission_projection = await scheduler.get(permission_task["id"])
-                assert permission_projection["last_turn_status"] == "INTERRUPTED"
+                try:
+                    await scheduler.get(permission_task["id"])
+                except KeyError:
+                    pass
+                else:
+                    raise AssertionError("stopping execution must not restore a once plan")
                 final = await asyncio.to_thread(
                     reader.snapshot,
                     session_id=session.session_id,
@@ -245,6 +261,11 @@ async def run():
                     len(final.interruption_notices) == 2
                     and not (root / "scheduled_permission_probe.txt").exists()
                 )
+                assert any(notice.turn_id == permission_turn and notice.reason == "USER_STOPPED"
+                           for notice in final.interruption_notices)
+                assert any(entry.turn_id == permission_turn and entry.HasField("scheduled_input")
+                           and entry.scheduled_input.task_id == permission_task["id"]
+                           for entry in final.entries)
                 for previous, current in zip(calls, calls[1:]):
                     left, right = previous["provider_input"], current["provider_input"]
                     assert (
@@ -258,7 +279,7 @@ async def run():
                     "model": connection.target.model_id,
                     "reply": reply.final_text,
                     "notice_count": 2,
-                    "scheduled_tasks": [first_projection, permission_projection],
+                    "removed_scheduled_task_ids": [first_task["id"], permission_task["id"]],
                     "permission_wait_stopped": True,
                     "automatic_timer_without_browser": True,
                     "notice_retained_after_continue": True,
@@ -272,7 +293,7 @@ async def run():
             except BaseException:
                 state = {
                     "calls": calls,
-                    "task": await scheduler.get(first_task["id"]),
+                    "tasks": await scheduler.list(session_id=session.session_id),
                     "active_turn": session._active_turn_id,
                 }
                 reader = CanonicalProtocolReader(session.repository.connection_provider)

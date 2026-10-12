@@ -4,36 +4,52 @@ import { ScheduledTasksView } from '../../frontend/components/scheduled-tasks-vi
 import { LocalScheduledTasksApi, ScheduledApiError, type ScheduledTask } from '../../frontend/lib/scheduled-tasks-api';
 import type { ModelConfigurationSummary } from '../../frontend/lib/runtime-adapter';
 import type { SessionSummary } from '../../frontend/lib/pulsara-types';
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); notify.mockClear(); });
 const task: ScheduledTask = { id:'scheduled:a',session_id:'session:a',name:'每日报告',prompt:'检查进展',status:'ACTIVE',revision:1,next_run_at:'2026-10-06T00:00:00Z',timezone:'Asia/Shanghai',permission_mode:'ask-permissions',schedule:{contract:'scheduled-rule:v1',kind:'once',run_at_utc:'2026-10-06T00:00:13Z'} };
 const model:ModelConfigurationSummary={id:'model:a',source:'models_dev',route_id:'test',route_name:'测试供应商',wire_api:'openai_responses',model_id:'test-model',status:'ready',base_url:'http://localhost',authentication:'none',credential_configured:false,reasoning:{kind:'selectable',effort:{values:['high','max']}},default_reasoning:{kind:'effort',value:'high'}};
 function setup() {
  const api=new LocalScheduledTasksApi();
+ vi.spyOn(api,'listSessions').mockResolvedValue({sessions:[{id:'session:a',title:'任务会话'}],next_cursor:null});
  vi.spyOn(api,'list').mockResolvedValue({tasks:[task],next_cursor:null});
  vi.spyOn(api,'preview').mockResolvedValue({next_run_at:task.next_run_at!,local_time_fold:null});
- vi.spyOn(api,'create').mockResolvedValue(task);
+ vi.spyOn(api,'create').mockResolvedValue({...task,status:'PAUSED',next_run_at:null});
  vi.spyOn(api,'get').mockResolvedValue(task);
  vi.spyOn(api,'update').mockResolvedValue(task);
  vi.spyOn(api,'action').mockResolvedValue({task:null});
- vi.spyOn(api,'runNow').mockResolvedValue({queue_item_id:'queue:a',status:'PENDING'});
+ vi.spyOn(api,'runNow').mockResolvedValue({queue_item_id:'queue:a',status:'PENDING',coalesced:false});
  return api;
 }
-function show(api:LocalScheduledTasksApi,onOpenSession=vi.fn(),onCreateSession=vi.fn(async()=> 'session:new')) { return render(<ScheduledTasksView modelConfigurations={[model]} onCreateSession={onCreateSession} api={api} ready sessions={[{id:'session:a',title:'普通会话'} as SessionSummary]} onOpenSession={onOpenSession} onOpenSettings={vi.fn()} />); }
+const notify = vi.fn();
+function show(api:LocalScheduledTasksApi,onOpenSession=vi.fn(),onCreateSession=vi.fn(async()=> 'session:new')) { return render(<ScheduledTasksView onNotify={notify} modelConfigurations={[model]} onCreateSession={onCreateSession} api={api} ready sessions={[{id:'session:a',title:'普通会话'} as SessionSummary]} onOpenSession={onOpenSession} onOpenSettings={vi.fn()} />); }
 it('retains the complete run action after unknown ACK and task revision refresh',async()=>{
  const api=setup();vi.mocked(api.runNow).mockRejectedValueOnce(new Error('network lost'));
- show(api);fireEvent.click(await screen.findByRole('button',{name:'立即运行'}));
- await screen.findByRole('alert');const original=vi.mocked(api.runNow).mock.calls[0][0];
+ show(api);fireEvent.click(await screen.findByRole('button',{name:'运行一次'}));
+ await waitFor(()=>expect(notify).toHaveBeenCalledWith('提交结果尚未确认','network lost','warning'));const original=vi.mocked(api.runNow).mock.calls[0][0];
  vi.mocked(api.list).mockResolvedValue({tasks:[{...task,revision:2,prompt:'新提示词'}],next_cursor:null});
  fireEvent.click(screen.getByRole('button',{name:'刷新定时任务'}));await screen.findByText('新提示词');
- fireEvent.click(screen.getByRole('button',{name:'立即运行'}));await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(2));
+ fireEvent.click(screen.getByRole('button',{name:'运行一次'}));await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(2));
  expect(vi.mocked(api.runNow).mock.calls[1][0]).toEqual(original);expect(original.expected_revision).toBe(1);
 });
 it('rejects definite conflicting run and uses a new identity after reload',async()=>{
  const api=setup();vi.mocked(api.runNow).mockRejectedValueOnce(new ScheduledApiError('任务已修改',409));
  vi.mocked(api.list).mockResolvedValueOnce({tasks:[task],next_cursor:null}).mockResolvedValue({tasks:[{...task,revision:2}],next_cursor:null});
- show(api);fireEvent.click(await screen.findByRole('button',{name:'立即运行'}));await screen.findByRole('alert');await waitFor(()=>expect(api.list).toHaveBeenCalledTimes(2));
- fireEvent.click(screen.getByRole('button',{name:'立即运行'}));await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(2));
+ show(api);fireEvent.click(await screen.findByRole('button',{name:'运行一次'}));await waitFor(()=>expect(notify).toHaveBeenCalledWith('未能运行任务','任务已修改','warning'));await waitFor(()=>expect(api.list).toHaveBeenCalledTimes(2));
+ fireEvent.click(screen.getByRole('button',{name:'运行一次'}));await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(2));
  const [a,b]=vi.mocked(api.runNow).mock.calls.map(c=>c[0]);expect(b.expected_revision).toBe(2);expect(b.client_command_id).not.toBe(a.client_command_id);
+});
+it('confirms an unknown submission through the toolbar after the once row disappears',async()=>{
+ const api=setup();vi.mocked(api.runNow).mockRejectedValueOnce(new Error('network lost'));
+ show(api);await screen.findByRole('button',{name:'运行一次'});
+ vi.mocked(api.list).mockResolvedValue({tasks:[],next_cursor:null});
+ fireEvent.click(screen.getByRole('button',{name:'运行一次'}));
+ await waitFor(()=>expect(screen.queryByRole('heading',{name:task.name})).toBeNull());
+ await waitFor(()=>expect(screen.getByRole('button',{name:'确认上次提交'}).hasAttribute('disabled')).toBe(false));
+ expect(screen.queryByText('network lost')).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'确认上次提交'}));
+ await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(2));
+ const [original,retry]=vi.mocked(api.runNow).mock.calls.map(call=>call[0]);
+ expect(retry).toEqual(original);
+ await waitFor(()=>expect(screen.queryByRole('button',{name:'确认上次提交'})).toBeNull());
 });
 it('editing preserves the saved timezone, permission and exact once UTC including seconds',async()=>{
  const api=setup();const local=vi.spyOn(api,'localOnce');show(api);fireEvent.click(await screen.findByRole('button',{name:'编辑'}));
@@ -51,22 +67,35 @@ it('reloads all editor fields on CAS conflict rather than resubmitting stale val
  expect((screen.getByRole('combobox',{name:'时间规则'}) as HTMLSelectElement).value).toBe('monthly');
  expect((screen.getByRole('spinbutton',{name:'每月几号'}) as HTMLInputElement).value).toBe('31');
 });
-it('links interrupted scheduled execution to its retained ordinary history entry',async()=>{
- const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[{...task,status:'COMPLETED',last_turn_status:'INTERRUPTED',last_entry_id:'entry:user'}],next_cursor:null});const open=vi.fn();show(api,open);
- fireEvent.click(await screen.findByRole('button',{name:'已中断 · 查看记录'}));expect(open).toHaveBeenCalledWith('session:a','entry:user');
+it('keeps the session link and expands only the prompt in the compact paused card',async()=>{
+ const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[{...task,status:'PAUSED',next_run_at:null,last_turn_status:'INTERRUPTED',last_entry_id:'entry:user'}],next_cursor:null});const open=vi.fn();show(api,open);
+ fireEvent.click(await screen.findByRole('button',{name:'普通会话'}));expect(open).toHaveBeenCalledWith('session:a');
+ expect(screen.queryByText(/查看记录|恢复后继续按计划运行/)).toBeNull();
+ const toggle=screen.getByRole('button',{name:'展开每日报告'});
+ fireEvent.click(toggle);
+ const prompt=document.getElementById(toggle.getAttribute('aria-controls')!);
+ expect(prompt?.textContent).toBe(task.prompt);expect(prompt?.classList.contains('is-full')).toBe(true);
+ expect(screen.queryByText('时区')).toBeNull();expect(screen.queryByText('权限')).toBeNull();
+ expect(prompt?.closest('article')?.querySelector('.scheduled-row-meta')).toBeNull();
 });
-it('groups a dispatched once task under enabled without presenting a resume or pause action',async()=>{
- const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[task,{...task,id:'scheduled:once',name:'一次性检查',status:'COMPLETED',next_run_at:null}],next_cursor:null});show(api);
- const heading=await screen.findByRole('heading',{name:'一次性检查'});const row=heading.closest('article')!;
- expect(within(row).getByText('已启用')).toBeTruthy();
- expect(within(row).getByText('一次性计划已派发')).toBeTruthy();
- expect(within(row).queryByRole('button',{name:'恢复'})).toBeNull();
- expect(within(row).queryByRole('button',{name:'暂停'})).toBeNull();
- const filter=screen.getByRole('combobox',{name:'任务状态'});
- expect(within(filter).queryByRole('option',{name:'已派发'})).toBeNull();
- fireEvent.change(filter,{target:{value:'ENABLED'}});
- await waitFor(()=>expect(api.list).toHaveBeenLastCalledWith('ENABLED',undefined,expect.any(AbortSignal)));
- expect(screen.getByRole('heading',{name:'一次性检查'})).toBeTruthy();
+it('removes an accepted once plan and shows submission feedback',async()=>{
+ const api=setup();show(api);
+ await screen.findByRole('heading',{name:'每日报告'});
+ vi.mocked(api.list).mockResolvedValue({tasks:[],next_cursor:null});
+ fireEvent.click(screen.getByRole('button',{name:'运行一次'}));
+ await waitFor(()=>expect(notify).toHaveBeenCalledWith('已提交','可在会话中查看','success'));
+ expect(screen.queryByText('已提交，可在会话中查看')).toBeNull();
+ await waitFor(()=>expect(screen.queryByRole('heading',{name:'每日报告'})).toBeNull());
+ fireEvent.change(screen.getByRole('combobox',{name:'任务状态'}),{target:{value:'ACTIVE'}});
+ await waitFor(()=>expect(api.list).toHaveBeenLastCalledWith('ACTIVE',undefined,expect.any(AbortSignal),undefined));
+});
+it('switches atomically when enabling another plan without a confirmation dialog',async()=>{
+ const api=setup();const target={...task,id:'scheduled:b',name:'每周整理',status:'PAUSED' as const,next_run_at:null};
+ vi.mocked(api.list).mockImplementation(async(status)=>({tasks:status==='ACTIVE'?[task]:[task,target],next_cursor:null}));
+ vi.spyOn(api,'switch').mockResolvedValue({paused:{...task,status:'PAUSED'},active:{...target,status:'ACTIVE'}});
+ show(api);fireEvent.click(await screen.findByRole('switch',{name:'启用每周整理'}));
+ await waitFor(()=>expect(api.switch).toHaveBeenCalledWith(task,{kind:'existing',task_id:target.id,expected_revision:target.revision}));
+ expect(api.action).not.toHaveBeenCalled();expect(screen.queryByRole('dialog')).toBeNull();
 });
 it('does not replace a newer filter result with a late older page',async()=>{
  const api=setup();let finish!:(p:{tasks:ScheduledTask[];next_cursor:null})=>void;vi.mocked(api.list).mockReturnValueOnce(new Promise(resolve=>{finish=resolve;})).mockResolvedValue({tasks:[{...task,id:'scheduled:b',name:'暂停任务',status:'PAUSED'}],next_cursor:null});
@@ -115,4 +144,93 @@ it('retries a rejected task save in the already-created session',async()=>{
  expect((screen.getByRole('combobox',{name:'供应商 / 模型'}) as HTMLSelectElement).disabled).toBe(true);
  fireEvent.click(screen.getByRole('button',{name:'保存任务'}));await waitFor(()=>expect(api.create).toHaveBeenCalledTimes(2));
  expect(create).toHaveBeenCalledTimes(1);expect(vi.mocked(api.create).mock.calls.map(c=>c[0])).toEqual(['session:new','session:new']);
+});
+
+
+it('locates and flashes an exact task beyond the first page, then deduplicates ordinary pagination', async () => {
+ const api=setup();const target={...task,id:'scheduled:z',name:'定位任务'};
+ vi.mocked(api.list).mockResolvedValueOnce({tasks:[task],next_cursor:task.id}).mockResolvedValue({tasks:[target],next_cursor:null});
+ vi.mocked(api.get).mockResolvedValue(target);
+ const scroll=vi.fn();
+ Object.defineProperty(HTMLElement.prototype,'scrollIntoView',{configurable:true,value:scroll});
+ render(<ScheduledTasksView onNotify={notify} focusTaskId={target.id} modelConfigurations={[model]} onCreateSession={vi.fn()} api={api} ready sessions={[]} onOpenSession={vi.fn()} onOpenSettings={vi.fn()} />);
+ const row=(await screen.findByRole('heading',{name:target.name})).closest('article')!;
+ expect(api.get).toHaveBeenCalledWith(target.id,expect.any(AbortSignal));
+ await waitFor(()=>expect(document.activeElement).toBe(row));
+ expect(scroll).toHaveBeenCalledWith({block:'center'});
+ expect(row.classList.contains('is-highlighted')).toBe(true);
+ fireEvent.animationEnd(row);await waitFor(()=>expect(row.classList.contains('is-highlighted')).toBe(false),{timeout:3000});
+ fireEvent.click(screen.getByRole('button',{name:'加载更多任务'}));
+ await waitFor(()=>expect(screen.queryByRole('button',{name:'加载更多任务'})).toBeNull());
+ expect(screen.getAllByRole('heading',{name:target.name})).toHaveLength(1);
+ Reflect.deleteProperty(HTMLElement.prototype,'scrollIntoView');
+});
+
+it('reports a removed direct target while keeping the ordinary task list usable', async () => {
+ const api=setup();vi.mocked(api.get).mockRejectedValue(new ScheduledApiError('任务不存在',404));
+ render(<ScheduledTasksView onNotify={notify} focusTaskId="scheduled:deleted" modelConfigurations={[model]} onCreateSession={vi.fn()} api={api} ready sessions={[]} onOpenSession={vi.fn()} onOpenSettings={vi.fn()} />);
+ expect(await screen.findByRole('alert')).toHaveProperty('textContent',expect.stringContaining('任务不存在'));
+ expect(await screen.findByRole('heading',{name:task.name})).toBeTruthy();
+});
+
+it('keeps all task sessions available while combining session and status filters',async()=>{
+ const api=setup();show(api);
+ const filters=screen.getByRole('navigation',{name:'按会话筛选'});
+ fireEvent.click(await within(filters).findByRole('button',{name:'任务会话'}));
+ await waitFor(()=>expect(api.list).toHaveBeenLastCalledWith('',undefined,expect.any(AbortSignal),'session:a'));
+ fireEvent.change(screen.getByRole('combobox',{name:'任务状态'}),{target:{value:'PAUSED'}});
+ await waitFor(()=>expect(api.list).toHaveBeenLastCalledWith('PAUSED',undefined,expect.any(AbortSignal),'session:a'));
+ expect(within(filters).getByRole('button',{name:'任务会话'}).getAttribute('aria-pressed')).toBe('true');
+ fireEvent.change(screen.getByRole('searchbox',{name:'搜索任务会话'}),{target:{value:'另一会话'}});
+ await waitFor(()=>expect(api.listSessions).toHaveBeenLastCalledWith('另一会话',undefined,expect.any(AbortSignal)));
+ fireEvent.click(within(filters).getByRole('button',{name:'全部会话'}));
+ await waitFor(()=>expect(api.list).toHaveBeenLastCalledWith('PAUSED',undefined,expect.any(AbortSignal),undefined));
+});
+it('enables a paused task directly if its session has no active plan',async()=>{
+ const api=setup();const paused={...task,status:'PAUSED' as const,next_run_at:null};
+ vi.mocked(api.list).mockImplementation(async(status)=>({tasks:status==='ACTIVE'?[]:[paused],next_cursor:null}));
+ const atomic=vi.spyOn(api,'switch');show(api);
+ fireEvent.click(await screen.findByRole('switch',{name:'启用每日报告'}));
+ await waitFor(()=>expect(api.action).toHaveBeenCalledWith(paused,'resume'));
+ expect(atomic).not.toHaveBeenCalled();
+});
+it('keeps the previous active plan visible after an atomic switch conflict',async()=>{
+ const api=setup();const paused={...task,id:'scheduled:b',name:'另一个计划',status:'PAUSED' as const,next_run_at:null};
+ vi.mocked(api.list).mockImplementation(async(status)=>({tasks:status==='ACTIVE'?[task]:[task,paused],next_cursor:null}));
+ vi.spyOn(api,'switch').mockRejectedValue(new ScheduledApiError('计划已变更',409));show(api);
+ fireEvent.click(await screen.findByRole('switch',{name:'启用另一个计划'}));
+ await screen.findByRole('alert');
+ await waitFor(()=>expect(screen.getByRole('switch',{name:'启用另一个计划'}).hasAttribute('disabled')).toBe(false));
+ expect(screen.getByRole('switch',{name:'启用每日报告'}).getAttribute('aria-checked')).toBe('true');
+ expect(screen.getByRole('switch',{name:'启用另一个计划'}).getAttribute('aria-checked')).toBe('false');
+ expect(api.action).not.toHaveBeenCalled();
+});
+
+it.each([
+ {pending_queue_item_id:'queue:a',last_turn_status:null,label:'已排队'},
+ {pending_queue_item_id:null,last_turn_status:'RUNNING',label:'运行中'},
+])('blocks another run while $label, then allows a new run after settlement',async(state)=>{
+ const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[{...task,...state}],next_cursor:null});
+ show(api);
+ const button=await screen.findByRole('button',{name:state.label});
+ expect(button.hasAttribute('disabled')).toBe(true);
+ fireEvent.click(button);expect(api.runNow).not.toHaveBeenCalled();
+ vi.mocked(api.get).mockResolvedValue({...task,pending_queue_item_id:null,last_turn_status:'COMPLETED'});
+ fireEvent.focus(window);
+ const run=await screen.findByRole('button',{name:'运行一次'});
+ expect(run.hasAttribute('disabled')).toBe(false);
+ fireEvent.click(run);await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(1));
+});
+
+it('prevents rapid repeated submission while the request is unresolved',async()=>{
+ const api=setup();let resolve!: (value:{queue_item_id:string;status:string;coalesced:boolean})=>void;
+ vi.mocked(api.runNow).mockImplementation(()=>new Promise(done=>{resolve=done;}));
+ show(api);const run=await screen.findByRole('button',{name:'运行一次'});
+ fireEvent.click(run);fireEvent.click(run);fireEvent.click(run);
+ expect(api.runNow).toHaveBeenCalledTimes(1);
+ vi.mocked(api.list).mockResolvedValue({tasks:[{...task,last_turn_status:'RUNNING'}],next_cursor:null});
+ resolve({queue_item_id:'queue:a',status:'RUNNING',coalesced:false});
+ expect((await screen.findByRole('button',{name:'运行中'})).hasAttribute('disabled')).toBe(true);
+ await waitFor(()=>expect(notify).toHaveBeenCalledWith('任务正在运行','可在会话中查看','success'));
+ expect(screen.queryByRole('status')).toBeNull();
 });

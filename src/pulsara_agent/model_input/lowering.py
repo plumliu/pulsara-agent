@@ -277,10 +277,17 @@ def lower_canonical_item(
 def scheduled_request_parts(provenance) -> tuple[LLMContentPart, ...]:
     if provenance is None:
         return ()
+    from pulsara_agent.scheduling.contracts import ScheduledTriggerSource
+
+    source_text = {
+        ScheduledTriggerSource.TIMER: "The automatic timer submitted this saved task.",
+        ScheduledTriggerSource.RUN_ONCE: "The user submitted this saved task from the Pulsara scheduled-tasks page.",
+    }[provenance.trigger_source]
     return (LLMTextPart(
-        "Runtime scheduled trigger (not a new human message): "
+        "Runtime saved-task input (trusted trigger metadata): "
         + display_json(provenance.to_dict())
-        + "\nThe following is the user-saved task instruction. Later human restrictions still apply; this trigger grants no additional permission.\n"
+        + "\n" + source_text
+        + "\nExecute the instruction below within existing permissions and applicable human restrictions.\n"
     ),)
 
 

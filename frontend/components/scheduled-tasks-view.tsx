@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { CalendarClock, ChevronDown, ChevronRight, CircleAlert, Clock3, ExternalLink, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react';
-import type { SessionSummary, PermissionMode } from '../lib/pulsara-types';
+import { CalendarClock, ChevronDown, ChevronRight, CircleAlert, Clock3, LoaderCircle, MessageSquare, Pencil, Play, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react';
+import type { SessionSummary, ToastMessage } from '../lib/pulsara-types';
 import type { ModelCallBindingPayload, ModelConfigurationSummary, ReasoningSelectionPayload } from '../lib/runtime-adapter';
-import { LocalScheduledTasksApi, ScheduledApiError, scheduleLabel, type ScheduledTask, type ScheduledValues, type ScheduleRule, type ScheduledRunRequest } from '../lib/scheduled-tasks-api';
+import { LocalScheduledTasksApi, ScheduledApiError, scheduleLabel, type ScheduledTask, type ScheduledValues, type ScheduleRule, type ScheduledRunRequest, type ScheduledSession } from '../lib/scheduled-tasks-api';
+
+import { ScheduledSessionFilter } from './scheduled-session-filter';
 
 // Use the same portal/focus boundary as existing session management dialogs.
 function ScheduledDialog({label,busy,onClose,children}: {label:string;busy:boolean;onClose:()=>void;children:ReactNode}) {
@@ -26,44 +28,135 @@ function ScheduledDialog({label,busy,onClose,children}: {label:string;busy:boole
   }}>{children}</section></div>,document.body);
 }
 
-const statuses = { ACTIVE: '已启用', PAUSED: '已暂停', COMPLETED: '已启用' };
-const statusFilters = { ENABLED: '已启用', PAUSED: '已暂停' };
-const turns: Record<string, string> = { RUNNING: '正在执行', COMPLETED: '执行完成', INTERRUPTED: '已中断' };
-const permissions: Record<PermissionMode, string> = { 'read-only': '只读', 'ask-permissions': '询问权限', 'accept-edits': '允许编辑', 'bypass-permissions': '允许全部操作' };
+const statusFilters = { ACTIVE: '已启用', PAUSED: '已暂停' };
+function runState(task: ScheduledTask) { return task.last_turn_status === 'RUNNING' ? '运行中' : task.pending_queue_item_id ? '已排队' : null; }
 function dateTime(value: string | null, zone: string, withOffset = true) { return value ? new Intl.DateTimeFormat('zh-CN', { timeZone: zone, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', ...(withOffset ? {timeZoneName:'longOffset' as const} : {}) }).format(new Date(value)) : '—'; }
 function localInput(value: string, zone: string) { const parts = new Intl.DateTimeFormat('sv-SE', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(value)); const get = (name: string) => parts.find(p => p.type === name)?.value; return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`; }
-interface Props { modelConfigurations: ModelConfigurationSummary[]; onCreateSession: (binding: ModelCallBindingPayload) => Promise<string>; api: LocalScheduledTasksApi; sessions: SessionSummary[]; ready: boolean; onOpenSession: (id: string, entryId?: string) => void; onOpenSettings: () => void }
-export function ScheduledTasksView({ modelConfigurations, onCreateSession, api, sessions, ready, onOpenSession, onOpenSettings }: Props) {
+interface Props { onNotify: (title: string, detail?: string, tone?: ToastMessage['tone']) => void; focusTaskId?: string; modelConfigurations: ModelConfigurationSummary[]; onCreateSession: (binding: ModelCallBindingPayload) => Promise<string>; api: LocalScheduledTasksApi; sessions: SessionSummary[]; ready: boolean; onOpenSession: (id: string, entryId?: string) => void; onOpenSettings: () => void }
+export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations, onCreateSession, api, sessions, ready, onOpenSession, onOpenSettings }: Props) {
   const [items, setItems] = useState<ScheduledTask[]>([]); const [status, setStatus] = useState(''); const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const [editor, setEditor] = useState<{task?: ScheduledTask} | null>(null); const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
+  const [selectedSession, setSelectedSession] = useState<ScheduledSession | null>(null);
+  const [sessionRefresh, setSessionRefresh] = useState(0);
+  const [uncertainRun, setUncertainRun] = useState<ScheduledTask | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [highlightedTaskId, setHighlightedTaskId] = useState<string>();
+  const focusedRow = useRef<HTMLElement>(null);
+  const locatedTaskId = useRef<string | undefined>(undefined);
+  const actionInFlight = useRef(false);
   const revision = useRef(0); const runRequests = useRef(new Map<string, ScheduledRunRequest>());
   // Invalidate every outstanding list request, including manual reloads, on cleanup.
   const invalidateListRequests = useCallback(() => { revision.current++; }, []);
   const reload = async (more = false) => {
     const captured = ++revision.current; setLoading(true);
-    try { const page = await api.list(status, more ? cursor ?? undefined : undefined); if (revision.current !== captured) return; setItems(old => more ? [...old.filter(x => !page.tasks.some(y => y.id === x.id)), ...page.tasks] : page.tasks); setCursor(page.next_cursor); }
+    if (!more) setSessionRefresh(value => value + 1);
+    try { const page = await api.list(status, more ? cursor ?? undefined : undefined, undefined, selectedSession?.id); if (revision.current !== captured) return; setItems(old => more ? [...old.filter(x => !page.tasks.some(y => y.id === x.id)), ...page.tasks] : page.tasks); setCursor(page.next_cursor); }
     catch (e) { if (revision.current === captured) setError((e as Error).message); }
     finally { if (revision.current === captured) setLoading(false); }
   };
   useEffect(() => {
+    if (focusTaskId && locatedTaskId.current !== focusTaskId) { setSelectedSession(null); setStatus(''); }
+  }, [focusTaskId]);
+  useEffect(() => {
     const captured = ++revision.current;
+    setLoading(true); setItems([]); setCursor(null); setError('');
     const controller = new AbortController();
-    if (ready) void api.list(status, undefined, controller.signal).then(page => {
+    if (ready) void api.list(status, undefined, controller.signal, selectedSession?.id).then(async page => {
+      // A direct target can be beyond the first page. Fetch that row by ID;
+      // keep the page cursor, and ordinary pagination deduplicates it later.
+      const target = !status && !selectedSession && focusTaskId && locatedTaskId.current !== focusTaskId;
+      if (target && !page.tasks.some(task => task.id === focusTaskId)) {
+        try {
+          const task = await api.get(focusTaskId, controller.signal);
+          page = { ...page, tasks: [task, ...page.tasks] };
+        } catch (e) {
+          if (!controller.signal.aborted && revision.current === captured) setError((e as Error).message);
+        }
+      }
       if (revision.current !== captured) return;
       setItems(page.tasks); setCursor(page.next_cursor); setLoading(false);
+      if (target && page.tasks.some(task => task.id === focusTaskId)) setHighlightedTaskId(focusTaskId);
     }).catch(e => { if (!controller.signal.aborted && revision.current === captured) { setError((e as Error).message); setLoading(false); } });
     return () => { controller.abort(); invalidateListRequests(); };
-  }, [api, ready, status, invalidateListRequests]);
+  }, [api, ready, status, selectedSession?.id, focusTaskId, invalidateListRequests]);
+  useEffect(() => {
+    if (!highlightedTaskId || !focusedRow.current) return;
+    locatedTaskId.current = highlightedTaskId;
+    focusedRow.current.scrollIntoView?.({ block: 'center' });
+    focusedRow.current.focus({ preventScroll: true });
+    // Match the home-directory locator and clear even with reduced motion.
+    const timer = setTimeout(() => setHighlightedTaskId(undefined), 2200);
+    return () => clearTimeout(timer);
+  }, [highlightedTaskId]);
+  useEffect(() => {
+    if (!ready || busy || !items.length) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let refreshing = false;
+    const refresh = async (all = false) => {
+      if (refreshing || document.visibilityState === 'hidden') return;
+      const targets = all ? items : items.filter(task => runState(task));
+      if (!targets.length) return;
+      refreshing = true;
+      const captured = revision.current;
+      try {
+        const updates = await Promise.all(targets.map(async task => {
+          try { return {id: task.id, task: await api.get(task.id, controller.signal)}; }
+          catch (e) { return {id: task.id, task: e instanceof ScheduledApiError && e.status === 404 ? null : task}; }
+        }));
+        if (!controller.signal.aborted && revision.current === captured) {
+          const byId = new Map(updates.map(update => [update.id, update.task]));
+          setItems(current => current.flatMap(task => {
+            const updated = byId.has(task.id) ? byId.get(task.id) : task;
+            return updated ? [updated] : [];
+          }));
+        }
+      } finally { refreshing = false; }
+    };
+    const onFocus = () => { void refresh(true); };
+    // Display refresh cadence only; backend admission owns duplicate prevention.
+    if (items.some(task => runState(task))) timer = setTimeout(() => { void refresh(); }, 2000);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => { controller.abort(); clearTimeout(timer); window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onFocus); };
+  }, [api, ready, busy, items]);
   const act = async (task: ScheduledTask, action: 'pause' | 'resume' | 'delete' | 'run') => {
+    if (actionInFlight.current || (action === 'run' && runState(task) && !runRequests.current.has(task.id))) return;
+    actionInFlight.current = true;
     setBusy(true); setError('');
     try {
-      if (action === 'run') { let request = runRequests.current.get(task.id); if (!request) { request = { task_id: task.id, session_id: task.session_id, expected_revision: task.revision, client_command_id: crypto.randomUUID(), request_at_utc: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() }; runRequests.current.set(task.id, request); } await api.runNow(request); runRequests.current.delete(task.id); }
+      if (action === 'resume') {
+        const active = (await api.list('ACTIVE', undefined, undefined, task.session_id)).tasks.find(item => item.id !== task.id);
+        if (active) await api.switch(active, {kind: 'existing', task_id: task.id, expected_revision: task.revision});
+        else await api.action(task, 'resume');
+      }
+      else if (action === 'run') {
+        let request = runRequests.current.get(task.id);
+        if (!request) {
+          request = { task_id: task.id, session_id: task.session_id, expected_revision: task.revision, client_command_id: crypto.randomUUID(), request_at_utc: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() };
+          runRequests.current.set(task.id, request);
+        }
+        const result = await api.runNow(request);
+        runRequests.current.delete(task.id); setUncertainRun(null);
+        setItems(current => current.map(item => item.id !== task.id ? item : {
+          ...item,
+          pending_queue_item_id: result.status === 'PENDING' ? result.queue_item_id : null,
+          last_turn_status: result.status === 'RUNNING' ? 'RUNNING' : item.last_turn_status,
+        }));
+        onNotify(result.status === 'RUNNING' ? '任务正在运行' : result.coalesced && result.status === 'PENDING' ? '任务已在队列中' : '已提交', '可在会话中查看', 'success');
+      }
       else await api.action(task, action);
       setConfirmDelete(null); await reload();
-    } catch (e) { setError((e as Error).message); if (e instanceof ScheduledApiError && e.status >= 400 && e.status < 500) { runRequests.current.delete(task.id); if (e.status === 409) await reload(); } }
-    finally { setBusy(false); }
+    } catch (e) {
+      if (action === 'run') {
+        const definite = e instanceof ScheduledApiError && e.status >= 400 && e.status < 500;
+        if (definite) { runRequests.current.delete(task.id); setUncertainRun(null); }
+        else setUncertainRun(task);
+        onNotify(definite ? '未能运行任务' : '提交结果尚未确认', (e as Error).message, 'warning');
+      } else setError((e as Error).message);
+      await reload();
+    } finally { actionInFlight.current = false; setBusy(false); }
   };
   return <section className="scheduled-view">
     <header className="page-header scheduled-page-header">
@@ -72,47 +165,54 @@ export function ScheduledTasksView({ modelConfigurations, onCreateSession, api, 
         <button className="scheduled-primary" disabled={busy} onClick={() => setEditor({})}><Plus size={15} aria-hidden="true" />新建任务</button>
       </div>}
     </header>
-    <div className="scheduled-inner">
+    <div className={`scheduled-inner${ready ? ' scheduled-layout' : ''}`}>
+      {ready && <ScheduledSessionFilter api={api} selected={selectedSession} onSelect={session => { if (session?.id !== selectedSession?.id) { invalidateListRequests(); setSelectedSession(session); } }} disabled={busy} refresh={sessionRefresh} />}
       {!ready ? <div className="scheduled-collection scheduled-empty">
         <span className="scheduled-empty-icon"><CalendarClock size={25} aria-hidden="true" /></span><h2>连接数据库后即可管理任务</h2>
-        <p>定时任务和会话会保存在本地数据库中。</p><button className="secondary-action" onClick={onOpenSettings}>打开设置</button>
+        <button className="secondary-action" onClick={onOpenSettings}>打开设置</button>
       </div> : <div className="scheduled-collection">
         <div className="scheduled-toolbar">
-          <div className="scheduled-collection-title"><CalendarClock size={17} aria-hidden="true" /><h2>{status ? statusFilters[status as keyof typeof statusFilters] : '全部任务'}</h2></div>
+          <div className="scheduled-collection-title">{selectedSession ? <MessageSquare size={17} aria-hidden="true" /> : <CalendarClock size={17} aria-hidden="true" />}<h2>{selectedSession ? <button className="scheduled-session-heading" title={selectedSession.title} aria-label={`打开会话：${selectedSession.title}`} onClick={() => onOpenSession(selectedSession.id)}>{selectedSession.title}</button> : '全部任务'}</h2></div>
           <div className="scheduled-toolbar-actions">
-            <label className="scheduled-filter memory-state-select"><SlidersHorizontal size={15} aria-hidden="true" /><select aria-label="任务状态" value={status} disabled={busy} onChange={e => setStatus(e.target.value)}><option value="">全部状态</option>{Object.entries(statusFilters).map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
+            <label className="scheduled-filter memory-state-select"><SlidersHorizontal size={15} aria-hidden="true" /><select aria-label="任务状态" value={status} disabled={busy} onChange={e => { invalidateListRequests(); setStatus(e.target.value); }}><option value="">全部状态</option>{Object.entries(statusFilters).map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
+            {uncertainRun && <button className="secondary-action" disabled={busy} onClick={() => void act(uncertainRun, 'run')}>确认上次提交</button>}
             <button className="scheduled-icon-button" disabled={busy || loading} onClick={() => void reload()} aria-label="刷新定时任务">{loading ? <LoaderCircle size={16} aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}</button>
           </div>
         </div>
         {error && <div role="alert" className="scheduled-feedback"><CircleAlert size={16} aria-hidden="true" /><span>{error}</span></div>}
         {loading && !items.length ? <div className="scheduled-empty" role="status"><span className="scheduled-empty-icon"><LoaderCircle size={25} aria-hidden="true" /></span><p>正在读取任务…</p></div> : !items.length ? <div className="scheduled-empty">
-          <span className="scheduled-empty-icon"><CalendarClock size={25} aria-hidden="true" /></span><h2>{status ? '没有符合条件的任务' : '还没有定时任务'}</h2><p>{status ? '可以切换状态，查看其他任务。' : '每天的检查、每周的整理，都可以交给一个计划。'}</p>
-          {!status && <button className="secondary-action" onClick={() => setEditor({})}><Plus size={14} aria-hidden="true" />创建第一个任务</button>}
+          <span className="scheduled-empty-icon"><CalendarClock size={25} aria-hidden="true" /></span><h2>{status || selectedSession ? '没有符合条件的任务' : '还没有定时任务'}</h2>
+          {!status && !selectedSession && <button className="secondary-action" onClick={() => setEditor({})}><Plus size={14} aria-hidden="true" />创建第一个任务</button>}
         </div> : <div className="scheduled-list">{items.map(task => {
           const open = expanded === task.id;
-          const sessionTitle = sessions.find(s => s.id === task.session_id)?.title ?? '打开会话';
+          const execution = runState(task);
+          const sessionTitle = task.session_title ?? sessions.find(s => s.id === task.session_id)?.title ?? '打开会话';
           const detailId = `scheduled-detail-${task.id}`;
-          return <article key={task.id} className={`scheduled-row${open ? ' is-expanded' : ''}`}>
+          return <article key={task.id} ref={task.id === focusTaskId ? focusedRow : undefined} tabIndex={-1}
+            className={`scheduled-row${open ? ' is-expanded' : ''}${highlightedTaskId === task.id ? ' is-highlighted' : ''}`}
+            onAnimationEnd={event => { if (event.target === event.currentTarget && highlightedTaskId === task.id) setHighlightedTaskId(undefined); }}>
             <div className="scheduled-row-heading">
               <span className="scheduled-row-icon"><CalendarClock size={19} aria-hidden="true" /></span>
-              <button className="scheduled-row-title" aria-expanded={open} aria-controls={detailId} onClick={() => setExpanded(open ? null : task.id)}>
+              <button className="scheduled-row-title" title={task.name} aria-expanded={open} aria-controls={detailId} onClick={() => setExpanded(open ? null : task.id)}>
                 <h3>{task.name}</h3><span>{scheduleLabel(task)}</span>
               </button>
-              <span className={`scheduled-status is-${task.status === 'PAUSED' ? 'paused' : 'active'}`}>{statuses[task.status]}</span>
+              <button type="button" role="switch" className="settings-switch scheduled-task-switch" aria-label={`启用${task.name}`} aria-checked={task.status === 'ACTIVE'} disabled={busy} onClick={() => void act(task, task.status === 'ACTIVE' ? 'pause' : 'resume')}><span /></button>
               <button className="scheduled-icon-button scheduled-expand" aria-label={`${open ? '收起' : '展开'}${task.name}`} aria-expanded={open} aria-controls={detailId} onClick={() => setExpanded(open ? null : task.id)}><ChevronRight size={16} aria-hidden="true" /></button>
             </div>
             <div className="scheduled-row-body">
-              <p className={`scheduled-prompt${open ? ' is-full' : ''}`}>{task.prompt}</p>
-              <div className="scheduled-row-meta"><span><Clock3 size={13} aria-hidden="true" />{task.next_run_at ? `下一次：${dateTime(task.next_run_at, task.timezone)}` : task.status === 'COMPLETED' ? '一次性计划已派发' : '恢复后继续按计划运行'}</span>{task.pending_queue_item_id && <span className="scheduled-pending">等待运行</span>}</div>
-              <dl id={detailId} hidden={!open} className="scheduled-details"><div><dt>时区</dt><dd>{task.timezone}</dd></div><div><dt>权限</dt><dd>{permissions[task.permission_mode]}</dd></div></dl>
+              <p id={detailId} className={`scheduled-prompt${open ? ' is-full' : ''}`}>{task.prompt}</p>
               {task.prepare_error && <p className="scheduled-task-error"><CircleAlert size={14} aria-hidden="true" />{task.prepare_error}</p>}
               <footer className="scheduled-row-footer">
-                <div className="scheduled-links"><button title={sessionTitle} onClick={() => onOpenSession(task.session_id)}><MessageSquare size={13} aria-hidden="true" /><span>{sessionTitle}</span></button>{task.last_turn_status && <button onClick={() => onOpenSession(task.session_id, task.last_entry_id ?? undefined)}><ExternalLink size={13} aria-hidden="true" /><span>{turns[task.last_turn_status] ?? task.last_turn_status} · 查看记录</span></button>}</div>
+                <div className="scheduled-row-context">
+                  <div className="scheduled-links"><button title={sessionTitle} onClick={() => onOpenSession(task.session_id)}><MessageSquare size={13} aria-hidden="true" /><span>{sessionTitle}</span></button></div>
+                  {task.next_run_at && <div className="scheduled-row-meta">
+                    {task.next_run_at && <span><Clock3 size={13} aria-hidden="true" />{`下一次：${dateTime(task.next_run_at, task.timezone, task.timezone !== 'Asia/Shanghai')}`}</span>}
+                  </div>}
+                </div>
                 <div className="scheduled-row-actions">
                   <button disabled={busy} onClick={() => setEditor({task})}><Pencil size={13} aria-hidden="true" />编辑</button>
-                  <button disabled={busy} onClick={() => void act(task,'run')}><Play size={13} aria-hidden="true" />立即运行</button>
-                  {task.status !== 'COMPLETED' && <button disabled={busy} onClick={() => void act(task,task.status === 'ACTIVE' ? 'pause' : 'resume')}>{task.status === 'ACTIVE' ? <Pause size={13} aria-hidden="true" /> : <Play size={13} aria-hidden="true" />}{task.status === 'ACTIVE' ? '暂停' : '恢复'}</button>}
-                  <button className="scheduled-danger" disabled={busy} onClick={() => setConfirmDelete(task)}><Trash2 size={13} aria-hidden="true" />取消任务</button>
+                  <button className="scheduled-run" disabled={busy || Boolean(execution)} onClick={() => void act(task,'run')}><Play size={13} aria-hidden="true" />{execution ?? '运行一次'}</button>
+                  <button className="scheduled-danger" disabled={busy} onClick={() => setConfirmDelete(task)}><Trash2 size={13} aria-hidden="true" />删除任务</button>
                 </div>
               </footer>
             </div>
@@ -122,10 +222,10 @@ export function ScheduledTasksView({ modelConfigurations, onCreateSession, api, 
       </div>}
     </div>
     {editor && <TaskEditor modelConfigurations={modelConfigurations} onCreateSession={onCreateSession} onOpenSettings={onOpenSettings} key={editor.task?.id ?? 'new'} task={editor.task} api={api} onClose={() => setEditor(null)} onSaved={() => { setEditor(null); void reload(); }} />}
-    {confirmDelete && <ScheduledDialog label="取消定时任务" busy={busy} onClose={()=>setConfirmDelete(null)}>
-      <header><div><span className="page-kicker">取消计划</span><h2>取消「{confirmDelete.name}」？</h2></div><button className="scheduled-icon-button" disabled={busy} aria-label="关闭取消确认" onClick={() => setConfirmDelete(null)}><X size={18} aria-hidden="true" /></button></header>
+    {confirmDelete && <ScheduledDialog label="删除定时任务" busy={busy} onClose={()=>setConfirmDelete(null)}>
+      <header><div><h2>删除「{confirmDelete.name}」？</h2></div><button className="scheduled-icon-button" disabled={busy} aria-label="关闭删除确认" onClick={() => setConfirmDelete(null)}><X size={18} aria-hidden="true" /></button></header>
       <div className="scheduled-confirm-body"><p>待运行输入会取消，会话和历史仍然保留。正在执行的回复会继续。</p></div>
-      <footer className="scheduled-dialog-actions"><button className="secondary-action" disabled={busy} onClick={() => setConfirmDelete(null)}>保留任务</button><button className="scheduled-delete-action" disabled={busy} onClick={() => void act(confirmDelete,'delete')}>取消任务</button></footer>
+      <footer className="scheduled-dialog-actions"><button className="secondary-action" disabled={busy} onClick={() => setConfirmDelete(null)}>保留任务</button><button className="scheduled-delete-action" disabled={busy} onClick={() => void act(confirmDelete,'delete')}>删除任务</button></footer>
     </ScheduledDialog>}
   </section>;
 }
@@ -190,7 +290,7 @@ function TaskEditor({modelConfigurations, onCreateSession, onOpenSettings, task,
       }
     } finally { setBusy(false); }
   };
-  return <ScheduledDialog label={task ? '编辑定时任务' : '新建定时任务'} busy={busy} onClose={onClose}><header><div><span className="page-kicker">会话计划</span><h2>{task ? '编辑任务' : '新建任务'}</h2></div><button className="scheduled-icon-button" disabled={busy} onClick={onClose} aria-label="关闭任务表单"><X size={18} /></button></header><form onSubmit={e => { e.preventDefault(); void save(); }}><div className="scheduled-form-body">
+  return <ScheduledDialog label={task ? '编辑定时任务' : '新建定时任务'} busy={busy} onClose={onClose}><header><div><h2>{task ? '编辑任务' : '新建任务'}</h2></div><button className="scheduled-icon-button" disabled={busy} onClick={onClose} aria-label="关闭任务表单"><X size={18} /></button></header><form onSubmit={e => { e.preventDefault(); void save(); }}><div className="scheduled-form-body">
     {!task && <>
       <label>供应商 / 模型<select required disabled={busy || Boolean(createdSessionId)} value={modelId} onChange={e=>{const next=modelConfigurations.find(item=>item.id===e.target.value);setModelId(e.target.value);setReasoning(next?.default_reasoning ?? null);}}><option value="">选择供应商和模型</option>{modelConfigurations.map(item=><option key={item.id} value={item.id} disabled={item.status!=='ready'}>{item.route_name ?? item.route_id} · {item.display_name ?? item.model_id}</option>)}</select></label>
       {model?.reasoning.kind === 'selectable' && <label>推理强度<select disabled={busy || Boolean(createdSessionId)} value={reasoning?.kind==='budget_tokens' ? 'budget' : JSON.stringify(reasoning)} onChange={e=>setReasoning(e.target.value==='budget' ? {kind:'budget_tokens',tokens:Math.ceil(((model.reasoning.budget_tokens?.minimum ?? 0)+(model.reasoning.budget_tokens?.maximum ?? 0))/2)} : JSON.parse(e.target.value) as ReasoningSelectionPayload | null)}>{reasoningOptions.map(item=><option key={JSON.stringify(item.value)} value={JSON.stringify(item.value)}>{item.label}</option>)}{model.reasoning.budget_tokens?.minimum!=null && model.reasoning.budget_tokens.maximum!=null && <option value="budget">自定义推理预算</option>}</select></label>}
@@ -201,6 +301,6 @@ function TaskEditor({modelConfigurations, onCreateSession, onOpenSettings, task,
     <label>时间规则<select disabled={busy} value={kind} onChange={e => setKind(e.target.value as ScheduleRule['kind'])}><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="interval">固定间隔</option><option value="once">只运行一次</option></select></label>
     {kind === 'once' ? <label>运行时间{timezoneLabel && `（${timezoneLabel}）`}<input type="datetime-local" required disabled={busy} value={once} onChange={e => { setOnceChanged(true); setOnce(e.target.value); }} /></label> : kind === 'interval' ? <><label>间隔（秒）<input type="number" min="1" step="1" required disabled={busy} value={seconds} onChange={e => setSeconds(Number(e.target.value))} /></label><label>固定起点（UTC）<input required disabled={busy} value={anchor} onChange={e => setAnchor(e.target.value)} /></label></> : <><div className="scheduled-fields"><label>开始日期<input type="date" required disabled={busy} value={start} onChange={e => setStart(e.target.value)} /></label><label>时间{timezoneLabel && `（${timezoneLabel}）`}<input type="time" required disabled={busy} value={time} onChange={e => setTime(e.target.value)} /></label></div>{kind === 'monthly' && <label>每月几号<input type="number" min="1" max="31" step="1" required disabled={busy} value={day} onChange={e => setDay(Number(e.target.value))} /></label>}{kind === 'weekly' && <fieldset><legend>星期</legend><div className="scheduled-weekdays">{['一','二','三','四','五','六','日'].map((d,i) => <label key={d}><input type="checkbox" disabled={busy} checked={days.includes(i+1)} onChange={e => setDays(old => e.target.checked ? [...old,i+1].sort() : old.filter(x => x!==i+1))} />{d}</label>)}</div></fieldset>}</>}
 
-    <p className="scheduled-preview"><Clock3 size={15} aria-hidden="true" /><span>下一次：{preview || '正在计算…'}{timezoneLabel && ` · ${timezoneLabel}`}</span></p>{createdSessionId && <p className="scheduled-muted">会话已创建，重试会继续保存到该会话。</p>}{task && <p className="scheduled-muted">已入队的输入保留原内容。需要取消时，请进入会话。</p>}{error && <p role="alert" className="scheduled-error">{error}</p>}</div><footer className="scheduled-dialog-actions"><button className="secondary-action" type="button" disabled={busy} onClick={onClose}>取消</button><button className="scheduled-primary" disabled={busy || (!task && (!model || model.status !== 'ready'))}>{busy ? '保存中…' : '保存任务'}</button></footer>
+    <p className="scheduled-preview"><Clock3 size={15} aria-hidden="true" /><span>{current?.status === 'ACTIVE' ? '下一次' : '启用后下一次'}：{preview || '正在计算…'}{timezoneLabel && ` · ${timezoneLabel}`}</span></p>{error && <p role="alert" className="scheduled-error">{error}</p>}</div><footer className="scheduled-dialog-actions"><button className="secondary-action" type="button" disabled={busy} onClick={onClose}>取消</button><button className="scheduled-primary" disabled={busy || (!task && (!model || model.status !== 'ready'))}>{busy ? '保存中…' : '保存任务'}</button></footer>
   </form></ScheduledDialog>;
 }

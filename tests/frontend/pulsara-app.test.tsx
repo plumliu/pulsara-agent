@@ -1255,7 +1255,7 @@ describe('PulsaraApp', () => {
     expect(within(inspector).queryByText(hiddenWinner, { exact: false })).toBeNull();
     expect(within(inspector).queryByText(/internal producer unavailable/)).toBeNull();
     fireEvent.mouseEnter(rules);
-    fireEvent.click(within(screen.getByRole('tooltip')).getByRole('link', { name: '用户级 Pulsara' }));
+    fireEvent.click(within(screen.getByRole('tooltip')).getByRole('link', { name: '用户级 Pulsara 目录' }));
     expect(screen.queryByRole('tooltip')).toBeNull();
     const homeSetting = screen.getByRole('region', { name: 'Pulsara 用户目录' });
     expect(homeSetting.classList.contains('is-highlighted')).toBe(true);
@@ -3412,9 +3412,10 @@ describe('PulsaraApp', () => {
 
   it('creates a scheduled quick session with its selected model while retaining the current chat connection', async () => {
     const adapter = new FakeAdapter();
-    const list = vi.spyOn(LocalScheduledTasksApi.prototype, 'list').mockResolvedValue({tasks:[], next_cursor:null});
+    vi.spyOn(LocalScheduledTasksApi.prototype, 'listSessions').mockResolvedValue({sessions:[],next_cursor:null});
+  const list = vi.spyOn(LocalScheduledTasksApi.prototype, 'list').mockResolvedValue({tasks:[], next_cursor:null});
     const preview = vi.spyOn(LocalScheduledTasksApi.prototype, 'preview').mockResolvedValue({next_run_at:'2026-10-06T00:00:00Z', local_time_fold:null});
-    const create = vi.spyOn(LocalScheduledTasksApi.prototype, 'create').mockImplementation(async (session_id, values) => ({...values, session_id, id:'scheduled:test', revision:1, status:'ACTIVE', next_run_at:'2026-10-06T00:00:00Z'}));
+    const create = vi.spyOn(LocalScheduledTasksApi.prototype, 'create').mockImplementation(async (session_id, values) => ({...values, session_id, id:'scheduled:test', revision:1, status:'PAUSED', next_run_at:null}));
     try {
       renderWorkbench(<PulsaraApp adapter={adapter} />);
       await screen.findByRole('heading', {name:'准备发布'});
@@ -4932,14 +4933,17 @@ it.each([false, true])('PR05 later unknown command recovers independently of old
 });
 
 
-it.each(['sidebar', 'topbar'])('renames the session from %s and updates shared title displays', async (entry) => {
+it.each(['sidebar', 'topbar', 'double-click'])('renames the session from %s and updates shared title displays', async (entry) => {
   const adapter = new FakeAdapter();
   renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByLabelText(`${initialSession.title} 更多操作`);
-  if (entry === 'sidebar') fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
+  if (entry === 'double-click') fireEvent.doubleClick(screen.getByRole('button', { name: new RegExp(initialSession.title + '当前会话') }));
+  else if (entry === 'sidebar') fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
   else fireEvent.click(await screen.findByRole('button', { name: '更多会话操作' }));
-  const buttons = screen.getAllByRole('button', { name: '重命名' });
-  fireEvent.click(buttons.at(-1)!);
+  if (entry !== 'double-click') {
+    const buttons = screen.getAllByRole('button', { name: '重命名' });
+    fireEvent.click(buttons.at(-1)!);
+  }
   const dialog = await screen.findByRole('dialog', { name: '重命名会话' });
   fireEvent.change(within(dialog).getByLabelText('会话标题'), { target: { value: '新的会话标题' } });
   fireEvent.click(within(dialog).getByRole('button', { name: '保存' }));
@@ -5018,4 +5022,26 @@ it('loads existing task groups for a cold history view without opening a runtime
   await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalledWith('session-1', undefined));
   expect(adapter.lastConnection).toBeUndefined();
   expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
+});
+
+
+it('opens the unique ACTIVE schedule from the session header and hides the alarm after it pauses', async () => {
+  const task = { id: 'scheduled:header', session_id: initialSession.id, name: '会话活跃计划', prompt: '检查进展', status: 'ACTIVE' as const, revision: 1,
+    next_run_at: '2026-10-13T00:00:00Z', timezone: 'Asia/Shanghai', permission_mode: 'bypass-permissions' as const,
+    schedule: { contract: 'scheduled-rule:v1' as const, kind: 'daily' as const, start_date: '2026-10-13', time: '08:00' } };
+  vi.spyOn(LocalScheduledTasksApi.prototype, 'listSessions').mockResolvedValue({sessions:[],next_cursor:null});
+  const list = vi.spyOn(LocalScheduledTasksApi.prototype, 'list').mockResolvedValue({tasks:[task],next_cursor:null});
+  try {
+    const adapter = new FakeAdapter();
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '查看此会话的活跃定时任务' }));
+    expect(list).toHaveBeenCalledWith('ACTIVE', undefined, expect.any(AbortSignal), initialSession.id);
+    const row = (await screen.findByRole('heading', { name: task.name })).closest('article')!;
+    await waitFor(() => expect(document.activeElement).toBe(row));
+    expect(row.classList.contains('is-highlighted')).toBe(true);
+    list.mockResolvedValue({tasks:[],next_cursor:null});
+    fireEvent.click(within(row).getByRole('button', { name: initialSession.title }));
+    await screen.findByRole('heading', { name: initialSession.title });
+    await waitFor(() => expect(screen.queryByRole('button', { name: '查看此会话的活跃定时任务' })).toBeNull());
+  } finally { list.mockRestore(); }
 });

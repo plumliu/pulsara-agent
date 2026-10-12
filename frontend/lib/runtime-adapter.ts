@@ -1032,7 +1032,7 @@ interface ProtocolEntry {
     source_coverage_reason?: string; artifact_unavailability_reason?: string;
   };
   input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string };
-  scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string };
+  scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string; trigger_source: 'TIMER' | 'RUN_ONCE' };
   visualizations?: Array<{
     ordinal: string | number; state: string; visualization_ref?: string;
     content_size?: string | number; failure_code?: string; failure_detail?: string;
@@ -4252,7 +4252,7 @@ function projectEntries(
         entrySequence: numeric(entry.entry_sequence),
         role: 'user',
         userKind,
-        scheduledInput: entry.scheduled_input ? { taskId: entry.scheduled_input.task_id, taskRevision: numeric(entry.scheduled_input.task_revision), dueAtUtc: entry.scheduled_input.due_at_utc } : undefined,
+        scheduledInput: entry.scheduled_input ? { taskId: entry.scheduled_input.task_id, taskRevision: numeric(entry.scheduled_input.task_revision), dueAtUtc: entry.scheduled_input.due_at_utc, triggerSource: entry.scheduled_input.trigger_source } : undefined,
         time: formatTime(entry.accepted_at_utc),
         body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? projectPlanContinuation(decodeContent(entry.content))

@@ -30,45 +30,82 @@ from pulsara_agent.capability.user_skill_config import (
 from tests.support.model_config import test_model_runtime
 
 
-def test_context_usage_http_reads_the_selected_session_without_a_command(tmp_path, monkeypatch):
+def test_context_usage_http_reads_the_selected_session_without_a_command(
+    tmp_path, monkeypatch
+):
     async def exercise():
-        (tmp_path / 'index.html').write_text('Pulsara', encoding='utf-8')
+        (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
         sessions = _Sessions()
-        payload = {'state': 'ready', 'connection_id': 'selected', 'input_tokens': 1000,
-                   'input_budget_tokens': 2000, 'compaction_expected': False}
+        payload = {
+            "state": "ready",
+            "connection_id": "selected",
+            "input_tokens": 1000,
+            "input_budget_tokens": 2000,
+            "compaction_expected": False,
+        }
         read = AsyncMock(return_value=payload)
-        monkeypatch.setattr(sessions, 'read_context_usage', read, raising=False)
-        server = LocalHttpServer(sessions=cast(LocalSessionController, sessions),
-            bridge=cast(LocalBrowserBridge, _Bridge()), static_root=tmp_path, requested_port=0,
-            is_ready=lambda: True, is_draining=lambda: False, **_model_server_dependencies())
+        monkeypatch.setattr(sessions, "read_context_usage", read, raising=False)
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, sessions),
+            bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=tmp_path,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
         await server.start()
         try:
-            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
-                async with client.get(f'{server.origin}/api/sessions/session:preview/context-usage') as response:
+            async with ClientSession(
+                headers={
+                    "X-Pulsara-Connection-Id": "connection-1",
+                    "X-Pulsara-Connection-Generation": "1",
+                }
+            ) as client:
+                async with client.get(
+                    f"{server.origin}/api/sessions/session:preview/context-usage"
+                ) as response:
                     assert response.status == 200
                     assert await response.json() == payload
-                read.assert_awaited_once_with('session:preview')
+                read.assert_awaited_once_with("session:preview")
         finally:
             await server.aclose()
 
     asyncio.run(exercise())
 
 
-def test_native_workspace_picker_http_security_selection_cancel_and_failure(tmp_path, monkeypatch):
+def test_native_workspace_picker_http_security_selection_cancel_and_failure(
+    tmp_path, monkeypatch
+):
     async def exercise():
         (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
         server = LocalHttpServer(
             sessions=cast(LocalSessionController, _Sessions()),
             bridge=cast(LocalBrowserBridge, _Bridge()),
-            static_root=tmp_path, requested_port=0,
-            is_ready=lambda: True, is_draining=lambda: False,
+            static_root=tmp_path,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
             **_model_server_dependencies(),
         )
-        choose = AsyncMock(side_effect=["/tmp/原目录 ", None, OSError("unavailable"), NotImplementedError(), NativeDesktopUnavailable("缺少桌面组件，请安装 zenity 后重试。")])
+        choose = AsyncMock(
+            side_effect=[
+                "/tmp/原目录 ",
+                None,
+                OSError("unavailable"),
+                NotImplementedError(),
+                NativeDesktopUnavailable("缺少桌面组件，请安装 zenity 后重试。"),
+            ]
+        )
         monkeypatch.setattr(server._directory_picker, "choose", choose)
         await server.start()
         try:
-            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+            async with ClientSession(
+                headers={
+                    "X-Pulsara-Connection-Id": "connection-1",
+                    "X-Pulsara-Connection-Generation": "1",
+                }
+            ) as client:
                 url = f"{server.origin}/api/workspace-directory/pick"
                 for headers, code in [
                     ({"Origin": "https://other.test"}, "ORIGIN_REJECTED"),
@@ -82,21 +119,39 @@ def test_native_workspace_picker_http_security_selection_cancel_and_failure(tmp_
                     assert response.status == 400
                 choose.assert_not_awaited()
                 for expected in ["/tmp/原目录 ", None]:
-                    async with client.post(url, json={"initial_path": "/tmp/start"}, headers={"Origin": server.origin}) as response:
+                    async with client.post(
+                        url,
+                        json={"initial_path": "/tmp/start"},
+                        headers={"Origin": server.origin},
+                    ) as response:
                         assert response.status == 200
                         assert await response.json() == {"path": expected}
                 choose.assert_awaited_with("/tmp/start")
-                for status, code in [(503, "DIRECTORY_PICKER_UNAVAILABLE"), (501, "DIRECTORY_PICKER_UNSUPPORTED")]:
+                for status, code in [
+                    (503, "DIRECTORY_PICKER_UNAVAILABLE"),
+                    (501, "DIRECTORY_PICKER_UNSUPPORTED"),
+                ]:
                     async with client.post(url, json={}) as response:
                         assert response.status == status
                         assert (await response.json())["error"]["code"] == code
                 async with client.post(url, json={}) as response:
                     assert response.status == 503
-                    assert (await response.json())["error"]["message"] == "缺少桌面组件，请安装 zenity 后重试。"
-                monkeypatch.setattr(server.sessions, "open_capability_root", AsyncMock(
-                    side_effect=NativeDesktopUnavailable("缺少桌面组件，请安装 xdg-utils 后重试。"),
-                ), raising=False)
-                async with client.post(f"{server.origin}/api/capabilities/roots/pulsara/open", json={}) as response:
+                    assert (await response.json())["error"][
+                        "message"
+                    ] == "缺少桌面组件，请安装 zenity 后重试。"
+                monkeypatch.setattr(
+                    server.sessions,
+                    "open_capability_root",
+                    AsyncMock(
+                        side_effect=NativeDesktopUnavailable(
+                            "缺少桌面组件，请安装 xdg-utils 后重试。"
+                        ),
+                    ),
+                    raising=False,
+                )
+                async with client.post(
+                    f"{server.origin}/api/capabilities/roots/pulsara/open", json={}
+                ) as response:
                     assert response.status == 503
                     error = (await response.json())["error"]
                     assert error["code"] == "DIRECTORY_OPEN_UNAVAILABLE"
@@ -162,7 +217,11 @@ class _Sessions:
         ]
 
     async def create_session(
-        self, *, workspace_kind: str, workspace_path: str | None, model_call_binding=None
+        self,
+        *,
+        workspace_kind: str,
+        workspace_path: str | None,
+        model_call_binding=None,
     ) -> SimpleNamespace:
         assert workspace_kind == "quick"
         assert workspace_path is None
@@ -185,7 +244,7 @@ class _Sessions:
         self.task_page_calls.append((session_id, maximum_items, cursor, batch_id))
         return {
             "session_id": session_id,
-            "tasks": [{"id": "task-1", "status": "COMPLETED"}],
+            "tasks": [{"id": "task-1", "status": "ACTIVE"}],
             "total_count": 1,
             "page_count": 1,
             "remaining_count": 0,
@@ -214,9 +273,7 @@ class _Sessions:
         maximum_items: int,
         cursor: str | None,
     ) -> dict[str, object]:
-        self.task_activity_calls.append(
-            (session_id, task_id, maximum_items, cursor)
-        )
+        self.task_activity_calls.append((session_id, task_id, maximum_items, cursor))
         return {
             "session_id": session_id,
             "task_id": task_id,
@@ -388,7 +445,9 @@ class _Bridge:
         self.connect_calls: list[tuple[str, str, bool]] = []
         self.operation_calls: list[tuple[str, str, dict[str, object]]] = []
 
-    async def require_chat_controller(self, connection_id, generation, *, session_id=None, require_directory=True):
+    async def require_chat_controller(
+        self, connection_id, generation, *, session_id=None, require_directory=True
+    ):
         assert connection_id == "connection-1" and generation == 1
 
     async def _connection(self, connection_id):
@@ -424,9 +483,7 @@ class _Bridge:
     async def list_background_processes(
         self, connection_id: str, body: dict[str, object]
     ) -> dict[str, object]:
-        self.operation_calls.append(
-            ("list-background-processes", connection_id, body)
-        )
+        self.operation_calls.append(("list-background-processes", connection_id, body))
         return {"background_processes": {"processes": []}}
 
     async def read_background_process_log(
@@ -440,7 +497,9 @@ class _Bridge:
 
 @pytest.mark.parametrize("read_only", [True, False])
 def test_subagent_capacity_preserves_body_after_admission_read(
-    tmp_path: Path, monkeypatch, read_only: bool,
+    tmp_path: Path,
+    monkeypatch,
+    read_only: bool,
 ) -> None:
     async def exercise() -> None:
         (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
@@ -464,8 +523,11 @@ def test_subagent_capacity_preserves_body_after_admission_read(
         monkeypatch.setattr(bridge, "require_chat_controller", admission)
         server = LocalHttpServer(
             sessions=cast(LocalSessionController, _Sessions()),
-            bridge=cast(LocalBrowserBridge, bridge), static_root=tmp_path,
-            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            bridge=cast(LocalBrowserBridge, bridge),
+            static_root=tmp_path,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
             **_model_server_dependencies(),
         )
         await server.start()
@@ -515,7 +577,7 @@ async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
         },
     )
     await server.start()
-    image_bytes = b"\x00\xff\\\"" * 1_000_000
+    image_bytes = b'\x00\xff\\"' * 1_000_000
     encoded_image = base64.b64encode(image_bytes).decode("ascii")
     command = {
         "command_id": "command:http-boundary",
@@ -524,7 +586,7 @@ async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
         "requested_permission_mode": "PERMISSION_MODE_READ_ONLY",
         "prompt_content": {
             "parts": [
-                {"type": "text", "text": "escaping \\\" 中文\n"},
+                {"type": "text", "text": 'escaping \\" 中文\n'},
                 {
                     "type": "image",
                     "content_base64": encoded_image,
@@ -533,9 +595,9 @@ async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
             ]
         },
     }
-    base = json.dumps(
-        command, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
+    base = json.dumps(command, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
     maximum_http_bytes = 8 << 20
     assert len(base) < maximum_http_bytes
     exact = base + b" " * (maximum_http_bytes - len(base))
@@ -545,7 +607,13 @@ async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
         "Sec-Fetch-Site": "same-origin",
     }
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+        async with ClientSession(
+            cookie_jar=DummyCookieJar(),
+            headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            },
+        ) as client:
             async with client.post(
                 f"{server.origin}/api/connections/connection-1/command",
                 data=exact,
@@ -559,7 +627,7 @@ async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
             assert operation == "command"
             assert connection_id == "connection-1"
             received_parts = received["prompt_content"]["parts"]
-            assert received_parts[0]["text"] == "escaping \\\" 中文\n"
+            assert received_parts[0]["text"] == 'escaping \\" 中文\n'
             assert base64.b64decode(received_parts[1]["content_base64"]) == image_bytes
 
             async with client.post(
@@ -584,7 +652,8 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
     static_root.mkdir()
     (static_root / "index.html").write_text("Pulsara settings", encoding="utf-8")
     base = test_model_runtime(
-        input_modalities=("text", "image", "audio"), output_modalities=("text",),
+        input_modalities=("text", "image", "audio"),
+        output_modalities=("text",),
     )
     settings = LocalSettingsStore(tmp_path / "pulsara" / "local-settings.yaml")
     runtime = ModelRuntime(
@@ -627,7 +696,13 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
     }
     secret = "model-api-key-sentinel"
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+        async with ClientSession(
+            cookie_jar=DummyCookieJar(),
+            headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            },
+        ) as client:
             async with client.get(f"{server.origin}/api/app/bootstrap") as response:
                 assert response.status == 200
                 payload = await response.json()
@@ -662,10 +737,10 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                     "source": "models_dev",
                     "context_window_tokens": None,
                     "route_id": "test",
-                        "model_id": "test-model",
-                        "wire_api": "openai_responses",
-                        "reasoning_wire_profile": "catalog_standard",
-                        "api_key": secret,
+                    "model_id": "test-model",
+                    "wire_api": "openai_responses",
+                    "reasoning_wire_profile": "catalog_standard",
+                    "api_key": secret,
                 },
                 headers=mutation_headers,
             ) as response:
@@ -675,7 +750,9 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 assert secret not in rendered
                 assert payload["model_configuration"]["credential_configured"] is True
                 assert payload["model_configuration"]["input_modalities"] == [
-                    "text", "image", "audio",
+                    "text",
+                    "image",
+                    "audio",
                 ]
                 assert payload["model_configuration"]["output_modalities"] == ["text"]
                 connection_id = payload["model_configuration"]["id"]
@@ -717,7 +794,8 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
             assert len(stored.model_connections) == 2
             assert stored.model_connections[1].user_declared is not None
             assert stored.model_connections[1].user_declared.input_modalities == (
-                "text", "image",
+                "text",
+                "image",
             )
 
             async with client.delete(
@@ -752,8 +830,13 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                     headers=mutation_headers,
                 ) as response:
                     assert response.status == 200
-                    assert (await response.json())[kind]["credential_configured"] is True
-                assert getattr(settings.read().memory_retrieval, kind).api_key == f"{kind}-secret"
+                    assert (await response.json())[kind][
+                        "credential_configured"
+                    ] is True
+                assert (
+                    getattr(settings.read().memory_retrieval, kind).api_key
+                    == f"{kind}-secret"
+                )
 
             async with client.delete(
                 f"{server.origin}/api/local-settings/memory-retrieval/embedding",
@@ -784,18 +867,28 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
 
 
 def test_model_configuration_edit_round_trip_and_draft_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asyncio.run(_exercise_model_configuration_edit(tmp_path, monkeypatch))
 
 
-async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def _exercise_model_configuration_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     (tmp_path / "index.html").write_text("Pulsara settings", encoding="utf-8")
-    from pulsara_agent.llm.model_catalog import ReasoningEffortChoices, ReasoningSelectableControls
+    from pulsara_agent.llm.model_catalog import (
+        ReasoningEffortChoices,
+        ReasoningSelectableControls,
+    )
     from pulsara_agent.llm.model_connections import ModelConnectionId
     from pulsara_agent.llm.route_wires import production_route_wire_registry
 
-    base = test_model_runtime(reasoning=ReasoningSelectableControls(effort=ReasoningEffortChoices(("low", "high"))))
+    base = test_model_runtime(
+        reasoning=ReasoningSelectableControls(
+            effort=ReasoningEffortChoices(("low", "high"))
+        )
+    )
     store = LocalSettingsStore(tmp_path / "settings" / "local-settings.yaml")
     runtime = ModelRuntime(store, base.catalog, production_route_wire_registry())
     probes: list[dict[str, object]] = []
@@ -805,30 +898,58 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
 
     monkeypatch.setattr(http_server_module, "probe_model_connection", probe)
     server = LocalHttpServer(
-        sessions=cast(LocalSessionController, _Sessions()), bridge=cast(LocalBrowserBridge, _Bridge()),
-        static_root=tmp_path, requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+        sessions=cast(LocalSessionController, _Sessions()),
+        bridge=cast(LocalBrowserBridge, _Bridge()),
+        static_root=tmp_path,
+        requested_port=0,
+        is_ready=lambda: True,
+        is_draining=lambda: False,
         **_model_server_dependencies_for_runtime(runtime),
     )
     await server.start()
     headers = {"Origin": server.origin, "Sec-Fetch-Site": "same-origin"}
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+        async with ClientSession(
+            cookie_jar=DummyCookieJar(),
+            headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            },
+        ) as client:
             for source in ("models_dev", "user_declared"):
                 if source == "models_dev":
                     draft = {
-                        "source": source, "context_window_tokens": None, "route_id": "test", "model_id": "test-model",
-                        "wire_api": "openai_chat_completions", "reasoning_wire_profile": "catalog_standard",
+                        "source": source,
+                        "context_window_tokens": None,
+                        "route_id": "test",
+                        "model_id": "test-model",
+                        "wire_api": "openai_chat_completions",
+                        "reasoning_wire_profile": "catalog_standard",
                         "api_key": "edit-secret",
                     }
                 else:
                     draft = {
-                        "source": source, "configuration_name": "Private", "base_url": "https://private.example/v1",
-                        "model_id": "private-model", "wire_api": "openai_chat_completions",
-                        "authentication": "bearer_api_key", "api_key": "edit-secret", "context_tokens": 300_000,
-                        "max_output_tokens": 16_384, "tool_call": False, "input_modalities": None,
-                        "reasoning": {"kind": "thinking_effort", "values": ["none", "high"]},
+                        "source": source,
+                        "configuration_name": "Private",
+                        "base_url": "https://private.example/v1",
+                        "model_id": "private-model",
+                        "wire_api": "openai_chat_completions",
+                        "authentication": "bearer_api_key",
+                        "api_key": "edit-secret",
+                        "context_tokens": 300_000,
+                        "max_output_tokens": 16_384,
+                        "tool_call": False,
+                        "input_modalities": None,
+                        "reasoning": {
+                            "kind": "thinking_effort",
+                            "values": ["none", "high"],
+                        },
                     }
-                async with client.post(f"{server.origin}/api/model-configurations", json=draft, headers=headers) as response:
+                async with client.post(
+                    f"{server.origin}/api/model-configurations",
+                    json=draft,
+                    headers=headers,
+                ) as response:
                     assert response.status == 201
                     connection_id = (await response.json())["model_configuration"]["id"]
                 url = f"{server.origin}/api/model-configurations/{connection_id}"
@@ -845,8 +966,13 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
                     edited["context_window_tokens"] = 256_000
                 else:
                     edited["configuration_name"] = "Renamed Private"
-                    edited["reasoning"] = {"kind": "broad_compat", "values": ["none", "high"]}
-                async with client.post(f"{url}/test", json=edited, headers=headers) as response:
+                    edited["reasoning"] = {
+                        "kind": "broad_compat",
+                        "values": ["none", "high"],
+                    }
+                async with client.post(
+                    f"{url}/test", json=edited, headers=headers
+                ) as response:
                     assert response.status == 200
                 assert store.read() == before
                 assert probes[-1]["api_key"] == "edit-secret"
@@ -855,56 +981,106 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
                     assert response.status == 200
                     summary = (await response.json())["model_configuration"]
                     assert summary["id"] == connection_id
-                    assert summary["reasoning_wire_profile"] == ("effort" if source == "models_dev" else "broad_compat")
+                    assert summary["reasoning_wire_profile"] == (
+                        "effort" if source == "models_dev" else "broad_compat"
+                    )
                     assert "edit-secret" not in str(summary)
                     if source == "models_dev":
                         assert summary["context_window_tokens"] == 256_000
                         assert summary["max_output_tokens"] == 8_192
-                assert store.read().model_api_key(ModelConnectionId(connection_id)) == "edit-secret"
+                assert (
+                    store.read().model_api_key(ModelConnectionId(connection_id))
+                    == "edit-secret"
+                )
                 async with client.get(url) as response:
                     assert (await response.json())["configuration"] == edited
                 # The same draft cannot borrow credentials via the new-connection path.
                 for suffix in ("", "/test"):
-                    async with client.post(f"{server.origin}/api/model-configurations{suffix}", json=edited, headers=headers) as response:
+                    async with client.post(
+                        f"{server.origin}/api/model-configurations{suffix}",
+                        json=edited,
+                        headers=headers,
+                    ) as response:
                         assert response.status == 400
                 before_invalid = store.read()
                 if source == "models_dev":
                     for amount in (True, 255_999, 256_000.5, 256_001):
-                        async with client.put(url, json={**edited, "context_window_tokens": amount}, headers=headers) as response:
+                        async with client.put(
+                            url,
+                            json={**edited, "context_window_tokens": amount},
+                            headers=headers,
+                        ) as response:
                             assert response.status == 400
-                    async with client.put(url, json={**edited, "max_output_tokens": 16_384}, headers=headers) as response:
+                    async with client.put(
+                        url,
+                        json={**edited, "max_output_tokens": 16_384},
+                        headers=headers,
+                    ) as response:
                         assert response.status == 400
                     assert store.read() == before_invalid
                 invalid = {**edited, "wire_api": "openai_responses"}
                 if source == "models_dev":
                     invalid["reasoning_wire_profile"] = "thinking_effort"
                 for method, suffix in ((client.put, ""), (client.post, "/test")):
-                    async with method(f"{url}{suffix}", json=invalid, headers=headers) as response:
+                    async with method(
+                        f"{url}{suffix}", json=invalid, headers=headers
+                    ) as response:
                         assert response.status == 400
                 assert store.read() == before_invalid
                 if source == "user_declared":
-                    changed_endpoint = {**edited, "base_url": "https://different.example/v1"}
+                    changed_endpoint = {
+                        **edited,
+                        "base_url": "https://different.example/v1",
+                    }
                     for method, suffix in ((client.put, ""), (client.post, "/test")):
-                        async with method(f"{url}{suffix}", json=changed_endpoint, headers=headers) as response:
+                        async with method(
+                            f"{url}{suffix}", json=changed_endpoint, headers=headers
+                        ) as response:
                             assert response.status == 400
-                            assert (await response.json())["error"]["code"] == "MODEL_CONFIGURATION_EDIT_INVALID"
+                            assert (await response.json())["error"][
+                                "code"
+                            ] == "MODEL_CONFIGURATION_EDIT_INVALID"
                     assert store.read() == before_invalid
                     assert len(probes) == 2
                     # Rotating an address requires an explicit new credential.
-                    async with client.put(url, json={**changed_endpoint, "api_key": "new-endpoint-secret"}, headers=headers) as response:
+                    async with client.put(
+                        url,
+                        json={**changed_endpoint, "api_key": "new-endpoint-secret"},
+                        headers=headers,
+                    ) as response:
                         assert response.status == 200
-                    assert store.read().model_api_key(ModelConnectionId(connection_id)) == "new-endpoint-secret"
+                    assert (
+                        store.read().model_api_key(ModelConnectionId(connection_id))
+                        == "new-endpoint-secret"
+                    )
                     no_auth = {**changed_endpoint, "authentication": "none"}
-                    async with client.put(url, json=no_auth, headers=headers) as response:
+                    async with client.put(
+                        url, json=no_auth, headers=headers
+                    ) as response:
                         assert response.status == 200
-                    assert store.read().model_api_key(ModelConnectionId(connection_id)) is None
+                    assert (
+                        store.read().model_api_key(ModelConnectionId(connection_id))
+                        is None
+                    )
                     # Invalid/unresolvable saved declarations still have a readable editor.
                     from dataclasses import replace
+
                     saved = store.read().connection(ModelConnectionId(connection_id))
-                    await store.update_model_connection(connection=replace(saved, target=replace(saved.target, wire_api=http_server_module.WireApi.OPENAI_RESPONSES)), api_key=None)
+                    await store.update_model_connection(
+                        connection=replace(
+                            saved,
+                            target=replace(
+                                saved.target,
+                                wire_api=http_server_module.WireApi.OPENAI_RESPONSES,
+                            ),
+                        ),
+                        api_key=None,
+                    )
                     async with client.get(url) as response:
                         assert response.status == 200
-                        assert (await response.json())["configuration"]["reasoning"] == edited["reasoning"]
+                        assert (await response.json())["configuration"][
+                            "reasoning"
+                        ] == edited["reasoning"]
                 async with client.delete(url, headers=headers) as response:
                     assert response.status == 200
                 async with client.put(url, json=edited, headers=headers) as response:
@@ -952,7 +1128,13 @@ async def _exercise_model_connection_test(
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+        async with ClientSession(
+            cookie_jar=DummyCookieJar(),
+            headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            },
+        ) as client:
             async with client.post(
                 f"{server.origin}/api/model-configurations/test",
                 json={
@@ -1011,7 +1193,13 @@ async def _exercise_settings_catalog_refresh_failure(tmp_path: Path) -> None:
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+        async with ClientSession(
+            cookie_jar=DummyCookieJar(),
+            headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            },
+        ) as client:
             async with client.post(
                 f"{server.origin}/api/model-catalog/refresh",
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
@@ -1066,7 +1254,13 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+        async with ClientSession(
+            cookie_jar=DummyCookieJar(),
+            headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            },
+        ) as client:
             async with client.get(
                 f"{server.origin}/", allow_redirects=False
             ) as response:
@@ -1100,7 +1294,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             ) as response:
                 assert response.status == 200
                 payload = await response.json()
-                assert payload["tasks"] == [{"id": "task-1", "status": "COMPLETED"}]
+                assert payload["tasks"] == [{"id": "task-1", "status": "ACTIVE"}]
 
             async with client.get(
                 f"{server.origin}/api/sessions/session-1/tasks",
@@ -1126,9 +1320,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 assert (await response.json())["groups"] == [
                     {"group_id": "batch:1", "task_count": 1}
                 ]
-            assert sessions.task_group_calls == [
-                ("session-1", 9, "group:next")
-            ]
+            assert sessions.task_group_calls == [("session-1", 9, "group:next")]
 
             async with client.get(
                 f"{server.origin}/api/sessions/session-1/tasks/task-1/activities",
@@ -1231,9 +1423,14 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 f"{server.origin}/api/sessions/session-1/capabilities/mcp",
                 json={
                     "server_id": "project-docs",
-                    "config": {"display_name": "Project Docs",
-                               "transport": {"type": "streamable_http", "endpoint": "https://example.com/mcp"},
-                               "scope_policy": "ROOT_AND_SUBAGENTS"},
+                    "config": {
+                        "display_name": "Project Docs",
+                        "transport": {
+                            "type": "streamable_http",
+                            "endpoint": "https://example.com/mcp",
+                        },
+                        "scope_policy": "ROOT_AND_SUBAGENTS",
+                    },
                 },
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
@@ -1252,9 +1449,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     ("session-1", "project-docs", "config-v1", False)
                 ]
 
-            sessions.project_mcp_toggle_error = McpManagementConflict(
-                "changed"
-            )
+            sessions.project_mcp_toggle_error = McpManagementConflict("changed")
             async with client.post(
                 f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs/enabled",
                 json={"enabled": True, "config_identity": "config-v1"},
@@ -1299,20 +1494,34 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 assert response.status == 201
             from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 
-            assert model_call_binding_to_dict(sessions.create_model_bindings[-1]) == initial_binding
+            assert (
+                model_call_binding_to_dict(sessions.create_model_bindings[-1])
+                == initial_binding
+            )
             create_count = len(sessions.create_model_bindings)
-            for invalid_binding in (None, {"connection_id": "untyped-model"}, {**initial_binding, "extra": True}):
+            for invalid_binding in (
+                None,
+                {"connection_id": "untyped-model"},
+                {**initial_binding, "extra": True},
+            ):
                 async with client.post(
                     f"{server.origin}/api/sessions",
-                    json={"workspace_kind": "quick", "model_call_binding": invalid_binding},
+                    json={
+                        "workspace_kind": "quick",
+                        "model_call_binding": invalid_binding,
+                    },
                     headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
                 ) as response:
                     assert response.status == 400
-                    assert (await response.json())["error"]["code"] == "MODEL_BINDING_INVALID"
+                    assert (await response.json())["error"][
+                        "code"
+                    ] == "MODEL_BINDING_INVALID"
             assert len(sessions.create_model_bindings) == create_count
 
-            sessions.create_model_error = session_controller_module.SessionControlRejected(
-                "MODEL_BINDING_INVALID", "model connection metadata is unavailable"
+            sessions.create_model_error = (
+                session_controller_module.SessionControlRejected(
+                    "MODEL_BINDING_INVALID", "model connection metadata is unavailable"
+                )
             )
             async with client.post(
                 f"{server.origin}/api/sessions",
@@ -1320,7 +1529,9 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
                 assert response.status == 400
-                assert (await response.json())["error"]["code"] == "MODEL_BINDING_INVALID"
+                assert (await response.json())["error"][
+                    "code"
+                ] == "MODEL_BINDING_INVALID"
             sessions.create_model_error = None
 
             async with client.post(
@@ -1346,8 +1557,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
 
             control = {
                 "command_id": (
-                    "command:control:9999999999999:"
-                    "55555555-5555-4555-8555-555555555555"
+                    "command:control:9999999999999:55555555-5555-4555-8555-555555555555"
                 ),
                 "command_kind": "TERMINATE_BACKGROUND_PROCESS",
                 "expected_session_id": "session-1",
@@ -1437,7 +1647,13 @@ async def _exercise_request_guards(tmp_path: Path) -> None:
     )
     await server.start()
     try:
-        async with ClientSession(cookie_jar=DummyCookieJar(), headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+        async with ClientSession(
+            cookie_jar=DummyCookieJar(),
+            headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            },
+        ) as client:
             async with client.get(
                 f"{server.origin}/api/app/bootstrap",
                 headers={"Host": f"localhost:{server.port}"},
@@ -1629,45 +1845,80 @@ def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
 
 def test_workspace_path_candidates_http_contract_and_security(tmp_path):
     async def exercise():
-        (tmp_path / 'index.html').write_text('Pulsara', encoding='utf-8')
+        (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
         sessions = _Sessions()
-        listing = {'directory': '/selected', 'items': [], 'next_cursor': None}
-        sessions.complete_workspace_paths = AsyncMock(side_effect=[listing, OSError('unreadable'), KeyError('missing')])
+        listing = {"directory": "/selected", "items": [], "next_cursor": None}
+        sessions.complete_workspace_paths = AsyncMock(
+            side_effect=[listing, OSError("unreadable"), KeyError("missing")]
+        )
         server = LocalHttpServer(
-            sessions=cast(LocalSessionController, sessions), bridge=cast(LocalBrowserBridge, _Bridge()),
-            static_root=tmp_path, requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            sessions=cast(LocalSessionController, sessions),
+            bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=tmp_path,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
             **_model_server_dependencies(),
         )
         await server.start()
         try:
-            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
-                url = f'{server.origin}/api/sessions/selected/path-candidates'
-                for headers, status in [({'Origin': 'https://other.test'}, 403), ({'Sec-Fetch-Site': 'cross-site'}, 403), ({'Host': 'other.test'}, 421)]:
-                    async with client.post(url, json={'prefix': ''}, headers=headers) as response:
+            async with ClientSession(
+                headers={
+                    "X-Pulsara-Connection-Id": "connection-1",
+                    "X-Pulsara-Connection-Generation": "1",
+                }
+            ) as client:
+                url = f"{server.origin}/api/sessions/selected/path-candidates"
+                for headers, status in [
+                    ({"Origin": "https://other.test"}, 403),
+                    ({"Sec-Fetch-Site": "cross-site"}, 403),
+                    ({"Host": "other.test"}, 421),
+                ]:
+                    async with client.post(
+                        url, json={"prefix": ""}, headers=headers
+                    ) as response:
                         assert response.status == status
                 sessions.complete_workspace_paths.assert_not_awaited()
-                for body in [{}, {'prefix': []}, {'prefix': '', 'cursor': 123}, {'prefix': '', 'root': '/override'}]:
+                for body in [
+                    {},
+                    {"prefix": []},
+                    {"prefix": "", "cursor": 123},
+                    {"prefix": "", "root": "/override"},
+                ]:
                     async with client.post(url, json=body) as response:
                         assert response.status == 400
                 sessions.complete_workspace_paths.assert_not_awaited()
-                async with client.post(url, json={'prefix': '文档 folder/', 'cursor': 'Report.pdf'}, headers={'Origin': server.origin}) as response:
+                async with client.post(
+                    url,
+                    json={"prefix": "文档 folder/", "cursor": "Report.pdf"},
+                    headers={"Origin": server.origin},
+                ) as response:
                     assert response.status == 200
                     assert await response.json() == listing
-                sessions.complete_workspace_paths.assert_awaited_with('selected', '文档 folder/', 'Report.pdf')
-                async with client.post(url, json={'prefix': 'missing/'}) as response:
+                sessions.complete_workspace_paths.assert_awaited_with(
+                    "selected", "文档 folder/", "Report.pdf"
+                )
+                async with client.post(url, json={"prefix": "missing/"}) as response:
                     assert response.status == 400
-                    assert (await response.json())['error']['code'] == 'PATH_CANDIDATES_UNAVAILABLE'
-                async with client.post(url, json={'prefix': ''}) as response:
+                    assert (await response.json())["error"][
+                        "code"
+                    ] == "PATH_CANDIDATES_UNAVAILABLE"
+                async with client.post(url, json={"prefix": ""}) as response:
                     assert response.status == 404
         finally:
             await server.aclose()
+
     asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("custom_home", [False, True])
-def test_settings_expose_effective_home_readonly_independently_of_cwd(tmp_path, monkeypatch, custom_home):
+def test_settings_expose_effective_home_readonly_independently_of_cwd(
+    tmp_path, monkeypatch, custom_home
+):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "os-home"))
-    home = tmp_path / "custom-home" if custom_home else tmp_path / "os-home" / ".pulsara"
+    home = (
+        tmp_path / "custom-home" if custom_home else tmp_path / "os-home" / ".pulsara"
+    )
     if custom_home:
         monkeypatch.setenv("PULSARA_HOME", str(home))
     else:
@@ -1686,17 +1937,26 @@ def test_settings_expose_effective_home_readonly_independently_of_cwd(tmp_path, 
         server = LocalHttpServer(
             sessions=cast(LocalSessionController, _Sessions()),
             bridge=cast(LocalBrowserBridge, _Bridge()),
-            static_root=static, requested_port=0,
-            is_ready=lambda: True, is_draining=lambda: False,
+            static_root=static,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
             **_model_server_dependencies(),
         )
         await server.start()
         try:
-            async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
+            async with ClientSession(
+                headers={
+                    "X-Pulsara-Connection-Id": "connection-1",
+                    "X-Pulsara-Connection-Generation": "1",
+                }
+            ) as client:
                 for path in ("/api/app/bootstrap", "/api/local-settings"):
                     async with client.get(server.origin + path) as response:
                         assert response.status == 200
-                        assert (await response.json())["local_settings"]["pulsara_home"] == str(home)
+                        assert (await response.json())["local_settings"][
+                            "pulsara_home"
+                        ] == str(home)
         finally:
             await server.aclose()
 
@@ -1707,48 +1967,220 @@ def test_settings_expose_effective_home_readonly_independently_of_cwd(tmp_path, 
 
 def test_memory_settings_http_errors_are_specific_and_confirmation_is_atomic(tmp_path):
     async def exercise():
-        root = tmp_path / 'static'
+        root = tmp_path / "static"
         root.mkdir()
-        (root / 'index.html').write_text('Pulsara')
+        (root / "index.html").write_text("Pulsara")
         deps = _model_server_dependencies()
-        store = LocalSettingsStore(tmp_path / 'home' / 'local-settings.yaml')
-        deps['settings'] = store
-        server = LocalHttpServer(sessions=cast(LocalSessionController, _Sessions()),
-            bridge=cast(LocalBrowserBridge, _Bridge()), static_root=root, requested_port=0,
-            is_ready=lambda: True, is_draining=lambda: False, **deps)
+        store = LocalSettingsStore(tmp_path / "home" / "local-settings.yaml")
+        deps["settings"] = store
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=root,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
+            **deps,
+        )
         await server.start()
         try:
-            async with ClientSession(headers={'X-Pulsara-Connection-Id': 'connection-1', 'X-Pulsara-Connection-Generation': '1'}) as client:
-                base = server.origin + '/api/local-settings/memory-retrieval'
+            async with ClientSession(
+                headers={
+                    "X-Pulsara-Connection-Id": "connection-1",
+                    "X-Pulsara-Connection-Generation": "1",
+                }
+            ) as client:
+                base = server.origin + "/api/local-settings/memory-retrieval"
                 assert store.read().memory_retrieval.history_enabled is True
                 before = store.read().memory_retrieval
                 for enabled in (False, True):
-                    async with client.put(base + '/history-enabled', json={'enabled': enabled}) as response:
+                    async with client.put(
+                        base + "/history-enabled", json={"enabled": enabled}
+                    ) as response:
                         assert response.status == 200
                     assert store.read().memory_retrieval.history_enabled is enabled
                     assert store.read().memory_retrieval.embedding == before.embedding
-                    assert store.read().memory_retrieval.ranking_mode == before.ranking_mode
-                for malformed in ({'enabled': 'yes'}, {'enabled': True, 'extra': 1}, {}):
-                    async with client.put(base + '/history-enabled', json=malformed) as response:
+                    assert (
+                        store.read().memory_retrieval.ranking_mode
+                        == before.ranking_mode
+                    )
+                for malformed in (
+                    {"enabled": "yes"},
+                    {"enabled": True, "extra": 1},
+                    {},
+                ):
+                    async with client.put(
+                        base + "/history-enabled", json=malformed
+                    ) as response:
                         assert response.status == 400
                     assert store.read().memory_retrieval == before
-                async with client.put(base + '/ranking-mode', json={'mode': 'decision'}) as response:
+                async with client.put(
+                    base + "/ranking-mode", json={"mode": "decision"}
+                ) as response:
                     assert response.status == 400
-                    assert 'API key' in (await response.json())['error']['message']
-                payload = input_for('embedding', 'fixture-secret')
-                payload['connection']['endpoint'] = 'https://provider.example'
-                async with client.post(base + '/embedding/test', json=payload) as response:
+                    assert "API key" in (await response.json())["error"]["message"]
+                payload = input_for("embedding", "fixture-secret")
+                payload["connection"]["endpoint"] = "https://provider.example"
+                async with client.post(
+                    base + "/embedding/test", json=payload
+                ) as response:
                     assert response.status == 400
-                    error = (await response.json())['error']
-                    assert 'API 路径' in error['message']
-                    assert 'fixture-secret' not in str(error)
-                payload = input_for('embedding', 'fixture-secret', activate=True)
-                payload.pop('confirm_reembed')
-                async with client.put(base + '/embedding', json=payload) as response:
+                    error = (await response.json())["error"]
+                    assert "API 路径" in error["message"]
+                    assert "fixture-secret" not in str(error)
+                payload = input_for("embedding", "fixture-secret", activate=True)
+                payload.pop("confirm_reembed")
+                async with client.put(base + "/embedding", json=payload) as response:
                     assert response.status == 409
-                    assert (await response.json())['error']['code'] == 'EMBEDDING_CONFIRMATION_REQUIRED'
+                    assert (await response.json())["error"][
+                        "code"
+                    ] == "EMBEDDING_CONFIRMATION_REQUIRED"
                 assert store.read().memory_retrieval.embedding is None
                 assert store.read().memory_retrieval.embedding_enabled is False
         finally:
             await server.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_scheduled_http_filters_active_session_and_returns_activation_conflicts(
+    tmp_path,
+):
+    from pulsara_agent.scheduling.contracts import ScheduledTaskError
+
+    async def exercise():
+        (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
+        tasks = SimpleNamespace(
+            list=AsyncMock(return_value={"tasks": [], "next_cursor": None}),
+            list_sessions=AsyncMock(return_value={"sessions": [], "next_cursor": None}),
+            create=AsyncMock(
+                side_effect=ScheduledTaskError(
+                    "ACTIVE_TASK_CONFLICT",
+                    "此会话已有活跃的定时任务，请先暂停或取消该任务。",
+                )
+            ),
+        )
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=tmp_path,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
+            scheduled_tasks=tasks,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                url = f"{server.origin}/api/scheduled-tasks"
+                async with client.get(
+                    url, params={"status": "ACTIVE", "session_id": "session:target"}
+                ) as response:
+                    assert response.status == 200
+                    assert await response.json() == {"tasks": [], "next_cursor": None}
+                tasks.list.assert_awaited_once_with(
+                    cursor=None, status="ACTIVE", session_id="session:target"
+                )
+                async with client.get(url + "/sessions", params={"query": "报告", "cursor": "session:a"}) as response:
+                    assert response.status == 200
+                    assert await response.json() == {"sessions": [], "next_cursor": None}
+                tasks.list_sessions.assert_awaited_once_with(query="报告", cursor="session:a")
+                async with client.get(url + "/sessions", params={"status": "ACTIVE"}) as response:
+                    assert response.status == 400
+                async with client.get(url, params={"session_id": ""}) as response:
+                    assert response.status == 400
+                assert tasks.list.await_count == 1
+                async with client.post(
+                    url,
+                    json={"session_id": "session:target", "values": {}, "status": "ACTIVE"},
+                    headers={"Origin": server.origin},
+                ) as response:
+                    assert response.status == 409
+                    value = await response.json()
+                    assert value["error"]["code"] == "ACTIVE_TASK_CONFLICT"
+                    assert "先暂停或取消" in value["error"]["message"]
+                tasks.create.assert_awaited_once_with(session_id="session:target", values={}, status="ACTIVE")
+                tasks.create.side_effect = None
+                tasks.create.return_value = {"status": "PAUSED", "next_run_at": None}
+                for status_fields in ({}, {"status": None}, {"status": "PAUSED"}):
+                    async with client.post(url, json={"session_id": "session:target", "values": {}, **status_fields}, headers={"Origin": server.origin}) as response:
+                        assert response.status == 201
+                    tasks.create.assert_awaited_with(session_id="session:target", values={}, **status_fields)
+                accepted = tasks.create.await_count
+                for invalid in ("", "active", False, 0, [], {}):
+                    async with client.post(url, json={"session_id": "session:target", "values": {}, "status": invalid}, headers={"Origin": server.origin}) as response:
+                        assert response.status == 400
+                assert tasks.create.await_count == accepted
+        finally:
+            await server.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path):
+
+    async def exercise():
+        (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
+        tasks = SimpleNamespace(
+            run_now=AsyncMock(
+                return_value={
+                    "queue_item_id": "queue:one",
+                    "status": "PENDING",
+                    "coalesced": False,
+                }
+            ),
+            switch=AsyncMock(return_value={"paused": {}, "active": {}}),
+        )
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=tmp_path,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
+            scheduled_tasks=tasks,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                headers = {"Origin": server.origin}
+                url = f"{server.origin}/api/scheduled-tasks/task-a"
+                request = {
+                    "task_id": "task-a",
+                    "session_id": "session-a",
+                    "expected_revision": 1,
+                    "client_command_id": "command-a",
+                    "request_at_utc": "2026-10-13T00:00:00Z",
+                }
+                async with client.post(
+                    url + "/run-now", json=request, headers=headers
+                ) as response:
+                    assert response.status == 200
+                tasks.run_now.assert_awaited_once_with(request)
+                async with client.post(
+                    url + "/run-now",
+                    json={**request, "trigger_source": "TIMER"},
+                    headers=headers,
+                ) as response:
+                    assert response.status == 400
+                assert tasks.run_now.await_count == 1
+                target = {
+                    "kind": "existing",
+                    "task_id": "task-b",
+                    "expected_revision": 2,
+                }
+                async with client.post(
+                    url + "/switch",
+                    json={"expected_revision": 1, "target": target},
+                    headers=headers,
+                ) as response:
+                    assert response.status == 200
+                tasks.switch.assert_awaited_once_with(
+                    task_id="task-a", expected_revision=1, target=target
+                )
+        finally:
+            await server.aclose()
+
     asyncio.run(exercise())

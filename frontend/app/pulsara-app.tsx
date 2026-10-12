@@ -201,6 +201,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const deletingSession = useRef<string | undefined>(undefined);
   const requestedSession = useRef('');
   const [activeSessionId, setActiveSessionId] = useState('');
+  const [activeSchedule, setActiveSchedule] = useState<{ sessionId: string; taskId: string }>();
+  const [focusScheduledTaskId, setFocusScheduledTaskId] = useState<string>();
   // Selection feedback is local UI state; only a connected runtime becomes active.
   const [openingSessionId, setOpeningSessionId] = useState('');
   const [focusSourceEntry, setFocusSourceEntry] = useState<{ sessionId: string; entryId: string }>();
@@ -1359,12 +1361,45 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [mergedProjection, projection.subagentRuns]);
   const renderedMessages = mergedProjection.messages;
 
+  useEffect(() => {
+    if (activeView !== 'workbench' || !activeSessionId || databaseState !== 'ready' || runtimeStatus !== 'online') return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    let reading = false;
+    const refresh = async () => {
+      if (reading || controller.signal.aborted) return;
+      clearTimeout(timer);
+      if (document.visibilityState === 'visible') {
+        reading = true;
+        try {
+          const page = await scheduledApi.list('ACTIVE', undefined, controller.signal, activeSessionId);
+          if (!controller.signal.aborted) {
+            const task = page.tasks.find(item => item.status === 'ACTIVE' && item.session_id === activeSessionId);
+            setActiveSchedule(task ? { sessionId: activeSessionId, taskId: task.id } : undefined);
+          }
+        } catch {
+          if (!controller.signal.aborted) setActiveSchedule(undefined);
+        } finally { reading = false; }
+      }
+      if (!controller.signal.aborted) timer = setTimeout(refresh, 30_000);
+    };
+    void refresh();
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      controller.abort(); clearTimeout(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [activeSessionId, activeView, databaseState, projection.isRunning, runtimeStatus, scheduledApi]);
+
   const navigate = (view: AppView, settingsSection?: SettingsSection, highlightHome = false) => {
     if (view === 'settings') {
       setSettingsInitialSection(settingsSection);
       setSettingsHighlightHome(highlightHome);
     }
     setActiveView(view);
+    setFocusScheduledTaskId(undefined);
     setSidebarOpen(false);
   };
 
@@ -2624,6 +2659,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onStop={() => void stopRun()}
           onCompact={compact}
           onRenameSession={() => setRenameTarget(activeSession)}
+          onOpenScheduledTask={runtimeStatus === 'online' && activeSchedule?.sessionId === activeSession.id ? () => {
+            setFocusScheduledTaskId(activeSchedule.taskId);
+            setActiveView('scheduled'); setSidebarOpen(false);
+          } : undefined}
           onReopenRuntime={() => void reopenRuntime()}
           runtimeReopenBusy={runtimeReopenBusy}
           onReadInteraction={readInteraction}
@@ -2784,7 +2823,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         />
       )}
 
-      {activeView === 'scheduled' && <ScheduledTasksView modelConfigurations={bootstrap?.model_configurations ?? []} onCreateSession={createScheduledSession} api={scheduledApi} sessions={sessionList} ready={!databaseBlocked && runtimeStatus === 'online'} onOpenSettings={() => navigate('settings')} onOpenSession={(id, entryId) => { if (entryId) setFocusSourceEntry({ sessionId: id, entryId }); openSession(id); }} />}
+      {activeView === 'scheduled' && <ScheduledTasksView onNotify={notify} focusTaskId={focusScheduledTaskId} modelConfigurations={bootstrap?.model_configurations ?? []} onCreateSession={createScheduledSession} api={scheduledApi} sessions={sessionList} ready={!databaseBlocked && runtimeStatus === 'online'} onOpenSettings={() => navigate('settings')} onOpenSession={(id, entryId) => { if (entryId) setFocusSourceEntry({ sessionId: id, entryId }); openSession(id); }} />}
       {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={runtimeStatus} onReconnect={reconnect} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusSourceEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
 
       {searchOpen && <SessionSearchDialog adapter={adapter} available={databaseState === 'ready' && Boolean(bootstrap)}

@@ -190,16 +190,10 @@ def scheduled_args(action):
                 },
             },
         }
-    return {
-        "action": action,
-        "task_id": "scheduled:one",
-        "expected_revision": 1,
-        "client_command_id": "command:original",
-        "request_at_utc": "2026-10-07T00:00:00Z",
-    }
+    raise AssertionError(f"unsupported scoped action: {action}")
 
 
-@pytest.mark.parametrize("action", ["list", "create", "run_now"])
+@pytest.mark.parametrize("action", ["list", "create"])
 @pytest.mark.parametrize(
     "session_field,expected",
     [
@@ -225,10 +219,7 @@ def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_ident
         )
         dispatched = {key: value for key, value in original.items() if key != "action"}
         dispatched["session_id"] = expected
-        if action == "run_now":
-            target.assert_awaited_once_with(dispatched)
-        else:
-            target.assert_awaited_once_with(**dispatched)
+        target.assert_awaited_once_with(**dispatched)
         assert arguments == original
 
     asyncio.run(run())
@@ -279,6 +270,31 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
         service.mutate.assert_not_awaited()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("status_fields", [{}, {"status": None}, {"status": "PAUSED"}, {"status": "ACTIVE"}])
+def test_scheduled_create_status_schema_and_dispatch(status_fields):
+    async def run():
+        service = ScheduledTaskService(SimpleNamespace())
+        service.create = AsyncMock(return_value={})
+        arguments = {**scheduled_args("create"), **status_fields}
+        assert_shape("scheduled_tasks", arguments, True)
+        await service.invoke(arguments, default_session_id="current", permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+        service.create.assert_awaited_once_with(session_id="current", values=arguments["values"], **status_fields)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["", "active", "COMPLETED", False, 0, [], {}])
+def test_scheduled_create_rejects_invalid_status(status):
+    from pulsara_agent.scheduling.requests import creation_status
+
+    arguments = {**scheduled_args("create"), "status": status}
+    assert_shape("scheduled_tasks", arguments, False)
+    with pytest.raises(ScheduledTaskError):
+        validate_action(arguments)
+    with pytest.raises(ScheduledTaskError):
+        creation_status(status)
 
 
 def test_scheduled_wire_keeps_action_signatures_and_pagination_guidance():
@@ -360,3 +376,52 @@ def test_existing_empty_values_remain_operations():
         ).conditions.output
         is not None
     )
+
+
+def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
+    from pulsara_agent.scheduling.service import ScheduledTaskService
+    from pulsara_agent.scheduling.contracts import ScheduledTaskError
+    from pulsara_agent.primitives.permission import PermissionMode
+
+    async def scenario():
+        service = ScheduledTaskService(SimpleNamespace())
+        service.run_now = AsyncMock()
+        with pytest.raises(ScheduledTaskError) as error:
+            await service.invoke(
+                {
+                    "action": "run_now",
+                    "task_id": "a",
+                    "expected_revision": 1,
+                    "client_command_id": "cmd",
+                    "request_at_utc": "2026-10-13T00:00:00Z",
+                },
+                default_session_id="session",
+                permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+            )
+        assert error.value.code == "INVALID_ACTION"
+        assert_shape("scheduled_tasks", {
+            "action": "run_now", "task_id": "a", "expected_revision": 1,
+            "client_command_id": "cmd", "request_at_utc": "2026-10-13T00:00:00Z",
+        }, False)
+        service.run_now.assert_not_awaited()
+        service.get = AsyncMock(return_value={"permission_mode": "bypass-permissions"})
+        service.switch = AsyncMock()
+        with pytest.raises(ScheduledTaskError) as error:
+            await service.invoke(
+                {
+                    "action": "switch",
+                    "task_id": "a",
+                    "expected_revision": 1,
+                    "target": {
+                        "kind": "existing",
+                        "task_id": "b",
+                        "expected_revision": 2,
+                    },
+                },
+                default_session_id="session",
+                permission_mode=PermissionMode.READ_ONLY,
+            )
+        assert error.value.code == "PERMISSION_ESCALATION"
+        service.switch.assert_not_awaited()
+
+    asyncio.run(scenario())

@@ -1,6 +1,6 @@
 'use client';
 
-import { Bot, LoaderCircle, UserRound } from 'lucide-react';
+import { AlarmClock, Bot, LoaderCircle, UserRound } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { RuntimeAdapter } from '../lib/runtime-adapter';
 import { AvatarCropDialog } from './avatar-crop-dialog';
@@ -52,7 +52,9 @@ export function UserAvatar({ className = '' }: { className?: string }) {
 }
 
 export function AgentInputAvatar({ kind }: { kind: 'agent' | 'scheduled' }) {
-  return <span className="person-avatar person-avatar--agent" role="img" aria-label={kind === 'agent' ? '主 Agent 头像' : '定时任务头像'}><Bot size={15} aria-hidden="true" /></span>;
+  return <span className="person-avatar person-avatar--agent" role="img" aria-label={kind === 'agent' ? '主 Agent 头像' : '定时任务头像'}>
+    {kind === 'scheduled' ? <AlarmClock size={15} aria-hidden="true" /> : <Bot size={15} aria-hidden="true" />}
+  </span>;
 }
 
 export function AvatarSetting({ onNotify }: { onNotify: (title: string, detail?: string, tone?: 'neutral' | 'success' | 'warning') => void }) {

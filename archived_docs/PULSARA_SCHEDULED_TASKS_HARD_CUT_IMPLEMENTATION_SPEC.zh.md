@@ -4,13 +4,15 @@
 
 本规格记录产品讨论、本地 Codex 源码参考及本次完整实施。生产代码、依赖、clean-v0、协议、前端静态构建和行为测试已同步硬切；保存生产配置仅作为只读输入。
 
+2026-10-13 语义修订：暂停、运行一次、一次性计划成功入队后自动移除、唯一活跃计划、显式切换与模型指引以 [定时任务产品语义规格](../PULSARA_SCHEDULED_TASK_PRODUCT_SEMANTICS_SPEC.zh.md) 为准。可信来源贯通、once 自动移除、原子切换和界面入口现已同批实现。下文 COMPLETED 留存与 ENABLED 分组、manual/timer 二分及逐项替换只保留为历史基线，不是现行合同；现行 TIMER / RUN_ONCE 双来源合同及仅 UI 运行一次入口见新规格第 13 节，历史验证见第 11 节。
+
 两项普通会话前置均已在 main 完成。第一项为 [会话统一只读与工作目录恢复规格](PULSARA_SESSION_READ_ONLY_WORKSPACE_RECOVERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)：普通会话已落地冷历史、显式目录恢复与具体非抢占 writer 接缝，代码验收见其 §15。定时入口复用这些 owner，不静默 mkdir、不另写恢复路径。
 
 第二项为 [逐轮中断历史提示规格](PULSARA_TURN_INTERRUPTION_HISTORY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。它让普通 turn 的 runtime 中断事实持久投影到历史，并继续由现有 compiler 在下次请求提供通知；定时触发复用同一路径，不人工插入 final assistant answer，不另建 scheduled 结果历史。第二项已通过主代理与 Workspace readonly spec critic（GPT-6 Astra / high）的代码复审；实现冻结和验收证据见该规格 §12。本次定时实现沿用两项前置的现行边界。
 
 ## 1. 产品目标与明确范围
 
-定时任务是一份“何时向哪个普通会话提交什么提示词”的持久配置。每个任务绑定一个会话，一个会话允许绑定多个任务。管理页新建任务时，用户先选供应商/模型及其支持的推理选项，保存时通过普通「快速开始」入口创建会话，再在该会话保存任务。表单不选择已有会话、时区或权限；新任务固定上海时区、允许全部操作。聊天管理工具仍能在普通会话中创建任务。后续触发始终进入绑定会话，不为每次触发另开会话。
+定时任务是一份“何时向哪个普通会话提交什么提示词”的持久配置。每个任务绑定一个会话，一个会话允许保留多个任务，但同时只能有 0 或 1 个 `ACTIVE` 任务（2026-10-12 用户追加的明确产品限制）；`PAUSED` / `COMPLETED` 数量不加总上限。管理页新建任务时，用户先选供应商/模型及其支持的推理选项，保存时通过普通「快速开始」入口创建会话，再在该会话保存任务。表单不选择已有会话、时区或权限；新任务固定上海时区、允许全部操作。聊天管理工具仍能在普通会话中创建任务。后续触发始终进入绑定会话，不为每次触发另开会话。
 
 会话仍可正常聊天、改模型、压缩、停止回复、归档和删除；不增加会话类型、定时专用 Runner 或第二套执行历史。任务只驱动输入，不替代会话的上下文与执行所有权。
 
@@ -199,7 +201,7 @@ once 如果关闭期间到期，恢复后仍尝试一次；成功接受或与已
 - 删除（界面「取消定时任务」）：同样取消 PENDING 并删除任务行，保留已消费输入、运行中 turn、会话与历史。来源 task ID 可以继续显示为已删除任务。
 - queue consumer 与上述动作复用同一 session writer 锁。暂停/删除先赢则不能消费；消费先赢说明已经启动，管理操作不隐式取消 RUNNING。
 - 「停止当前回复」只通过原执行取消入口停止当前 turn，不修改任务定义或时间规则。
-- 修改配置：expected_revision 乐观检查；实际值变化原子 revision+1，完全相同值返回当前值；旧 PENDING 快照保持。只改 name/prompt/permission，或只改 once/interval 的显示时区，保留 status/next，不吞掉已有 due。有效时间规则变化才重算：ACTIVE 从编辑时刻求下一未来时点；PAUSED 保持 PAUSED/next NULL；COMPLETED once 重新 ACTIVE。once 新建或修改 run_at_utc 须在提交时仍为未来，名称/提示词编辑不对已保存的旧时刻重新施加此检查。once↔周期转换遵守同一状态规则；COMPLETED once 仅改提示词不会重新运行。
+- 修改配置：expected_revision 乐观检查；实际值变化原子 revision+1，完全相同值返回当前值；旧 PENDING 快照保持。只改 name/prompt/permission，或只改 once/interval 的显示时区，保留 status/next，不吞掉已有 due。有效时间规则变化才重算：ACTIVE 从编辑时刻求下一未来时点；PAUSED 保持 PAUSED/next NULL；COMPLETED once 在没有其他 ACTIVE 任务时重新 ACTIVE，否则拒绝并保持原配置。once 新建或修改 run_at_utc 须在提交时仍为未来，名称/提示词编辑不对已保存的旧时刻重新施加此检查。once↔周期转换遵守同一状态规则；COMPLETED once 仅改提示词不会重新运行。
 - 「立即运行」：允许 ACTIVE/PAUSED/COMPLETED，使用同一 scheduled origin 和普通入队许可；成功或失败都不改 status/时间游标。已有同任务 PENDING 时返回已有项；无 PENDING 时才接受一个。typed admission 明确为 manual，而自动派发为 timer；manual 校验配置 revision、会话和许可 cut，不要求 ACTIVE 或 next_run_at 相等，不调用时间推进操作。暂停先完成后，新的明确 run_now 仍可执行；run_now 先完成后，暂停可取消其尚未消费项。两种 admission 共用原 enqueue 事务接缝，不复制输入状态机。
 - 管理工具在正在执行的该定时 turn 中暂停/删除自身时，当前调用仍正常结算，未来触发停止。文本声称已取消不算成功，必须来自管理 owner 返回结果。
 
@@ -253,7 +255,7 @@ timer 用 process-local wake 合并本进程创建/时间编辑/恢复/立即运
 
 创建任务保存用户授权的具体指令和 permission preset。按用户明确的产品决定，管理页新建采用 `bypass-permissions`；编辑保留已保存许可，工具创建仍不能超出其当前调用许可。每次接受由既有 permission owner 根据保存值生成快照，遵守 Plan overlay、interaction、side-effect settlement 与 workspace constraints。定时器不自行修改任务许可，也不由 saved prompt 提升权限。
 
-scheduled metadata 是 runtime 可信事实，prompt 是用户保存的任务内容；模型应知道“这是先前创建任务的计划触发，不是用户刚刚发送的话”。任务名称/提示词中的 XML/JSON 包装、伪造 ID 或所谓系统指令不能取得 origin authority。模型正常阅读会话里之后出现的真人更正与停止指令，不把重放任务提示当成覆盖旧限制的新真人授权。
+scheduled metadata 是 runtime 可信事实，prompt 是用户保存的任务内容。自动到点和模型工具请求不是新真人授权；用户点击运行一次是对保存任务的单次请求，不恢复自动计划，也不取消其他实质限制。当前来源尚未区分三者时，模型不能编造发起方。暂停自动计划本身不禁止后续显式单次运行，收到 PAUSED 任务输入也不能据此断言调度失效。任务名称/提示词中的 XML/JSON 包装、伪造 ID 或所谓系统指令不能取得 origin authority。后续真人更正和实质禁止仍然有效；完整语义和来源贯通要求见新的产品语义规格。
 
 模型绑定继续从普通会话当前配置在输入接受时冻结；不新增任务级 provider credentials/model target。已接受项保持其原模型与许可切面，之后的普通模型切换/上下文额度交接沿用现有三级压缩，不由定时器插手。
 
@@ -265,11 +267,11 @@ SYSTEM/provider tools 在已安装 epoch 内保持逐字节一致，messages 只
 
 侧边栏新增固定「定时任务」入口，显示当前 Pulsara home 中可访问的所有任务，不受当前打开聊天限制。按现有分页模式查询，支持状态筛选与绑定会话跳转；只读 observer 可查看。任务配置写操作使用 §8 的独立管理授权与 live/cold writer 接缝，不能把当前聊天的 observer 当成全局无权，也不能把进入管理页当成获得聊天写权。缺目录时仍可通过这个入口暂停/删除任务，不要求先恢复目录或打开 Host。
 
-列表/详情显示：名称、保存 prompt、自然语言时间规则、时区、状态、下一触发时间、绑定会话、当前 PENDING/最近 turn 的派生状态；执行结果点击跳转普通历史。跨时区显示须明确标签。最近记录从 queue/turn 关联读取，删除任务后其历史仍在聊天里。
+列表显示：名称、保存 prompt、自然语言时间规则、状态、下一触发时间、绑定会话及当前 PENDING。prompt 默认两行，展开只显示完整 prompt；不显示独立时区/权限详情栏、暂停后的恢复说明或最近执行记录入口。没有下一触发时间、一次性派发说明和 PENDING 时不留空元数据行。跨时区的时间显示须明确标签。绑定会话链接仍可打开普通聊天，删除任务后其历史仍在聊天里。
 
 界面任务状态仅显示「已启用」「已暂停」；已派发的一次性 COMPLETED 与 ACTIVE 都归入「已启用」，使用相同标记样式。共享 list 的 `status=ENABLED` 在数据库查询与分页前匹配 ACTIVE/COMPLETED；ACTIVE、PAUSED、COMPLETED 查询仍精确匹配 canonical 状态。COMPLETED 仍不进入 timer due，不展示恢复动作，保留一次性已派发的时间说明及编辑/立即运行/取消入口；分组不使任务自动重跑，也不新增持久状态。
 
-最近执行状态只映射该任务实际关联 ROOT 的 RUNNING/COMPLETED/INTERRUPTED，未接受失败与 PENDING 用各自准备/队列信息表示，不补出一轮“已中断”。任务状态不显示为“模型执行成功”。聊天导航复用现有 scoped 冷历史，目录缺失或无 live Host 也可查看消息与中断 ⓘ；读取详情不 resume、探测 provider 或生成模型请求。历史分页保留现有 entry/event 双 cut、显式 0 presence、原窗口合并及晚响应保护，不由任务结果链接另开无边界分页路径。
+最近执行状态的查询事实仍只来自该任务实际关联 ROOT 的 RUNNING/COMPLETED/INTERRUPTED，管理卡片不展示该派生信息。未接受失败与 PENDING 用各自准备/队列信息表示，不补出一轮“已中断”。任务状态不显示为“模型执行成功”。聊天导航复用现有 scoped 冷历史，目录缺失或无 live Host 也可查看消息与中断 ⓘ；读取详情不 resume、探测 provider 或生成模型请求。历史分页保留现有 entry/event 双 cut、显式 0 presence、原窗口合并及晚响应保护。
 
 创建表单：供应商/模型、其支持的推理选项、名称、prompt、时间规则；显示下一次发生时间，上海时区不重复标注，不暴露会话、时区、权限选择。保存前检查名称、提示词和共享时间预览，再调用普通会话创建接口，以 `workspace_kind=quick` 和可选的 `model_call_binding` 完成会话初始模型绑定，随后保存任务。初始绑定复用现有模型解析及 Host 更新 owner，不发 provider 健康请求，不连接新会话或切走当前聊天。取消未保存表单不创建会话；任务保存失败不会留半份任务行，已创建的普通会话仍保留，当前表单记住该会话 ID 并在显式重试时复用，模型选择此后锁定。未知网络结果仍遵守普通创建接口现有合同，不增加回执、持久恢复或跨请求事务。
 
@@ -414,3 +416,21 @@ Workspace readonly spec critic（GPT-6 Astra / high）完成三轮代码复核�
 静态 `ports/system_prompt.py` 增加 Scheduled work 指导；`scheduled_tasks` descriptor 与 values 字段说明承载完整操作方法。权限拒绝文案同步纠正为由用户调整会话权限，避免指向管理页已移除的权限选择器。没有更改保存/触发/授权事务、工具调用参数集合、数据库结构、输出 token 或 prefix 重建规则。
 
 验证：system prompt、真实 compiler、capability semantics 与 scheduled Host 专项 **125 passed**。自然语言真实供应商 dogfood 只读复用保存的 deepseek-flash Chat 配置，使用隔离 home 与核实本机的临时 PostgreSQL，经过实际 Host、工具及 ScheduledTaskService，未启动 timer，未创建生产任务。三轮共 **10 次实际 provider 调用**：每天八点请求先 list 再 create，默认上海且绑定原会话；仅修改提示词请求先 get 再 update，任务 ID/名称/时间/时区/许可保持；运行并跟进三秒 Python 命令时通过 terminal 等到实际输出，没有新建定时任务。逐对核对 SYSTEM/tools 相同、messages 仅追加。证据包含实际输入、输出与工具结果，仅排除真实凭据值，存于 `output/scheduled-tasks-20261006/prompt-guidance-dogfood.json`；临时数据库与目录已删除。Ruff 与 `git diff --check` 通过，不把通知策略纳入验收。
+
+
+## 20. 会话入口与唯一活跃计划（2026-10-12）
+
+- 用户明确要求每个会话最多一个 `ACTIVE` 任务；这是产品限制，不是总任务数、历史或执行寿命上限。`PAUSED` / `COMPLETED` 仍可保留多条，立即运行仍按原合同处理，不占据新的 ACTIVE 配置名额。
+- `scheduled_tasks` 当前配置行与既有 session writer 事务拥有此限制。创建、恢复 PAUSED、修改 COMPLETED once 的有效时间重新启用，均在锁定同一 session 后检查其他 ACTIVE 行；冲突返回 `ACTIVE_TASK_CONFLICT`（HTTP 409），原事务不写入任何配置或状态变更，不自动暂停/删除原计划。修改现有 ACTIVE 本身和幂等 resume 仍可成功。
+- clean-v0 添加 `scheduled_tasks_one_active_session` 部分唯一索引：`UNIQUE(session_id) WHERE status='ACTIVE'`。数据库约束防止绕过管理入口的写入违反产品规则。同步既有 schema catalog manifest，不加迁移兼容链、新表、事件、subject、append guard、产品关系或 durable job。
+- 聊天标题右侧在该会话有 ACTIVE 任务时显示闹钟。读取既有任务列表 owner 的 `status=ACTIVE&session_id=...` 查询，不凭最近定时消息或执行状态推断。进入聊天、运行状态变化、窗口重新获得焦点和可见时刷新；可见聊天页每 30 秒刷新一次，这是可取消的 advisory UI 查询周期，不是任务执行或生命周期上限。查询失败不显示未经确认的闹钟。
+- 定时任务产生的用户消息使用与聊天标题入口相同的 `AlarmClock` 闹钟头像；主 Agent 输入继续使用机器人头像。
+- 点击闹钟切换到全部定时任务页，定位唯一任务条目并取得键盘焦点。目标不在首个分页时通过既有 get 查询直接加入当前展示，普通加载更多按任务 ID 去重、保持原 cursor。目标已删除时展示读取错误，其他任务仍可管理。
+- 定位条目复用用户目录设置的 1.1 秒、两次闪烁动画及 2.2 秒清理；减少动态效果设置关闭动画。双击侧栏会话条打开已有重命名模态弹窗；技能来源提示中的「用户级 Pulsara 目录」完整作为链接。
+- 验收覆盖同会话 create/resume/rearm 冲突且原行不变、同一 ACTIVE 的幂等操作、冷会话并发竞争与数据库直接写入保护；已有多状态与分页测试使用先暂停/完成再创建下一个任务，继续验证无总任务数上限。前端覆盖双击保存、唯一 ACTIVE 闹钟入口、跨分页定位/去重及目标已删除。
+
+本次本机激活：通过 `LocalSettingsStore` 与有效 Pulsara home 只读读取已保存配置，核实 admin/runtime 同一本机 `localhost:5432/pulsara`、空闲服务、旧 catalog/clean-v0 身份完全匹配且不存在重复 ACTIVE。停止旧服务后，在一个事务中锁任务表，添加唯一索引，核对实际 catalog 等于新 clean-v0，再更新既有迁移 ledger 的当前身份。任务 ID/session/status/revision 完整保留，未 reset、删除历史或改写保存配置；新 runtime schema verification 通过后用原 home/端口重启服务。该一次性本机操作不成为生产在线迁移或兼容路径。
+
+验证结果：定时任务、HTTP、clean-v0、会话标题、能力语义专项 119 passed；system prompt / provider prefix continuity 专项通过。前端相关专项、ESLint、TypeScript 与生产静态构建通过。前端全量 694 passed / 1 failed，失败为既有 `workbench-view.test.tsx` 的可视化 occurrence 展示用例；用 HEAD 原组件和原测试单独复跑得到相同失败，未修改其断言。Playwright 在重启后的真实本地应用验证标题旁闹钟、定位后的 CSS 动画与焦点、双击弹窗预填当前标题及 Escape 关闭；没有保存测试重命名或修改现有任务。页面截图保留于 `output/playwright/session-active-alarm.png`、`scheduled-task-location.png`、`session-rename-modal.png`。
+
+2026-10-13 管理卡片按用户要求收紧：删除时区/权限详情栏、暂停后的恢复说明与执行记录入口；展开仅展示完整提示词，空元数据行不渲染，减少工具栏、卡片与正文/页脚间距。管理页专项 14 passed，ESLint、TypeScript、静态构建及 diff 检查通过。Playwright 核对真实暂停任务的折叠/展开和 375px 窄屏，删除内容未显示且无横向溢出；未修改任务配置。截图位于 `output/playwright/scheduled-compact-collapsed.png`、`scheduled-compact-expanded.png`、`scheduled-compact-mobile.png`。

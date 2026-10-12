@@ -9,6 +9,7 @@ import { CapabilityInteractionEditor } from './capability-interaction-editor';
 
 import {
   ArrowDown,
+  AlarmClock,
   Plus,
   FolderPlus,
   BookOpenText,
@@ -154,6 +155,7 @@ interface WorkbenchViewProps {
   onStop: () => void;
   onCompact: () => Promise<void>;
   onRenameSession: () => void;
+  onOpenScheduledTask?: () => void;
   onReopenRuntime: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
@@ -1631,6 +1633,7 @@ export function WorkbenchView({
   onStop,
   onCompact,
   onRenameSession,
+  onOpenScheduledTask,
   onReopenRuntime,
   runtimeReopenBusy,
   onReadInteraction,
@@ -2213,7 +2216,9 @@ export function WorkbenchView({
         <div className="session-title">
           <button className="mobile-menu-button" onClick={onOpenSidebar} aria-label="打开会话侧栏"><Menu size={17} /></button>
           {sessionStatusLabel && <span className={`live-badge live-badge--${readOnlyDock ? "readonly" : session.status}`}>{sessionStatusLabel}</span>}
-          <div><h2>{session.title}</h2><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
+          <div><div className="session-title-heading"><h2>{session.title}</h2>
+            {onOpenScheduledTask && <button type="button" className="session-schedule-button" title="查看此会话的活跃定时任务" aria-label="查看此会话的活跃定时任务" onClick={onOpenScheduledTask}><AlarmClock size={16} aria-hidden="true" /></button>}
+          </div><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
         </div>
         <div className="topbar-actions">
           {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}

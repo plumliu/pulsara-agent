@@ -323,3 +323,7 @@ dsh-motion-ui 仅作为宿主环境传递和按内容展示的参考，不适配
 中文 Markdown 加粗与删除线采用维护中的 CJK 扩展，展示解析与批注源码位置映射同步接入；相关五组前端回归共 60 项通过。最后的短图调整通过 14 项图集前端测试及 9 项真实 Chromium 隔离回归，覆盖高度阈值两侧、动态变化、图集切换和放大退出。TypeScript、相关 ESLint、Ruff、diff 检查和前端构建通过。
 
 本地浏览器报告和截图位于 `output/inline-gallery-browser-20261012/`，不纳入 Git。上述后续验证补充早期阶段记录；未实测的主题切换仍不宣称已完成真实浏览器验收。
+
+### 会话集成测试同步
+
+2026-10-13：排查完整前端套件中的既有失败，发现 `workbench-view.test.tsx` 仍断言已删除的末尾可折叠图集，且回复正文没有标记。按现行正文内嵌契约更新该测试，验证准确插入位置、缩略图选择、仅读取已选择页面、切换后复用驻留 iframe，以及隐藏页面的 hidden/inert 属性；补充无标记时不展示、不读取的回归。生产渲染逻辑未改动。可视化与会话组件聚焦回归 87 项通过，完整前端套件 45 个文件、696 项全部通过。测试使用 `NODE_OPTIONS=--no-experimental-webstorage npm test`，避免 Node 25 实验性 Web Storage 干扰 jsdom 的 localStorage。

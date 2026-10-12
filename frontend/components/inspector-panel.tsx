@@ -179,7 +179,7 @@ function SkillPrecedenceInfo({ onOpenHomeSettings }: { onOpenHomeSettings: () =>
       <strong>同名技能</strong>
       <p>优先使用靠前的版本，其余版本会保留。</p>
       <ol>
-        <li>当前目录下的 .pulsara/skills</li><li>当前目录下的 .agents/skills</li><li><a href="#pulsara-home" onClick={(event) => { event.preventDefault(); dismiss(); onOpenHomeSettings(); }}>用户级 Pulsara</a> 目录下的 skills</li><li>家目录下的 .agents/skills</li>
+        <li>当前目录下的 .pulsara/skills</li><li>当前目录下的 .agents/skills</li><li><a href="#pulsara-home" onClick={(event) => { event.preventDefault(); dismiss(); onOpenHomeSettings(); }}>用户级 Pulsara 目录</a>下的 skills</li><li>家目录下的 .agents/skills</li>
         <li>当前目录的插件提供的技能</li><li>用户级插件提供的技能</li><li>Pulsara 自带的技能</li>
       </ol>
     </div>, document.body)}

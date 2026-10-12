@@ -15,6 +15,10 @@
 .session-title > div { min-width: 0; }
 .session-title h2, .session-title p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-title h2 { font-size: var(--type-body); font-weight: 700; }
+.session-title-heading { display: flex; align-items: center; min-width: 0; gap: 6px; }
+.session-schedule-button { display: grid; flex: none; place-items: center; width: 26px; height: 26px; padding: 0; border-radius: 6px; color: var(--muted); background: transparent; }
+.session-schedule-button:hover { color: var(--amber); background: var(--amber-soft); }
+.session-schedule-button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 .session-title p { margin-top: 3px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); }
 .mobile-menu-button { display: none; place-items: center; width: 31px; height: 31px; border-radius: 8px; background: transparent; color: var(--muted); }
 .session-opening { grid-template-rows: 62px minmax(0, 1fr); }

@@ -208,6 +208,7 @@ message ScheduledInputProvenance {
   string task_id = 1;
   uint64 task_revision = 2;
   string due_at_utc = 3;
+  string trigger_source = 4;
 }
 
 message CanonicalEntry {
