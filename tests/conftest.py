@@ -44,3 +44,13 @@ def stage2_migrated_postgres_database():
         yield database
     finally:
         drop_postgres_test_database(admin_root_dsn(), database.database_name)
+
+
+@pytest.fixture
+def isolated_migrated_postgres_database():
+    """A fresh physical corpus for tests sensitive to prior canonical writes."""
+    database = create_migrated_postgres_test_database()
+    try:
+        yield database
+    finally:
+        drop_postgres_test_database(admin_root_dsn(), database.database_name)

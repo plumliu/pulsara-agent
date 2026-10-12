@@ -669,7 +669,7 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
 def test_k3_queued_root_resource_failure_rejects_before_consumption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stage2_migrated_postgres_database,
+    isolated_migrated_postgres_database,
 ) -> None:
     import pulsara_agent.conversation_kernel.host as kernel_host
     import pulsara_agent.conversation_kernel.provider_dispatch as provider_dispatch
@@ -681,11 +681,14 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
         "load_configs",
         lambda *_args, **_kwargs: (),
     )
+    # Exercise fresh-database host composition: prior tests' corpus/index work
+    # must not become part of this queue test's model-start synchronization.
+    database = isolated_migrated_postgres_database
     runtime = test_model_runtime(
         model_id="test-pro",
         wire_api="openai_chat_completions",
         input_modalities=("text", "image"),
-        postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
+        postgres_dsn=database.runtime_dsn,
     )
     image_output = BytesIO()
     Image.effect_noise((256, 256), 100).convert("RGB").save(image_output, "PNG")
@@ -727,7 +730,12 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
                     command_id="command:k3-queue-origin",
                 )
             )
-            await asyncio.wait_for(model.started.wait(), timeout=2)
+            try:
+                await asyncio.wait_for(model.started.wait(), timeout=2)
+            except TimeoutError:
+                if running.done():
+                    pytest.fail(f"ROOT finished before model startup: {running.result()!r}")
+                raise
             queued = await session.submit_prompt(
                 command_id="command:k3-queue-image",
                 content=PromptContent(
@@ -773,7 +781,7 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
     session_id, queue_item_id = asyncio.run(scenario())
 
     assert len(model.requests) == 1
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+    with psycopg.connect(database.admin_dsn) as connection:
         queue = connection.execute(
             "SELECT status, terminal_reason, consumed_entry_id "
             "FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s",

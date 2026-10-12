@@ -24,25 +24,17 @@ from pulsara_agent.conversation_kernel.repository import ConversationKernelRepos
 from pulsara_agent.storage.schema_verification_service import (
     acquire_verified_postgres_access_sync,
 )
-from tests.support.postgres_database import (
-    admin_root_dsn,
-    create_migrated_postgres_test_database,
-    drop_postgres_test_database,
-)
 
 
 @pytest.fixture
-def isolated_history_repo():
+def isolated_history_repo(isolated_migrated_postgres_database):
     # BM25 statistics span every memory domain in the physical index. A score
     # drift regression therefore needs its own corpus, not just unique IDs.
-    database = create_migrated_postgres_test_database()
-    try:
-        with acquire_verified_postgres_access_sync(
-            database.runtime_dsn, deadline_monotonic=monotonic() + 30
-        ) as lease:
-            yield ConversationKernelRepository(lease.connection_provider)
-    finally:
-        drop_postgres_test_database(admin_root_dsn(), database.database_name)
+    with acquire_verified_postgres_access_sync(
+        isolated_migrated_postgres_database.runtime_dsn,
+        deadline_monotonic=monotonic() + 30,
+    ) as lease:
+        yield ConversationKernelRepository(lease.connection_provider)
 
 
 def new(repo, domain, workspace=None):
