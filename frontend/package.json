@@ -42,6 +42,7 @@
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "react-easy-crop": "6.2.4",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-cjk-friendly": "2.3.2",

@@ -10,6 +10,7 @@ import {
 import { useId, useRef, useState } from 'react';
 import type { AppView } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
+import { UserAvatar } from './user-avatar';
 
 const navigation = [
   { id: 'overview' as const, label: '总览', icon: Gauge },
@@ -66,7 +67,7 @@ export function ActivityRail({ activeView, onNavigate }: ActivityRailProps) {
         >
           <Settings size={17} strokeWidth={1.8} />
         </button>
-        <span className="rail-avatar" aria-label="本地用户">PL</span>
+        <UserAvatar className="rail-avatar" />
       </div>
       <div className="rail-more">
         <button type="button" className={`rail-button${moreActive || moreOpen ? ' is-active' : ''}`}

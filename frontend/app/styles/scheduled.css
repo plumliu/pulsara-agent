@@ -1,5 +1,5 @@
 .scheduled-view { min-width: 0; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable; }
-.scheduled-page-header { flex-wrap: wrap; padding-top: 24px; }
+.scheduled-page-header { flex-wrap: wrap; }
 .scheduled-page-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
 .scheduled-inner { width: min(1040px, calc(100% - 64px)); margin: 24px auto 36px; }
 .scheduled-view button, .scheduled-dialog button { transition: background .15s, color .15s, border-color .15s; }
@@ -96,7 +96,6 @@
   .scheduled-row-actions { margin-left: -8px; }
 }
 @media (max-width: 580px) {
-  .scheduled-page-header { padding-top: 18px; }
   .scheduled-page-actions { margin-top: 14px; }
   .scheduled-toolbar { flex-wrap: wrap; gap: 12px; padding: 14px; }
   .scheduled-list { padding-inline: 14px; }

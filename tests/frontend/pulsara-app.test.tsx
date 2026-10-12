@@ -495,6 +495,9 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  userAvatar = vi.fn(async () => ({ configured: false }));
+  uploadUserAvatar = vi.fn(async (_file: File) => ({ configured: true }));
+  clearUserAvatar = vi.fn(async () => ({ configured: false }));
   workspaceAvailability = vi.fn(async (_sessionId: string) => ({path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null}));
   restoreWorkspace = vi.fn(async (_sessionId: string) => ({path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null}));
   searchSessions = vi.fn(async () => ({ items: this.sessions.map(session => ({ session, matchKind: 'recent' as const, snippet: '' })), nextCursor: null }));
@@ -1883,7 +1886,8 @@ describe('PulsaraApp', () => {
     for (const userHeading of container.querySelectorAll('.user-heading')) {
       expect(userHeading.textContent).toContain('你');
       expect(userHeading.firstElementChild?.tagName).toBe('STRONG');
-      expect(userHeading.lastElementChild?.classList.contains('user-avatar')).toBe(true);
+      expect(userHeading.lastElementChild?.classList.contains('person-avatar')).toBe(true);
+      expect(userHeading.lastElementChild?.getAttribute('aria-label')).toBe('用户头像');
     }
     expect(container.querySelectorAll('.user-steer')).toHaveLength(1);
     expect(screen.getByText('引导')).toBeTruthy();

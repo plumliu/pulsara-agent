@@ -539,6 +539,9 @@ export interface SessionSearchItem {
 export interface SessionSearchPage { items: SessionSearchItem[]; nextCursor: string | null }
 
 export interface RuntimeAdapter {
+  userAvatar(): Promise<{ configured: boolean }>;
+  uploadUserAvatar(file: File): Promise<{ configured: boolean }>;
+  clearUserAvatar(): Promise<{ configured: boolean }>;
   workspaceAvailability(sessionId: string, signal?: AbortSignal): Promise<WorkspaceAvailability>;
   restoreWorkspace(sessionId: string): Promise<WorkspaceAvailability>;
   searchSessions(query: string, lifecycle: 'ALL' | 'OPEN' | 'ARCHIVED', cursor?: string, signal?: AbortSignal): Promise<SessionSearchPage>;
@@ -1351,6 +1354,15 @@ function resolveBrowserInstanceId(): string {
 }
 
 export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
+  userAvatar(): Promise<{ configured: boolean }> {
+    return apiRequest('/api/user-avatar');
+  }
+  uploadUserAvatar(file: File): Promise<{ configured: boolean }> {
+    return httpRequest('/api/user-avatar', { method: 'PUT', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' } });
+  }
+  clearUserAvatar(): Promise<{ configured: boolean }> {
+    return apiRequest('/api/user-avatar', { method: 'DELETE' });
+  }
   private chatConnection?: LocalRuntimeConnection;
   private connectAttempt = 0;
   private sessionRequest<T>(sessionId: string, url: string, init: RequestInit): Promise<T> {

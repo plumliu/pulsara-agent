@@ -2,6 +2,7 @@
 
 import { createPortal } from 'react-dom';
 import { usePromptHover } from '../lib/prompt-hover';
+import { AgentInputAvatar, UserAvatar } from './user-avatar';
 
 
 import { CapabilityInteractionEditor } from './capability-interaction-editor';
@@ -44,7 +45,6 @@ import {
   Sparkles,
   TerminalSquare,
   TriangleAlert,
-  UserRound,
   WandSparkles,
   Zap,
 } from 'lucide-react';
@@ -985,6 +985,7 @@ function SubagentCompletionEvent({ message, visible }: { message: Message; visib
 function UserMessage({
   message,
   label = '你',
+  senderKind = 'user',
   pendingContent,
   deliveryStatus,
   onReadPromptImage = unavailablePromptImage,
@@ -992,6 +993,7 @@ function UserMessage({
 }: {
   message: Message;
   label?: string;
+  senderKind?: 'user' | 'agent';
   pendingContent?: LocalPromptSubmission['content'];
   deliveryStatus?: string;
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
@@ -1029,7 +1031,8 @@ function UserMessage({
     <article className="user-turn">
       <header className="user-heading">
         <strong>{message.userKind === 'scheduled' ? '定时任务' : label}</strong>
-        <span className="user-avatar"><UserRound size={14} /></span>
+        {message.userKind === 'scheduled' ? <AgentInputAvatar kind="scheduled" />
+          : senderKind === 'agent' ? <AgentInputAvatar kind="agent" /> : <UserAvatar />}
       </header>
       {content
         ? <PromptContentView
@@ -1271,6 +1274,7 @@ export function ConversationMessages({
   onReadVisualization = unavailableVisualization,
   onReadVisualizationThumbnail,
   userLabel = '你',
+  userSenderKind = 'user',
   assistantLabel = 'Pulsara',
   taskFinalAnswerId,
   contextCompactionIndex = -1,
@@ -1293,6 +1297,7 @@ export function ConversationMessages({
   onReadVisualization?: WorkbenchViewProps['onReadVisualization'];
   onReadVisualizationThumbnail?: WorkbenchViewProps['onReadVisualizationThumbnail'];
   userLabel?: string;
+  userSenderKind?: 'user' | 'agent';
   assistantLabel?: string;
   taskFinalAnswerId?: string;
   contextCompactionIndex?: number;
@@ -1310,7 +1315,7 @@ export function ConversationMessages({
   const renderMessage = (message: Message, startsRun: boolean, visible = true) => (
     <div key={message.id} data-source-entry={message.id} style={{ display: 'contents' }}>
       {message.role === 'user'
-        ? <UserMessage message={message} label={userLabel} onReadPromptImage={onReadPromptImage} visible={visible} />
+        ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} visible={visible} />
         : <AssistantMessage message={message} responseActionEligible={isCompleteAnswer(message, taskFinalAnswerId)} startsAssistantRun={startsRun}
             joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
             joinsNextToolChain={toolChainConnections.after.has(message.id)}

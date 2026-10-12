@@ -1,6 +1,7 @@
 'use client';
 
 import { FilePreviewProvider } from '../components/file-preview-dialog';
+import { UserAvatarProvider } from '../components/user-avatar';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
@@ -2503,6 +2504,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, []);
 
   return (
+    <UserAvatarProvider adapter={adapter}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !openingSession ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} />
@@ -2814,5 +2816,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         onConfirm={() => void confirmSessionDelete()} onClose={() => { if (!deleteBusy) setDeleteTarget(undefined); }} />}
     </main>
     </ToolResultDisplayContext.Provider>
+    </UserAvatarProvider>
   );
 }

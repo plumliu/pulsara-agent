@@ -81,6 +81,7 @@ from pulsara_agent.web_app.native_desktop import NativeDesktopUnavailable
 from pulsara_agent.web_app.file_preview import FilePreviewError
 from pulsara_agent.web_app.file_preview_http import FilePreviewHttp
 from pulsara_agent.web_app.visualization_preview import VisualizationPreviews
+from pulsara_agent.web_app.user_avatar import UserAvatarHttp
 from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
     OldHostCloseQuarantined,
@@ -391,6 +392,7 @@ class LocalHttpServer:
             await runner.cleanup()
 
     def _install_routes(self) -> None:
+        UserAvatarHttp().install(self._app.router)
         if self.scheduled_tasks is not None:
             ScheduledTaskController(self.scheduled_tasks).install(self._app.router)
         memory = LocalMemoryController(self.sessions)

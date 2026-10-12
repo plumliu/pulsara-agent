@@ -15,6 +15,7 @@ import type {
 import type { RuntimeStatus, SessionSummary } from '../lib/pulsara-types';
 import { MemoryRetrievalSettingsPanel } from './memory-retrieval-settings';
 import { ArchivedSessions } from './archived-sessions';
+import { AvatarSetting, UserAvatar } from './user-avatar';
 import { RuntimeApiError } from '../lib/runtime-adapter';
 
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
@@ -529,9 +530,9 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     <header className="page-header"><div><span className="page-kicker">本机设置</span><h1>设置</h1><p>配置模型、记忆检索与本机 PostgreSQL。访问密钥保存在权限受限的本机设置文件中。</p></div></header>
     <div className="settings-layout">
       <aside className="settings-nav">
-        <div className="settings-profile"><span>PL</span><div><strong>本机用户</strong><small>无需账号登录</small></div></div>
+        <div className="settings-profile"><UserAvatar /><div><strong>本机用户</strong><small>无需账号登录</small></div></div>
         {navItems.map(({ id, label, icon: Icon }) => <button className={section === id ? 'is-active' : ''} key={id} onClick={() => setSection(id)}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
-        <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span><small>运行在本机</small></div>
+        <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span></div>
       </aside>
       <div className="settings-content">
         {section === 'archived' && <ArchivedSessions adapter={adapter} revision={sessionRevision} onRestored={onSessionsChanged} onDelete={onDeleteSession} />}
@@ -542,6 +543,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
           <SettingRow icon={SlidersHorizontal} title="显示内置工具原始结果" detail="显示原始文本、长结果预览和分页读取入口。仅影响界面，保存在当前浏览器。">
             <button type="button" role="switch" className="settings-switch" aria-label="显示内置工具原始结果" aria-checked={showBuiltinToolResults} onClick={() => onToolResultDisplayChange(!showBuiltinToolResults)}><span /></button>
           </SettingRow>
+          <AvatarSetting onNotify={onNotify} />
         </section>}
         {section === 'models' && <>
           <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" disabled={Boolean(loadingModelId) || savingModel || testingModel} onClick={() => { if (adding) closeModelForm(); else { resetModelDraft(); setEditingConfiguration(undefined); setAdding(true); } }}><Plus size={13} />添加配置</button></header>

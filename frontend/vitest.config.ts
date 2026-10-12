@@ -12,6 +12,7 @@ export default defineConfig({
     dedupe: [
       'react',
       'react-dom',
+      'react-easy-crop',
       'vitest',
       '@testing-library/react',
       '@testing-library/user-event',

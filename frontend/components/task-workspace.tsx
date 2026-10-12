@@ -645,7 +645,7 @@ function TaskGraphDialog({
                       taskFinalAnswerId={[...group.records].reverse().find(record => record.entryKind === 'ASSISTANT_MESSAGE' && record.turnStatus === 'COMPLETED')?.entryId}
                       skills={skills} artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
                       onReadToolArtifact={onReadToolArtifact} onNotify={onNotify}
-                      userLabel="主 Agent" assistantLabel={group.label} />
+                      userLabel="主 Agent" userSenderKind="agent" assistantLabel={group.label} />
                   </div>)}
                   {!inheritedGroups.length && !inheritedContext.materials.length && <p>继承的上下文没有可显示的对话。</p>}
                 </details>
@@ -666,6 +666,7 @@ function TaskGraphDialog({
                       onReadToolArtifact={onReadToolArtifact}
                       onNotify={onNotify}
                       userLabel="主 Agent"
+                      userSenderKind="agent"
                       assistantLabel={selected.label || selected.role}
                     />
                   </div>
