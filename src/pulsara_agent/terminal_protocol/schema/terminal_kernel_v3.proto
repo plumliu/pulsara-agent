@@ -662,6 +662,7 @@ message SessionLiveControlSnapshot {
   string host_session_id = 11;
   string active_root_turn_id = 12;
   uint64 control_admission_deadline_ms = 13;
+  bool root_compaction_in_progress = 14;
 }
 
 enum LiveControlEventKind {
@@ -719,6 +720,7 @@ message ObservationResponse {
   uint64 through_live_control_revision = 10;
   repeated LiveControlEventProjection live_control = 11;
   repeated string presentation_notices = 12;
+  bool root_compaction_in_progress = 13;
 }
 
 message LiveControlSnapshotRequest {

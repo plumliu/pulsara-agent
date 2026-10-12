@@ -66,6 +66,25 @@ def test_missing_or_unreadable_settings_degrade_without_opening_provider(
             await port._rerank_explicit("query", result, total_deadline=999999999)
             is result
         )
+        from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
+        from pulsara_agent.conversation_kernel.memory.recall import (
+            MemoryQueryResult, MemoryRetrievalDisposition,
+        )
+
+        mixed = MemoryQueryResult(
+            disposition=MemoryRetrievalDisposition.COMPLETE,
+            facts=("ordinary", HistoryCandidate(
+                session_id="session:old", q1_entry_id="entry:old", title="old",
+                score=1.0, document={}, messages=(),
+            )),
+            attempted_stages=(),
+        )
+        implicit = await port._rerank_explicit(
+            "query", mixed, total_deadline=999999999, purpose="automatic_recall"
+        )
+        # A missing file is an intentional default/off configuration; an
+        # unreadable file cannot authorize unjudged history admission.
+        assert implicit.facts == (("ordinary",) if unreadable else mixed.facts)
         await port.aclose()
 
     asyncio.run(exercise())

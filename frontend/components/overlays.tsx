@@ -100,7 +100,8 @@ export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, on
 }
 
 function activeModal(): HTMLDialogElement | null {
-  return typeof document === 'undefined' ? null : document.querySelector<HTMLDialogElement>('dialog[open]');
+  // Inline galleries use non-modal open dialogs; only a real modal owns toasts.
+  return typeof document === 'undefined' ? null : Array.from(document.querySelectorAll<HTMLDialogElement>('dialog[open]')).find(dialog => dialog.matches(':modal')) ?? null;
 }
 
 function subscribeToModalChange(onChange: () => void): () => void {

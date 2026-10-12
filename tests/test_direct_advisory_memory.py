@@ -1868,3 +1868,25 @@ def test_embedding_maintainer_discards_old_binding_and_resumes_partial_overwrite
             await port.aclose()
             await io.aclose(deadline_monotonic=monotonic()+10)
     asyncio.run(exercise())
+
+
+def test_memory_sparse_search_reuses_bilingual_query_stopwords(direct_memory_session):
+    repository, _, _, remember = direct_memory_session
+    _, irrelevant, _ = remember('the is and 的 了 和 无关事实')
+    _, relevant, _ = remember('the is and 的 了 和 API_key running 中文检索')
+    query = PostgresMemoryQuery(repository.connection_provider)
+    binding = freeze_memory_read_context_binding(
+        domain=MemoryDomainContext('u_local', 'transient'),
+        host_workspace_id=workspace_context_id("stopword-test"),
+    )
+    for text in ('的 了 和', 'the is and'):
+        assert query.sparse_candidates(
+            read_binding=binding, query=text, kind_filter=None, limit=20,
+            automatic=True, deadline_monotonic=monotonic() + 30,
+        ) == ()
+    candidates = query.sparse_candidates(
+        read_binding=binding, query='the 的 API_key', kind_filter=None, limit=20,
+        automatic=True, deadline_monotonic=monotonic() + 30,
+    )
+    assert tuple(item.fact_id for item in candidates) == (relevant['memory_id'],)
+    assert irrelevant['memory_id'] != relevant['memory_id']

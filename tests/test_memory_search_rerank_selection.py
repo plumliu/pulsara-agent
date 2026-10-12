@@ -41,6 +41,8 @@ async def _search(
     memory_count=40,
     invalidate_history=False,
     timed_out_route=None,
+    ranking_mode="rerank",
+    scores=None,
 ):
     io = KernelSessionIO()
     port = KernelMemoryToolPort(
@@ -55,7 +57,7 @@ async def _search(
         settings=LocalSettingsStore(tmp_path / "settings.yaml"),
     )
     if mode != "unconfigured" and (not automatic or rank_automatic):
-        await save_model(port._settings, "rerank", "test-key", activate=True)
+        await save_model(port._settings, ranking_mode, "test-key", activate=True)
     facts = tuple(
         MemoryQueryRow(
             fact_id=f"memory:{index}",
@@ -95,16 +97,20 @@ async def _search(
         )
         for i in range(history_count)
     )
+
     def route_result(name, value, kwargs):
         if timed_out_route == name:
             from time import sleep
+
             sleep(max(0, kwargs["deadline_monotonic"] - monotonic()) + 0.01)
             raise TimeoutError(f"{name} query timed out")
         return value
 
     if timed_out_route is not None:
         monkeypatch.setattr(port, "_canonical_deadline", lambda _: monotonic() + 0.1)
-    port._history.automatic_candidates = lambda **kwargs: route_result("history", history, kwargs)
+    port._history.automatic_candidates = lambda **kwargs: route_result(
+        "history", history, kwargs
+    )
     port._history.canonical_refetch = lambda **kwargs: (
         () if invalidate_history else kwargs["candidates"]
     )
@@ -115,7 +121,7 @@ async def _search(
         canonical_input=SimpleNamespace(items=()),
     )
     observed = SimpleNamespace(
-        stages=[], candidates=(), documents=(), relations=(), purpose=None
+        stages=[], candidates=(), documents=(), relations=(), purpose=None, calls=0
     )
 
     def sparse(**kwargs):
@@ -139,6 +145,7 @@ async def _search(
         return None
 
     async def rerank(_query, documents, **kwargs):
+        observed.calls += 1
         observed.purpose = kwargs["purpose"]
         observed.documents = tuple(json.loads(item) for item in documents)
         assert len(kwargs["candidate_ids"]) == len(documents)
@@ -146,6 +153,10 @@ async def _search(
             raise TimeoutError("test rerank failure")
         if mode == "malformed":
             return [RerankResult(0, 1.0)] * len(documents)
+        if mode == "settings_changed":
+            await port._settings.set_retrieval_mode(ranking_mode="off")
+        if scores is not None:
+            return [RerankResult(index, score) for index, score in enumerate(scores)]
         # Promote an item outside the default result limit to first place.
         promoted = min(11, len(documents) - 1)
         indexes = (
@@ -157,7 +168,11 @@ async def _search(
         ]
 
     async def rerank_provider():
-        return None if mode == "unconfigured" else SimpleNamespace(rerank=rerank)
+        return (
+            None
+            if mode in {"unconfigured", "provider_unavailable"}
+            else SimpleNamespace(rerank=rerank)
+        )
 
     monkeypatch.setattr(port._query, "sparse_candidates", sparse)
     monkeypatch.setattr(port._query, "canonical_refetch", canonical)
@@ -288,7 +303,7 @@ def test_implicit_recall_ranks_twenty_before_injecting_five(
     ids = tuple(item["memory_id"] for item in body["items"])
     assert len(observed.candidates) == 20
     assert len(observed.documents) == 20
-    assert observed.purpose == "recall"
+    assert observed.purpose == "automatic_recall"
     if mode == "success":
         assert ids == ("memory:11", "memory:0", "memory:1", "memory:2", "memory:3")
     else:
@@ -386,12 +401,21 @@ def test_selected_invalid_history_is_omitted_without_final_refill(
 
 @pytest.mark.parametrize("timed_out_route", ["history", "sparse"])
 @pytest.mark.parametrize("rank_automatic", [False, True])
-def test_automatic_route_timeout_preserves_other_source(tmp_path, monkeypatch, timed_out_route, rank_automatic):
-    body, observed = asyncio.run(_search(
-        tmp_path, monkeypatch, limit=5, automatic=True,
-        history_count=1, memory_count=1, timed_out_route=timed_out_route,
-        rank_automatic=rank_automatic,
-    ))
+def test_automatic_route_timeout_preserves_other_source(
+    tmp_path, monkeypatch, timed_out_route, rank_automatic
+):
+    body, observed = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            history_count=1,
+            memory_count=1,
+            timed_out_route=timed_out_route,
+            rank_automatic=rank_automatic,
+        )
+    )
     assert len(body["items"]) == 1
     assert len(observed.documents) == int(rank_automatic)
     if timed_out_route == "history":
@@ -399,3 +423,127 @@ def test_automatic_route_timeout_preserves_other_source(tmp_path, monkeypatch, t
         assert observed.candidates == ("memory:0",)
     else:
         assert body["items"][0]["source"] == "session_history"
+
+
+@pytest.mark.parametrize(
+    "scores,expected",
+    [
+        ([0.699, 0.7, 0.95, 0.0, 0.8], ("memory:2", "memory:4", "memory:1")),
+        ([0.0, 0.5, 0.699, 0.1, 0.2], ()),
+        ([0.8] * 7, tuple(f"memory:{i}" for i in range(5))),
+    ],
+)
+def test_implicit_decision_admission_filters_before_top_five(
+    tmp_path, monkeypatch, scores, expected
+):
+    body, seen = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            rank_automatic=True,
+            ranking_mode="decision",
+            memory_count=len(scores),
+            scores=scores,
+        )
+    )
+    assert tuple(item["memory_id"] for item in body["items"]) == expected
+    assert seen.purpose == "automatic_recall"
+    assert seen.calls == 1
+    assert len(seen.documents) == len(scores)
+    assert seen.relations == expected
+
+
+def test_implicit_decision_uses_same_threshold_for_memory_and_history(
+    tmp_path, monkeypatch
+):
+    body, seen = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            rank_automatic=True,
+            ranking_mode="decision",
+            memory_count=2,
+            history_count=3,
+            scores=[0.699, 0.7, 0.9, 0.699, 0.7],
+        )
+    )
+    assert [item.get("memory_id", item.get("title")) for item in body["items"]] == [
+        "history 0",
+        "memory:1",
+        "history 2",
+    ]
+    assert len(seen.documents) == 5
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "failure",
+        "malformed",
+        "provider_unavailable",
+        "bad_probability",
+        "projection",
+        "settings_changed",
+    ],
+)
+@pytest.mark.parametrize("memory_count", [0, 2])
+def test_failed_implicit_decision_does_not_bypass_history_admission(
+    tmp_path, monkeypatch, mode, memory_count
+):
+    body, seen = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            automatic=True,
+            rank_automatic=True,
+            ranking_mode="decision",
+            memory_count=memory_count,
+            history_count=3,
+            mode=mode,
+            scores=[1.1] * (memory_count + 3) if mode == "bad_probability" else None,
+        )
+    )
+    assert tuple(item["memory_id"] for item in body["items"]) == tuple(
+        f"memory:{i}" for i in range(memory_count)
+    )
+    assert seen.relations == tuple(f"memory:{i}" for i in range(memory_count))
+
+
+@pytest.mark.parametrize("related", [False, True])
+def test_explicit_decision_and_related_inspection_do_not_use_implicit_threshold(
+    tmp_path, monkeypatch, related
+):
+    result, seen = asyncio.run(
+        _search(
+            tmp_path,
+            monkeypatch,
+            limit=5,
+            ranking_mode="decision",
+            memory_count=5,
+            scores=[0.2, 0.5, 0.1, 0.3, 0.4],
+            related=related,
+        )
+    )
+    if related:
+        related_items, coverage = result
+        assert tuple(item.memory_id for item in related_items) == (
+            "memory:1",
+            "memory:4",
+            "memory:3",
+        )
+        assert coverage["rerank"] == "APPLIED"
+        assert seen.purpose == "related_memory"
+    else:
+        assert tuple(item["memory_id"] for item in result["memories"]) == (
+            "memory:1",
+            "memory:4",
+            "memory:3",
+            "memory:0",
+            "memory:2",
+        )
+        assert seen.purpose == "recall"

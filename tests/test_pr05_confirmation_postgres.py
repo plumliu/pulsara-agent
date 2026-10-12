@@ -277,6 +277,9 @@ class ProtocolHost:
     def current_todo_snapshots(self):
         return ()
 
+    def root_compaction_in_progress(self):
+        return False
+
     def current_compaction_projection(self):
         return False, None, None, None
 

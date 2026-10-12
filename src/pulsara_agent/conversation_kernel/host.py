@@ -2164,6 +2164,12 @@ class KernelHostSession:
                 continue
             await asyncio.sleep(0)
 
+    def root_compaction_in_progress(self) -> bool:
+        """Disposable GUI progress, owned by the existing ROOT compaction fence."""
+        return self._compaction.is_fenced(
+            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+        )
+
     def current_compaction_projection(
         self,
     ) -> tuple[bool, str | None, str | None, str | None]:

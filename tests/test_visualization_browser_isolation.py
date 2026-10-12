@@ -343,3 +343,25 @@ def test_short_chart_omits_zoom_space_and_regular_chart_keeps_zoom_clickable() -
                 assert page.locator('iframe').evaluate('el=>el.clientHeight') == 500
         finally:
             browser.close()
+
+
+def test_toast_keeps_its_layout_inside_maximized_visualization() -> None:
+    styles = Path(__file__).resolve().parents[1] / 'frontend/app/styles'
+    css = '\n'.join((styles / name).read_text() for name in ['base.css', 'workbench.css', 'overlays.css'])
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.set_content('<style>' + css + '</style><section class="inline-visualization"><dialog><div class="inline-visualization__figure"><button class="inline-visualization__zoom">zoom</button></div><div class="toast-stack" popover="manual"><button class="toast toast--success"><span class="toast-mark">✓</span><span><strong>输入已接受</strong><small>已送达本地服务。</small></span><svg width="11" height="11"></svg></button></div></dialog></section>')
+            page.locator('dialog').evaluate('el => el.showModal()')
+            page.locator('.toast-stack').evaluate('el => el.showPopover()')
+            toast = page.locator('.toast')
+            assert toast.evaluate('el => getComputedStyle(el).display') == 'grid'
+            assert toast.evaluate('el => getComputedStyle(el).borderRadius') == '11px'
+            assert toast.evaluate('el => getComputedStyle(el).padding') == '9px 10px'
+            geometry = toast.evaluate('el => Array.from(el.children).map(child => child.getBoundingClientRect().left)')
+            assert geometry[0] < geometry[1] < geometry[2]
+            page.locator('.inline-visualization__zoom').focus()
+            assert page.locator('.inline-visualization__zoom').evaluate('el => getComputedStyle(el).padding') == '6px'
+        finally:
+            browser.close()

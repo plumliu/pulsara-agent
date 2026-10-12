@@ -103,6 +103,7 @@ interface WorkbenchViewProps {
   messages: Message[];
   interruptionNotices?: TurnInterruptionNotice[];
   contextCompaction?: ContextCompactionBoundary;
+  contextCompactionInProgress?: boolean;
   initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
   onFork: (entryId: string) => Promise<void>;
   todo?: TodoRun;
@@ -1273,6 +1274,7 @@ export function ConversationMessages({
   assistantLabel = 'Pulsara',
   taskFinalAnswerId,
   contextCompactionIndex = -1,
+  contextCompactionInProgress = false,
   isRunning = false,
   focusTaskId,
   focusTaskRevision = 0,
@@ -1294,6 +1296,7 @@ export function ConversationMessages({
   assistantLabel?: string;
   taskFinalAnswerId?: string;
   contextCompactionIndex?: number;
+  contextCompactionInProgress?: boolean;
   isRunning?: boolean;
   focusTaskId?: string;
   focusTaskRevision?: number;
@@ -1354,6 +1357,7 @@ export function ConversationMessages({
   });
   flush();
   if (contextCompactionIndex === messages.length) content.push(<ContextCompactionDivider key="compaction" />);
+  if (contextCompactionInProgress) content.push(<ContextCompactionDivider key="compaction-progress" inProgress />);
   return content;
 }
 
@@ -1529,16 +1533,17 @@ function InteractionCard({
   );
 }
 
-function ContextCompactionDivider({ inherited = false }: { inherited?: boolean }) {
-  const label = inherited ? '已保留分叉点的有效上下文，压缩前记录请在原会话查看' : '上下文已压缩';
+function ContextCompactionDivider({ inherited = false, inProgress = false }: { inherited?: boolean; inProgress?: boolean }) {
+  const label = inProgress ? '上下文正在压缩' : inherited ? '已保留分叉点的有效上下文，压缩前记录请在原会话查看' : '上下文已压缩';
   return (
     <div
       className="context-compaction-divider"
-      role="separator"
+      role={inProgress ? "status" : "separator"}
+      aria-busy={inProgress || undefined}
       aria-label={label}
     >
       <span className="context-compaction-divider__line" aria-hidden="true" />
-      <span>{label}</span>
+      <span className="context-compaction-divider__label">{inProgress && <LoaderCircle className="context-compaction-divider__spinner" size={12} aria-hidden="true" />}{label}</span>
       <span className="context-compaction-divider__line" aria-hidden="true" />
     </div>
   );
@@ -1574,6 +1579,7 @@ export function WorkbenchView({
   messages,
   interruptionNotices,
   contextCompaction,
+  contextCompactionInProgress = false,
   initialContextBase,
   onFork,
   todo,
@@ -1649,6 +1655,7 @@ export function WorkbenchView({
   }
   const welcomeDeparture = useRef<{ sessionId: string; top: number } | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const compactionBusy = compacting || contextCompactionInProgress;
   const directoryReadOnly = workspaceAvailability?.outcome === 'MISSING' || workspaceAvailability?.outcome === 'UNAVAILABLE';
   const readOnlyDock = isObserver || directoryReadOnly || historyOnly;
   const sessionStatusLabel = isObserver ? '观察中'
@@ -2230,17 +2237,17 @@ export function WorkbenchView({
           </div>
           {canControl && (
             <button
-              className={`ghost-button context-compact-button${compacting ? ' is-compacting' : ''}`}
-              aria-label={compacting ? '正在整理上下文' : '压缩上下文'}
-              disabled={compacting || !hasCompactionContext || runtimeStatus !== 'online'}
+              className={`ghost-button context-compact-button${compactionBusy ? ' is-compacting' : ''}`}
+              aria-label={compactionBusy ? '正在整理上下文' : '压缩上下文'}
+              disabled={compactionBusy || !hasCompactionContext || runtimeStatus !== 'online'}
               title={!hasCompactionContext ? '开始对话后即可压缩上下文' : undefined}
               onClick={() => {
                 setCompacting(true);
                 void onCompact().finally(() => setCompacting(false));
               }}
             >
-              {compacting ? <LoaderCircle size={12} /> : <RotateCcw size={12} />}
-              <span>{compacting ? '正在整理上下文' : '压缩上下文'}</span>
+              {compactionBusy ? <LoaderCircle size={12} /> : <RotateCcw size={12} />}
+              <span>{compactionBusy ? '正在整理上下文' : '压缩上下文'}</span>
             </button>
           )}
           <button className={`icon-button${inspectorOpen ? ' is-active' : ''}`} onClick={onToggleInspector} aria-label="切换检查器"><PanelRight size={15} /></button>
@@ -2280,6 +2287,7 @@ export function WorkbenchView({
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             onNotify={onNotify} onFork={onFork} canFork={canControl} contextCompactionIndex={contextCompactionIndex}
+            contextCompactionInProgress={contextCompactionInProgress}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={focusSourceEntry} />
           {conversationSubmissions.map(item => (
@@ -2522,7 +2530,7 @@ export function WorkbenchView({
       </div> : (
         <div className="observer-wrap composer-wrap" ref={composerWrapRef}>
           {composerQueue}
-          <div className="observer-dock">
+          <div className={`observer-dock${isObserver ? " observer-dock--observer" : ""}`}>
             <span className="observer-dock__icon"><Eye size={15} /></span>
             <span className="readonly-dock__copy">
               <strong>{isObserver ? '此窗口仅供查看' : directoryReadOnly && workspaceAvailability?.outcome === 'MISSING' ? '工作目录已丢失' : workspaceAvailability?.outcome === 'UNAVAILABLE' ? '工作目录不可用' : '暂时无法继续'}</strong>

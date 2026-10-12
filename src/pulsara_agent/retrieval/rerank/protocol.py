@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Literal, NamedTuple, Protocol, runtime_checkable
 
 
-RerankPurpose = Literal["recall", "related_memory"]
+RerankPurpose = Literal["recall", "automatic_recall", "related_memory"]
 
 
 class RerankResult(NamedTuple):

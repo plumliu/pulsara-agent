@@ -94,6 +94,9 @@
 .thread-column { width: min(690px, calc(100% - 54px)); margin: 0 auto; padding: 34px 0 42px; font-family: var(--serif); }
 .assistant-turn:has(+ .context-compaction-divider), .user-turn:has(+ .context-compaction-divider) { margin-bottom: 16px; }
 .context-compaction-divider { display: flex; align-items: center; gap: 12px; margin: 2px 0 10px; color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); font-weight: 700; letter-spacing: .1em; white-space: nowrap; }
+.context-compaction-divider__label { display: inline-flex; align-items: center; gap: 6px; }
+.context-compaction-divider__spinner { animation: spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .context-compaction-divider__spinner { animation: none; } }
 .context-compaction-divider__line { flex: 1; min-width: 24px; border-top: 1px solid var(--line-strong); }
 .turn-meta { display: flex; align-items: center; gap: 9px; margin-bottom: 17px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); letter-spacing: .08em; }
 .hairline { width: 28px; height: 1px; background: var(--paper-darker); }
@@ -176,9 +179,9 @@
 .inline-visualization__figure:hover .inline-visualization__zoom, .inline-visualization__figure:focus-within .inline-visualization__zoom, .inline-visualization .is-maximized .inline-visualization__zoom { opacity: 1; pointer-events: auto; }
 @media (hover: none), (pointer: coarse) { .inline-visualization button.inline-visualization__zoom { opacity: .65; pointer-events: auto; } }
 @media (prefers-reduced-motion: reduce) { .inline-visualization button.inline-visualization__zoom { transition: none; } }
-.inline-visualization button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; background: transparent; color: var(--muted); border-radius: 6px; }
-.inline-visualization button:hover { background: var(--paper-deep); color: var(--amber); }
-.inline-visualization button:focus-visible { outline: 2px solid var(--amber); }
+.inline-visualization :where(button.inline-visualization__zoom, .inline-visualization__strip > button, .inline-visualization__status-copy > button) { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; background: transparent; color: var(--muted); border-radius: 6px; }
+.inline-visualization :where(button.inline-visualization__zoom, .inline-visualization__strip > button, .inline-visualization__status-copy > button):hover { background: var(--paper-deep); color: var(--amber); }
+.inline-visualization :where(button.inline-visualization__zoom, .inline-visualization__strip > button, .inline-visualization__status-copy > button):focus-visible { outline: 2px solid var(--amber); }
 .inline-visualization__viewport-probe { position: absolute; width: 100%; height: var(--visualization-height); visibility: hidden; pointer-events: none; }
 /* Only reserve zoom space when there is a control; tiny roots keep their own height. */
 .inline-visualization__stage { position: relative; min-height: 46px; overflow: clip; display: grid; place-items: start; }

@@ -2951,3 +2951,20 @@ it('projects a notice from a cold feedback-only page without requiring a visible
   expect(view.current().interruptionNotices).toHaveLength(1);
   expect(view.current().interruptionNotices![0].displayAfterMessageId).toBeUndefined();
 });
+
+it('reads ROOT compaction progress on connect and every observation without inventing adoption', async () => {
+  const responses = [connectPayload([], {}, [], { root_compaction_in_progress: true }),
+    { observation: { root_compaction_in_progress: false } },
+    { observation: { root_compaction_in_progress: true } },
+    { observation: { root_compaction_in_progress: false } }];
+  const fetch = vi.fn(async () => new Response(JSON.stringify(responses.shift()), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  vi.stubGlobal('fetch', fetch);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().liveControl.root_compaction_in_progress).toBe(true);
+  for (const expected of [false, true, false]) {
+    const projection = await connection.observe();
+    expect(projection.liveControl.root_compaction_in_progress).toBe(expected);
+    expect(projection.contextCompaction).toBeUndefined();
+  }
+  expect(fetch).toHaveBeenCalledTimes(4);
+});

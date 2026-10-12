@@ -1167,6 +1167,7 @@ export interface ProtocolLiveControlSnapshot {
   current_interaction?: Record<string, unknown>;
   current_todos?: ProtocolTodoRunSnapshot[];
   compaction_in_progress?: boolean;
+  root_compaction_in_progress?: boolean;
   input_admission_deferred?: boolean;
   host_session_id?: string;
   active_root_turn_id?: string;
@@ -1245,6 +1246,7 @@ interface ObservationPayload {
     interaction?: Record<string, unknown>;
   }>;
   presentation_notices?: string[];
+  root_compaction_in_progress?: boolean;
   gap?: { kind: string; reason?: string };
 }
 
@@ -2618,6 +2620,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       throw new RuntimeGapError(observation.gap.kind, '连接状态需要刷新。');
     }
     this.presentationNotices = [...(observation.presentation_notices ?? [])];
+    this.liveControl.root_compaction_in_progress = observation.root_compaction_in_progress === true;
     this.taskInvalidations = [...new Set((observation.committed ?? [])
       .map((item) => item.affected_subagent_task_id)
       .filter((item): item is string => Boolean(item)))];

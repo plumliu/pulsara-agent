@@ -1308,3 +1308,35 @@ it('closes composer menus on control loss without reopening them when control re
   fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
   expect(screen.getByRole('dialog', { name: '添加内容与模式' })).toBeTruthy();
 });
+
+describe('ROOT context compaction progress', () => {
+  it.each([false, true])('shows live compaction for controller and observer windows (observer=%s)', isObserver => {
+    render(<WorkbenchView {...props({ isObserver, canControl: !isObserver, contextCompactionInProgress: true })} />);
+    const status = screen.getByRole('status', { name: '上下文正在压缩' });
+    expect(status.getAttribute('aria-busy')).toBe('true');
+    expect(status.querySelector('.context-compaction-divider__spinner')).toBeTruthy();
+    expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
+    if (!isObserver) expect((screen.getByRole('button', { name: '正在整理上下文' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('replaces live progress with only the adopted canonical boundary', () => {
+    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages: [{ id: 'q', role: 'user' as const, time: '', body: '问题' }] };
+    const view = render(<ConversationMessages {...base} contextCompactionInProgress />);
+    expect(screen.getByRole('status', { name: '上下文正在压缩' })).toBeTruthy();
+    view.rerender(<ConversationMessages {...base} contextCompactionIndex={1} />);
+    expect(screen.queryByRole('status', { name: '上下文正在压缩' })).toBeNull();
+    expect(screen.getAllByRole('separator', { name: '上下文已压缩' })).toHaveLength(1);
+    // A second attempt leaves the old adopted marker intact.
+    view.rerender(<ConversationMessages {...base} contextCompactionIndex={1} contextCompactionInProgress />);
+    expect(screen.getAllByRole('separator', { name: '上下文已压缩' })).toHaveLength(1);
+    expect(screen.getByRole('status', { name: '上下文正在压缩' })).toBeTruthy();
+  });
+
+  it('removes failed or cancelled progress without creating a completed boundary', () => {
+    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages: [] };
+    const view = render(<ConversationMessages {...base} contextCompactionInProgress />);
+    view.rerender(<ConversationMessages {...base} />);
+    expect(screen.queryByRole('status', { name: '上下文正在压缩' })).toBeNull();
+    expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
+  });
+});

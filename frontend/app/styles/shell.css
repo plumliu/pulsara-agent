@@ -35,6 +35,7 @@
 .rail-button.is-active::before { content: ""; position: absolute; left: -11px; width: 3px; height: 18px; border-radius: 0 3px 3px 0; background: #e5ad58; }
 .rail-button::after { content: attr(data-tooltip); position: absolute; left: calc(100% + 11px); z-index: 100; padding: 6px 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 6px; background: #25272d; color: #f1eee7; font-size: var(--type-small); white-space: nowrap; opacity: 0; pointer-events: none; transform: translateX(-4px); transition: .14s ease; box-shadow: var(--shadow-md); }
 .rail-button:hover::after { opacity: 1; transform: translateX(0); }
+.rail-more, .rail-more-popover { display: none; }
 .rail-avatar { display: grid; place-items: center; width: 27px; height: 27px; margin-top: 8px; border: 1px solid rgba(255,255,255,.13); border-radius: 9px; background: rgba(255,255,255,.065); color: #dbd6cc; font-family: var(--mono); font-size: var(--type-label); }
 
 .session-sidebar {

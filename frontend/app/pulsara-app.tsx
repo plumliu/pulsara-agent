@@ -2564,6 +2564,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           messages={renderedMessages}
           interruptionNotices={mergedProjection.interruptionNotices}
           contextCompaction={mergedProjection.contextCompaction}
+          contextCompactionInProgress={mergedProjection.liveControl.root_compaction_in_progress === true}
           initialContextBase={mergedProjection.initialContextBase}
           onFork={forkConversation}
           todo={projection.todo}

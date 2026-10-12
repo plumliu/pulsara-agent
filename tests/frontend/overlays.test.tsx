@@ -19,6 +19,7 @@ const hidePopover = vi.fn(function (this: HTMLElement) {
 beforeEach(() => {
   const nativeMatches = HTMLElement.prototype.matches;
   vi.spyOn(HTMLElement.prototype, 'matches').mockImplementation(function (this: HTMLElement, selector: string) {
+    if (selector === ':modal') return this instanceof HTMLDialogElement && this.open && this.hasAttribute('data-test-modal');
     return selector === ':popover-open' ? openedPopovers.has(this) : nativeMatches.call(this, selector);
   });
   Object.defineProperty(HTMLElement.prototype, 'showPopover', { configurable: true, value: showPopover });
@@ -36,7 +37,7 @@ function SavingDialog({ existingToast = false }: { existingToast?: boolean }) {
   const [editing, setEditing] = useState(true);
   const [toasts, setToasts] = useState<ToastMessage[]>(existingToast ? [{ id: 1, title: '连接正常', tone: 'success' }] : []);
   return <>
-    {editing && <dialog open aria-label="修改模型配置"><button onClick={() => {
+    {editing && <dialog open data-test-modal aria-label="修改模型配置"><button onClick={() => {
       setEditing(false);
       setToasts([{ id: 2, title: '模型配置已保存', tone: 'success' }]);
     }}>保存修改</button></dialog>}
@@ -60,6 +61,7 @@ it.each([false, true])('keeps the save toast visible when its modal is removed i
 
 it('moves an active toast into an open modal and back when the modal closes', async () => {
   const dialog = document.createElement('dialog');
+  dialog.setAttribute('data-test-modal', '');
   document.body.append(dialog);
   render(<ToastStack toasts={[{ id: 1, title: '连接正常', tone: 'success' }]} onDismiss={() => {}} />);
   const expectOpenToastIn = (parent: HTMLElement) => {

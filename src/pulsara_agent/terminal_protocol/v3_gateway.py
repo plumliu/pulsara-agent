@@ -109,7 +109,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:2c97c7a78ebeb237e4def9de07b7df853d6b2fa34897c43aaf9af33b9fa6c6ee"
+    "sha256:801fdf8de46863db3bb1159db311614d8c2772230454bb7fe64eb9fc38b8570f"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -511,6 +511,7 @@ class TerminalKernelProtocolServer:
                     snapshot,
                     state.host_session.current_todo_snapshots(),
                     state.host_session.current_compaction_projection(),
+                    root_compaction_in_progress=state.host_session.root_compaction_in_progress(),
                     host_session_id=state.host_session.host_session_id,
                     active_root_turn_id=state.host_session.active_root_turn_id(),
                     control_admission_deadline_ms=(
@@ -664,6 +665,7 @@ class TerminalKernelProtocolServer:
                         through_live_control_revision=control.through_revision,
                         live_control=control_wire,
                         presentation_notices=presentation_notices,
+                        root_compaction_in_progress=state.host_session.root_compaction_in_progress(),
                     )
                 )
             await asyncio.sleep(min(0.05, max(0.0, deadline - monotonic())))
@@ -1850,6 +1852,7 @@ def _live_control_snapshot_to_wire(
         None,
     ),
     *,
+    root_compaction_in_progress: bool = False,
     host_session_id: str = "",
     active_root_turn_id: str | None = None,
     control_admission_deadline_ms: int = 0,
@@ -1885,6 +1888,7 @@ def _live_control_snapshot_to_wire(
             for item in todo_snapshots
         ),
         compaction_in_progress=in_progress,
+        root_compaction_in_progress=root_compaction_in_progress,
         compaction_trigger=trigger or "",
         compaction_phase=phase or "",
         compaction_target_scope=scope or "",

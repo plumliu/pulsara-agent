@@ -4,7 +4,7 @@ from .protocol import RerankPurpose
 
 
 def decision_question(name: str, purpose: RerankPurpose) -> tuple[str, str, str]:
-    if purpose == "recall":
+    if purpose in {"recall", "automatic_recall"}:
         question = (
             f"For candidate_number {name}, would this candidate materially help answer or act "
             "on user_task? Match meaning across languages; shared words alone are insufficient. "
@@ -21,6 +21,20 @@ def decision_question(name: str, purpose: RerankPurpose) -> tuple[str, str, str]
             "the answer or action, or identify a necessary check."
         )
         negative = "Merely topical or inapplicable to the subject, project, time or conditions."
+        if purpose == "automatic_recall":
+            question += (
+                " This is unsolicited implicit recall. Judge whether injecting this candidate "
+                "has a concrete use for the current task, independently of its rank among "
+                "other candidates; every candidate may be false. Do not assume the user "
+                "is continuing another project's or session's task without supplied evidence. "
+                "An open-ended request to write or test something does not make an old "
+                "example or topic useful merely as optional inspiration. Applicable user "
+                "preferences or constraints may still be useful for such a request."
+            )
+            negative += (
+                " Shared terminology, optional inspiration, or a connection that requires "
+                "inventing continuity with a different task is insufficient."
+            )
     elif purpose == "related_memory":
         question = (
             "user_task is a proposed memory statement. "

@@ -104,6 +104,8 @@ MEMORY_AUTO_EMBED_TIMEOUT_SECONDS = 3.0
 MEMORY_EXPLICIT_EMBED_TIMEOUT_SECONDS = 4.0
 MEMORY_EXPLICIT_RERANK_TIMEOUT_SECONDS = 4.0
 MAXIMUM_RERANK_CANDIDATES = 20
+# Product admission boundary for unsolicited recall, not a reranker score scale.
+AUTOMATIC_DECISION_MINIMUM_PROBABILITY = 0.7
 MAXIMUM_RERANK_QUERY_BYTES = 8 * 1024
 MAXIMUM_RERANK_DOCUMENT_BYTES = 8 * 1024
 MAXIMUM_RERANK_REQUEST_BYTES = 192 * 1024
@@ -682,9 +684,32 @@ class KernelMemoryToolPort:
         try:
             retrieval_before = self._settings.read().memory_retrieval
         except LocalSettingsUnavailable:
+            if purpose == "automatic_recall":
+                return replace(
+                    result,
+                    facts=tuple(
+                        item for item in result.facts
+                        if not isinstance(item, HistoryCandidate)
+                    ),
+                )
             return result
         if retrieval_before.ranking_mode == "off":
             return result
+        decision_admission = (
+            purpose == "automatic_recall"
+            and retrieval_before.ranking_mode == "decision"
+        )
+
+        def fallback(disposition):
+            # A failed/unavailable Decision must not admit unjudged history.
+            # Ordinary memory retains its existing local retrieval fallback.
+            facts = tuple(
+                item
+                for item in result.facts
+                if not decision_admission or not isinstance(item, HistoryCandidate)
+            )
+            return replace(result, facts=facts, rerank_disposition=disposition)
+
         try:
             provider = await self._rerank_provider()
             if (
@@ -695,31 +720,13 @@ class KernelMemoryToolPort:
             ):
                 raise ValueError("rerank configuration changed before admission")
         except Exception:
-            return type(result)(
-                disposition=result.disposition,
-                facts=result.facts,
-                attempted_stages=result.attempted_stages,
-                relaxed_fields=result.relaxed_fields,
-                sparse_available=result.sparse_available,
-                dense_available=result.dense_available,
-                dense_disposition=result.dense_disposition,
-                rerank_disposition="FAILED_FALLBACK",
-            )
+            return fallback("FAILED_FALLBACK")
         if provider is None or not result.facts:
-            return result
+            return fallback(result.rerank_disposition)
         selected = result.facts[:MAXIMUM_RERANK_CANDIDATES]
         prepared = _prepare_rerank_projection(query, selected)
         if prepared is None:
-            return type(result)(
-                disposition=result.disposition,
-                facts=result.facts,
-                attempted_stages=result.attempted_stages,
-                relaxed_fields=result.relaxed_fields,
-                sparse_available=result.sparse_available,
-                dense_available=result.dense_available,
-                dense_disposition=result.dense_disposition,
-                rerank_disposition="NOT_APPLICABLE",
-            )
+            return fallback("NOT_APPLICABLE")
         remote_query, documents = prepared
         try:
             rows = await self._run_remote_exact(
@@ -748,23 +755,34 @@ class KernelMemoryToolPort:
                 or len(set(indexes)) != len(indexes)
                 or set(indexes) != set(range(len(selected)))
                 or any(not math.isfinite(item.score) for item in rows)
+                or (
+                    decision_admission
+                    and any(not 0 <= item.score <= 1 for item in rows)
+                )
             ):
                 raise ValueError("rerank response does not cover the exact candidates")
         except Exception:
-            disposition = "FAILED_FALLBACK"
-            ordered = result.facts
+            return fallback("FAILED_FALLBACK")
         else:
             # Filter relaxation is a product promise: a relaxed row can never
             # leapfrog an exact row merely because a remote score is larger.
             by_tier: dict[int, list] = {}
             for row in rows:
+                if (
+                    decision_admission
+                    and row.score < AUTOMATIC_DECISION_MINIMUM_PROBABILITY
+                ):
+                    continue
                 item = selected[row.index]
                 by_tier.setdefault(getattr(item, "match_tier", 0), []).append(item)
             reranked = tuple(item for tier in sorted(by_tier) for item in by_tier[tier])
             selected_ids = {id(item) for item in selected}
             ordered = (
                 *reranked,
-                *(item for item in result.facts if id(item) not in selected_ids),
+                *(
+                    item for item in result.facts
+                    if not decision_admission and id(item) not in selected_ids
+                ),
             )
             disposition = "APPLIED"
         return type(result)(
@@ -971,12 +989,22 @@ class KernelMemoryToolPort:
         )
         result = await self._rerank_explicit(
             normalized, result,
-            total_deadline=self._deadlines.deadline(KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK)
+            total_deadline=self._deadlines.deadline(KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK),
+            purpose="automatic_recall",
         )
         selected = (
             result.facts[:5]
             if result.rerank_disposition == "APPLIED"
-            else _elastic_candidates(memory, history, 4, 1)
+            else _elastic_candidates(
+                tuple(
+                    item for item in result.facts if not isinstance(item, HistoryCandidate)
+                ),
+                tuple(
+                    item for item in result.facts if isinstance(item, HistoryCandidate)
+                ),
+                4,
+                1,
+            )
         )
         selected_history = tuple(
             item for item in selected if isinstance(item, HistoryCandidate)

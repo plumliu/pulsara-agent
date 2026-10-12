@@ -692,3 +692,45 @@ def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo,
     with pytest.raises(SessionQueryError) as error:
         invoke({'cursor': _encode(token)})
     assert error.value.code == 'CURSOR_INVALID'
+
+
+@pytest.mark.parametrize('query', ['的 了 和 是', 'the is and to', '的 the 了 IS and', '啊 呀 呢 吧 嘛 么 嗯', 'a an am was were being', '的啊 the BE', '呗 嘞 喽 噢 哟 唷 嘿 呵 哇', 'please PLEASE'])
+def test_shared_lexical_analyzer_stopwords_do_not_match_any_field(repo, query):
+    domain = identity('domain').replace(':', '_')
+    caller = new(repo, domain)
+    target = new(repo, domain)
+    turn(repo, target.guard, '的 了 和 是 the is and to 啊 呀 呢 吧 嘛 么 嗯 a an am was were being BE 呗 嘞 喽 噢 哟 唷 嘿 呵 哇 please PLEASE', answer='没有相关实词')
+    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
+    assert search(repo, scope, query, target_session_id=target.guard.session_id)[0] == []
+
+
+def test_stopword_filter_keeps_body_positions_and_removes_unrelated_matches(repo):
+    domain = identity('domain').replace(':', '_')
+    caller = new(repo, domain)
+    target = new(repo, domain)
+    turn(repo, target.guard, '的 了 the 哇 please', answer='无关旧任务')
+    turn(repo, target.guard, '的 了 the 哇 please 紫色纸船', answer='中文检索 running API_key /src/my-file.py')
+    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
+    found, candidates = search(repo, scope, '的 了 the 哇 please API_key', target_session_id=target.guard.session_id)
+    assert len(candidates) == 1
+    raw = found[0]['body'].encode()
+    terms = {
+        raw[start:end].decode()
+        for key in ('hits', 'hits_en', 'hits_tech')
+        for start, end in found[0][key] or ()
+    }
+    assert 'API_key' in terms
+    assert not terms.intersection({'的', '了', 'the', '哇', 'please', ' '})
+    assert earliest_hit(candidates[0].document, (found[0]['hits'], found[0]['hits_en'], found[0]['hits_tech'])) is not None
+
+
+@pytest.mark.parametrize('query', ['不', '没有', '可以', '当前', '之前', '2026', 'not', 'if', 'can', 'one', '我', 'you', '得', '都', '只有', '必须', '就', 'no', 'or', 'all', 'we', 'this'])
+def test_query_analyzer_preserves_task_bearing_words(repo, query):
+    domain = identity('domain').replace(':', '_')
+    caller = new(repo, domain)
+    target = new(repo, domain)
+    turn(repo, target.guard, query, answer='保留原文')
+    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
+    found, candidates = search(repo, scope, query, target_session_id=target.guard.session_id)
+    assert len(candidates) == 1
+    assert candidates[0].messages[0]['text'] == query
