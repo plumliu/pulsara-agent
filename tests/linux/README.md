@@ -36,7 +36,9 @@ Orphan descendants must be reaped by PID 1 for the existing physical process-gro
 completion contract. For a manual `docker run`, always use `--init`. Running
 pytest as a non-reaping PID 1 leaves zombie groups and fails the terminal tests;
 Pulsara does not replace the OS/init owner's reaping responsibility.
-The harness creates and drops its own test databases. No host PostgreSQL port
+The harness creates test databases from PostgreSQL's pristine `template0`, so
+extensions preinstalled in ParadeDB's `template1` do not leak into migration
+fixtures, and drops those databases after use. No host PostgreSQL port
 or saved production configuration is used. The cleanup command removes the
 container database volume.
 

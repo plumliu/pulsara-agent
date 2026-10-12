@@ -20,6 +20,29 @@ from pulsara_agent.ports.session_content import SessionContentRange
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from psycopg.rows import dict_row
 from tests.test_conversation_fork import repo as repo, identity, turn, rows, fork
+from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.storage.schema_verification_service import (
+    acquire_verified_postgres_access_sync,
+)
+from tests.support.postgres_database import (
+    admin_root_dsn,
+    create_migrated_postgres_test_database,
+    drop_postgres_test_database,
+)
+
+
+@pytest.fixture
+def isolated_history_repo():
+    # BM25 statistics span every memory domain in the physical index. A score
+    # drift regression therefore needs its own corpus, not just unique IDs.
+    database = create_migrated_postgres_test_database()
+    try:
+        with acquire_verified_postgres_access_sync(
+            database.runtime_dsn, deadline_monotonic=monotonic() + 30
+        ) as lease:
+            yield ConversationKernelRepository(lease.connection_provider)
+    finally:
+        drop_postgres_test_database(admin_root_dsn(), database.database_name)
 
 
 def new(repo, domain, workspace=None):
@@ -589,8 +612,9 @@ def test_failed_projection_refresh_leaves_old_rows_but_never_returns_stale_body(
     assert candidates == ()  # Canonical comparison rejects their stale body.
 
 
-def test_relevance_paging_survives_corpus_score_drift(repo):
+def test_relevance_paging_survives_corpus_score_drift(isolated_history_repo):
     """Unrelated canonical writes must not strand results above an old score."""
+    repo = isolated_history_repo
     domain = identity('domain').replace(':', '_')
     caller, target = new(repo, domain), new(repo, domain)
     for i in range(2):

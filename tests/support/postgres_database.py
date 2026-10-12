@@ -58,8 +58,13 @@ def create_empty_postgres_test_database() -> MigratedPostgresTestDatabase:
     runtime_dsn = dsn_with_database(runtime_root_dsn, database_name)
 
     with psycopg.connect(admin_root_dsn, autocommit=True) as connection:
+        # ParadeDB preinstalls extensions in template1. The empty-database
+        # fixture must start from PostgreSQL's pristine template so migration
+        # tests own extension installation and deliberately malformed schemas.
         connection.execute(
-            sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name))
+            sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(
+                sql.Identifier(database_name)
+            )
         )
     return MigratedPostgresTestDatabase(
         database_name=database_name,
