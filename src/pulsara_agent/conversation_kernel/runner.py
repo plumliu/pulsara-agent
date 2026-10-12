@@ -30,14 +30,7 @@ from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
 )
-from pulsara_agent.conversation_kernel.visualization import (
-    PostgresCanonicalVisualizationReadPort,
-    VisualizationSource,
-    VisualizationSourceKind,
-    VisualizationSubscription,
-    materialize_visualization_subscription,
-    parse_visualization_source,
-)
+from pulsara_agent.conversation_kernel.visualization import FrozenVisualizationOccurrence, assistant_display_body
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
@@ -429,7 +422,7 @@ class _ImageToolResourceQuoteOwner:
         self,
         *,
         tool_call_id: str,
-        source: ViewImageSource | VisualizationSource,
+        source: ViewImageSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement:
         images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
@@ -937,15 +930,7 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
 class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Protocol):
     """Require one Tool owner to satisfy the runner's two narrow consumers."""
 
-    def visualization_subscriptions(
-        self, turn_id: str
-    ) -> tuple[VisualizationSubscription, ...]: ...
-
-    def consume_visualization_subscriptions(
-        self, turn_id: str, expected: tuple[VisualizationSubscription, ...]
-    ) -> None: ...
-
-    def discard_visualization_subscriptions(self, turn_id: str) -> None: ...
+    def prepare_visualizations(self, body: str, *, deadline_monotonic: float) -> tuple[FrozenVisualizationOccurrence, ...]: ...
 
 
 class ConversationKernelRunner:
@@ -2473,27 +2458,13 @@ class ConversationKernelRunner:
                         complete_turn = not (
                             pending_completion or pending_control_feedback
                         )
-                    visualization_batch = (
-                        self._tools.visualization_subscriptions(turn_id)
-                        if not calls
-                        else ()
-                    )
-                    frozen_visualizations = []
-                    if visualization_batch:
-                        visualization_reader = PostgresCanonicalVisualizationReadPort(
-                            self._repository.connection_provider,
-                            session_id=request.session_id,
-                            workspace_id=await self._resolved_workspace_id(),
+                    frozen_visualizations = ()
+                    if not calls:
+                        frozen_visualizations = await self._io.run(
+                            self._tools.prepare_visualizations,
+                            assistant_display_body(block.text for block in completed.blocks if isinstance(block, CompletedTextBlock)),
+                            deadline_monotonic=self._canonical_deadline(),
                         )
-                        for subscription in visualization_batch:
-                            item = await self._io.run(
-                                materialize_visualization_subscription,
-                                subscription,
-                                visualization_reader,
-                                deadline_monotonic=self._canonical_deadline(),
-                            )
-                            if item is not None:
-                                frozen_visualizations.append(item)
                     settlement = PreparedAssistantMessageSettlement(
                         guard=self._writer_lease.guard,
                         cut=request.cut,
@@ -2537,10 +2508,6 @@ class ConversationKernelRunner:
                                 completion_prepared.permit, committed=False
                             )
                         raise
-                    if visualization_batch:
-                        self._tools.consume_visualization_subscriptions(
-                            turn_id, visualization_batch
-                        )
                     if (
                         control_answer_fenced
                         and self._root_control_completion_settlement is not None
@@ -2794,7 +2761,6 @@ class ConversationKernelRunner:
                 )
             raise
         finally:
-            self._tools.discard_visualization_subscriptions(turn_id)
             if pending_prospective_root_dispatch is not None:
                 pending_prospective_root_dispatch.close()
             if root_completion_phase_opened and self._subagent_runtime is not None:
@@ -3336,17 +3302,11 @@ class ConversationKernelRunner:
             # smallest legal provider display. Predict possible successful FULL
             # delivery with the same classifier used by the canonical reader.
             arguments = thaw_json(call.arguments)
-            possible_image = False
-            if call.tool_name == "visualization_render":
-                try:
-                    _, possible_image = parse_visualization_source(arguments)
-                except ValueError:
-                    pass
             delivery = classify_tool_result_delivery(
                 tool_name=call.tool_name,
                 result_state="SUCCESS",
                 public_arguments=arguments,
-                has_image_attachment=possible_image,
+                has_image_attachment=False,
             )
             suffix_messages.extend(
                 quote[3]
@@ -3360,7 +3320,7 @@ class ConversationKernelRunner:
 
         image_calls: list[tuple[int, CompletedToolCallBlock, str]] = []
         for call_ordinal, call in enumerate(calls):
-            if call.tool_name not in {"view_image", "visualization_render"}:
+            if call.tool_name != "view_image":
                 continue
             try:
                 binding = request.prepared_call.tool_surface.binding(call.tool_name)
@@ -3372,12 +3332,7 @@ class ConversationKernelRunner:
             if not isinstance(arguments, dict):
                 continue
             try:
-                if call.tool_name == "visualization_render":
-                    image_source, review = parse_visualization_source(arguments)
-                    if not review:
-                        continue
-                else:
-                    image_source = parse_view_image_source(arguments)
+                image_source = parse_view_image_source(arguments)
             except ValueError:
                 continue
             image_calls.append(
@@ -3388,7 +3343,6 @@ class ConversationKernelRunner:
                 if image_source.kind
                 in {
                     ViewImageSourceKind.IMAGE_REF,
-                    VisualizationSourceKind.VISUALIZATION_REF,
                 }
                 else "sha256:" + ("0" * 64)
             )

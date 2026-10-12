@@ -19,6 +19,29 @@ function mount(body: string) {
 }
 
 describe('canonical response selection', () => {
+  it('maps CJK bold and deletion to exact original offsets across normalization and repeated text', () => {
+    const body = '😀前文\n\n$$ x+y $$\n\n**方案 A：**固定费用；~~错误：~~修正\n\n**方案 A：**固定费用；~~错误：~~修正';
+    const { container } = mount(body);
+    expect(container.querySelector('[data-source-invalid]')).toBeNull();
+    const bold = container.querySelectorAll('strong')[1].firstChild!;
+    const deleted = container.querySelectorAll('del')[1].firstChild!;
+    const start = body.lastIndexOf('方案 A：');
+    const end = body.lastIndexOf('错误：') + '错误：'.length;
+    expect(select(bold, 0)).toEqual({ type: 'annotation', quote: '方案 A：', source: { entry_id: 'entry:a', start, end: start + 5 } });
+    expect(select(deleted, 0)).toEqual({ type: 'annotation', quote: '错误：', source: { entry_id: 'entry:a', start: end - 3, end } });
+    expect(select(bold, 0, deleted, 3)).toEqual({ type: 'annotation', quote: body.slice(start, end), source: { entry_id: 'entry:a', start, end } });
+  });
+
+  it('preserves source mapping through nested CJK emphasis, links and escaped characters', () => {
+    const body = '前**外层（~~旧值：~~新值 &amp; [链接](https://example.com)）**后';
+    const { container, leaves } = mount(body);
+    expect(container.querySelector('strong del')?.textContent).toBe('旧值：');
+    expect(container.querySelector('[data-source-invalid]')).toBeNull();
+    expect(select(leaves[0].firstChild!, 0, leaves.at(-1)!.firstChild!, 1)?.quote).toBe(body);
+    const link = container.querySelector('a [data-source-text]')!.firstChild!;
+    expect(select(link, 0)?.source).toEqual({ entry_id: 'entry:a', start: body.indexOf('链接'), end: body.indexOf('链接') + 2 });
+  });
+
   it('maps decoded entities, escaped text and UTF16 inside a text node', () => {
     const body = '甲 &amp; 乙😀 \\*重复 &#x1F600; e\u0301';
     const { leaves } = mount(body); const text = leaves[0].firstChild!;

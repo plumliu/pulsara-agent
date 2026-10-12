@@ -791,7 +791,7 @@ export function projectAgentTaskConversation(
         role: 'assistant',
         assistantKind: record.entryKind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
         time: formatTime(record.acceptedAt),
-        body: projected?.body ?? (record.blocks.filter(block => block.kind === 'TEXT').sort((a, b) => a.ordinal - b.ordinal).map(block => block.text ?? '').join('\n\n') || taskAssistantBody(record.entryKind, body)),
+        body: projected?.body ?? (record.blocks.filter(block => block.kind === 'TEXT').sort((a, b) => a.ordinal - b.ordinal).map(block => block.text ?? '').filter(Boolean).join('\n\n') || taskAssistantBody(record.entryKind, body)),
         reasoning: projected?.reasoning?.map((block) => ({ ...block })),
         traces: traces.length ? traces : undefined,
         status: projected?.status === 'running' ? 'running' : 'completed',
@@ -4800,7 +4800,6 @@ function toolDisplayName(name: string): string {
   if (normalized.includes('send_agent_message')) return '发送任务消息';
   if (normalized.includes('stop_agent')) return '停止任务';
   if (normalized === 'list_agent_models') return '查看可用模型';
-  if (normalized === 'visualization_render') return '渲染可视化';
   if (normalized.includes('list_agents')) return '查看任务';
   if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
@@ -4839,7 +4838,6 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized.includes('send_agent_message')) return '向任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定任务';
     if (normalized === 'list_agent_models') return '正在读取已保存的模型配置';
-    if (normalized === 'visualization_render') return value.review === true ? '正在生成可视化预览' : '正在准备可视化';
     if (normalized.includes('list_agents')) return '读取当前任务状态';
     if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');

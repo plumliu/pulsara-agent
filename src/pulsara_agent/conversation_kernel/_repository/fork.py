@@ -378,7 +378,6 @@ class _ForkOperations:
                 }
                 for visualization in material.visualizations:
                     source_assistant_id = str(visualization["assistant_entry_id"])
-                    source_result_id = visualization["source_result_entry_id"]
                     _insert(
                         connection,
                         "assistant_visualizations",
@@ -390,11 +389,7 @@ class _ForkOperations:
                             "imported_history_group_id": group_map[
                                 source_group_by_entry[source_assistant_id]
                             ],
-                            "source_result_entry_id": (
-                                None
-                                if source_result_id is None
-                                else entry_map.get(str(source_result_id))
-                            ),
+                            "source_filename": visualization["source_filename"],
                             "state": visualization["state"],
                             "blob_id": visualization["blob_id"],
                             "failure_code": visualization["failure_code"],

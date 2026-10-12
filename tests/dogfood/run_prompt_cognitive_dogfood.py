@@ -793,79 +793,53 @@ async def _case_ui_native(
     row["decision_passed"] = bool(
         "|" in reply
         and str(deliverable) in reply
-        and not any(item["tool_name"] == "visualization_render" for item in trace)
+        and "```pulsara-visualization" not in reply
     )
     await core.close_session(session.host_session_id)
     return row
 
 
-async def _case_visualization_metadata(
-    *, core, runtime, connection, root, calls
-) -> list[dict[str, object]]:
-    workspace = _case_workspace(root, "saved-visualization-metadata")
-    visualization_dir = workspace / ".pulsara" / "visualizations"
-    visualization_dir.mkdir(parents=True)
-    html = visualization_dir / "threshold.html"
-    html.write_text(
-        "<!doctype html><html><head><meta charset='utf-8'><title>Threshold demo</title>"
-        "<style>body{font:16px system-ui;padding:2rem}label{display:block}"
-        "#bar{height:2rem;background:#4263eb;margin-top:1rem}</style></head>"
-        "<body><h1>Threshold demo</h1><label>Threshold <input id='v' type='range' "
-        "min='0' max='100' value='40'></label><div id='bar'></div>"
-        "<script>document.querySelector('#v').oninput=e=>document.querySelector('#bar').style.width=e.target.value+'%';"
-        "document.querySelector('#bar').style.width='40%'</script></body></html>\n",
-        encoding="utf-8",
-    )
-    first_prompt = (
-        "Schedule the interactive threshold page at "
-        ".pulsara/visualizations/threshold.html with visualization_render, review=false. "
-        "Then briefly say that it appears below your reply. Do not inspect credentials."
-    )
+async def _case_inline_visualization(*, core, runtime, connection, root, calls) -> list[dict[str, object]]:
+    workspace = _case_workspace(root, "inline-visualization")
     first, session, _ = await _run_turn(
-        core=core,
-        runtime=runtime,
-        connection=connection,
-        workspace=workspace,
-        calls=calls,
-        case_name="publish_interactive_html",
-        prompt=first_prompt,
+        core=core, runtime=runtime, connection=connection, workspace=workspace, calls=calls,
+        case_name="publish_inline_html",
+        prompt=("Create two self-contained HTML files: chart.html with a working labeled slider "
+                "and one data-pulsara-visualization-root, and page.html as a whole-page layout without that marker. "
+                "Use window.PulsaraVisualization when available with standalone fallbacks. "
+                "Inspect both with view_image, then show two independent galleries in your reply: "
+                "the first top-level pulsara-visualization fence must contain chart.html and page.html, one per line; "
+                "the second fence must contain only chart.html, with one paragraph before, between and after the galleries. "
+                "Do not inspect credentials."),
     )
-    first_trace = first["tool_trace"]
-    assert isinstance(first_trace, list)
-    visualization_calls = [
-        item for item in first_trace if item["tool_name"] == "visualization_render"
-    ]
+    def snapshots():
+        with session.repository.connection_provider.connection(lane=PostgresConnectionLane.ARTIFACT,
+                row_factory=dict_row, deadline_monotonic=monotonic()+30) as db:
+            return [dict(row) for row in db.execute(
+                """SELECT v.assistant_entry_id, v.ordinal, v.source_filename, v.state,
+                          convert_from(b.body, 'UTF8') AS html
+                   FROM pulsara_v3.assistant_visualizations v
+                   LEFT JOIN pulsara_v3.blobs b ON b.id=v.blob_id AND b.workspace_id=v.workspace_id
+                   WHERE v.session_id=%s ORDER BY v.assistant_entry_id, v.ordinal""",
+                (session.session_id,),
+            ).fetchall()]
+    before = await asyncio.to_thread(snapshots)
+    first["snapshots"] = before
+    first["decision_passed"] = (first["turn_error"] is None and len(before) == 3
+        and all(row["state"] == "READY" for row in before)
+        and sum(item["tool_name"] == "view_image" for item in first["tool_trace"]) >= 2)
     second, _, _ = await _run_turn(
-        core=core,
-        runtime=runtime,
-        connection=connection,
-        workspace=workspace,
-        calls=calls,
-        case_name="existing_visualization_ref_is_metadata",
-        prompt=(
-            "In one short sentence, state what the saved display is for. It already "
-            "exists from the earlier reply; do not request a screenshot and do not "
-            "create or schedule another visualization."
-        ),
-        existing_session=session,
+        core=core, runtime=runtime, connection=connection, workspace=workspace, calls=calls,
+        case_name="edit_and_republish_inline_html", existing_session=session,
+        prompt="Change chart.html to include the visible text 'SECOND VERSION', inspect it with view_image, and display it once in your new reply. Do not display page.html again.",
     )
-    second_trace = second["tool_trace"]
-    assert isinstance(second_trace, list)
-    second_calls = second["provider_calls"]
-    wire_text = json.dumps(second_calls, ensure_ascii=False)
-    second["metadata_input_observed"] = "pulsara_visualizations" in wire_text
-    second["metadata_handling_observed"] = (
-        "Runtime metadata for HTML saved with an earlier assistant reply" in wire_text
-    )
-    second["decision_passed"] = bool(
-        visualization_calls
-        and second["metadata_input_observed"]
-        and second["metadata_handling_observed"]
-        and not any(item["tool_name"] == "visualization_render" for item in second_trace)
-        and "threshold" in str(second.get("reply")).casefold()
-    )
-    first["published_visualization_calls"] = visualization_calls
-    first["decision_passed"] = bool(visualization_calls)
+    after = await asyncio.to_thread(snapshots)
+    second["snapshots"] = after
+    old_ids = {row["assistant_entry_id"] for row in before}
+    second["decision_passed"] = (second["turn_error"] is None
+        and [row for row in after if row["assistant_entry_id"] in old_ids] == before
+        and len(after) == 4 and any('SECOND VERSION' in (row["html"] or '') for row in after if row["assistant_entry_id"] not in old_ids)
+        and 'pulsara_visualizations' not in json.dumps(second['provider_calls']))
     await core.close_session(session.host_session_id)
     return [first, second]
 
@@ -1264,9 +1238,9 @@ async def _run(
                             calls=calls,
                         )
                     )
-                if "visualization_metadata" in selected:
+                if "inline_visualization" in selected:
                     runs.extend(
-                        await _case_visualization_metadata(
+                        await _case_inline_visualization(
                             core=core,
                             runtime=runtime,
                             connection=connection,
@@ -1351,11 +1325,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--cases",
-        default="agents_and_ordinary,non_bypass,active_skill,terminal_poll,stable_observation,changed_observation,handoff,unknown_effect,ui_native,visualization_metadata,plan_review",
+        default="agents_and_ordinary,non_bypass,active_skill,terminal_poll,stable_observation,changed_observation,handoff,unknown_effect,ui_native,inline_visualization,plan_review",
         help=(
             "comma-separated cases: agents_and_ordinary, non_bypass, active_skill, "
             "terminal_poll, stable_observation, changed_observation, handoff, "
-            "unknown_effect, ui_native, visualization_metadata, "
+            "unknown_effect, ui_native, inline_visualization, "
             "plan_review, plan_review_approval"
         ),
     )
@@ -1375,7 +1349,7 @@ def main() -> int:
         "handoff",
         "unknown_effect",
         "ui_native",
-        "visualization_metadata",
+        "inline_visualization",
         "plan_review",
         "plan_review_approval",
     }

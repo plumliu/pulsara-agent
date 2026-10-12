@@ -1,11 +1,13 @@
 'use client';
-import { useEffect, useMemo, useRef, type CSSProperties, type RefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { visualizationFrameMeasurementScript, visualizationLayoutMessageType } from '../lib/visualization-frame';
+
+import { environmentBootstrap, environmentMessageType, type VisualizationEnvironment } from '../lib/visualization-environment';
 
 const isolatedPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; worker-src 'none'; frame-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const scriptValue = (value: string) => JSON.stringify(value).replace(/</g, '\\u003c');
 
-type HtmlPreviewSource = { html: string; measure?: boolean; allowTextSelection?: boolean } | { url: string };
+type HtmlPreviewSource = { html: string; measure?: boolean; allowTextSelection?: boolean; environment?: VisualizationEnvironment } | { url: string };
 
 // Visualization content is an interactive artifact, outside the reply's text
 // selection. Keep editing inside its own controls functional.
@@ -30,22 +32,34 @@ export function htmlPreviewShell(source: HtmlPreviewSource): string {
   }
   const prefix = url ? `${url.origin}${url.pathname.split('/resources/')[0]}/resources/` : undefined;
   const policy = prefix ? isolatedPolicy.replace("frame-src 'none'", `frame-src ${prefix}`) : isolatedPolicy;
-  const inner = local ? source.url : `<!doctype html><meta http-equiv="Content-Security-Policy" content="${isolatedPolicy}">${source.allowTextSelection === false ? nonselectableContent : ''}${source.html.replace(/^\s*<!doctype[^>]*>/i, '')}${source.measure ? visualizationFrameMeasurementScript : ''}`;
+  const inner = local ? source.url : `<!doctype html><meta http-equiv="Content-Security-Policy" content="${isolatedPolicy}">${source.environment ? environmentBootstrap(source.environment) : ''}${source.allowTextSelection === false ? nonselectableContent : ''}${source.html.replace(/^\s*<!doctype[^>]*>/i, '')}${source.measure ? visualizationFrameMeasurementScript : ''}`;
   return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,iframe{margin:0;width:100%;height:100%;border:0;display:block;overflow:hidden}</style><iframe id="content" sandbox="allow-scripts" referrerpolicy="no-referrer" title="预览内容"></iframe><script>
 const frame=document.getElementById('content');
 const report=type=>parent.postMessage({type},'*');
+let environment=${scriptValue(!local && source.environment ? JSON.stringify(source.environment) : 'null')};
+environment=JSON.parse(environment);
+const validEnv=e=>e && ['light','dark'].includes(e.theme) && typeof e.visible==='boolean' && typeof e.reducedMotion==='boolean' && e.colors && ['background','foreground','muted','accent','border','soft'].every(k=>typeof e.colors[k]==='string');
+const sendEnvironment=()=>{if(environment)frame.contentWindow.postMessage({type:'${environmentMessageType}',environment},'*');};
 addEventListener('securitypolicyviolation',()=>report('pulsara-preview-error'));
 addEventListener('message',event=>{
+  if(event.source===parent && event.data?.type==='${environmentMessageType}' && validEnv(event.data.environment)){
+    const e=event.data.environment;
+    environment={theme:e.theme,visible:e.visible,reducedMotion:e.reducedMotion,colors:Object.fromEntries(['background','foreground','muted','accent','border','soft'].map(k=>[k,e.colors[k]]))};
+    sendEnvironment();return;
+  }
   if(event.source!==frame.contentWindow || !event.data || typeof event.data!=='object')return;
   const d=event.data;
+  if(d.type==='pulsara-visualization-environment-ready')sendEnvironment();
   if(d.type==='pulsara-preview-error')report(d.type);
   if(d.type==='${visualizationLayoutMessageType}'){
-    if(d.mode==='page')parent.postMessage({type:d.type,mode:'page'},'*');
+    if(!d.viewport || !Number.isFinite(d.viewport.width) || !Number.isFinite(d.viewport.height))return;
+    const viewport={width:d.viewport.width,height:d.viewport.height};
+    if(d.mode==='page')parent.postMessage({type:d.type,mode:'page',viewport},'*');
     if(d.mode==='root' && d.rect && ['x','y','width','height'].every(k=>Number.isFinite(d.rect[k])))
-      parent.postMessage({type:d.type,mode:'root',rect:{x:d.rect.x,y:d.rect.y,width:d.rect.width,height:d.rect.height}},'*');
+      parent.postMessage({type:d.type,mode:'root',viewport,rect:{x:d.rect.x,y:d.rect.y,width:d.rect.width,height:d.rect.height}},'*');
   }
 });
-frame.addEventListener('load',()=>report('pulsara-preview-ready'));
+frame.addEventListener('load',()=>{sendEnvironment();report('pulsara-preview-ready');});
 frame.${local ? 'src' : 'srcdoc'}=${scriptValue(inner)};
 </script>`;
 }
@@ -63,12 +77,22 @@ export function SandboxedHtmlPreview({ source, title, frameRef, style, onStatus 
   const url = 'url' in source ? source.url : undefined;
   const measure = 'measure' in source && source.measure;
   const allowTextSelection = 'allowTextSelection' in source ? source.allowTextSelection : undefined;
-  const shell = useMemo(() => htmlPreviewShell(url !== undefined ? { url } : { html: html ?? '', measure, allowTextSelection }), [html, url, measure, allowTextSelection]);
+  const [initialEnvironment] = useState(() => 'environment' in source ? source.environment : undefined);
+  const environment = 'environment' in source ? source.environment : undefined;
+  const environmentRef = useRef(environment);
+  useEffect(() => {
+    environmentRef.current = environment;
+    if (environment) ref.current?.contentWindow?.postMessage({ type: environmentMessageType, environment }, '*');
+  }, [environment, ref]);
+  const shell = useMemo(() => htmlPreviewShell(url !== undefined ? { url } : { html: html ?? '', measure, allowTextSelection, environment: initialEnvironment }), [html, url, measure, allowTextSelection, initialEnvironment]);
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== ref.current?.contentWindow) return;
       if (event.data?.type === 'pulsara-preview-error') onStatus?.('error');
-      if (event.data?.type === 'pulsara-preview-ready') onStatus?.('ready');
+      if (event.data?.type === 'pulsara-preview-ready') {
+        if (environmentRef.current) ref.current?.contentWindow?.postMessage({type: environmentMessageType, environment: environmentRef.current}, '*');
+        onStatus?.('ready');
+      }
     };
     window.addEventListener('message', receive);
     return () => window.removeEventListener('message', receive);

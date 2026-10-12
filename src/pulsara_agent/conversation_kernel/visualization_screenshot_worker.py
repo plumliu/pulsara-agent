@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from io import BytesIO
 from math import isfinite
 import re
@@ -39,13 +40,17 @@ def main() -> None:
     html = sys.stdin.buffer.read().decode("utf-8")
     # Keep standards mode while placing the restrictive CSP before author markup.
     html = re.sub(r"^\s*<!doctype[^>]*>", "", html, count=1, flags=re.IGNORECASE)
-    html = f'<!doctype html><meta http-equiv="Content-Security-Policy" content="{_CSP}">' + html
+    bootstrap = Path(__file__).with_name('visualization_environment.js').read_text().removeprefix('export default ')
+    environment = '<script>(' + bootstrap + ')(null)</script>'
+    html = f'<!doctype html><meta http-equiv="Content-Security-Policy" content="{_CSP}">' + environment + html
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
             context = browser.new_context(
                 viewport={"width": _VIEWPORT_WIDTH, "height": _VIEWPORT_HEIGHT},
                 device_scale_factor=1,
+                color_scheme="light",
+                reduced_motion="reduce",
                 service_workers="block",
                 accept_downloads=False,
             )
@@ -56,17 +61,16 @@ def main() -> None:
             page.evaluate(
                 "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
             )
-            roots = page.locator("[data-pulsara-visualization-root]")
-            if (
-                roots.count() == 1
-                and roots.evaluate(
-                    "root => root.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})"
-                )
-                and _usable_root_box(roots.bounding_box())
-            ):
-                screenshot = roots.screenshot(type="png", timeout=10_000)
+            selector = Path(__file__).with_name("visualization_root.js").read_text()
+            # The shared selector includes comments before the export.
+            selector = selector.replace("export default ", "", 1)
+            root_handle = page.evaluate_handle("() => {" + selector + "; return visualizationRoot(); }")
+            root = root_handle.as_element()
+            if root is not None and _usable_root_box(root.bounding_box()):
+                screenshot = root.screenshot(type="png", timeout=10_000)
             else:
                 screenshot = page.screenshot(type="png", full_page=False, timeout=10_000)
+            root_handle.dispose()
             if "--thumbnail" in sys.argv:
                 from PIL import Image
 

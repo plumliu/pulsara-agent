@@ -23,6 +23,6 @@ Library and product contracts consulted:
 - [pandas joins](https://pandas.pydata.org/docs/reference/api/pandas.merge.html).
 - [Plotly self-contained HTML](https://plotly.com/python/interactive-html-export/).
 - scikit-learn [PCA](https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.PCA.html) and [silhouette analysis](https://scikit-learn.org/stable/auto_examples/cluster/plot_kmeans_silhouette_analysis.html): feature scaling, explained variance, and interpreting clustering diagnostics in the optional multi-view example.
-- Pulsara `visualization_render` tool descriptor, source parser, and `PULSARA_VISUALIZATION_SUBSCRIPTION_IMPLEMENTATION_SPEC.zh.md`: workspace-root paths, inline resources, publication timing, and optional screenshot review.
+- Pulsara inline visualization specification and `view_image` descriptor: workspace-root paths, frozen publication, screenshot review and host environment.
 
 Lingzhi source was read for workflow comparison; no repository license was identified in the collected version and no code was copied. Professional/statistical references inform optional methods; they do not mandate a full audit or specialized workflow for every task.

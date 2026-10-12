@@ -1176,9 +1176,7 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
     ordinal integer NOT NULL CHECK (ordinal >= 0),
     turn_id text,
     imported_history_group_id text,
-    source_result_entry_id text,
-    source_result_entry_kind text NOT NULL DEFAULT 'TOOL_RESULT'
-        CHECK (source_result_entry_kind = 'TOOL_RESULT'),
+    source_filename text NOT NULL,
     state text NOT NULL CHECK (state IN ('READY', 'FAILED')),
     blob_id text,
     failure_code text,
@@ -1196,19 +1194,10 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
         REFERENCES pulsara_v3.transcript_entries (
             session_id, id, imported_history_group_id
         ) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, source_result_entry_id, source_result_entry_kind)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, source_result_entry_id, turn_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id, turn_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, source_result_entry_id, imported_history_group_id)
-        REFERENCES pulsara_v3.transcript_entries (
-            session_id, id, imported_history_group_id
-        ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
-        (turn_id IS NOT NULL AND imported_history_group_id IS NULL
-            AND source_result_entry_id IS NOT NULL)
+        (turn_id IS NOT NULL AND imported_history_group_id IS NULL)
         OR
         (turn_id IS NULL AND imported_history_group_id IS NOT NULL)
     ),

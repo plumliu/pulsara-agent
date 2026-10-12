@@ -1150,27 +1150,17 @@ def test_final_wire_quote_is_one_shot_without_creating_an_executable_plan(
 
 
 @pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
-def test_native_replay_replaces_assistant_but_keeps_visualization_metadata(
+def test_native_replay_preserves_inline_visualization_marker(
     api: str,
 ) -> None:
     assistant_entry_id = "entry:visualization-owner"
-    metadata_text = (
-        '{"pulsara_visualizations":[{"visualization_ref":"sha256:' + "a" * 64 + '"}]}'
-    )
+    marker_text = "answer\n\n```pulsara-visualization\nchart.html\n```"
     assistant = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.ASSISTANT,
         source_entry_id=assistant_entry_id,
         source_entry_sequence=1,
         source_turn_id="turn:earlier",
-        content=(LLMTextPart("answer"),),
-    )
-    visualization_metadata = FrozenProviderInputItem(
-        item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id=assistant_entry_id,
-        source_entry_sequence=1,
-        source_turn_id="turn:earlier",
-        content=(LLMTextPart(metadata_text),),
-        input_origin=CanonicalInputOriginKind.VISUALIZATION_METADATA,
+        content=(LLMTextPart(marker_text),),
     )
     next_user = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
@@ -1183,7 +1173,7 @@ def test_native_replay_replaces_assistant_but_keeps_visualization_metadata(
     port = _port(api=api)
     request, _tool_port = _prepared_execution(
         port,
-        canonical_items=(assistant, visualization_metadata, next_user),
+        canonical_items=(assistant, next_user),
     )
     try:
         compiled = request.compiled_input
@@ -1192,20 +1182,19 @@ def test_native_replay_replaces_assistant_but_keeps_visualization_metadata(
             for index, placement in enumerate(compiled.message_placements)
             if placement.origin_entry_id == assistant_entry_id
         ]
-        assert len(owner_indexes) == 2
+        assert len(owner_indexes) == 1
         assert [compiled.messages[index].role for index in owner_indexes] == [
             MessageRole.ASSISTANT,
-            MessageRole.USER,
         ]
         assistant_index = owner_indexes[0]
         target = port.replay_target(request.prepared_call)
         native_item = (
-            {"role": "assistant", "content": "answer", "reasoning_content": "thought"}
+            {"role": "assistant", "content": marker_text, "reasoning_content": "thought"}
             if api == "openai_chat_completions"
             else {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "answer"}],
+                "content": [{"type": "output_text", "text": marker_text}],
             }
         )
         frozen_native_item = freeze_json(native_item)
@@ -1274,8 +1263,8 @@ def test_native_replay_replaces_assistant_but_keeps_visualization_metadata(
         assert len(plan.replacements) == 1
         assert plan.replacements[0].message_count == 1
         assert plan.replacements[0].first_message_ordinal == assistant_index
-        assert metadata_text in str(wire_items[native_index + 1])
-        assert any("continue" in str(item) for item in wire_items[native_index + 2 :])
+        assert marker_text in str(wire_items[native_index]).replace("\\n", "\n")
+        assert any("continue" in str(item) for item in wire_items[native_index + 1 :])
     finally:
         request.surface_borrow.close()
 

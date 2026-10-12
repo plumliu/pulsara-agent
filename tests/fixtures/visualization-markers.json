@@ -1,0 +1,218 @@
+[
+  {
+    "name": "single",
+    "body": "```pulsara-visualization\nchart.html\n```",
+    "paths": [
+      "chart.html"
+    ]
+  },
+  {
+    "name": "invalid before valid",
+    "body": "```pulsara-visualization\n\n```\n\n```pulsara-visualization\ngood.html\n```",
+    "paths": [
+      "",
+      "good.html"
+    ]
+  },
+  {
+    "name": "multiline",
+    "body": "```pulsara-visualization\na.html\nb.html\n```",
+    "paths": [
+      "a.html",
+      "b.html"
+    ],
+    "groups": [
+      2
+    ]
+  },
+  {
+    "name": "crlf",
+    "body": "```pulsara-visualization\r\n中文 path.HTM\r\n```",
+    "paths": [
+      "中文 path.HTM"
+    ]
+  },
+  {
+    "name": "spaced",
+    "body": "   ~~~~  pulsara-visualization \r\n   a.html\r\n   ~~~~~\r\n",
+    "paths": [
+      "a.html"
+    ]
+  },
+  {
+    "name": "unclosed",
+    "body": "```pulsara-visualization\na.html",
+    "paths": []
+  },
+  {
+    "name": "uppercase",
+    "body": "```Pulsara-Visualization\na.html\n```",
+    "paths": []
+  },
+  {
+    "name": "params",
+    "body": "```pulsara-visualization x\na.html\n```",
+    "paths": []
+  },
+  {
+    "name": "quote",
+    "body": "> ```pulsara-visualization\n> a.html\n> ```",
+    "paths": []
+  },
+  {
+    "name": "list",
+    "body": "- item\n\n  ```pulsara-visualization\n  a.html\n  ```",
+    "paths": []
+  },
+  {
+    "name": "example",
+    "body": "````markdown\n```pulsara-visualization\na.html\n```\n````",
+    "paths": []
+  },
+  {
+    "name": "html",
+    "body": "<div>\n```pulsara-visualization\na.html\n```\n</div>",
+    "paths": []
+  },
+  {
+    "name": "math",
+    "body": "$$\n```pulsara-visualization\na.html\n```\n$$",
+    "paths": []
+  },
+  {
+    "name": "open math",
+    "body": "$$\n```pulsara-visualization\na.html\n```",
+    "paths": []
+  },
+  {
+    "name": "math bracket",
+    "body": "\\[\n```pulsara-visualization\na.html\n```\n\\]",
+    "paths": []
+  },
+  {
+    "name": "bracket trailing prose",
+    "body": "\\[\n```pulsara-visualization\na.html\n```\n\\] tail\n\n```pulsara-visualization\nb.html\n```",
+    "paths": [
+      "a.html",
+      "b.html"
+    ]
+  },
+  {
+    "name": "dollar invalid meta",
+    "body": "$$ x $\n```pulsara-visualization\na.html\n```\n$$\n\n```pulsara-visualization\nb.html\n```",
+    "paths": [
+      "a.html"
+    ]
+  },
+  {
+    "name": "dollar inline then marker",
+    "body": "$$ x $$\n```pulsara-visualization\nb.html\n```",
+    "paths": [
+      "b.html"
+    ]
+  },
+  {
+    "name": "bracket open EOF",
+    "body": "\\[\n```pulsara-visualization\nb.html\n```",
+    "paths": [
+      "b.html"
+    ]
+  },
+  {
+    "name": "bracket nested",
+    "body": "\\[\n```pulsara-visualization\na.html\n```\n\\[\n```pulsara-visualization\nb.html\n```\n\\]",
+    "paths": [
+      "a.html"
+    ]
+  },
+  {
+    "name": "non Markdown info whitespace 0xa0",
+    "body": "``` pulsara-visualization \na.html\n```\n\n```pulsara-visualization\nb.html\n```",
+    "paths": [
+      "b.html"
+    ]
+  },
+  {
+    "name": "non Markdown info whitespace 0x85",
+    "body": "```pulsara-visualization\na.html\n```\n\n```pulsara-visualization\nb.html\n```",
+    "paths": [
+      "b.html"
+    ]
+  },
+  {
+    "name": "escaped bracket closer",
+    "body": "\\[\n```pulsara-visualization\na.html\n```\n\\\\]\n\n```pulsara-visualization\nb.html\n```",
+    "paths": [
+      "a.html",
+      "b.html"
+    ]
+  },
+  {
+    "name": "bracket invalid close then legal close",
+    "body": "\\[\n```pulsara-visualization\na.html\n```\n\\] tail\n```pulsara-visualization\nb.html\n```\n\\]\n\n```pulsara-visualization\nc.html\n```",
+    "paths": [
+      "c.html"
+    ]
+  },
+  {
+    "name": "galleries and blanks",
+    "body": "```pulsara-visualization\n a.html \n\t\n b.html\n```\n\nbetween\n\n```pulsara-visualization\nc.html\n```",
+    "paths": [
+      "a.html",
+      "b.html",
+      "c.html"
+    ],
+    "groups": [
+      2,
+      1
+    ]
+  },
+  {
+    "name": "failed gallery before multi",
+    "body": "```pulsara-visualization\n \t\n```\n\n```pulsara-visualization\nno.png\na.html\n```",
+    "paths": [
+      "",
+      "no.png",
+      "a.html"
+    ],
+    "groups": [
+      1,
+      2
+    ]
+  },
+  {
+    "name": "non ASCII path whitespace is not blank",
+    "body": "```pulsara-visualization\n\na.html\n```",
+    "paths": [
+      "",
+      "a.html"
+    ],
+    "groups": [
+      2
+    ]
+  },
+  {
+    "name": "crlf galleries and blank lines",
+    "body": "```pulsara-visualization\r\na.html\r\n\r\nb.html\r\n```\r\n\r\n```pulsara-visualization\r\nc.html\r\n```",
+    "paths": [
+      "a.html",
+      "b.html",
+      "c.html"
+    ],
+    "groups": [
+      2,
+      1
+    ]
+  },
+  {
+    "name": "bare cr multiline gallery",
+    "body": "```pulsara-visualization\ra.html\rb.html\r```",
+    "paths": [
+      "a.html",
+      "b.html"
+    ],
+    "groups": [
+      2
+    ]
+  }
+]

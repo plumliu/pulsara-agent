@@ -1,5 +1,7 @@
 import { parse, preprocess, postprocess } from 'micromark';
 import { gfm } from 'micromark-extension-gfm';
+import { cjkFriendlyExtension } from 'micromark-extension-cjk-friendly';
+import { gfmStrikethroughCjkFriendly } from 'micromark-extension-cjk-friendly-gfm-strikethrough';
 import { math } from 'micromark-extension-math-extended';
 import { decodeString } from 'micromark-util-decode-string';
 import type { Element, Root, RootContent } from 'hast';
@@ -76,7 +78,9 @@ function linearUnits(value: string, start: number): SourceUnit[] {
 
 /** micromark owns syntax/decoding. This adapter tracks only emitted character boundaries. */
 function sourceUnits(text: string): { units: SourceUnit[]; code: Map<number, SourceUnit[]> } {
-  const events = postprocess(parse({ extensions: [gfm(), math({ singleDollarTextMath: true })] })
+  // Match MarkdownBody's remark extensions: CJK syntax is parsed in place,
+  // never rewritten, so rendered selections retain canonical source offsets.
+  const events = postprocess(parse({ extensions: [gfm(), cjkFriendlyExtension(), gfmStrikethroughCjkFriendly(), math({ singleDollarTextMath: true })] })
     .document().write(preprocess()(text, undefined, true)));
   const units: SourceUnit[] = [];
   const stack: string[] = [];
@@ -144,7 +148,7 @@ export function rehypeSourceMapping(normalized: NormalizedMarkdown) {
           const codeClasses = code?.type === 'element' && Array.isArray(code.properties.className) ? code.properties.className.map(String) : [];
           const language = codeClasses.find(name => name.startsWith('language-'))?.slice(9).toLowerCase();
           const isDiagram = code?.type === 'element' && markdownDiagramFormat(language, toText(code, { whitespace: 'pre' }).replace(/\n$/, ''));
-          if (pos && (node.tagName === 'img' || classes.includes('math-copy-target') || isDiagram)) {
+          if (pos && (node.tagName === 'img' || classes.includes('math-copy-target') || isDiagram || (code?.type === 'element' && typeof code.properties['data-visualization-ordinal'] === 'number'))) {
             node.properties['data-source-atom'] = `${pos.originalStart}:${pos.originalEnd}`;
             return node;
           }

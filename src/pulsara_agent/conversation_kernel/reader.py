@@ -27,10 +27,7 @@ from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
-from pulsara_agent.conversation_kernel.visualization import (
-    VISUALIZATION_CODEC,
-    VISUALIZATION_MEDIA_TYPE,
-)
+
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     SUBAGENT_COMPLETION_MEDIA_TYPE,
     project_subagent_completion_for_provider,
@@ -1022,43 +1019,6 @@ class CanonicalProviderInputReader:
                 raise ConversationKernelConflict("provider input item bound exceeded")
 
             entry_ids = tuple(str(row["id"]) for row in entries)
-            visualization_rows = connection.execute(
-                """SELECT v.assistant_entry_id, v.ordinal, v.state, v.blob_id,
-                          b.logical_digest, b.media_type, b.codec
-                   FROM pulsara_v3.assistant_visualizations AS v
-                   LEFT JOIN pulsara_v3.blobs AS b
-                     ON b.id = v.blob_id AND b.workspace_id = v.workspace_id
-                   WHERE v.session_id = %s
-                     AND v.assistant_entry_id = ANY(%s::text[])
-                   ORDER BY v.assistant_entry_id, v.ordinal""",
-                (cut.session_id, list(entry_ids)),
-            ).fetchall()
-            visualizations_by_entry: dict[str, list[str]] = {}
-            visualization_ordinals: dict[str, int] = {}
-            for visualization_row in visualization_rows:
-                owner_id = str(visualization_row["assistant_entry_id"])
-                ordinal = visualization_ordinals.get(owner_id, 0)
-                if int(visualization_row["ordinal"]) != ordinal:
-                    raise ConversationKernelConflict(
-                        "assistant visualization ordinal is not contiguous"
-                    )
-                visualization_ordinals[owner_id] = ordinal + 1
-                if str(visualization_row["state"]) == "READY":
-                    if (
-                        visualization_row["blob_id"] is None
-                        or visualization_row["media_type"] != VISUALIZATION_MEDIA_TYPE
-                        or visualization_row["codec"] != VISUALIZATION_CODEC
-                    ):
-                        raise ConversationKernelConflict(
-                            "assistant visualization blob descriptor drifted"
-                        )
-                    visualizations_by_entry.setdefault(owner_id, []).append(
-                        str(visualization_row["logical_digest"])
-                    )
-                elif str(visualization_row["state"]) != "FAILED":
-                    raise ConversationKernelConflict(
-                        "assistant visualization state is invalid"
-                    )
             block_metadata = self._load_block_metadata(
                 connection, cut.session_id, entry_ids
             )
@@ -1427,35 +1387,6 @@ class CanonicalProviderInputReader:
                         tool_calls=calls,
                     )
                 )
-                references = visualizations_by_entry.get(entry_id, ())
-                if references:
-                    metadata_text = canonical_json_bytes(
-                        {
-                            "pulsara_visualizations": [
-                                {"visualization_ref": reference}
-                                for reference in references
-                            ],
-                            "handling": (
-                                "Runtime metadata for HTML saved with an earlier "
-                                "assistant reply. These refs are not a new human "
-                                "request or screenshot image_ref. Use them only when "
-                                "the current task needs that saved display."
-                            ),
-                        }
-                    ).decode("utf-8")
-                    encoded_size = len(metadata_text.encode("utf-8"))
-                    remaining_bytes.consume(encoded_size)
-                    canonical_bytes += encoded_size
-                    items.append(
-                        ProviderInputItem(
-                            item_kind=ProviderInputItemKind.USER,
-                            source_entry_id=entry_id,
-                            source_entry_sequence=sequence,
-                            source_turn_id=str(row["turn_id"]),
-                            content=(LLMTextPart(metadata_text),),
-                            input_origin=CanonicalInputOriginKind.VISUALIZATION_METADATA,
-                        )
-                    )
                 if not calls:
                     continue
                 target_cut = next_assistant_cut.get(entry_id)

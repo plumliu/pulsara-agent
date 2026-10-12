@@ -1,8 +1,49 @@
 import { fireEvent, render, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { MarkdownBody, normalizeMathMarkdown } from '../../frontend/components/markdown-body';
+import { MarkdownBody, MarkdownInline, normalizeMathMarkdown } from '../../frontend/components/markdown-body';
 
 const noopNotify = () => undefined;
+
+describe('CJK emphasis and strikethrough', () => {
+  it.each([MarkdownBody, MarkdownInline])('renders punctuation-adjacent CJK markup in %s', Component => {
+    const { container } = render(<Component body={'**方案 A：**固定费用；这是**「重点」**说明；*提醒：*继续；~~错误：~~修正；**外层（~~旧值：~~新值）**结束'} onNotify={noopNotify} />);
+    expect([...container.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['方案 A：', '「重点」', '外层（旧值：新值）']);
+    expect(container.querySelector('em')?.textContent).toBe('提醒：');
+    expect([...container.querySelectorAll('del')].map(node => node.textContent)).toEqual(['错误：', '旧值：']);
+    expect(container.querySelector('strong del')?.textContent).toBe('旧值：');
+    expect(container.textContent).not.toContain('**');
+    expect(container.textContent).not.toContain('~~');
+  });
+
+  it('preserves literal code, escapes, math and ordinary English parsing', () => {
+    const literal = '**方案 A：**固定费用 ~~错误：~~修正';
+    const body = [
+      `\`${literal}\``, '', '```text', literal, '```', '',
+      String.raw`\*\*方案 A：\*\*固定费用 \~\~错误：\~\~修正`, '',
+      '$x ** y$ 与 $a \\sim b$；**结论：**成立', '',
+      '**Label:**text and **valid** bold',
+    ].join('\n');
+    const { container } = render(<MarkdownBody body={body} onNotify={noopNotify} />);
+    expect(container.querySelector('p code')?.textContent).toBe(literal);
+    expect(container.querySelector('.code-card__line-content')?.textContent).toBe(literal);
+    expect(container.querySelector('code strong, code del')).toBeNull();
+    expect(container.textContent).toContain(literal);
+    expect([...container.querySelectorAll('.math-copy-target')].map(node => node.getAttribute('data-math-source'))).toEqual(['x ** y', 'a \\sim b']);
+    expect(container.textContent).toContain('**Label:**text');
+    expect([...container.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['结论：', 'valid']);
+    expect(container.querySelector('del')).toBeNull();
+  });
+
+  it('renders closed markup during streaming without inventing missing delimiters', () => {
+    const { container, rerender } = render(<MarkdownBody streaming body="**方案 A：" onNotify={noopNotify} />);
+    expect(container.querySelector('strong')).toBeNull();
+    rerender(<MarkdownBody streaming body="**方案 A：**固定费用；~~错误：" onNotify={noopNotify} />);
+    expect(container.querySelector('strong')?.textContent).toBe('方案 A：');
+    expect(container.querySelector('del')).toBeNull();
+    rerender(<MarkdownBody body="**方案 A：**固定费用；~~错误：~~修正" onNotify={noopNotify} />);
+    expect(container.querySelector('del')?.textContent).toBe('错误：');
+  });
+});
 
 describe('MarkdownBody math rendering', () => {
   it('shows fenced code with a language toolbar, line numbers, safe highlighting and source-only copy', async () => {

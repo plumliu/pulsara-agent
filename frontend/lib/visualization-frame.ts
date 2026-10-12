@@ -1,3 +1,5 @@
+import visualizationRoot from '../../src/pulsara_agent/conversation_kernel/visualization_root.js';
+
 export interface VisualizationRootRect {
   x: number;
   y: number;
@@ -13,6 +15,9 @@ export const visualizationFrameMeasurementScript = `<script>
 (() => {
   const type = '${visualizationLayoutMessageType}';
   let pending = false;
+  let interactionPending = false;
+  let hadAutomaticCrop = false;
+  let automaticPage = false;
   let observedRoot = null;
   const resize = new ResizeObserver(schedule);
   const observeRoot = (root) => {
@@ -23,19 +28,30 @@ export const visualizationFrameMeasurementScript = `<script>
   };
   const report = () => {
     pending = false;
-    const roots = document.querySelectorAll('[data-pulsara-visualization-root]');
-    observeRoot(roots.length === 1 ? roots[0] : null);
-    if (roots.length !== 1) {
-      parent.postMessage({ type, mode: 'page' }, '*');
+    const viewport = {width: innerWidth, height: innerHeight};
+    const explicit = document.querySelector('[data-pulsara-visualization-root]');
+    const candidate = (${visualizationRoot.toString()})();
+    const box = candidate?.getBoundingClientRect();
+    const fits = box && box.width >= 1 && box.height >= 1 && box.x >= 0 && box.y >= 0
+      && box.right <= viewport.width && box.bottom <= viewport.height;
+    if (!explicit) {
+      if (document.getAnimations().some(animation => animation.pending || animation.playState === 'running')
+          || (interactionPending && hadAutomaticCrop && !fits)) automaticPage = true;
+      if (fits) hadAutomaticCrop = true;
+    }
+    interactionPending = false;
+    const root = !explicit && automaticPage ? null : candidate;
+    observeRoot(root);
+    if (!root) {
+      parent.postMessage({ type, mode: 'page', viewport }, '*');
       return;
     }
-    const root = roots[0];
     if (!root.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
-      parent.postMessage({ type, mode: 'page' }, '*');
+      parent.postMessage({ type, mode: 'page', viewport }, '*');
       return;
     }
     const rect = root.getBoundingClientRect();
-    parent.postMessage({ type, mode: 'root', rect: {
+    parent.postMessage({ type, mode: 'root', viewport, rect: {
       x: rect.x, y: rect.y, width: rect.width, height: rect.height,
     } }, '*');
   };
@@ -52,6 +68,12 @@ export const visualizationFrameMeasurementScript = `<script>
     });
     schedule();
   };
+  const interaction = () => {interactionPending = true; schedule();};
+  for (const type of ['pointerover', 'pointerout', 'pointerdown', 'pointerup', 'focusin', 'focusout',
+    'input', 'change', 'toggle', 'scroll', 'animationstart', 'animationend', 'animationcancel',
+    'transitionrun', 'transitionstart', 'transitionend', 'transitioncancel']) {
+    document.addEventListener(type, interaction, true);
+  }
   window.addEventListener('resize', schedule);
   window.addEventListener('load', schedule);
   if (document.readyState === 'loading') {
@@ -66,7 +88,6 @@ export const visualizationFrameMeasurementScript = `<script>
 export function usableVisualizationRootRect(
   value: unknown,
   viewportWidth: number,
-  viewportHeight: number,
 ): VisualizationRootRect | null {
   if (!value || typeof value !== 'object') return null;
   const rect = value as Record<string, unknown>;
@@ -75,6 +96,6 @@ export function usableVisualizationRootRect(
   const checked = { x, y, width, height } as VisualizationRootRect;
   if (checked.width < 1 || checked.height < 1) return null;
   if (checked.x < 0 || checked.y < 0) return null;
-  if (checked.x + checked.width > viewportWidth || checked.y + checked.height > viewportHeight) return null;
+  if (checked.x + checked.width > viewportWidth) return null;
   return checked;
 }

@@ -41,7 +41,6 @@ from pulsara_agent.model_input.provider_replay import (
     decode_provider_replay_fragment,
     freeze_provider_replay_manifest,
     freeze_provider_replay_manifest_cut,
-    freeze_selected_provider_replay_hydration,
     quote_provider_dispatch_composite_bytes,
     select_compatible_provider_replay_manifests,
 )
@@ -206,26 +205,12 @@ def _visualization_metadata_replay_input():
     return target, cut, compiled_input, candidate.fragment()
 
 
-def test_visualization_metadata_is_not_part_of_native_assistant_replay() -> None:
-    target, cut, compiled_input, fragment = _visualization_metadata_replay_input()
-
-    selected, placements = select_compatible_provider_replay_manifests(
-        manifest_cut=cut,
-        compiled_input=compiled_input,
-        replay_target=target,
-    )
-
-    assert selected == cut.manifests
-    assert placements == compiled_input.message_placements[:1]
-    hydration = freeze_selected_provider_replay_hydration(
-        manifest_cut=cut,
-        compiled_input=compiled_input,
-        replay_target=target,
-        selected_manifests=selected,
-        selected_placements=placements,
-        fragments=(fragment,),
-    )
-    assert hydration.selected_manifests == selected
+def test_removed_visualization_metadata_carrier_is_rejected() -> None:
+    target, cut, compiled_input, _ = _visualization_metadata_replay_input()
+    with pytest.raises(ValueError, match="assistant placement group is invalid"):
+        select_compatible_provider_replay_manifests(
+            manifest_cut=cut, compiled_input=compiled_input, replay_target=target,
+        )
 
 
 def test_incompatible_replay_is_skipped_before_assistant_shape_validation() -> None:

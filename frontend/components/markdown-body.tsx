@@ -1,5 +1,7 @@
 'use client';
 
+import { InlineVisualization, type InlineVisualizationContext } from './inline-visualization';
+import { remarkVisualizationMarkers } from '../lib/visualization-markers';
 import type { Element as HastElement, Parent as HastParent, Root as HastRoot } from 'hast';
 import type { Root as MdastRoot } from 'mdast';
 import { toText } from 'hast-util-to-text';
@@ -8,6 +10,8 @@ import rehypeKatex from 'rehype-katex';
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
+import remarkCjkStrikethrough from 'remark-cjk-friendly-gfm-strikethrough/parseOnly';
 import remarkMath from 'remark-math-extended';
 import { SKIP, visitParents } from 'unist-util-visit-parents';
 import { normalizeMathWithSource, rehypeSourceMapping } from '../lib/markdown-source';
@@ -30,6 +34,7 @@ interface MarkdownProps {
   onNotify: MarkdownNotify;
   streaming?: boolean;
   annotationSource?: boolean;
+  visualization?: InlineVisualizationContext;
 }
 
 interface PointerOrigin {
@@ -284,14 +289,26 @@ function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob
     }}>{content}</button>;
 }
 
-export function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false }: MarkdownProps) {
+const VisualizationContext = createContext<InlineVisualizationContext | undefined>(undefined);
+
+export function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false, visualization }: MarkdownProps) {
   const normalized = useMemo(() => normalizeMathWithSource(body), [body]);
   const sourceMapping = useMemo(() => () => annotationSource ? rehypeSourceMapping(normalized) : () => {}, [normalized, annotationSource]);
   const components = useMemo<Components>(() => ({
     a: ({ children, href }) => <MarkdownLink href={href} onNotify={onNotify}>{children}</MarkdownLink>,
     img: ({ src, alt, node }) => <span data-source-atom={node?.properties['data-source-atom']}><MarkdownImage src={src} alt={alt} onNotify={onNotify} selectable={annotationSource} /></span>,
-    pre: ({ node, children, ...props }) => {
+    pre: function MarkdownPre({ node, children, ...props }) {
+      const visualization = useContext(VisualizationContext);
       const code = node?.children[0];
+      if (visualization && code?.type === 'element' && typeof code.properties['data-visualization-ordinal'] === 'number') {
+        const ordinal = code.properties['data-visualization-ordinal'];
+        const count = Number(code.properties['data-visualization-count']);
+        const items = Array.from({length: count}, (_, index) => visualization.items.find(value => value.ordinal === ordinal + index));
+        if (items.every(item => item !== undefined)) return <div data-source-atom={node?.properties['data-source-atom']}><InlineVisualization key={`${visualization.entryId}:${ordinal}`} entryId={visualization.entryId} items={items} onRead={visualization.onRead} onReadThumbnail={visualization.onReadThumbnail}/></div>;
+        if (streaming) return <div role="status">正在准备可视化…</div>;
+        // A completed unbound fence remains ordinary code; never load its path.
+      }
+
       if (code?.type === 'element' && code.tagName === 'code') {
         const language = elementClasses(code).find(name => name.startsWith('language-'))?.slice(9).toLowerCase();
         const source = toText(code, { whitespace: 'pre' }).replace(/\n$/, '');
@@ -313,16 +330,18 @@ export function MarkdownBody({ body, onNotify, streaming = false, annotationSour
     },
   }), [onNotify, streaming, annotationSource]);
   return (
+    <VisualizationContext.Provider value={visualization}>
     <MarkdownCopySurface onNotify={onNotify} annotationSource={annotationSource}>
       <ReactMarkdown
         urlTransform={markdownUrl}
-        remarkPlugins={[remarkGfm, remarkSvgBlocks, [remarkMath, { singleDollarTextMath: true }]]}
+        remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkCjkStrikethrough, remarkSvgBlocks, [remarkMath, { singleDollarTextMath: true }], remarkVisualizationMarkers]}
         rehypePlugins={[rehypeCopyableMath, sourceMapping, [rehypeKatex, { strict: false }]]}
         components={components}
       >
         {normalized.text}
       </ReactMarkdown>
     </MarkdownCopySurface>
+    </VisualizationContext.Provider>
   );
 }
 
@@ -331,7 +350,7 @@ export function MarkdownInline({ body, onNotify }: MarkdownProps) {
     <MarkdownCopySurface inline onNotify={onNotify}>
       <ReactMarkdown
         urlTransform={markdownUrl}
-        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
+        remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkCjkStrikethrough, [remarkMath, { singleDollarTextMath: true }]]}
         rehypePlugins={[rehypeCopyableMath, [rehypeKatex, { strict: false }]]}
         allowedElements={['a', 'strong', 'em', 'del', 'code', 'span']}
         unwrapDisallowed

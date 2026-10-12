@@ -846,6 +846,18 @@ wheels = [
 ]
 
 [[package]]
+name = "mdit-py-plugins"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markdown-it-py" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/59/fc/f8d0863f8862f25602c0404d75568e89fb6b4109804645e5cdfb1be5cf56/mdit_py_plugins-0.6.1.tar.gz", hash = "sha256:a2bca0f039f39dbd35fb74ae1b5f998608c437463371f0ff7f49a19a17a114d0", size = 56114, upload-time = "2026-05-13T09:03:38.91Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/69/6da5581c6a7fede7dc261bf4e67d6adca4196f176b43288b55b3db395b6e/mdit_py_plugins-0.6.1-py3-none-any.whl", hash = "sha256:214c82fb2ac524472ab6a5bcab1de80f73b50443e187f401bfd77efbc7c6481d", size = 66663, upload-time = "2026-05-13T09:03:37.76Z" },
+]
+
+[[package]]
 name = "mdurl"
 version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1276,8 +1288,10 @@ dependencies = [
     { name = "httpx" },
     { name = "httpx2" },
     { name = "jsonschema" },
+    { name = "markdown-it-py" },
     { name = "mcp", extra = ["cli"] },
     { name = "mcp-types" },
+    { name = "mdit-py-plugins" },
     { name = "openai" },
     { name = "pillow" },
     { name = "playwright" },
@@ -1306,8 +1320,10 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "httpx2", specifier = ">=2.12.0,<3" },
     { name = "jsonschema", specifier = ">=4.26,<5" },
+    { name = "markdown-it-py", specifier = ">=4,<5" },
     { name = "mcp", extras = ["cli"], specifier = "==2.1.0" },
     { name = "mcp-types", specifier = "==2.1.0" },
+    { name = "mdit-py-plugins", specifier = ">=0.5,<1" },
     { name = "openai", specifier = ">=3.26.0" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "playwright", specifier = ">=1.58,<2" },

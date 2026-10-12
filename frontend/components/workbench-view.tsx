@@ -1,6 +1,5 @@
 'use client';
 
-import { VisualizationGallery, type ReadVisualizationThumbnail } from './visualization-gallery';
 import { createPortal } from 'react-dom';
 import { usePromptHover } from '../lib/prompt-hover';
 
@@ -166,8 +165,8 @@ interface WorkbenchViewProps {
   artifactOwnerKey: string;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
-  onReadVisualizationThumbnail?: ReadVisualizationThumbnail;
   onReadVisualization?: (entryId: string, ordinal: number, digest: string, size: number) => Promise<string>;
+  onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   promptDraftStore: PromptDraftStore;
   onNotify: MarkdownNotify;
   onPermissionChange: (permission: PermissionMode) => void;
@@ -1100,7 +1099,7 @@ function AssistantMessage({
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
   onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
-  onReadVisualizationThumbnail?: ReadVisualizationThumbnail;
+  onReadVisualizationThumbnail?: WorkbenchViewProps['onReadVisualizationThumbnail'];
   assistantLabel?: string;
 }) {
   const [forking, setForking] = useState(false);
@@ -1134,7 +1133,7 @@ function AssistantMessage({
           <div className="assistant-copy">
             <div className={`assistant-markdown${isStreaming ? '' : ' assistant-markdown--pretty'}`}>
               <AnnotationBody entryId={message.assistantKind !== 'live' && !isStreaming ? message.id : undefined} body={message.body}>
-                <MarkdownBody annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
+                <MarkdownBody visualization={{ entryId: message.id, items: message.visualizations ?? [], onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail }} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
               </AnnotationBody>
             </div>
             {(canCopyResponse || message.forkEligible) && (
@@ -1173,11 +1172,7 @@ function AssistantMessage({
       {message.subagentRuns?.length ? (
         <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
       ) : null}
-      {Boolean(message.visualizations?.length) && <VisualizationGallery
-        key={`${artifactOwnerKey}:${message.id}`}
-        entryId={message.id} items={message.visualizations!}
-        onRead={onReadVisualization} onReadThumbnail={onReadVisualizationThumbnail}
-      />}
+
     </article>
   );
 }
@@ -1293,8 +1288,8 @@ export function ConversationMessages({
   onFork?: (entryId: string) => Promise<void>;
   canFork?: boolean;
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
-  onReadVisualizationThumbnail?: ReadVisualizationThumbnail;
   onReadVisualization?: WorkbenchViewProps['onReadVisualization'];
+  onReadVisualizationThumbnail?: WorkbenchViewProps['onReadVisualizationThumbnail'];
   userLabel?: string;
   assistantLabel?: string;
   taskFinalAnswerId?: string;

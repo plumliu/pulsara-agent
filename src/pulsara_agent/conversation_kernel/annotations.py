@@ -13,6 +13,7 @@ from pulsara_agent.llm.input import (
     PromptAnnotationSource,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import _read_body
+from pulsara_agent.conversation_kernel.visualization import assistant_display_body
 
 
 class AnnotationSourceInvalid(ValueError):
@@ -70,7 +71,7 @@ def validate_annotation_sources(
                 ).decode("utf-8")
                 for row in rows
             ]
-            bodies[source.entry_id] = "\n\n".join(text for text in texts if text)
+            bodies[source.entry_id] = assistant_display_body(texts)
         if utf16_slice(bodies[source.entry_id], source.start, source.end) != part.quote:
             raise AnnotationSourceInvalid("批注引用与已保存原文不一致，请重新选择")
 

@@ -16,10 +16,10 @@ const first: PromptAnnotationPart = { type: 'annotation', quote: '第一段需�
 const second: PromptAnnotationPart = { type: 'annotation', quote: '第二段需要核对。', source: { entry_id: 'entry:a', start: 10, end: 18 } };
 let store: PromptDraftStore;
 let highlights: Map<string, { ranges: Range[] }>;
-function Harness({ sessionId = 'one', canAnnotate = true }: { sessionId?: string; canAnnotate?: boolean }) {
+function Harness({ sessionId = 'one', canAnnotate = true, sourceBody = body }: { sessionId?: string; canAnnotate?: boolean; sourceBody?: string }) {
   return <ResponseAnnotations sessionId={sessionId} store={store} canAnnotate={canAnnotate} onNotify={() => {}}>
-    <div className="workbench"><div className="thread-scroll"><AnnotationBody entryId="entry:a" body={body}>
-      <MarkdownBody annotationSource body={body} onNotify={() => {}} />
+    <div className="workbench"><div className="thread-scroll"><AnnotationBody entryId="entry:a" body={sourceBody}>
+      <MarkdownBody annotationSource body={sourceBody} onNotify={() => {}} />
     </AnnotationBody></div><PromptComposer sessionId={sessionId} store={store} disabled={false} placeholder="正文" onSubmit={() => {}} onNotify={() => {}} /></div>
     <button>其他区域</button>
   </ResponseAnnotations>;
@@ -34,6 +34,32 @@ beforeEach(() => {
 afterEach(() => { cleanup(); store.destroy(); window.getSelection()?.removeAllRanges(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('draft annotation UI', () => {
+  it('copies and annotates CJK formatting using canonical text, then restores its highlight', async () => {
+    const sourceBody = '😀前文 **方案 A：**固定费用；~~错误：~~修正';
+    const { container } = render(<Harness sourceBody={sourceBody} />);
+    const bold = container.querySelector('strong')!.firstChild!;
+    const deleted = container.querySelector('del')!.firstChild!;
+    const range = document.createRange(); range.setStart(bold, 0); range.setEnd(deleted, 3);
+    window.getSelection()!.addRange(range);
+    const start = sourceBody.indexOf('方案 A：');
+    const end = sourceBody.indexOf('错误：') + 3;
+    const quote = sourceBody.slice(start, end);
+    const setData = vi.fn();
+    fireEvent.copy(deleted.parentElement!, { clipboardData: { setData } });
+    expect(setData).toHaveBeenCalledWith('text/plain', quote);
+    fireEvent.pointerUp(deleted.parentElement!);
+    fireEvent.click(await screen.findByRole('button', { name: '添加注释' }));
+    await screen.findByRole('textbox', { name: '批注内容' });
+    expect((await store.capture('one')).content.parts).toEqual([
+      { type: 'annotation', quote, source: { entry_id: 'entry:a', start, end } },
+    ]);
+    expect(highlights.get('annotation-active')?.ranges[0].toString()).toBe('方案 A：固定费用；错误：');
+    fireEvent.pointerDown(screen.getByRole('button', { name: '其他区域' }));
+    fireEvent.click(await screen.findByRole('button', { name: '正文批注 1' }));
+    await screen.findByRole('dialog');
+    expect(highlights.get('annotation-active')?.ranges[0].toString()).toBe('方案 A：固定费用；错误：');
+  });
+
   it('adds a selection to a compact chip and immediately focuses its floating comment editor', async () => {
     const { container } = render(<Harness />);
     const text = container.querySelector('[data-source-text]')!.firstChild!;

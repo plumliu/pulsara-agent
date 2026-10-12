@@ -711,3 +711,63 @@ def test_cancelling_concurrent_view_segment_drains_started_calls() -> None:
         assert active == 0
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('mode', ['success', 'png_budget', 'deadline', 'missing', 'text_only'])
+def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkeypatch, mode):
+    from io import BytesIO
+    from PIL import Image
+    from pulsara_agent.conversation_kernel.visualization_screenshot import VisualizationScreenshotError
+    import pulsara_agent.conversation_kernel.tool_runtime as runtime_module
+
+    async def scenario():
+        path = tmp_path / 'chart.html'
+        path.write_text('<h1>' + 'x' * 10000 + '</h1>')
+        validator = HostPromptImageValidator()
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:html', session_id='session:html',
+            live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy(), image_validator=validator)
+        borrow, context = direct_tool_invocation_context(port, session_id='session:html', tool_name='view_image',
+            tool_call_id='call:html', attempt_id='attempt:html', turn_id='turn:html', assistant_entry_id='entry:assistant')
+        rendered = []
+        quoted = []
+        output = BytesIO()
+        Image.new('RGB',(2,2),'red').save(output,format='PNG')
+        async def screenshot(html, *, deadline_monotonic):
+            rendered.append(html)
+            if mode == 'deadline':
+                monkeypatch.setattr(runtime_module, 'monotonic', lambda: deadline_monotonic+1)
+                raise VisualizationScreenshotError('PREVIEW_DEADLINE_EXPIRED')
+            return output.getvalue()
+        def quote(**kwargs):
+            quoted.append(kwargs)
+            return FrozenImageToolResourceIncrement(canonical_bytes=100, logical_bytes=100, wire_bytes=100, input_tokens=100)
+        port._visualization_screenshots.render = screenshot
+        try:
+            binding = borrow.execution_binding('view_image')
+            allowance = FrozenImageToolResourceAllowance(call_ordinal=0, tool_call_id='call:html',
+                executor_binding_fingerprint=binding.executor_binding_fingerprint,
+                canonical_bytes=10 if mode == 'png_budget' else 4096, logical_bytes=4096,wire_bytes=4096,input_tokens=4096,
+                quote_owner=SimpleNamespace(quote=quote))
+            result = await port.invoke(tool_name='view_image', arguments={'path':'missing.html' if mode == 'missing' else 'chart.html'},
+                tool_call_id='call:html',attempt_id='attempt:html',turn_id='turn:html',assistant_entry_id='entry:assistant',
+                invocation_context=replace(context,input_modalities=('text',) if mode=='text_only' else ('text','image'),image_resource_allowance=allowance))
+            if mode == 'success':
+                assert result.state == 'SUCCESS'
+                assert len(rendered[0]) > allowance.canonical_bytes
+                assert isinstance(result.content, FrozenPromptContent)
+                assert any(isinstance(part, LLMImagePart) for part in result.content.parts)
+                assert quoted[0]['source'].value == 'chart.html'
+                assert quoted[0]['source'].kind is ViewImageSourceKind.PATH
+            else:
+                assert result.state == 'APPLICATION_ERROR'
+                assert not quoted
+                assert {'png_budget':'IMAGE_RESOURCE_EXCEEDED','deadline':'PREVIEW_DEADLINE_EXPIRED','missing':'HTML_NOT_FOUND','text_only':'MODEL_IMAGE_INPUT_UNSUPPORTED'}[mode] in result.content.decode()
+            if mode == 'deadline':
+                assert result.physical_timing == 'LATE_AFTER_WATCHDOG'
+            if mode in {'missing','text_only'}:
+                assert not rendered
+        finally:
+            borrow.close()
+            await port.aclose(timeout_seconds=2)
+            await validator.aclose()
+    asyncio.run(scenario())

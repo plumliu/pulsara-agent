@@ -112,9 +112,7 @@ def classify_tool_result_delivery(
 
     if result_state != "SUCCESS":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    if tool_name == "view_image" or (
-        tool_name == "visualization_render" and has_image_attachment
-    ):
+    if tool_name == "view_image":
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.IMAGE_ATTACHMENT
         )

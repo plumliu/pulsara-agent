@@ -139,7 +139,6 @@ from pulsara_agent.conversation_kernel.memory.dispatch import (
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.tools.builtins.filesystem import parse_view_image_source
-from pulsara_agent.conversation_kernel.visualization import parse_visualization_source
 
 
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -686,7 +685,7 @@ class ToolBatchExecutor:
     ) -> None:
         expected: list[tuple[int, str, str]] = []
         for call_ordinal, call in enumerate(calls, start=call_ordinal_offset):
-            if call.tool_name not in {"view_image", "visualization_render"}:
+            if call.tool_name != "view_image":
                 continue
             try:
                 binding = surface_borrow.execution_binding(call.tool_name)
@@ -698,12 +697,7 @@ class ToolBatchExecutor:
             ) or not isinstance(arguments, dict):
                 continue
             try:
-                if call.tool_name == "visualization_render":
-                    _, review = parse_visualization_source(arguments)
-                    if not review:
-                        continue
-                else:
-                    parse_view_image_source(arguments)
+                parse_view_image_source(arguments)
             except ValueError:
                 continue
             expected.append(

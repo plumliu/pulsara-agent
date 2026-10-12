@@ -387,27 +387,16 @@ def select_compatible_provider_replay_manifests(
         if placements is None:
             continue
         indexes = indexes_by_entry[manifest.assistant_entry_id]
-        assistant_count = next(
-            (
-                index
-                for index, placement in enumerate(placements)
-                if placement.role is not MessageRole.ASSISTANT
-            ),
-            len(placements),
-        )
         if (
             indexes != list(range(indexes[0], indexes[0] + len(indexes)))
             or tuple(item.within_origin_ordinal for item in placements)
             != tuple(range(len(placements)))
-            or assistant_count == 0
-            or tuple(item.role for item in placements[assistant_count:])
-            not in ((), (MessageRole.USER,))
+            or not placements
+            or any(item.role is not MessageRole.ASSISTANT for item in placements)
         ):
             raise ValueError("provider replay assistant placement group is invalid")
         selected.append(manifest)
-        # A visualization reference is a derived USER carrier after the
-        # assistant message; it shares the canonical entry, not native replay.
-        selected_placements.extend(placements[:assistant_count])
+        selected_placements.extend(placements)
     return tuple(selected), tuple(selected_placements)
 
 

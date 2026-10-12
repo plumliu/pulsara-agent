@@ -89,10 +89,7 @@ from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSource,
     parse_view_image_source,
 )
-from pulsara_agent.model_input.visualization_source import (
-    VisualizationSource,
-    parse_visualization_source,
-)
+
 
 
 COMPILER_CONTRACT_VERSION = "pulsara.structured-model-input-compiler.prefix-continuity.v17-canonical-worker-branches"
@@ -498,7 +495,7 @@ class _ExpandedTranscriptMessage:
 
 
 def _tool_attachment_message(source: ToolAttachmentSource) -> LLMMessage:
-    images: list[tuple[str, ViewImageSource | VisualizationSource, LLMImagePart]] = []
+    images: list[tuple[str, ViewImageSource, LLMImagePart]] = []
     for member in source.members:
         arguments = member.source.tool_call_arguments
         if arguments is None:
@@ -506,12 +503,7 @@ def _tool_attachment_message(source: ToolAttachmentSource) -> LLMMessage:
         thawed_arguments = thaw_json(arguments)
         if not isinstance(thawed_arguments, dict):
             raise ValueError("tool attachment source arguments are invalid")
-        if thawed_arguments.get("review") is True:
-            image_source, review = parse_visualization_source(thawed_arguments)
-            if not review:
-                raise ValueError("visualization image attachment lacks review")
-        else:
-            image_source = parse_view_image_source(thawed_arguments)
+        image_source = parse_view_image_source(thawed_arguments)
         assert isinstance(member.source.content, tuple)
         source_images = tuple(
             part for part in member.source.content if isinstance(part, LLMImagePart)
@@ -523,7 +515,7 @@ def _tool_attachment_message(source: ToolAttachmentSource) -> LLMMessage:
 
 
 def tool_image_attachment_message(
-    members: tuple[tuple[str, ViewImageSource | VisualizationSource, LLMImagePart], ...],
+    members: tuple[tuple[str, ViewImageSource, LLMImagePart], ...],
 ) -> LLMMessage:
     """Build the common compiler/provider projection for ToolResult images."""
 
@@ -535,7 +527,7 @@ def tool_image_attachment_message(
     for tool_call_id, source, image in members:
         if (
             not tool_call_id
-            or not isinstance(source, (ViewImageSource, VisualizationSource))
+            or not isinstance(source, ViewImageSource)
             or not isinstance(image, LLMImagePart)
         ):
             raise ValueError("tool image attachment member is invalid")

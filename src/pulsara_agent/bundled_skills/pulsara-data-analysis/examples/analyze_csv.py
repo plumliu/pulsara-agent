@@ -49,7 +49,7 @@ def summarize(source: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def create(source: Path, output: Path, *, unit: str = "Value") -> dict[str, object]:
     if output.suffix.lower() != ".html":
-        raise ValueError("Choose an .html output for visualization_render.")
+        raise ValueError("Choose an .html output for inline visualization.")
     if output.exists():
         raise FileExistsError(f"Choose a new output path: {output}")
     frame, summary = summarize(source)
@@ -95,11 +95,12 @@ def create(source: Path, output: Path, *, unit: str = "Value") -> dict[str, obje
 <title>Monthly totals</title>
 <style>
 * {{ box-sizing: border-box; }}
-body {{ margin: 0; background: #fbfaf6; color: #30343b; font: 14px/1.55 system-ui,sans-serif; }}
+html, body {{ background: transparent; }}
+body {{ margin: 0; color: var(--pulsara-foreground, #30343b); font: 14px/1.55 system-ui,sans-serif; }}
 main {{ width: 100%; max-width: 960px; padding: 20px; margin: auto; }}
 h1 {{ font-size: 22px; margin: 0 0 6px; }}
 p {{ margin: 6px 0; overflow-wrap: anywhere; }}
-.note {{ color: #62666d; font-size: 12px; }}
+.note {{ color: var(--pulsara-muted, #62666d); font-size: 12px; }}
 #monthly-chart {{ width: 100%; }}
 summary {{ cursor: pointer; padding: 10px 0; }}
 .table-wrap {{ overflow: auto; max-height: 280px; }}
@@ -122,7 +123,7 @@ th,td {{ border-bottom: 1px solid #ddd9ce; padding: 7px 12px; text-align: left; 
         "input_rows": len(frame),
         "result_rows": len(summary),
         "period": [start, end],
-        "next_step": "Call visualization_render with path set to html_path; use review=true for a preview.",
+        "next_step": "Optionally inspect html_path with view_image, then display it in a top-level pulsara-visualization fence in a tool-free reply. One path shows one figure; add related HTML paths on separate lines in the same fence for a gallery, or use separate fences between paragraphs.",
     }
 
 

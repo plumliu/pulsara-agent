@@ -845,14 +845,17 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "view_image": _descriptor(
         name="view_image",
         description=(
-            "Read one PNG, JPEG, or static WebP image and make its exact contents "
+            "Read one PNG, JPEG, static WebP image, or screenshot a local .html/.htm file and make its contents "
             "visible to the model. Use path for a local file; relative paths start in "
             "the current workspace and may traverse outside it with ../; absolute paths "
             "and ~ are also accepted. Use image_ref only to reread an exact reference "
             "already shown beside an image in this session; copy it unchanged and do "
-            "not guess or enumerate references. A screenshot attached by "
-            "visualization_render(review=true) has an image_ref you can reread here; "
-            "a visualization_ref names saved HTML and cannot be used here. "
+            "not guess or enumerate references. HTML renders in an isolated browser "
+            "at 1200×800 with light theme and reduced motion; network resources are blocked. "
+            "This inspects the current file without publishing it; later edits require "
+            "another screenshot to review the changed version. To display HTML to the "
+            "user, place its path in a top-level pulsara-visualization fence in a "
+            "tool-free reply; multiple paths, one per line, form one gallery. "
             "Provide exactly one source. Use multiple "
             "view_image calls for multiple images. URLs, directories, PDFs, animated "
             "images, multi-frame images, resize, and detail are unsupported."
@@ -863,7 +866,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Local image path to read. Relative paths start in the current "
+                        "Local image or HTML path to read. Relative paths start in the current "
                         "workspace and may traverse outside it with ../; absolute paths "
                         "and ~ are also accepted."
                     ),
@@ -874,83 +877,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "description": (
                         "Exact sha256: image reference previously shown beside an "
                         "image in this session, including a visualization screenshot. "
-                        "Not a visualization_ref."
-                    ),
-                },
-            },
-            required=[],
-        ),
-        is_read_only=True,
-        permission_category="filesystem_read",
-    ),
-    "visualization_render": _descriptor(
-        name="visualization_render",
-        description=(
-            "Embed interactive HTML charts, dashboards, or page layouts beneath your "
-            "next tool-free assistant message. When mentioning its location in your "
-            "reply, say below the reply text (下方). For an existing local image, reply with "
-            "![description](path); the user can click it to open the image preview. "
-            "Relative image paths start at the session workspace root; absolute paths "
-            "also work. For a static SVG diagram, reply with a fenced svg code block; "
-            "the frontend renders it directly. These image/SVG forms need no HTML "
-            "wrapper or call to this tool. For HTML, "
-            "write it first, preferably in .pulsara/visualizations/, then call with "
-            "a path or a visualization_ref previously shown in this session. For a "
-            "chart or card, mark one visible element data-pulsara-visualization-root; "
-            "it is framed when it fits, otherwise the whole page is shown. For a "
-            "whole website/page demo, omit the mark. Make the HTML responsive and "
-            "include resources needed to render it in the file; CDN assets, companion "
-            "files, and external network resources cannot load in the embedded display "
-            "or preview. URLs in text, SVG metadata, or namespace declarations do not "
-            "themselves need removal. A normal call schedules display but does not "
-            "read the file yet. You can edit a path before the next tool-free message; "
-            "its latest version is shown, deletion cancels it, and repeating the same "
-            "source displays it once. A visualization_ref keeps the saved version. "
-            "review=true also tries an immediate screenshot with an image_ref for "
-            "view_image; it does not freeze the path. If the preview fails or is "
-            "unavailable, the display remains scheduled. A missing path at display "
-            "cancels it; other file-read failures show a visible error."
-        ),
-        input_schema=object_schema(
-            properties={
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "Path to the complete HTML file you wrote. "
-                        "Use this OR visualization_ref, not both. Relative paths "
-                        "start at the workspace root, not a terminal's current "
-                        "directory; absolute paths and ~ also work under normal "
-                        "file permissions. The file is read for display when your "
-                        "next tool-free assistant message is saved, so edits before "
-                        "then appear and deletion before then cancels it."
-                    ),
-                },
-                "visualization_ref": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "Exact reference from a published HTML display in this session, "
-                        "shown later as pulsara_visualizations[].visualization_ref. "
-                        "It is not a screenshot image_ref. Use this OR path, "
-                        "not both, to show that saved HTML again without relying "
-                        "on its original file. Do not invent a reference."
-                    ),
-                },
-                "review": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": (
-                        "Default false: schedule display without opening or "
-                        "checking the HTML. True: also try a screenshot of the "
-                        "current file or saved reference now so you can inspect it; "
-                        "a successful preview image has its own image_ref for "
-                        "view_image later, not a visualization_ref. "
-                        "A path still uses its later version at display time, "
-                        "while a saved reference stays unchanged. If the "
-                        "model cannot receive images or reading/rendering fails, "
-                        "the result explains that no preview was made, while the "
-                        "display remains scheduled."
+                        "HTML content digests are not image references."
                     ),
                 },
             },
@@ -1981,7 +1908,6 @@ _FILESYSTEM = frozenset(
         "search_content",
         "find_files",
         "view_image",
-        "visualization_render",
         "write_file",
     }
 )
@@ -2337,7 +2263,6 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "get_mcp_prompt",
         "read_file",
         "view_image",
-        "visualization_render",
         "read_mcp_resource",
         "reload_hooks",
         "reload_capabilities",
