@@ -32,8 +32,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(postgres_marker)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def stage2_migrated_postgres_database():
+    # pg_search statistics and index work span all memory domains. A worker's
+    # entire suite is not one logical test corpus: isolate modules so earlier
+    # files cannot alter later files' scores or model-start synchronization.
     try:
         database = create_migrated_postgres_test_database()
     except Exception as exc:

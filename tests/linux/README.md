@@ -20,6 +20,8 @@ The public GitHub runners have [four CPUs](https://docs.github.com/en/actions/re
 CI uses two pytest workers to leave CPU capacity for ParadeDB's BM25 work and
 Chromium while running the complete suite with the existing synchronization
 deadlines. Additional tests wait for a worker rather than being excluded.
+Integration modules each receive a fresh migrated database: pg_search's global
+corpus statistics and index work must not carry across unrelated test files.
 The suite includes PTY/process cancellation, local MCP, hooks, Skill/Plugin
 publication, search, HTTP, storage and canonical conversation behavior. It also
 checks wheel/editable/sdist builds. The final gate installs the actual wheel in
