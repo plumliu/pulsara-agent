@@ -16,6 +16,10 @@ build hosts; wheel users do not need binutils, a system `rg`, or Node.js.
 Ubuntu 24.04 x86_64 and ARM64 runners with PostgreSQL 17, pg_search 0.26.1,
 pgvector and Chromium. Both workflows and the local test Compose use the pinned
 `paradedb/paradedb:0.26.1-pg17` image, matching the root Compose configuration.
+The public GitHub runners have [four CPUs](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+CI uses two pytest workers to leave CPU capacity for ParadeDB's BM25 work and
+Chromium while running the complete suite with the existing synchronization
+deadlines. Additional tests wait for a worker rather than being excluded.
 The suite includes PTY/process cancellation, local MCP, hooks, Skill/Plugin
 publication, search, HTTP, storage and canonical conversation behavior. It also
 checks wheel/editable/sdist builds. The final gate installs the actual wheel in

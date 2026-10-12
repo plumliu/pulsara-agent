@@ -49,7 +49,9 @@ jobs:
       - name: Ruff and complete Python test suite
         run: |
           uv run --no-sync ruff check
-          uv run --no-sync python -m pytest -q -n 4
+          # Both public runners have 4 CPUs; leave CPU capacity for ParadeDB
+          # and Chromium so concurrent tests do not starve event synchronization.
+          uv run --no-sync python -m pytest -q -n 2
       - name: Build offline wheel and source archive
         run: uv build --offline --no-build-isolation --sdist --wheel
       - name: Install wheel into isolated environment and smoke test outside checkout
