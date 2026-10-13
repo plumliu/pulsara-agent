@@ -845,20 +845,14 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "view_image": _descriptor(
         name="view_image",
         description=(
-            "Read one PNG, JPEG, static WebP image, or screenshot a local .html/.htm file and make its contents "
-            "visible to the model. Use path for a local file; relative paths start in "
-            "the current workspace and may traverse outside it with ../; absolute paths "
-            "and ~ are also accepted. Use image_ref only to reread an exact reference "
-            "already shown beside an image in this session; copy it unchanged and do "
-            "not guess or enumerate references. HTML renders in an isolated browser "
-            "at 1200×800 with light theme and reduced motion; network resources are blocked. "
-            "This inspects the current file without publishing it; later edits require "
-            "another screenshot to review the changed version. To display HTML to the "
-            "user, place its path in a top-level pulsara-visualization fence in a "
-            "tool-free reply; multiple paths, one per line, form one gallery. "
-            "Provide exactly one source. Use multiple "
-            "view_image calls for multiple images. URLs, directories, PDFs, animated "
-            "images, multi-frame images, resize, and detail are unsupported."
+            "View one PNG, JPEG or static WebP image, or screenshot a local .html/.htm file. "
+            "Provide exactly one of path or image_ref. Use image_ref only to reread an "
+            "exact reference already shown beside an image in this session; copy it "
+            "unchanged. HTML screenshots use an isolated 1200×800 browser with light "
+            "theme, reduced motion and network access blocked. They inspect the current "
+            "file without publishing it or checking every interaction; edits require "
+            "a new screenshot to review the changed content. URLs, directories, PDFs, "
+            "animated or multi-frame images, resize and detail are unsupported."
         ),
         input_schema=object_schema(
             properties={

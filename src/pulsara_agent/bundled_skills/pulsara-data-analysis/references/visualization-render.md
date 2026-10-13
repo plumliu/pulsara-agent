@@ -1,74 +1,64 @@
 # Inline visualizations and HTML review
 
-Use a Markdown image link for a saved image, fenced SVG or Mermaid for a small static diagram, and self-contained HTML for useful interaction. Keep simple answers simple.
+Choose text or tables for simple results, Markdown image links for saved figures, fenced `svg` or `mermaid` for static diagrams, and self-contained HTML for interaction. SVG and Mermaid display as images; ordinary HTML code blocks display source. Use `$...$` for inline formulas or `$$` on separate lines for display math; `\(...\)` and `\[...\]` are also supported.
 
-Write responsive `.html` or `.htm` files, preferably in `.pulsara/visualizations/`. Inline scripts, styles, fonts and data; network resources, CDN dependencies and companion files cannot load. Relative paths start at the session workspace, not the terminal's current directory. Absolute paths and `~` follow ordinary file access.
+## Create and publish
 
-Optionally call `view_image` with the HTML path to inspect a screenshot of the current file. Screenshots use a 1200×800 viewport, light theme and reduced motion. Inspect the returned image and revise as needed; edits after that screenshot are unreviewed until another screenshot is taken. The returned `image_ref` can reread that screenshot; it does not reference HTML. Screenshot review does not publish the file or validate every interaction.
+Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. Inline all scripts, styles, fonts and data: network and companion resources cannot load. Relative paths resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access.
 
-After creating the files, put one or more paths, one per line, in an explicitly closed top-level fenced block in a tool-free reply, between the paragraphs it illustrates. Use only paths inside the fence: no bullets, quotes, captions, JSON, HTML source or image references. For example, this reply contains a two-figure gallery followed by a separate single figure:
+In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing HTML paths, one per line:
 
 ````markdown
-The cost comparison is shown here:
+Compare the costs:
 
 ```pulsara-visualization
 .pulsara/visualizations/cost.html
 .pulsara/visualizations/cost-breakdown.html
 ```
-
-Beyond this point, option B costs less. The delivery schedule is shown separately:
-
-```pulsara-visualization
-.pulsara/visualizations/timeline.html
-```
-
-The first milestone is the critical dependency.
 ````
 
-Publication reads and freezes the HTML. Editing or deleting its file afterward does not change older replies. A later reply with the same path publishes the current version. Each marker displays an independent gallery at its own position. One path shows a single figure; multiple paths share thumbnail navigation. Blank lines are ignored; no subscription or display ID is needed. A missing or unreadable file shows an error in place. Do not put actual display markers inside lists, blockquotes, or tool-bearing messages. Use an outer four-backtick fence to explain the marker syntax without displaying a file.
+Each fence creates an independent gallery. One path shows one figure; multiple paths share host-provided thumbnail navigation. Group alternatives together; use separate fences to show figures together. Views with shared controls belong in one file. Keep actual display fences outside lists and blockquotes; wrap syntax examples in a longer outer fence as above.
 
-Independent galleries use separate body markers; related alternative views can share one marker containing multiple HTML paths. Only the selected figure in a gallery is shown, so use separate galleries when readers should see figures together. Pulsara supplies thumbnail navigation; do not recreate this outer navigation in every HTML file. Views sharing selection or controls should use one file: separate files do not share state, even within one gallery. Avoid title banners, explanatory padding and excessive whitespace when surrounding prose already provides context. Label axes, units and controls; preserve readability on narrow screens.
+Publication freezes each file. Later edits or deletion leave earlier replies unchanged; publishing the path again captures its current contents. Missing or unreadable files show an error at their display position.
 
-For a compact chart, mark exactly one visible container `data-pulsara-visualization-root`. If it fits the reference viewport, the host crops vertical whitespace and reduces the space occupied in the reply, while keeping the full body-column width and your internal horizontal spacing. Figures shorter than 46px keep their measured height without an inline zoom button; taller figures retain zoom, and maximized views always retain the exit control. Tall content uses the original page with native scrolling, within the inline height limit min(120dvh, 1200px). Without a marker, a unique visible `<main>` is automatically selected only when it contains all visible content with no overflowing descendants or ambiguous generated content. Automatic fitting is a layout heuristic: decorative shadows or strokes may be clipped. Automatic previews stay in page mode for the current mount after detected animations or interaction-driven content overflow, avoiding repeated layout shifts. Other unmarked layouts, and multiple, hidden or invalid explicit roots use page mode. Maximize displays a full viewport.
+## Layout and review
 
-For an inline figure, keep `html`, `body`, and the outer layout container transparent by default so the surrounding conversation shows through. Do not wrap the whole figure in a large opaque panel solely to provide a background. Cards, plot surfaces, or a requested full-page design can retain a background where it improves readability. Keep text, axes, and controls legible in both light and dark themes; transparency is a default, not a requirement to remove every surface.
+Use concise labels, readable axes and units, and compact layouts that fit narrow screens. Keep outer backgrounds transparent by default, with opaque surfaces where readability or the requested design needs them. Preserve contrast in light and dark themes.
 
-The optional read-only `window.PulsaraVisualization` is an environment API, not a visualization library. Its only methods are `getSnapshot()` and `subscribe(callback)`, which returns an unsubscribe function. There are no `mount`, `render`, or `animate` methods; create charts using ordinary HTML/SVG/canvas or an inlined library. A snapshot contains `theme` (`light`/`dark`), `visible`, `reducedMotion`, and `colors` (`background`, `foreground`, `muted`, `accent`, `border`, `soft`). Matching CSS variables are named `--pulsara-background`, etc. Read the initial snapshot explicitly: subscribing delivers later updates, not the initial value.
+For compact content, mark exactly one visible container `data-pulsara-visualization-root`. Keep its content within its bounds for reliable fitting. Without a marker, a unique visible `main` containing all visible content may be fitted automatically; other layouts use page mode.
 
-For CSS animations, a small environment adapter can set the play state; apply the same visibility rule to any JavaScript animation loop you own:
+Optionally inspect the current HTML with `view_image(path=...)`. Its screenshot is a visual check, not publication or proof that every interaction works; inspect again after editing when claiming the updated version was reviewed.
+
+## Host environment
+
+The optional read-only `window.PulsaraVisualization` supplies `getSnapshot()` and `subscribe(callback)`. Read the initial snapshot before subscribing to later updates; subscription returns an unsubscribe function. Snapshots contain `theme` (`light`/`dark`), `visible`, `reducedMotion`, and `colors` (`background`, `foreground`, `muted`, `accent`, `border`, `soft`). Colors are also available as `--pulsara-*` CSS variables. Render with HTML/SVG/canvas or an inlined library, with standalone fallbacks.
 
 ```css
 html, body { background: transparent; }
-body {
-  margin: 0;
-  color: var(--pulsara-foreground, #17191f);
-}
+body { margin: 0; color: var(--pulsara-foreground, #17191f); }
 [data-animated] { animation-play-state: var(--animation-state, paused); }
 ```
 
 ```js
 const environment = window.PulsaraVisualization;
-const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-function applyEnvironment(state) {
+const motion = matchMedia('(prefers-reduced-motion: reduce)');
+function apply(state) {
   document.documentElement.style.setProperty(
     '--animation-state', state.visible && !state.reducedMotion ? 'running' : 'paused'
   );
 }
 if (environment) {
-  applyEnvironment(environment.getSnapshot());
-  environment.subscribe(applyEnvironment);
+  apply(environment.getSnapshot());
+  const unsubscribe = environment.subscribe(apply);
+  // Call unsubscribe when removing the component that owns this listener.
 } else {
-  const update = () => applyEnvironment({
-    visible: !document.hidden, reducedMotion: reducedMotion.matches
-  });
+  const update = () => apply({visible: !document.hidden, reducedMotion: motion.matches});
   update();
-  reducedMotion.addEventListener('change', update);
+  motion.addEventListener('change', update);
   document.addEventListener('visibilitychange', update);
 }
 ```
 
-If your file creates and destroys its own components, retain and call the unsubscribe function when removing their listeners. Environment updates do not reload the iframe. Each gallery retains up to three recently visited pages; hidden retained pages receive `visible=false`. No arbitrary JavaScript state survives eviction or unmounting.
+Apply the same pause rule to JavaScript animations. Hidden pages receive `visible=false`; reopening a page can reset its local state, so do not rely on persisted controls. The environment API provides display context only; it grants no host-file, tool or messaging access.
 
-Provide ordinary browser fallbacks, for example `color: var(--pulsara-foreground, #17191f)`, and optional chaining for the API. Use `background: var(--pulsara-background, #fff)` on local surfaces that need an opaque background, not automatically on the entire page. A file must also work outside Pulsara. The API cannot read host files, call tools or send follow-up messages. Do not rely on network access or persisted widget parameters.
-
-The example `examples/analyze_csv.py` writes a standalone HTML file and reports its path. Adapt it to the task; its layout is not a required schema.
+`examples/analyze_csv.py` provides an adaptable standalone HTML example.
