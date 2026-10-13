@@ -888,7 +888,8 @@ def test_cross_session_tool_public_metadata_and_full_artifact_are_one_stable_vie
         for m in found["items"][0]["messages"]
     )
     projection_body = rows(repo, "SELECT body FROM pulsara_v3.history_search_documents WHERE session_id=%s AND include_tools=true", (lease.guard.session_id,))
-    assert all("Saved tool result:" not in r["body"] for r in projection_body)
+    assert projection_body
+    assert all(source in row["body"] for row in projection_body)
     page = invoke(
         session_id=lease.guard.session_id,
         entry_id=result_id,
@@ -903,13 +904,10 @@ def test_cross_session_tool_public_metadata_and_full_artifact_are_one_stable_vie
             break
         page = invoke(cursor=page["next_cursor"])
     combined = "".join(parts)
-    assert (
-        combined
-        == "Saved tool result:\n"
-        + projection.canonical_preview.canonical_bytes.decode()
-        + "\n\nTool output:\n"
-        + source
-    )
+    preview = projection.canonical_preview.canonical_bytes.decode()
+    assert preview in combined
+    assert combined.endswith(source)
+    assert combined.index(preview) + len(preview) <= len(combined) - len(source)
     assert '"exit_code":23' in combined and page["items"][0][
         "artifact_disposition"
     ] == ("INCOMPLETE" if retained else "AVAILABLE")

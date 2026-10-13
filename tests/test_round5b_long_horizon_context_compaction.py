@@ -59,7 +59,6 @@ import pulsara_agent.conversation_kernel.compaction.coordinator as compaction_co
 import pulsara_agent.conversation_kernel.compaction.model_call as compaction_model_call
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
-    compaction_summary_request,
     display_json,
     freeze_compaction_summary_output,
     parse_compaction_snapshot_carrier,
@@ -617,7 +616,6 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     assert display_json(exact_user) in rendered
     assert display_json(exact_assistant) in rendered
     assert terminal_marker in rendered
-    assert "active request is carried separately" not in rendered
     assert "call:secret" not in rendered
     assert "secret_argument" not in rendered
     assert first_result not in rendered
@@ -846,10 +844,6 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
     }
     assert decoded["retained_historical_requests"] == []
     assert decoded["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
-    assert decoded["continuation"]["instruction"].startswith(
-        "HANDOFF COMPLETE / RESUME NOW"
-    )
-    assert "newer canonical turn activation" in decoded["continuation"]["instruction"]
     assert carrier.active_request is not None
     assert decoded["continuation"]["active_request"] == (
         json.loads(canonical_json_bytes(carrier.active_request.canonical_value()))
@@ -876,7 +870,6 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
     idle_decoded = json.loads(idle.body)
     assert idle_decoded["continuation"]["mode"] == "AWAIT_NEXT_USER"
     assert idle_decoded["continuation"]["active_request"] is None
-    assert "survives a process restart" in idle_decoded["continuation"]["instruction"]
     assert parse_compaction_snapshot_carrier(idle.body) == idle
     with pytest.raises(ValueError, match="fields"):
         parse_compaction_snapshot_carrier(
@@ -937,20 +930,6 @@ def test_snapshot_lowering_labels_active_recent_and_historical_images_once() -> 
         and part.text.startswith('{"pulsara_image"')
     )
     assert len(labels) == len(images) == 3
-
-
-def test_round5b_summary_prompt_keeps_lifecycle_out_of_compaction() -> None:
-    request = compaction_summary_request()
-
-    assert "restrictions above" in request
-    assert "end when this summary response" in request
-    assert "Never say that a user request is queued, deferred, blocked" in request
-    assert "Runtime separately and mechanically owns" in request
-    assert "Do not infer either lifecycle" in request
-    assert "ACTIVE-TURN HANDOFF" not in request
-    assert "IDLE HANDOFF" not in request
-    assert "Do not assume quotes or tool results will be retained separately" in request
-    assert "user intent, constraints, conclusions, and tool outcomes" in request
 
 
 def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> None:

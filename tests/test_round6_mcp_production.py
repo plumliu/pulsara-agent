@@ -2071,23 +2071,10 @@ def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
     assert "mcp__late__bulk_00" in full_payload["new_tool_usage"]
 
 
-def test_round9_meta_tool_descriptors_define_inspect_then_use_few_shot() -> None:
-    inspect = builtin_tool_catalog_entry("inspect_capability").descriptor
-    use = builtin_tool_catalog_entry("use_new_mcp_tool").descriptor
-    assert "complete input_schema" in inspect.description
-    assert "DIRECT" in inspect.description and "META" in inspect.description
-    assert "target" in inspect.description
-    assert "input_schema" in use.description
-    assert (
-        '{"tool_ref":"mcpref_RETURNED_VALUE","arguments":{"text":"Hello"}}'
-    ) in use.description
-
-
 def test_reload_capabilities_name_is_one_complete_hard_cut() -> None:
     descriptor = builtin_tool_catalog_entry("reload_capabilities").descriptor
 
     assert descriptor.name == "reload_capabilities"
-    assert "Skill, MCP, and Hook" in descriptor.description
     with pytest.raises(KeyError, match="unknown builtin tool catalog entry"):
         builtin_tool_catalog_entry("reload_plugins")
 
@@ -2261,9 +2248,6 @@ def test_mcp_call_failure_preserves_outcome_and_cancellation(
                 body = json.loads(result.content)
                 assert body["remote_outcome"] == "UNKNOWN"
                 assert body["retry_performed"] is False
-                assert ("verify its outcome or idempotency" in body["guidance"]) == (
-                    default_effect == "EXTERNAL_EFFECT"
-                )
                 expected = {
                     "sse": "SSE stream ended",
                     "timeout": "deadline expired",

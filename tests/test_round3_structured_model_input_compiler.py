@@ -217,6 +217,7 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.conversation_kernel.cold_epoch import CanonicalColdContinuationSeed
 from pulsara_agent.model_input.lowering import (
+    decode_tool_result_observation,
     lower_canonical_item,
     source_variant_message,
 )
@@ -1964,7 +1965,7 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
     )
 
 
-def test_effective_root_system_contains_collector_and_delegated_guidance(
+def test_effective_root_system_preserves_the_collected_base_system(
     tmp_path: Path,
 ) -> None:
     collector = KernelContextSourceCollector(
@@ -1998,11 +1999,12 @@ def test_effective_root_system_contains_collector_and_delegated_guidance(
         )
     )
 
+    base = next(
+        candidate for candidate in sources.candidates
+        if candidate.source_kind is ContextSourceKind.BASE_SYSTEM
+    )
+    assert compiled.system_prompt == base.variants[0].text
     assert compiled.system_prompt.startswith(DEFAULT_SYSTEM_PROMPT)
-    assert compiled.system_prompt != DEFAULT_SYSTEM_PROMPT
-    assert "Provider role is transport" in compiled.system_prompt
-    assert "SKILL_CATALOG routes tasks" in compiled.system_prompt
-    assert "Delegated work:" in compiled.system_prompt
 
 
 def test_round3_optional_clock_advances_only_after_wire_render_feedback() -> None:
@@ -2134,7 +2136,6 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
     assert carrier["message_type"] == "FINAL_ANSWER"
     assert carrier["content"]["result"]["summary"] == "exact delegated summary"
     assert "schema_version" not in carrier["content"]
-    assert "not a human instruction" in carrier["handling"]
 
     human = FrozenProviderInputItem(
         FrozenProviderInputItemKind.USER,
@@ -2174,7 +2175,7 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
     )
     assert "omitted_utf8_bytes" in join_text_content(compact.message.content)
     assert "omitted_characters" in join_text_content(compact.message.content)
-    assert "Use artifact_read" not in join_text_content(compact.message.content)
+    assert "artifact_read" not in join_text_content(compact.message.content)
 
     with_read = lower_canonical_item(
         item,
@@ -2189,7 +2190,8 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
         for variant in with_read.tool_result_variants
         if variant.mode is ToolResultProviderRenderMode.COMPACT
     )
-    assert "If the omitted content is necessary" in join_text_content(
+    assert "artifact_read" in join_text_content(with_read_compact.message.content)
+    assert item.tool_result_context.artifact_id in join_text_content(
         with_read_compact.message.content
     )
 
@@ -2430,7 +2432,14 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
         for variant in lowered.tool_result_variants
         if variant.mode is ToolResultProviderRenderMode.REF_ONLY
     )
-    assert "retained snapshot" in join_text_content(ref.message.content, separator="")
+    reference_body = decode_tool_result_observation(
+        join_text_content(ref.message.content, separator="")
+    )["body"]
+    reference_metadata = json.loads(reference_body.splitlines()[1])
+    assert reference_metadata["source_coverage"] == "RETAINED_SNAPSHOT"
+    assert reference_metadata["source_coverage_reason"] == "TERMINAL_RETENTION_GAP"
+    assert reference_metadata["artifact_disposition"] == "INCOMPLETE"
+    assert reference_metadata["artifact_id"] == "artifact:retained"
 
     unavailable = replace(
         metadata,

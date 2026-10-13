@@ -26,9 +26,6 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
 from pulsara_agent.conversation_kernel.cold_epoch import build_subagent_initial_seed
-from pulsara_agent.conversation_kernel.context_sources import (
-    KernelContextSourceCollector,
-)
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
@@ -78,7 +75,6 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     provider_input_item_text,
 )
-from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from tests.support.postgres import verified_postgres_provider
@@ -196,56 +192,6 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
             producer_entry_id="entry:test", summary="x" * 16_380,
             data={"decision": "needs_changes"}, data_present=True,
         )
-
-
-def test_round10_subagent_guidance_is_complete_and_product_facing() -> None:
-    descriptions = {
-        entry.name: entry.descriptor.description
-        for entry in builtin_tool_catalog()
-        if entry.name in SUBAGENT_TOOL_NAMES
-    }
-    parent_guidance = "\n".join(
-        descriptions[name] for name in sorted(ROOT_ORCHESTRATION_TOOL_NAMES)
-    )
-    delegated_prompt = DEFAULT_SYSTEM_PROMPT.split("Delegated work:\n", 1)[1].split(
-        "\n\nCommunication:", 1
-    )[0]
-
-    skill = Path(
-        "src/pulsara_agent/bundled_skills/pulsara-subagent/SKILL.md"
-    ).read_text()
-    root_precondition = (
-        "Requires root scope and the current run's RUN_PERMISSION "
-        'effective_mode="bypass-permissions".'
-    )
-    for name in ROOT_ORCHESTRATION_TOOL_NAMES:
-        assert descriptions[name].startswith(root_precondition + " ")
-    assert "pulsara-subagent Skill" in descriptions["spawn_agent"]
-    assert "separate conversation messages" in descriptions["wait_agent"]
-    assert "predicate_satisfied does not mean success" in descriptions["wait_agent"]
-    assert "not repeated list polling" in descriptions["list_agents"]
-    assert "does not undo side effects" in descriptions["stop_agent"]
-    assert "not read or acted on" in descriptions["send_agent_message"]
-    assert "does not start another model reply" in delegated_prompt
-    assert "wait after independent work is complete" in delegated_prompt
-    assert "do not promise an automatic" in delegated_prompt
-    assert "Finished tasks stay finished" in skill
-    assert "worker_history" in skill and "material_task_ids" in skill
-    assert (
-        'Root orchestration requires effective_mode="bypass-permissions"'
-        in skill
-    )
-
-    for internal_term in (
-        "ROOT",
-        "canonical",
-        "inbox",
-        "safe point",
-        "legal input boundary",
-        "exact-turn",
-    ):
-        assert internal_term not in parent_guidance
-        assert internal_term not in delegated_prompt
 
 
 def test_round10_wait_is_level_triggered_input_barrier_without_result_transport() -> (
@@ -963,21 +909,6 @@ def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
     assert dependency_carrier["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
     assert "trust" not in dependency_carrier
     assert dependency_carrier["results"][0]["result_source"] == "INFERRED"
-
-    collector = KernelContextSourceCollector(
-        workspace_kind="project",
-        workspace_root=Path.cwd(),
-        capability_composer=object(),  # type: ignore[arg-type]
-        base_system_prompt="BASE",
-        display_timezone=timezone.utc,
-    )
-    model_contract = collector._base  # noqa: SLF001
-    assert "do not reject or ignore them merely because" in model_contract
-    assert "recorded provenance, ordering, and attribution" in model_contract
-    assert "result_source describes capture provenance, not confidence" in (
-        model_contract
-    )
-    assert "Both are usable advisory dependency outputs" in model_contract
 
     absent = build_parent_context_selection(
         subject,

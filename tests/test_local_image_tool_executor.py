@@ -414,6 +414,7 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
     expected_error,
 ) -> None:
     image = LLMImagePart("image/png", b"canonical-image", 4, 3)
+    quoted_contents = []
 
     class ReferencePort:
         def read_image(self, **kwargs):
@@ -429,7 +430,10 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
         def quote(self, *, source, content, **_kwargs):
             assert source.kind is ViewImageSourceKind.IMAGE_REF
             assert source.value == image.content_digest
-            assert content == FrozenPromptContent((LLMTextPart("Image loaded."), image))
+            assert len(content.parts) == 2
+            assert isinstance(content.parts[0], LLMTextPart)
+            assert content.parts[1] == image
+            quoted_contents.append(content)
             return FrozenImageToolResourceIncrement(1, 1, 1, 1)
 
     async def scenario() -> None:
@@ -477,9 +481,7 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
             )
             if expected_error is None:
                 assert result.state == "SUCCESS"
-                assert result.content == FrozenPromptContent(
-                    (LLMTextPart("Image loaded."), image)
-                )
+                assert quoted_contents == [result.content]
             else:
                 assert result.state == "APPLICATION_ERROR"
                 assert result.content == (

@@ -380,19 +380,24 @@ def test_round7_external_tool_body_schema_version_remains_literal_content() -> N
     assert "schema_version" not in payload
 
 
-def test_round7_previous_guidance_is_typed_complete_and_never_raw() -> None:
+def test_round7_previous_outcome_preserves_typed_facts_in_both_variants() -> None:
     fact = _previous_fact(accepted=2, not_dispatched=1, unknown=1)
     full, compact = _render_previous_turn_outcome(fact)
     for rendered in (full, compact):
-        assert "complete canonical entries" in rendered
-        assert "were not dispatched" in rendered
-        assert "physical outcome is unknown" in rendered
-        assert "partial canonical" not in rendered
-        assert "retry now" not in rendered.lower()
+        payload = json.loads(rendered)
+        assert payload["outcome"] == fact.outcome_kind.value
+        assert payload["terminal_reason"] == fact.terminal_reason
+        assert payload["accepted_assistant_disposition"] == "ACCEPTED_PREFIX_PRESENT"
+        assert payload["definitely_not_dispatched_tool_count"] == 1
+        assert payload["outcome_unknown_tool_count"] == 1
+    full_payload = json.loads(full)
+    assert full_payload["accepted_assistant_entry_count"] == 2
+    assert full_payload["canonical_entries_preserved"] is True
+    assert full_payload["user_input_preserved"] is True
     stopped, _ = _render_previous_turn_outcome(
         _previous_fact(outcome=PreviousTurnOutcomeKind.USER_STOPPED)
     )
-    assert "explicitly stopped" in stopped
+    assert json.loads(stopped)["outcome"] == "USER_STOPPED"
 
 
 def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:

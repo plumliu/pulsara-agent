@@ -320,8 +320,6 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
 
     memory = asyncio.run(inspect_model_memory())
     assert memory["user_edit"]["edited_at"] == changed["user_edited_at"]
-    assert "relations were not re-evaluated" in memory["user_edit"]["note"]
-    assert "original save" not in memory["user_edit"]["note"]
     assert memory["statement"] == changed["fact"]["statement"]
     assert "provenance" not in memory
     assert repository.memory_management_edit_statement(

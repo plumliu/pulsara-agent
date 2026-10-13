@@ -206,7 +206,7 @@ async def run():
                 )
                 assert before.interruption_notices[0].turn_id == target
                 assert any(
-                    "Runtime saved-task input"
+                    first_task["id"]
                     in json.dumps(c["provider_input"], ensure_ascii=False)
                     for c in calls
                 )

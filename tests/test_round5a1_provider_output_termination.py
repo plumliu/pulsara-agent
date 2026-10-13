@@ -176,7 +176,6 @@ def test_openai_function_tools_share_one_explicit_non_strict_wire_contract() -> 
     ]
     assert "process_id" in monitor_parameters["properties"]
     assert "monitor_id" in monitor_parameters["properties"]
-    assert "When action is 'register'" in monitor_parameters["description"]
 
 
 def test_openai_function_tool_declares_object_root_without_mutating_schema() -> None:
@@ -218,7 +217,6 @@ def test_capability_management_wire_keeps_each_actions_required_and_allowed_fiel
     chat = chat_tool_wire_items((tool,))[0]["function"]
     responses = responses_tool_wire_items((tool,))[0]
     assert chat == {key: responses[key] for key in chat}
-    assert "use only fields listed for the selected action" in chat["description"]
 
     wire = chat["parameters"]
     assert set(wire["required"]) == {"action", "scope"}

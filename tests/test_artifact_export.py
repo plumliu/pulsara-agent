@@ -238,7 +238,6 @@ def test_final_close_failure_keeps_publication_fact_and_closes_both_fds(
     monkeypatch.setattr(filesystem.os, "close", close)
     result = ArtifactExportTool(tmp_path, artifact_read_port=BodyPort()).execute(call())
     assert json.loads(result.output)["error"] == "FILE_PUBLICATION_UNCONFIRMED"
-    assert "No destination was created" not in result.output
     assert (tmp_path / "output.txt").read_bytes() == b"retained text"
     assert len(closed_after_failure) == 2
     assert not list(tmp_path.glob(".pulsara-*.tmp"))

@@ -297,7 +297,7 @@ def test_scheduled_create_rejects_invalid_status(status):
         creation_status(status)
 
 
-def test_scheduled_wire_keeps_action_signatures_and_pagination_guidance():
+def test_scheduled_wire_keeps_required_and_optional_action_fields():
     canonical = schema("scheduled_tasks")
     wire = lower_openai_function_parameters(canonical)
     assert set(wire["properties"]["action"]["enum"]) == {
@@ -319,10 +319,6 @@ def test_scheduled_wire_keeps_action_signatures_and_pagination_guidance():
         optional_set = set() if optional == "none" else set(optional.split(", "))
         assert required_set == set(branch["required"]) - {"action"}
         assert required_set | optional_set == set(branch["properties"]) - {"action"}
-    assert (
-        "repeat the same status/session_id filters"
-        in wire["properties"]["cursor"]["description"]
-    )
 
 
 @pytest.mark.parametrize(

@@ -571,7 +571,7 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     # omits the old group that cannot fit, while retaining source lifecycle.
     initial = join_text_content(contexts[-2].messages[-1].content)
     repair_messages = contexts[-1].messages
-    assert "Runtime source lifecycle facts" in initial and "USER_STOPPED" in initial
+    assert "USER_STOPPED" in initial
     assert ("OLD_IMPORTED_END" in initial) == (route == "installed")
     assert tuple(repair_messages[: len(contexts[-2].messages)]) == tuple(
         contexts[-2].messages

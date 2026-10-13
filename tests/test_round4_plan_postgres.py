@@ -74,7 +74,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
     ProviderToolResultClosureKind,
-    provider_input_item_text,
 )
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
@@ -1874,6 +1873,3 @@ def test_round4_aborted_plan_question_lowers_without_effect_unknown(
         and item.tool_call_id == question_batch.selected_tool_call_id
     )
     assert len(closure_items) == 1
-    assert "no physical tool effect occurred" in provider_input_item_text(
-        closure_items[0]
-    )

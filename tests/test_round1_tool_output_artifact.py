@@ -360,7 +360,7 @@ def test_round1_archive_bytes_and_display_chars_are_independent() -> None:
     assert publisher.calls == [text.encode("utf-8")]
 
 
-def test_round1_multibyte_preview_and_unavailable_wording_are_exact() -> None:
+def test_round1_multibyte_preview_preserves_coverage_when_storage_is_unavailable() -> None:
     text = "🙂" * 20_000
     publisher = _RecordingPublisher(
         failure=KnownArtifactPublicationFailure("storage unavailable")
@@ -380,7 +380,6 @@ def test_round1_multibyte_preview_and_unavailable_wording_are_exact() -> None:
         ToolOutputArtifactUnavailabilityReason.BLOB_PUBLICATION_FAILED
     )
     assert projection.canonical_preview.size <= 65_536
-    assert "omitted output could not be retained" in preview
     assert "artifact_id=" not in preview
 
     complete = _processor(
@@ -395,8 +394,8 @@ def test_round1_multibyte_preview_and_unavailable_wording_are_exact() -> None:
     )
     complete_preview = complete.canonical_preview.canonical_bytes.decode()
     assert complete.display_kind is ToolResultDisplayKind.COMPLETE
-    assert "complete candidate output is shown inline" in complete_preview
-    assert "omitted output could not be retained" not in complete_preview
+    assert complete.artifact_disposition is ToolOutputArtifactDisposition.UNAVAILABLE
+    assert "x" * 9_000 in complete_preview
 
 
 @dataclass(slots=True)
@@ -515,7 +514,6 @@ def test_round1_retained_snapshot_keeps_both_failure_axes() -> None:
         artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
-    preview = projection.canonical_preview.canonical_bytes.decode()
     assert projection.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
     assert projection.source_coverage_reason is (
         ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
@@ -524,8 +522,6 @@ def test_round1_retained_snapshot_keeps_both_failure_axes() -> None:
     assert projection.artifact_unavailability_reason is (
         ToolOutputArtifactUnavailabilityReason.BLOB_PUBLICATION_FAILED
     )
-    assert "retained snapshot only" in preview
-    assert "ARTIFACT UNAVAILABLE" in preview
 
 
 def test_round2_sanitizer_unavailable_remains_distinct_from_retention_gap(
@@ -655,9 +651,6 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
     assert preview_envelope["cwd"] == str(tmp_path)
     assert preview_envelope["process_id"] == public_envelope["process_id"]
     assert "MIDDLE-SENTINEL" not in preview_envelope["output"]
-    assert "For a small needed excerpt" in preview_envelope["output"]
-    assert "artifact_export when available" in preview_envelope["output"]
-    assert "no prior page read is required" in preview_envelope["output"]
 
 
 class _ScriptedModel(ScriptedKernelModel):

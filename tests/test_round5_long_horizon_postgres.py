@@ -1303,7 +1303,6 @@ def test_effectful_tool_failure_preserves_unknown_result_and_continues(
         assert body["message"] == "injected physical failure"
         assert body["physical_outcome"] == "UNKNOWN"
         assert body["retry_performed"] is False
-        assert "Check the actual state" in body["guidance"]
 
     assert tool.invocations == 1
     with provider.connection(

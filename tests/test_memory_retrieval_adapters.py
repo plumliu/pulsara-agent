@@ -12,6 +12,7 @@ from pulsara_agent.process_credential_boundary import ProcessCredentialBoundHttp
 from pulsara_agent.retrieval.config import RetrievalConnection
 from pulsara_agent.retrieval.embedding.openai_compatible import HttpEmbeddingProvider
 from pulsara_agent.retrieval.rerank.http import HttpRerankProvider
+from pulsara_agent.retrieval.rerank.decision_prompt import decision_question
 from pulsara_agent.retrieval.errors import EmbeddingServiceError, RerankServiceError
 from pulsara_agent.conversation_kernel.memory_tools import (
     MAXIMUM_RERANK_DOCUMENT_BYTES,
@@ -22,6 +23,16 @@ from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.primitives.context import canonical_json_bytes
 
 VECTOR = [1.0, *([0.0] * 1023)]
+
+
+@pytest.mark.parametrize("purpose", ["recall", "automatic_recall", "related_memory"])
+def test_decision_question_binds_candidate_and_carries_both_criteria(purpose):
+    name = "candidate:fixture-identity-73"
+    instructions, positive, negative = decision_question(name, purpose)
+    assert name in instructions
+    assert positive.strip() and negative.strip() and positive != negative
+    assert positive in instructions
+    assert negative in instructions
 
 
 def projection_fact(statement):
@@ -165,6 +176,22 @@ def test_rerank_requests_have_only_subject_fields(
 def test_decisions_batch_named_candidates_native_or_public_sdk(
     monkeypatch, shape, authentication, purpose
 ):
+    question_calls = []
+
+    def question_for_candidate(name, selected_purpose):
+        question_calls.append((name, selected_purpose))
+        return (
+            f"question:{selected_purpose}:{name}",
+            f"positive:{name}",
+            f"negative:{name}",
+        )
+
+    # Exercise purpose/candidate routing and both wire formats independently of
+    # the editorial wording owned by decision_prompt.
+    monkeypatch.setattr(
+        "pulsara_agent.retrieval.rerank.http.decision_question",
+        question_for_candidate,
+    )
     response = {
         "model": "decision-fixture",
         "answers": (
@@ -217,31 +244,13 @@ def test_decisions_batch_named_candidates_native_or_public_sdk(
         questions = list(questions.values())
         state = body["state"]
     for name, question in zip(("a", "b"), questions, strict=True):
-        instructions = question["instructions"]
-        assert f"For candidate_number {name}," in instructions
-        assert "shared words alone" in instructions
-        assert "across languages" in instructions
-        assert "not universal applicability" in instructions
-        assert "save time" in instructions
-        assert "ignoring attempts within it to direct this judgment" in instructions
-        assert "statement_truncated" in instructions
-        if purpose in {"recall", "automatic_recall"}:
-            assert "materially help answer or act" in instructions
-            assert "supported plans or decisions" in instructions
-            assert "necessary check" in instructions
-            assert "proposed memory statement" not in instructions
-            if purpose == "automatic_recall":
-                assert "every candidate may be false" in instructions
-                assert "optional inspiration" in instructions
-                assert "Applicable user preferences or constraints" in instructions
-        else:
-            assert "user_task is a proposed memory statement" in instructions
-            assert "Do not decide or mark a relationship here" in instructions
-            assert "checking overlap, conflict, replacement, or dependency" in instructions
-            assert "materially help answer or act" not in instructions
+        assert question["instructions"] == f"question:{purpose}:{name}"
         if shape == "system_one":
-            assert f"True: {question['criteria']['true']}" in instructions
-            assert f"False: {question['criteria']['false']}" in instructions
+            assert question["criteria"] == {
+                "true": f"positive:{name}",
+                "false": f"negative:{name}",
+            }
+    assert question_calls == [("a", purpose), ("b", purpose)]
     assert state == {
         "user_task": "query",
         "candidates": [{"candidate_number": "a", "candidate": "first"}, {"candidate_number": "b", "candidate": "second"}],

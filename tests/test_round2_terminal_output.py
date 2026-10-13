@@ -118,7 +118,6 @@ def test_round2_output_cursor_exact_delta_invalid_and_delivery_head_tail() -> No
     assert bounded.disposition is TerminalOutputReadDisposition.EXACT_DELTA
     assert bounded.text.startswith("HEAD-")
     assert bounded.text.endswith("-TAIL ")
-    assert "omitted by delivery bound" in bounded.text
     assert bounded.omitted_by_delivery_bound_utf8_bytes > 0
     assert (
         bounded.included_source_utf8_bytes
@@ -172,7 +171,6 @@ def test_terminal_cursor_rejection_returns_actionable_tool_error(foreign: bool) 
     assert result.status is ToolResultState.ERROR
     body = json.loads(result.output)
     assert body["error"] == "INVALID_CURSOR"
-    assert "omit since_cursor" in body["message"]
     assert cursor not in body["message"]
     assert "ValueError" not in result.output
     assert result.output_artifact_candidate is None

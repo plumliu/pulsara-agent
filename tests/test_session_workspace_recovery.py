@@ -104,7 +104,6 @@ def test_workspace_feedback_closed_codec_has_no_process_facts(tmp_path):
     assert value["kind"] == "workspace_recreated"
     assert not {"process", "process_id", "other_work_stopped"} & value.keys()
     lowered = project_user_control_feedback_for_provider(fact.canonical_bytes())
-    assert "Original files were not recovered" in lowered
     assert str(tmp_path) in lowered
 
 

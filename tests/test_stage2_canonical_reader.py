@@ -1541,15 +1541,16 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
         assert envelope["message_type"] == "FINAL_ANSWER"
         assert completion["status"] == "FAILED"
         assert completion["result"] is None
-        assert completion["failure"] == {
+        failure = completion["failure"]
+        assert set(failure) == {
+            "code", "detail", "failed_dependency_task_ids", "retryability", "next_action"
+        }
+        assert isinstance(failure["next_action"], str) and failure["next_action"].strip()
+        assert {key: value for key, value in failure.items() if key != "next_action"} == {
             "code": "CHILD_EXECUTION_FAILED",
             "detail": "ProviderError: controlled worker failure",
             "failed_dependency_task_ids": [],
             "retryability": "NEW_TASK_ONLY",
-            "next_action": (
-                "Use the failure detail to recover locally or create a "
-                "replacement task."
-            ),
         }
         assert duplicate.disposition is SubagentCompletionDisposition.ALREADY_DELIVERED
         assert duplicate.entry == automatic.entry

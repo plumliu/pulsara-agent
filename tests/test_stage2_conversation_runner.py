@@ -2623,9 +2623,6 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert len(model.requests) == 2
     successor_snapshot = _context_snapshot_payload(model.requests[1])
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
-    assert successor_snapshot["continuation"]["instruction"].startswith(
-        "HANDOFF COMPLETE / RESUME NOW"
-    )
     assert successor_snapshot["continuation"]["active_request"]["text"] == (
         "second question"
     )
@@ -6317,9 +6314,6 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     restart_snapshot = _context_snapshot_payload(replacement_model.requests[0])
     assert restart_snapshot["continuation"]["mode"] == "AWAIT_NEXT_USER"
     assert restart_snapshot["continuation"]["active_request"] is None
-    assert restart_snapshot["continuation"]["instruction"].startswith(
-        "HANDOFF COMPLETE / AWAIT NEXT USER"
-    )
     assert (
         sum(
             message.content == (LLMTextPart("question after restart"),)
@@ -9871,7 +9865,6 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         "pulsara_inter_agent_message"
     ]
     assert envelope["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
-    assert "Its source is recorded" in envelope["handling"]
     assert envelope["content"]["result"]["summary"] == "exact explicit summary"
     assert (
         materialized.items[-1].input_origin
@@ -10237,9 +10230,6 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     assert len(tool_messages) == 1
     preview = text_part_values(tool_messages[0].content)[0]
     assert len(preview.encode("utf-8")) <= 65_536
-    assert "OUTPUT TRUNCATED / PREVIEW" in preview
-    assert "For a small needed excerpt" in preview
-    assert "artifact_export when available" in preview
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,

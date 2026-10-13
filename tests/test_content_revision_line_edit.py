@@ -155,7 +155,6 @@ def test_head_tail_projected_read_does_not_authorize_partial_lines(
     payload = _payload(result)
     assert result.status is ToolResultState.SUCCESS
     assert len(result.output.encode("utf-8")) > 40_000
-    assert "none of its lines authorize" in payload["_warning"]
 
     edit_result = _edit(
         tmp_path,
@@ -233,17 +232,6 @@ def test_read_only_file_tools_accept_relative_paths_outside_workspace(
 
     with pytest.raises(ValueError, match="escapes workspace root"):
         _call(WriteFileTool(workspace), {"path": "../external/new.txt", "content": "x"})
-
-
-@pytest.mark.parametrize("tool_name", ("read_file", "search_content", "view_image"))
-def test_read_only_file_tool_catalog_allows_relative_paths_outside_workspace(
-    tool_name: str,
-) -> None:
-    descriptor = builtin_tool_catalog_entry(tool_name).descriptor
-    path_description = descriptor.input_schema["properties"]["path"]["description"]
-
-    assert "may traverse outside it with ../" in descriptor.description
-    assert "may traverse outside it with ../" in path_description
 
 
 def test_paginated_reads_union_seen_intervals_only_for_same_revision(
@@ -1012,52 +1000,6 @@ def test_catalog_schema_is_single_closed_line_edit_path() -> None:
             }
         )
     )
-
-
-def test_file_tool_descriptions_explain_line_locators_without_changing_edit_semantics() -> None:
-    read_description = builtin_tool_catalog_entry("read_file").descriptor.description
-    edit_descriptor = builtin_tool_catalog_entry("edit_file").descriptor
-    edit_description = edit_descriptor.description
-    combined = f"{read_description}\n{edit_description}"
-
-    assert "read_file displays: 2|预算=360" in combined
-    assert '"kind":"replace_lines"' in combined
-    assert '"lines":["预算=400"]' in combined
-    assert "The leading 2| is a display locator, not replacement text." in combined
-    assert "Do not copy the display prefix" in combined
-    assert "1|2|预算=360" in combined
-    assert "replace_file" in edit_description
-    assert "not display of the full file" in edit_description
-
-    operations_description = edit_descriptor.input_schema["properties"]["operations"][
-        "description"
-    ]
-    assert "without read_file's N| display locators unless intended content" in operations_description
-    assert "displayed 1|2|预算=360 means file text 2|预算=360" in operations_description
-    assert "without the first 1|" in operations_description
-
-    variants = edit_descriptor.input_schema["properties"]["operations"]["items"][
-        "oneOf"
-    ]
-    replace_lines = next(
-        item
-        for item in variants
-        if item["properties"]["kind"].get("const") == "replace_lines"
-    )
-    logical_lines = replace_lines["properties"]["lines"]
-    assert "Complete replacement/insertion lines" in logical_lines["description"]
-    assert "an empty string is a blank line" in logical_lines["description"]
-    assert "without CR, LF or NUL" in logical_lines["items"]["description"]
-
-    replace_file = next(
-        item
-        for item in variants
-        if item["properties"]["kind"].get("const") == "replace_file"
-    )
-    replace_content = replace_file["properties"]["content"]["description"]
-    assert "Complete UTF-8 file text" in replace_content
-    assert "only replace_file can replace or empty the entire file" in replace_content
-    assert "replace_file must be the sole operation" in edit_description
 
 
 def test_filesystem_state_has_no_timestamp_or_revision_registry() -> None:

@@ -692,7 +692,8 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 == summary_calls[0].messages
             )
             assert summary_calls[1].system_prompt == summary_calls[0].system_prompt
-            assert "Runtime saved-task input" in str(summary_calls[0].messages)
+            assert task["id"] in str(summary_calls[0].messages)
+            assert '"trigger_source":"RUN_ONCE"' in str(summary_calls[0].messages)
             human = await h.session.run_turn(
                 PromptContent.text("Human continuation after compaction")
             )

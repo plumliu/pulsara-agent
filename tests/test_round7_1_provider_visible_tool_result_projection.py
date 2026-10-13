@@ -173,7 +173,7 @@ def test_round7_1_variant_validator_accepts_ordered_subsets_without_full() -> No
     ):
         text = by_mode[mode].message.content[0].text
         assert "offset_chars=0" in text
-        assert "next_offset_chars as offset_chars" in text
+        assert "next_offset_chars" in text
         assert "offset/limit" not in text
     ref_and_omitted = (
         by_mode[ToolResultProviderRenderMode.REF_ONLY],
