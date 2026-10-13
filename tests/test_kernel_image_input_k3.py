@@ -963,9 +963,17 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
 
     assert projected.parts == (
         LLMTextPart("before"),
-        LLMTextPart("[Image omitted]"),
+        LLMTextPart(
+            "[历史图片引用；此处未包含图像内容]\n"
+            f"image_ref: {_image(b'same').content_digest}\n"
+            "media_type: image/png; width: 512; height: 512"
+        ),
         LLMTextPart("between"),
-        LLMTextPart("[Image omitted]"),
+        LLMTextPart(
+            "[历史图片引用；此处未包含图像内容]\n"
+            f"image_ref: {_image(b'same').content_digest}\n"
+            "media_type: image/png; width: 512; height: 512"
+        ),
     )
     assert project_prompt_content_for_text_only_handover(projected) == projected
 
@@ -1427,3 +1435,12 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
     assert quote.followup_wire.raw_final_wire_estimated_input_tokens < 200_000
     assert not any('post-response-resource-upper' in join_text_content(message.content) for message in seen)
     runner._require_post_response_resources(quote, effective_input_budget_tokens=200_000)
+
+
+def test_image_placeholder_text_limit_is_explicit_resource_failure():
+    from pulsara_agent.llm.input import MAXIMUM_PROMPT_TEXT_UTF8_BYTES
+    source = FrozenPromptContent((LLMTextPart("x" * MAXIMUM_PROMPT_TEXT_UTF8_BYTES), _image()))
+    with pytest.raises(StructuredModelInputCompileError) as error:
+        project_prompt_content_for_text_only_handover(source)
+    assert error.value.kind is ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
+    assert _can_retry_compaction_with_smaller_recent(error.value)

@@ -7,8 +7,56 @@ import re
 from pulsara_agent.conversation_kernel.prompt_content import (
     PROMPT_BODY_MEDIA_TYPE,
     decode_canonical_prompt_body,
+    CanonicalPromptImageDescriptor,
 )
-from pulsara_agent.llm.input import LLMTextPart, PromptAnnotationPart
+from pulsara_agent.llm.input import (
+    LLMTextPart,
+    PromptAnnotationPart,
+    HISTORICAL_IMAGE_MARKER,
+    image_reference_text,
+)
+
+
+def prompt_history_text(parts, *, image_references: bool | None):
+    """Project typed parts, keeping generated image spans out of lexical fields.
+
+    None is the caller-neutral search display; bool selects same/other-session
+    exact reading. Spans belong to this view, not to a stored authorization.
+    """
+    shown, segments, bounds = [], [], []
+    offset = 0
+    for part in parts:
+        is_image = isinstance(part, CanonicalPromptImageDescriptor)
+        if is_image:
+            if image_references is None:
+                text = HISTORICAL_IMAGE_MARKER
+            elif image_references:
+                text = image_reference_text(
+                    digest=part.digest,
+                    media_type=part.media_type,
+                    width=part.width,
+                    height=part.height,
+                )
+            else:
+                text = (
+                    f"[另一会话的历史图片；{part.media_type}；"
+                    "此处未包含图像内容，未授予当前会话读图权限]"
+                )
+        elif isinstance(part, LLMTextPart):
+            text = part.text
+        elif isinstance(part, PromptAnnotationPart):
+            text = part.comment or ""
+        else:
+            raise TypeError("unknown canonical prompt part")
+        if shown:
+            offset += 1
+        if is_image:
+            bounds.append((offset, offset + len(text)))
+        else:
+            segments.append((offset, text))
+        shown.append(text)
+        offset += len(text)
+    return "\n".join(shown), tuple(segments), tuple(bounds)
 
 
 def display_title(row):

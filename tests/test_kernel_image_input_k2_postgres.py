@@ -518,6 +518,33 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
     assert tuple(item.tool_call_ordinal for item in tool_results) == (0, 1)
     assert all(item.content[1] == shared_image for item in tool_results)
 
+    # History projection uses the typed tool body only when tools are included.
+    from pulsara_agent.conversation_kernel.history_projection import canonical_history_message
+    from pulsara_agent.conversation_kernel.session_content import SessionContentQuery
+    from pulsara_agent.ports.session_content import SessionContentRange
+    from pulsara_agent.llm.input import HISTORICAL_IMAGE_MARKER
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        entry = connection.execute(
+            "SELECT * FROM pulsara_v3.transcript_entries WHERE id=%s",
+            (accepted_candidates[0].result_entry_id,),
+        ).fetchone()
+        state = connection.execute("SELECT * FROM pulsara_v3.sessions WHERE id=%s", (lease.guard.session_id,)).fetchone()
+        assert canonical_history_message(connection, entry) is None
+        projected = canonical_history_message(connection, entry, include_tools=True)
+        assert HISTORICAL_IMAGE_MARKER in projected["text"]
+        assert shared_image.content_digest not in str(projected)
+        assert HISTORICAL_IMAGE_MARKER not in str(projected["fields"])
+    page = SessionContentQuery(repository, session_id=lease.guard.session_id, memory_domain_id=state["memory_domain_id"]).invoke(
+        "read_session_content", {"entry_id": entry["id"], "include_tools": True, "limit": 1},
+        current_range=SessionContentRange(state["latest_entry_sequence"]),
+        tool_call_id="call:history", deadline_monotonic=monotonic() + 30,
+    )
+    assert shared_image.content_digest in page["items"][0]["text"]
+    assert page["items"][0]["tool_name"] == "view_image"
+
     rollback_image = _image(_png(size=(8, 6)))
     rollback_entry_id = _id("entry")
     rollback_candidate = candidate(

@@ -240,7 +240,7 @@ def test_query_only_calls_do_not_match_or_consume_search_limit(repo, context):
     assert hit["items"][0]["entry_id"] != old
 
 
-def test_long_unicode_call_arguments_cursor_only_and_content_v2_hard_cut(repo, context):
+def test_long_unicode_call_arguments_cursor_only_and_content_v3_hard_cut(repo, context):
     _, new, query = context
     target = new()
     arguments = {"z": ['引号"😀\\\n' * 6000], "a": {"β": False, "null": None}}
@@ -264,7 +264,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v2_hard_cut(repo, c
     first_cursor = page["next_cursor"]
     assert (
         _decode(first_cursor, "read_session_content")["operation"]
-        == "read_session_content.v2"
+        == "read_session_content.v3"
     )
     chunks = []
     while True:
@@ -275,7 +275,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v2_hard_cut(repo, c
         page = query(cursor=page["next_cursor"], limit=1, max_chars=12345)
     assert "".join(chunks) == expected
     old = _decode(first_cursor, "read_session_content")
-    old["operation"] = "read_session_content"
+    old["operation"] = "read_session_content.v2"
     with pytest.raises(SessionQueryError) as error:
         query(cursor=_encode(old))
     assert error.value.code == "CURSOR_INVALID"

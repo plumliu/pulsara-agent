@@ -8,11 +8,16 @@ from dataclasses import dataclass
 from time import monotonic
 from uuid import uuid4
 
+from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    validate_canonical_prompt_owner_metadata,
+)
 from pulsara_agent.conversation_kernel.session_search import (
     search_session_page,
 )
 from pulsara_agent.conversation_kernel.session_text import (
     decode_saved_text,
+    prompt_history_text,
 )
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     ARTIFACT_READ_DEFAULT_CHARS,
@@ -71,7 +76,7 @@ def _decode(cursor, operation):
             operation
             if operation == "search_sessions"
             else operation
-            + (".bm25.v2" if operation == "search_session_content" else ".v2")
+            + (".bm25.v2" if operation == "search_session_content" else ".v3")
         )
         if not isinstance(value, dict) or value.get("operation") != expected:
             raise ValueError()
@@ -109,10 +114,11 @@ def _fits(payload, tool_call_id):
     )
 
 
-def _resource_error():
+def _resource_error(message=None):
     return SessionQueryError(
         "RESULT_BUDGET_EXCEEDED",
-        "One readable item and its cursor cannot fit the tool result budget.",
+        message
+        or "One readable item and its cursor cannot fit the tool result budget.",
     )
 
 
@@ -505,7 +511,7 @@ class SessionContentQuery:
         def token(sequence, start):
             return _encode(
                 {
-                    "operation": operation + ".v2",
+                    "operation": operation + ".v3",
                     "session_id": target,
                     "cut": cut,
                     "event_cut": event_cut,
@@ -604,6 +610,13 @@ class SessionContentQuery:
                 (entry["session_id"], entry["id"], include_tools),
             ).fetchall()
             text, segments, bounds = _assistant_document(blocks)
+        elif entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
+            decoded = validate_canonical_prompt_owner_metadata(
+                connection, row=entry, transcript_entry_id=entry["id"]
+            )
+            text, segments, bounds = prompt_history_text(
+                decoded.parts, image_references=entry["session_id"] == self.session_id
+            )
         else:
             content = entry["inline_content"]
             if content is None:
@@ -665,10 +678,10 @@ class SessionContentQuery:
                 except KeyError as exc:
                     raise RuntimeError("saved tool artifact is missing") from exc
                 prefix, separator = "Saved tool result:\n", "\n\nTool output:\n"
-                segments = (
-                    (len(prefix), text),
-                    (len(prefix) + len(text) + len(separator), body),
-                )
+                segments = tuple(
+                    (len(prefix) + at, value) for at, value in segments
+                ) + ((len(prefix) + len(text) + len(separator), body),)
+                bounds = tuple((len(prefix) + a, len(prefix) + b) for a, b in bounds)
                 text = prefix + text + separator + body
         notices = self.reader._notices(
             connection, entry["session_id"], event_cut, (entry["entry_sequence"],)
@@ -722,7 +735,8 @@ class SessionContentQuery:
             )
             if previous is None:
                 raise SessionQueryError(
-                    "CURSOR_EXPIRED", "Search continuation is no longer available; restart the query."
+                    "CURSOR_EXPIRED",
+                    "Search continuation is no longer available; restart the query.",
                 )
         if not isinstance(query, str) or not query.strip() or type(tools) is not bool:
             raise SessionQueryError(
@@ -831,15 +845,38 @@ class SessionContentQuery:
                 "CURSOR_INVALID", "Text cursor does not identify an eligible entry."
             )
         while entry is not None:
-            item, text, _, _ = self._document(
+            item, text, _, bounds = self._document(
                 connection, entry, event_cut, deadline, include_tools
             )
+            # Assistant bounds describe tool arguments, not generated image spans.
+            image_bounds = bounds if item["role"] != "assistant" else ()
+            if any(a < offset < b for a, b in image_bounds):
+                raise SessionQueryError(
+                    "CURSOR_INVALID", "Text cursor splits an image placeholder."
+                )
             if offset > len(text) or (offset == len(text) and offset):
                 raise SessionQueryError(
                     "CURSOR_INVALID", "Text cursor is outside this message."
                 )
             next_entry = next(iterator, None)
-            take = min(remaining, len(text) - offset)
+
+            def whole_length(length):
+                end = offset + length
+                for a, b in image_bounds:
+                    if a < end < b:
+                        return a - offset
+                return length
+
+            take = whole_length(min(remaining, len(text) - offset))
+            if not take and offset < len(text):
+                if not items:
+                    raise _resource_error(
+                        "Increase max_chars to fit one complete image placeholder and its result packaging."
+                    )
+                return {
+                    "items": items,
+                    "next_cursor": token(entry["entry_sequence"], offset),
+                }
 
             def build(length):
                 value = {**item, "text": text[offset : offset + length]}
@@ -859,9 +896,11 @@ class SessionContentQuery:
                 low, high, winner = 1, take, None
                 while low <= high:
                     middle = (low + high) // 2
-                    candidate = build(middle)
+                    length = whole_length(middle)
+                    candidate = build(length)
                     if _fits(candidate, call_id):
-                        winner = candidate
+                        if length:
+                            winner = candidate
                         low = middle + 1
                     else:
                         high = middle - 1

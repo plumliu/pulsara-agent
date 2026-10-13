@@ -9,10 +9,21 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.conversation_kernel.prompt_content import (
-    decode_canonical_prompt_body,
+    CanonicalPromptImageDescriptor,
+    PROMPT_BODY_MEDIA_TYPE,
 )
-from pulsara_agent.conversation_kernel.session_text import decode_saved_text
-from pulsara_agent.llm.input import LLMTextPart, PromptAnnotationPart
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    validate_canonical_prompt_owner_metadata,
+)
+from pulsara_agent.conversation_kernel.session_text import (
+    decode_saved_text,
+    prompt_history_text,
+)
+from pulsara_agent.llm.input import (
+    LLMTextPart,
+    PromptAnnotationPart,
+    HISTORICAL_IMAGE_MARKER,
+)
 
 
 @contextmanager
@@ -35,33 +46,28 @@ def history_projection_savepoint(connection, *, session_id):
 def canonical_history_message(connection, entry, *, include_tools=False):
     """Keep field coordinates and full annotations; quote never enters the index."""
     kind = entry["entry_kind"]
+    atomic_ranges = []
+    body_ranges = None
     if kind in {"USER_MESSAGE", "USER_STEER"}:
         if entry["scheduled_input"] is not None:
             return None
         role = "user"
-        body = entry["inline_content"]
-        if body is None:
-            body = connection.execute(
-                "SELECT body FROM pulsara_v3.blobs WHERE id=%s AND workspace_id=%s",
-                (entry["blob_id"], entry["workspace_id"]),
-            ).fetchone()["body"]
-        # Verify immutable bytes using the existing canonical reader before decoding.
-        decode_saved_text(
-            {
-                "kind": "user",
-                "content": body,
-                "size": entry["content_size"],
-                "digest": entry["content_digest"],
-                "media_type": entry["content_media_type"],
-            }
-        )
-        parts = decode_canonical_prompt_body(bytes(body)).parts
+        parts = validate_canonical_prompt_owner_metadata(
+            connection, row=entry, transcript_entry_id=entry["id"]
+        ).parts
         fields = []
         body_ranges = []
         shown = []
         annotated = any(isinstance(p, PromptAnnotationPart) for p in parts)
         offset = 0
         for i, part in enumerate(parts):
+            if isinstance(part, CanonicalPromptImageDescriptor):
+                if shown:
+                    offset += 1
+                shown.append(HISTORICAL_IMAGE_MARKER)
+                atomic_ranges.append([offset, offset + len(HISTORICAL_IMAGE_MARKER)])
+                offset += len(HISTORICAL_IMAGE_MARKER)
+                continue
             if isinstance(part, LLMTextPart):
                 display, searchable, field = part.text, part.text, "text"
                 within = 0
@@ -115,16 +121,31 @@ def canonical_history_message(connection, entry, *, include_tools=False):
                 "read_session_content",
             }:
                 return None
-            body = entry["inline_content"]
-            text = decode_saved_text(
-                {
-                    "kind": "tool",
-                    "content": body,
-                    "size": entry["content_size"],
-                    "digest": entry["content_digest"],
-                    "media_type": entry["content_media_type"],
-                }
-            )
+            if entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
+                parts = validate_canonical_prompt_owner_metadata(
+                    connection, row=entry, transcript_entry_id=entry["id"]
+                ).parts
+                text, source_segments, image_bounds = prompt_history_text(
+                    parts, image_references=None
+                )
+            else:
+                body = entry["inline_content"]
+                if body is None:
+                    blob = connection.execute(
+                        "SELECT body FROM pulsara_v3.blobs WHERE id=%s AND workspace_id=%s",
+                        (entry["blob_id"], entry["workspace_id"]),
+                    ).fetchone()
+                    body = None if blob is None else blob["body"]
+                text = decode_saved_text(
+                    {
+                        "kind": "tool",
+                        "content": body,
+                        "size": entry["content_size"],
+                        "digest": entry["content_digest"],
+                        "media_type": entry["content_media_type"],
+                    }
+                )
+                source_segments, image_bounds = ((0, text),), ()
             if fact["output_artifact_disposition"] in {"AVAILABLE", "INCOMPLETE"}:
                 blob = connection.execute(
                     "SELECT body,logical_size,logical_digest FROM pulsara_v3.blobs WHERE id=%s AND workspace_id=%s",
@@ -140,16 +161,26 @@ def canonical_history_message(connection, entry, *, include_tools=False):
                         "digest": blob["logical_digest"],
                     }
                 )
+                source_segments += ((len(text) + 1, artifact),)
                 text += "\n" + artifact
             role, label, shown = "tool", "工具结果", [fact["tool_name"] + "\n" + text]
+            prefix_size = len(fact["tool_name"]) + 1
+            segments = ((0, fact["tool_name"]),) + tuple(
+                (prefix_size + at, value) for at, value in source_segments
+            )
             fields = [
                 {
                     "block": None,
                     "part": None,
                     "field": "tool_result",
-                    "text": shown[0],
-                    "display_start": 0,
+                    "text": value,
+                    "display_start": at,
                 }
+                for at, value in segments
+            ]
+            body_ranges = [[at, at + len(value)] for at, value in segments]
+            atomic_ranges = [
+                [prefix_size + a, prefix_size + b] for a, b in image_bounds
             ]
             annotated = False
         else:
@@ -208,7 +239,10 @@ def canonical_history_message(connection, entry, *, include_tools=False):
         "text": "\n".join(shown),
         "annotated": annotated,
         "fields": fields,
-        "body_ranges": body_ranges if role == "user" else [[0, len("\n".join(shown))]],
+        "body_ranges": body_ranges
+        if body_ranges is not None
+        else [[0, len("\n".join(shown))]],
+        **({"atomic_ranges": atomic_ranges} if atomic_ranges else {}),
     }
 
 
@@ -257,7 +291,9 @@ def build_history_document(
     # Q2 is optional, and its content qualification precedes branch scoring.
     # A failure to restore Q2 must not discard an otherwise complete QA.
     try:
-        q2_message = canonical_history_message(connection, q2) if q2 is not None else None
+        q2_message = (
+            canonical_history_message(connection, q2) if q2 is not None else None
+        )
     except RuntimeError:
         q2_message = None
     if q2_message is None:

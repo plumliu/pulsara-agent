@@ -2487,14 +2487,15 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
 
 
 @pytest.mark.parametrize(
-    ("lose_adoption_ack", "retry_recent"),
-    ((False, False), (True, False), (False, True)),
+    ("lose_adoption_ack", "retry_recent", "image_history"),
+    ((False, False, False), (True, False, False), (False, True, False), (False, True, True)),
 )
 def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
     lose_adoption_ack: bool,
     retry_recent: bool,
+    image_history: bool,
 ) -> None:
     from pulsara_agent.conversation_kernel.compaction import (
         coordinator as compaction_coordinator,
@@ -2563,11 +2564,12 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
             "validate_compaction_wire_transition",
             reject_first_recent,
         )
-        monkeypatch.setattr(
-            compaction_coordinator,
-            "_ordinary_recent_suffixes",
-            lambda recent: (recent, recent),
-        )
+        if not image_history:
+            monkeypatch.setattr(
+                compaction_coordinator,
+                "_ordinary_recent_suffixes",
+                lambda recent: (recent, recent),
+            )
 
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -2586,7 +2588,12 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     runner._provider_dispatch._cold_epoch_assembler = cold_recorder
 
     async def exercise():
-        first = await runner.run_turn(frozen_test_prompt("first question"))
+        if image_history:
+            from tests.test_kernel_image_input_k2_postgres import _image
+            first_prompt = freeze_canonical_prompt(FrozenPromptContent((LLMTextPart("first question"), _image())))
+        else:
+            first_prompt = frozen_test_prompt("first question")
+        first = await runner.run_turn(first_prompt)
         command_id = _name("second-command")
         turn_id = _stable_id("turn", session_id, command_id)
         _request, outcome = await owner.request_manual(
@@ -2621,6 +2628,12 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         LLMTextPart(compaction_summary_request()),
     )
     assert len(model.requests) == 2
+    if image_history:
+        from tests.test_kernel_image_input_k2_postgres import _image
+        successor_text = "\n".join(join_text_content(m.content) for m in model.requests[1].compiled_input.messages)
+        assert _image().content_digest in successor_text
+        assert "[历史图片引用；此处未包含图像内容]" in successor_text
+        assert not any(isinstance(p, LLMImagePart) for m in model.requests[1].compiled_input.messages for p in m.content)
     successor_snapshot = _context_snapshot_payload(model.requests[1])
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
     assert successor_snapshot["continuation"]["active_request"]["text"] == (
@@ -2982,10 +2995,11 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
         for part in message.content
     )
     successor = _context_snapshot_payload(model.requests[1])
-    assert not any(
-        section["metadata"].get("section") == "recent"
-        for section in successor["sections"]
-    )
+    recent_sections = [section for section in successor["sections"]
+                       if section["metadata"].get("section") == "recent"]
+    assert recent_sections
+    assert image.content_digest in json.dumps(recent_sections, ensure_ascii=False)
+    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(recent_sections, ensure_ascii=False)
 
 
 def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
@@ -3246,7 +3260,7 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
     )
     assert (
         sum(
-            join_text_content(message.content).count("[Image omitted]")
+            join_text_content(message.content).count("[历史图片引用；此处未包含图像内容]")
             for message in summary_context.messages
         )
         == 2
@@ -3257,10 +3271,11 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
         for part in message.content
     )
     successor = _context_snapshot_payload(destination_model.requests[0])
-    assert not any(
-        section["metadata"].get("section") == "recent"
-        for section in successor["sections"]
-    )
+    recent_sections = [section for section in successor["sections"]
+                       if section["metadata"].get("section") == "recent"]
+    assert recent_sections
+    assert image.content_digest in json.dumps(recent_sections, ensure_ascii=False)
+    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(recent_sections, ensure_ascii=False)
     assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
 
 
@@ -3385,7 +3400,7 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
     )
     assert (
         sum(
-            join_text_content(message.content).count("[Image omitted]")
+            join_text_content(message.content).count("[历史图片引用；此处未包含图像内容]")
             for message in destination_summary.messages
         )
         == 2
@@ -3396,10 +3411,11 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
         for part in message.content
     )
     successor = _context_snapshot_payload(model.requests[-1])
-    assert not any(
-        section["metadata"].get("section") == "recent"
-        for section in successor["sections"]
-    )
+    recent_sections = [section for section in successor["sections"]
+                       if section["metadata"].get("section") == "recent"]
+    assert recent_sections
+    assert image.content_digest in json.dumps(recent_sections, ensure_ascii=False)
+    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(recent_sections, ensure_ascii=False)
     assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
 
 

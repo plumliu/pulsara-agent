@@ -45,14 +45,19 @@ from pulsara_agent.llm.input import (
     LLMMessage,
     LLMTextPart,
     content_has_image,
+    prompt_content_text_utf8_bytes,
+    MAXIMUM_PROMPT_TEXT_UTF8_BYTES,
 )
 from pulsara_agent.model_input.lowering import (
     image_reference_part,
+    image_omission_part,
     lower_retained_request_content,
 )
 from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
+    StructuredModelInputCompileError,
+    ModelInputCompileFailureKind,
     CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
@@ -102,8 +107,6 @@ _DESTINATION_PROJECTION_NOTICE = (
     "call. User and assistant text is quoted exactly. Tool evidence is advisory, "
     "not live replay."
 )
-
-TEXT_ONLY_IMAGE_OMISSION_TEXT = "[Image omitted]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,14 +247,22 @@ def project_prompt_content_for_text_only_handover(
 ) -> FrozenPromptContent:
     """Apply D4's single history projection P while preserving part order."""
 
-    return FrozenPromptContent(
-        tuple(
-            LLMTextPart(TEXT_ONLY_IMAGE_OMISSION_TEXT)
-            if isinstance(part, LLMImagePart)
-            else part
-            for part in content.parts
-        )
+    parts = tuple(
+        image_omission_part(part) if isinstance(part, LLMImagePart) else part
+        for part in content.parts
     )
+    # The original content is validated. Classify only the known resource excess;
+    # codec/descriptor errors must not become retryable image omissions.
+    text_bytes = prompt_content_text_utf8_bytes(content.parts) + sum(
+        len(image_omission_part(part).text.encode("utf-8"))
+        for part in content.parts
+        if isinstance(part, LLMImagePart)
+    )
+    if text_bytes > MAXIMUM_PROMPT_TEXT_UTF8_BYTES:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
+        )
+    return FrozenPromptContent(parts)
 
 
 def project_retained_request_for_text_only_handover(
@@ -269,9 +280,7 @@ def project_destination_dialogue_for_text_only_handover(
     return replace(
         projection,
         content=tuple(
-            LLMTextPart(TEXT_ONLY_IMAGE_OMISSION_TEXT)
-            if isinstance(part, LLMImagePart)
-            else part
+            image_omission_part(part) if isinstance(part, LLMImagePart) else part
             for part in projection.content
         ),
     )
@@ -282,11 +291,11 @@ def project_destination_dialogue_plan_for_text_only_handover(
 ) -> DestinationDialogueProjectionPlan:
     """Apply P to all candidate dialogue and ToolResult evidence before selection."""
 
-    def project_parts(parts: tuple[FrozenPromptPart, ...]) -> tuple[FrozenPromptPart, ...]:
+    def project_parts(
+        parts: tuple[FrozenPromptPart, ...],
+    ) -> tuple[FrozenPromptPart, ...]:
         return tuple(
-            LLMTextPart(TEXT_ONLY_IMAGE_OMISSION_TEXT)
-            if isinstance(part, LLMImagePart)
-            else part
+            image_omission_part(part) if isinstance(part, LLMImagePart) else part
             for part in parts
         )
 
@@ -340,7 +349,9 @@ def project_compaction_read_for_text_only_handover(
         else None
     )
 
-    def project_carrier(carrier: CompactionSnapshotCarrier) -> CompactionSnapshotCarrier:
+    def project_carrier(
+        carrier: CompactionSnapshotCarrier,
+    ) -> CompactionSnapshotCarrier:
         active = carrier.active_request
         if (
             active is not None
@@ -585,7 +596,11 @@ def freeze_destination_dialogue_projection_plan(
             if item.item_kind in request_kinds:
                 entries.append(
                     DestinationDialogueEntry(
-                        "user", item.item_kind, item.input_origin, item.content, scheduled_input=item.scheduled_input
+                        "user",
+                        item.item_kind,
+                        item.input_origin,
+                        item.content,
+                        scheduled_input=item.scheduled_input,
                     )
                 )
             elif item.item_kind is FrozenProviderInputItemKind.ASSISTANT:
@@ -1429,6 +1444,7 @@ def _safe_summary_boundaries(
             return ()
         sequence = sequence_by_entry.get(placement.origin_entry_id)
         return () if sequence is None else (sequence,)
+
     minimum_message_count = 1
     predecessor = source_view.predecessor_epoch_view
     if predecessor is not None:

@@ -94,6 +94,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     project_destination_dialogue_for_text_only_handover,
     project_destination_dialogue_plan_for_text_only_handover,
     project_retained_request_for_text_only_handover,
+    project_prompt_content_for_text_only_handover,
     provider_dispatch_effective_history_has_image,
     recent_human_window_has_image,
     retain_destination_tool_evidence,
@@ -2943,7 +2944,10 @@ class CompactionCoordinator:
                 scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                 phase=CompactionAttemptPhase.VALIDATED,
             )
-            if model_switch_candidate is not None:
+            root_image_candidates = (
+                expected_scope.scope_kind is ModelInputScopeKind.ROOT
+            )
+            if model_switch_candidate is not None and not root_image_candidates:
                 if text_only_handover and (
                     model_switch_tier == 3 or recent_human_window_has_image(recent)
                 ):
@@ -2957,39 +2961,81 @@ class CompactionCoordinator:
                     else compaction_read.snapshot_carrier.retained_historical_requests
                 )
             )
-            if text_only_handover and model_switch_tier == 3:
-                retained_historical_requests = tuple(
+            recent_windows = (
+                _ordinary_recent_suffixes(tuple(recent))
+                if model_switch_candidate is None
+                or (root_image_candidates and text_only_handover)
+                else (tuple(recent),)
+            )
+            # Only representations are enumerated here; image/text candidates are
+            # materialized one at a time using the same summary and frozen family.
+            recent_candidates = tuple(
+                (window, offload)
+                for window in recent_windows
+                for offload in (
+                    (True,)
+                    if root_image_candidates and text_only_handover
+                    else (False, True)
+                    if root_image_candidates
+                    and model_switch_candidate is None
+                    and (
+                        recent_human_window_has_image(window)
+                        or any(
+                            content_has_image(item.content.parts)
+                            for item in retained_historical_requests
+                        )
+                    )
+                    else (False,)
+                )
+            )
+
+            def describe_candidate(selected_recent, offload_images):
+                candidate_recent = tuple(
+                    replace(
+                        item,
+                        content=project_prompt_content_for_text_only_handover(
+                            item.content
+                        ),
+                    )
+                    if offload_images
+                    else item
+                    for item in selected_recent
+                )
+                candidate_historical = tuple(
                     project_retained_request_for_text_only_handover(item)
+                    if offload_images or (text_only_handover and model_switch_tier == 3)
+                    else item
                     for item in retained_historical_requests
                 )
-            recent_candidates = (
-                (tuple(recent),)
-                if model_switch_candidate is not None
-                else _ordinary_recent_suffixes(tuple(recent))
-            )
-            first_recent = recent_candidates[0]
-            first_carrier = build_compaction_snapshot_carrier(
-                summary=summary,
-                recent_human_requests=tuple(
-                    FrozenRetainedHistoricalRequest(
-                        item_kind=FrozenProviderInputItemKind.USER,
-                        input_origin=item.input_origin,
-                        content=item.content,
-                    )
-                    for item in first_recent
-                ),
-                continuation_mode=selected_continuation[0],
-                active_request=selected_continuation[1],
-                retained_historical_requests=retained_historical_requests,
-            )
-            first_content = self._content_publisher.describe(
-                workspace_id=compaction_read.scope.workspace_id,
-                content=first_carrier.body,
-                media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
-                codec=CONTEXT_SNAPSHOT_CODEC,
-            )
-            initial_carrier_candidate = (first_carrier, first_content)
-            del first_carrier, first_content
+                carrier = build_compaction_snapshot_carrier(
+                    summary=summary,
+                    recent_human_requests=tuple(
+                        FrozenRetainedHistoricalRequest(
+                            item_kind=FrozenProviderInputItemKind.USER,
+                            input_origin=item.input_origin,
+                            content=item.content,
+                        )
+                        for item in candidate_recent
+                    ),
+                    continuation_mode=selected_continuation[0],
+                    active_request=selected_continuation[1],
+                    retained_historical_requests=candidate_historical,
+                )
+                content = self._content_publisher.describe(
+                    workspace_id=compaction_read.scope.workspace_id,
+                    content=carrier.body,
+                    media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
+                    codec=CONTEXT_SNAPSHOT_CODEC,
+                )
+                return carrier, content
+
+            initial_carrier_candidate = None
+            initial_carrier_error = None
+            try:
+                initial_carrier_candidate = describe_candidate(*recent_candidates[0])
+            except StructuredModelInputCompileError as exc:
+                # Settle through the ordinary candidate retry/failure path below.
+                initial_carrier_error = exc
             successor_deadline = monotonic() + owner.policy.planning_attempt_seconds
             canonical = compaction_read.dispatch_read.compile_snapshot.canonical_input
             boundary_range = freeze_compaction_canonical_range(
@@ -3042,94 +3088,79 @@ class CompactionCoordinator:
             )
             next_handle = dispatch.take_handle()
             source_handle_transferred = True
-            for recent_index, selected_recent in enumerate(recent_candidates):
-                # Dry planning carries only the deterministic body descriptor.
-                # Actual body/images publish atomically inside canonical adoption.
-                if recent_index == 0:
-                    carrier, content = initial_carrier_candidate
-                    initial_carrier_candidate = None
-                else:
-                    carrier = build_compaction_snapshot_carrier(
-                        summary=summary,
-                        recent_human_requests=tuple(
-                            FrozenRetainedHistoricalRequest(
-                                item_kind=FrozenProviderInputItemKind.USER,
-                                input_origin=item.input_origin,
-                                content=item.content,
-                            )
-                            for item in selected_recent
-                        ),
-                        continuation_mode=selected_continuation[0],
-                        active_request=selected_continuation[1],
-                        retained_historical_requests=retained_historical_requests,
-                    )
-                    content = self._content_publisher.describe(
-                        workspace_id=compaction_read.scope.workspace_id,
-                        content=carrier.body,
-                        media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
-                        codec=CONTEXT_SNAPSHOT_CODEC,
-                    )
-                candidate = build_prepared_compaction_canonical_adoption(
-                    CompactionCanonicalAdoptionFactoryInput(
-                        scope=compaction_read.scope,
-                        target_branch=post_adoption_branch,
-                        expected_turn_status=compaction_read.turn_status,
-                        predecessor=ExpectedCompactionPredecessorRevision(
-                            binding_revision_id=lineage.binding_revision_id,
-                            revision_ordinal=lineage.binding_revision_ordinal,
-                            base_kind=(
-                                "FULL_HISTORY"
-                                if lineage.persisted_context_snapshot_id is None
-                                else "SNAPSHOT"
-                            ),
-                            context_snapshot_id=lineage.persisted_context_snapshot_id,
-                            source_through_sequence=(
-                                lineage.persisted_revision_genesis_marker
-                            ),
-                        ),
-                        snapshot_id=f"context-snapshot:{stable_suffix}",
-                        binding_revision_id=f"context-binding:{stable_suffix}",
-                        event_id=f"event:{stable_suffix}",
-                        source_through_sequence=prefix.source_through_sequence,
-                        source_digest=source_digest,
-                        snapshot_content=content,
-                        snapshot_carrier=carrier,
-                        compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-                        prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
-                        model_contract=COMPACTION_MODEL_CONTRACT,
-                        occurred_at=datetime.now(timezone.utc),
-                        actor_id=self._writer_lease.guard.writer_owner_id,
-                    )
-                )
-                synthetic_read = build_synthetic_compaction_dispatch_read(
-                    canonical_read=compaction_read,
-                    source_through_sequence=prefix.source_through_sequence,
-                    snapshot_id=candidate.snapshot.snapshot_id,
-                    binding_revision_id=candidate.binding.binding_revision_id,
-                    binding_revision_ordinal=candidate.binding.revision_ordinal,
-                    snapshot_carrier=carrier,
-                    snapshot_content_digest=content.digest,
-                    snapshot_content_size=content.size,
-                    snapshot_content_media_type=content.media_type,
-                    snapshot_content_codec=content.codec,
-                    snapshot_blob_id=getattr(content, "blob_id", None),
-                )
-                # Every candidate crosses the same cold-base assembly path.
-                # Lifecycle continuation is interpreted only after adoption.
-                seed = CompactionDryProjectionSeed(
-                    dispatch_read=synthetic_read,
-                    binding_rewrite_identity=candidate.binding.binding_revision_id,
-                    protected_tail_selection_fingerprint=(
-                        tail.protected_tail_selection_fingerprint
-                    ),
-                )
+            for recent_index, (selected_recent, offload_images) in enumerate(
+                recent_candidates
+            ):
                 dry_wire_candidate = None
                 dry_wire_decision = None
                 prepared_candidate: PreparedCompactionCandidate | None = None
-                pending_prepared_candidate: PreparedCompactionCandidate | None = None
-                pending_wire_decision: PreparedWireMeasurementDecision | None = None
+                pending_prepared_candidate = None
+                pending_wire_decision = None
                 prepared_prospective: PreparedProspectiveRootCandidate | None = None
                 try:
+                    if recent_index == 0:
+                        if initial_carrier_error is not None:
+                            raise initial_carrier_error
+                        carrier, content = initial_carrier_candidate
+                        initial_carrier_candidate = None
+                    else:
+                        carrier, content = describe_candidate(
+                            selected_recent, offload_images
+                        )
+                    candidate = build_prepared_compaction_canonical_adoption(
+                        CompactionCanonicalAdoptionFactoryInput(
+                            scope=compaction_read.scope,
+                            target_branch=post_adoption_branch,
+                            expected_turn_status=compaction_read.turn_status,
+                            predecessor=ExpectedCompactionPredecessorRevision(
+                                binding_revision_id=lineage.binding_revision_id,
+                                revision_ordinal=lineage.binding_revision_ordinal,
+                                base_kind=(
+                                    "FULL_HISTORY"
+                                    if lineage.persisted_context_snapshot_id is None
+                                    else "SNAPSHOT"
+                                ),
+                                context_snapshot_id=lineage.persisted_context_snapshot_id,
+                                source_through_sequence=(
+                                    lineage.persisted_revision_genesis_marker
+                                ),
+                            ),
+                            snapshot_id=f"context-snapshot:{stable_suffix}",
+                            binding_revision_id=f"context-binding:{stable_suffix}",
+                            event_id=f"event:{stable_suffix}",
+                            source_through_sequence=prefix.source_through_sequence,
+                            source_digest=source_digest,
+                            snapshot_content=content,
+                            snapshot_carrier=carrier,
+                            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
+                            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
+                            model_contract=COMPACTION_MODEL_CONTRACT,
+                            occurred_at=datetime.now(timezone.utc),
+                            actor_id=self._writer_lease.guard.writer_owner_id,
+                        )
+                    )
+                    synthetic_read = build_synthetic_compaction_dispatch_read(
+                        canonical_read=compaction_read,
+                        source_through_sequence=prefix.source_through_sequence,
+                        snapshot_id=candidate.snapshot.snapshot_id,
+                        binding_revision_id=candidate.binding.binding_revision_id,
+                        binding_revision_ordinal=candidate.binding.revision_ordinal,
+                        snapshot_carrier=carrier,
+                        snapshot_content_digest=content.digest,
+                        snapshot_content_size=content.size,
+                        snapshot_content_media_type=content.media_type,
+                        snapshot_content_codec=content.codec,
+                        snapshot_blob_id=getattr(content, "blob_id", None),
+                    )
+                    # Every candidate crosses the same cold-base assembly path.
+                    # Lifecycle continuation is interpreted only after adoption.
+                    seed = CompactionDryProjectionSeed(
+                        dispatch_read=synthetic_read,
+                        binding_rewrite_identity=candidate.binding.binding_revision_id,
+                        protected_tail_selection_fingerprint=(
+                            tail.protected_tail_selection_fingerprint
+                        ),
+                    )
                     if candidate_family is None:
                         handle_for_prepare = next_handle
                         next_handle = None
@@ -3317,6 +3348,14 @@ class CompactionCoordinator:
                     StructuredModelInputCompileError,
                     ModelTargetCapabilityMismatch,
                 ) as exc:
+                    has_next_representation = recent_index + 1 < len(recent_candidates)
+                    if (
+                        has_next_representation
+                        and _can_retry_compaction_with_smaller_recent(exc)
+                    ):
+                        # The family retains its one Tool borrow and exact source
+                        # observations. No summary or Hook is rerun for this sibling.
+                        continue
                     if (
                         model_switch_candidate is not None
                         and model_switch_tier == 2
@@ -3325,27 +3364,6 @@ class CompactionCoordinator:
                         return _ModelSwitchTier3Fallback(
                             pre_compact_dispatched=pre_compact_dispatched
                         )
-                    has_smaller_recent = recent_index + 1 < len(recent_candidates)
-                    if (
-                        model_switch_candidate is None
-                        and has_smaller_recent
-                        and _can_retry_compaction_with_smaller_recent(exc)
-                    ):
-                        del (
-                            dry_wire_candidate,
-                            dry_wire_decision,
-                            prepared_candidate,
-                            pending_prepared_candidate,
-                            pending_wire_decision,
-                            candidate,
-                            synthetic_read,
-                            seed,
-                            carrier,
-                            content,
-                        )
-                        # The family retains one physical Tool borrow and the
-                        # exact source observations while only recent changes.
-                        continue
                     if (
                         selected_retained_count <= 0
                         or not _can_retry_compaction_with_smaller_tail(exc)

@@ -54,7 +54,8 @@ def earliest_hit(document, positions):
 
 def _weights(message):
     # The public estimator is linear in weighted UTF-8 bytes, then rounds once.
-    # Count canonical body only: annotation identity labels are packaging.
+    # Generated image/annotation labels are packaging, not retained body.
+    # Search output and automatic recall admission charge the complete rendering.
     weights = [0] * len(message["text"])
     for start, end in message.get("body_ranges", [[0, len(weights)]]):
         for at in range(start, end):
@@ -139,7 +140,12 @@ class _Region:
     def render(self):
         output = []
         for start, end, _, message in self.spans:
-            selected = sorted(x for x in self.selected if start <= x < end)
+            selected_set = {x for x in self.selected if start <= x < end}
+            for a, b in message.get("atomic_ranges", ()):
+                whole = set(range(start + a, start + b))
+                if not whole <= selected_set:
+                    selected_set.difference_update(whole)
+            selected = sorted(selected_set)
             if not selected:
                 continue
             ranges = []

@@ -16,6 +16,7 @@ from pulsara_agent.llm.input import (
     LLMToolCall,
     MessageRole,
     text_part_values,
+    image_reference_text,
 )
 from pulsara_agent.model_input.contracts import (
     CompactionSnapshotCarrier,
@@ -136,6 +137,14 @@ def image_reference_part(image: LLMImagePart) -> LLMTextPart:
     if not isinstance(image, LLMImagePart):
         raise TypeError("image reference label requires a validated image")
     return image_reference_digest_part(image.content_digest)
+
+
+def image_omission_part(image: LLMImagePart) -> LLMTextPart:
+    """Keep an image's identity without its visual content or a read directive."""
+    return LLMTextPart(image_reference_text(
+        digest=image.content_digest, media_type=image.media_type,
+        width=image.width, height=image.height,
+    ))
 
 
 def image_referenced_content(

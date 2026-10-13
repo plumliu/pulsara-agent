@@ -657,7 +657,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         isinstance(part, LLMImagePart) for part in tier3_retained.content
     )
     tier3_text = join_text_content(tier3_retained.content)
-    assert tier3_text.count("[Image omitted]") == 2
+    assert tier3_text.count("[历史图片引用；此处未包含图像内容]") == 2
     assert user_reference not in tier3_text
     assert tool_reference not in tier3_text
     assert display_json(first_result) in tier3_text

@@ -847,7 +847,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "View one PNG, JPEG or static WebP image, or screenshot a local .html/.htm file. "
             "Provide exactly one of path or image_ref. Use image_ref only to reread an "
-            "exact reference already shown beside an image in this session; copy it "
+            "exact reference already shown beside an image or in a historical image "
+            "placeholder in this session; copy it "
             "unchanged. HTML screenshots use an isolated 1200×800 browser with light "
             "theme, reduced motion and network access blocked. They inspect the current "
             "file without publishing it or checking every interaction; edits require "
@@ -870,7 +871,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "minLength": 1,
                     "description": (
                         "Exact sha256: image reference previously shown beside an "
-                        "image in this session, including a visualization screenshot. "
+                        "image or a historical image placeholder in this session, including a visualization screenshot. "
                         "HTML content digests are not image references."
                     ),
                 },
@@ -1092,6 +1093,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "Omit session_id for this session's earlier raw history; other sessions use authorized saved content. "
             "include_tools also searches saved tool names, arguments and results, excluding these three query tools' own calls and results. "
             "Each item's entry_id starts the question; messages carry their own entry_id for read_session_content expansion. "
+            "Images have only a short presence marker; generated markers and image metadata are not search terms. "
             "[truncated] marks omitted original text. Continue with only cursor and optional limit."
         ),
         input_schema=session_query_input_schema(
@@ -1106,13 +1108,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_session_content": _descriptor(
         name="read_session_content",
         description=(
-            "Read saved message text using session_id + entry_id from a search; omit session_id for this session's earlier raw history. "
+            "Read saved messages using a known session_id + entry_id or browse without an anchor; searching first is optional. Omit session_id for this session's earlier raw history. "
             "An anchor is returned first, followed by newer messages by default; direction=older reads preceding messages. "
             "Without an anchor start at latest, default older (newer starts at earliest). Long entries are read from the beginning, "
             "split across pages before advancing to adjacent messages. Continue with only cursor and optional limit/max_chars. "
             "partial means this page is a slice. include_tools adds saved calls as historical names/arguments and results; "
             "public results and retained artifact output form labeled sections; "
-            "coverage/display/disposition describe saved source availability, and cursors cannot recover missing output."
+            "coverage/display/disposition describe saved source availability, and cursors cannot recover missing output. "
+            "Images appear as neutral text placeholders, not visual content. This session's placeholders include image_ref; "
+            "other sessions do not grant image access. Complete image placeholders require sufficient max_chars. "
+            "When existing information suffices, no historical lookup or image reread is needed."
         ),
         input_schema=session_query_input_schema(
             "read_session_content",

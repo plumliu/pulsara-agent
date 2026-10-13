@@ -210,7 +210,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
             assert len(first_model.summary_transport.contexts) == 1
             assert (
                 sum(
-                    join_text_content(message.content).count("[Image omitted]")
+                    join_text_content(message.content).count("[历史图片引用；此处未包含图像内容]")
                     for message in first_model.summary_transport.contexts[0].messages
                 )
                 == 2
