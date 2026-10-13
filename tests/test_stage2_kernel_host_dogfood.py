@@ -1,6 +1,8 @@
 """Fresh-database production-composition dogfood for the Stage 2 cut."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from io import BytesIO
@@ -314,7 +316,7 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
         if mixed
         else PromptContent((PromptImagePart(image_bytes, "image/png"),))
     )
-    expected_image = LLMImagePart("image/png", image_bytes, 7, 5)
+    expected_image = bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix()))
     expected_reference = image_reference_part(expected_image)
     expected_content = (
         (
@@ -377,7 +379,7 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
             await session.update_model_call_binding(test_model_binding(runtime))
             result = await session.run_turn(
                 prompt,
-                command_id=f"command:k2-image:{mixed}",
+                command_id=derive_id("command", "test-fixture", f"command:k2-image:{mixed}"),
             )
             assert result.final_text == "STAGE2_DOGFOOD_OK"
         finally:
@@ -401,7 +403,7 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
         for part in message.content
         if isinstance(part, LLMImagePart)
     )
-    assert images == (LLMImagePart("image/png", image_bytes, 7, 5),)
+    assert images == (bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix())),)
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         ref = connection.execute(
             """SELECT r.ref_ordinal, b.body, b.media_type, b.codec
@@ -459,7 +461,7 @@ def test_k2_public_host_reports_image_validation_reason_before_hook_or_command(
         )
         try:
             outcome = await session.submit_prompt(
-                command_id="command:k2-invalid-image",
+                command_id=derive_id("command", "test-fixture", "k2-invalid-image"),
                 content=PromptContent(
                     (PromptImagePart(payload.getvalue(), "image/jpeg"),)
                 ),
@@ -553,7 +555,7 @@ def test_k2_root_install_prepares_ordered_image_gap_without_a_child(
                         LLMTextPart("after"),
                     )
                 ),
-                command_id="command:k2-root-parent-context",
+                command_id='command:uoiue6s3jhw5ve5fvjnbndmcfe',
             )
             assert result.final_text == "STAGE2_DOGFOOD_OK"
         finally:
@@ -566,7 +568,7 @@ def test_k2_root_install_prepares_ordered_image_gap_without_a_child(
     assert len(prepared_parent_subjects) == 1
     assert len(prepared_parent_subjects[0].ordered_eligible_units) == 1
     expected_reference = image_reference_part(
-        LLMImagePart("image/png", image_bytes, 7, 5)
+        bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix()))
     ).text
     assert prepared_parent_subjects[0].ordered_eligible_units[
         0
@@ -586,7 +588,7 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
     image_bytes = payload.getvalue()
-    expected_image = LLMImagePart("image/png", image_bytes, 7, 5)
+    expected_image = bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix()))
     expected = (
         LLMTextPart("redirect"),
         image_reference_part(expected_image),
@@ -619,14 +621,14 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
             running = asyncio.create_task(
                 session.run_turn(
                     PromptContent.text("initial"),
-                    command_id="command:k2-image-steer-root",
+                    command_id='command:yojo7qyz27g7rqfqcpyn5hfmem',
                 )
             )
             await asyncio.wait_for(model.started.wait(), timeout=2)
             assert session._active_turn_id is not None  # noqa: SLF001
             turn_id = session._active_turn_id  # noqa: SLF001
             outcome = await session.steer_active_turn(
-                command_id="command:k2-image-steer",
+                command_id='command:2t6d4ik33vrhsycbaankkfj52a',
                 content=PromptContent(
                     (
                         LLMTextPart("redirect"),
@@ -727,7 +729,7 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
             running = asyncio.create_task(
                 session.run_turn(
                     PromptContent.text("occupy the ROOT slot"),
-                    command_id="command:k3-queue-origin",
+                    command_id='command:zunsgrrgzc6jouj72ihtnn4vx4',
                 )
             )
             try:
@@ -737,7 +739,7 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
                     pytest.fail(f"ROOT finished before model startup: {running.result()!r}")
                 raise
             queued = await session.submit_prompt(
-                command_id="command:k3-queue-image",
+                command_id='command:az3pawjutcxjmmksepmysvigkm',
                 content=PromptContent(
                     (PromptImagePart(image_bytes, "image/png"),)
                 ),
@@ -760,7 +762,7 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
 
             deadline = monotonic() + 5
             while True:
-                outcome = await session.query_command("command:k3-queue-image")
+                outcome = await session.query_command('command:az3pawjutcxjmmksepmysvigkm')
                 assert outcome is not None
                 if outcome.status != "PENDING":
                     break
@@ -832,24 +834,24 @@ def _exercise_host_steer(
         )
         await session.update_model_call_binding(test_model_binding(model_runtime))
         running = asyncio.create_task(
-            session.run_turn(PromptContent.text("initial"), command_id="command:steer-root")
+            session.run_turn(PromptContent.text("initial"), command_id='command:64ysizorxoyfzllfiubuuqbs5q')
         )
         await asyncio.wait_for(model.started.wait(), timeout=2)
         assert session._active_turn_id is not None  # noqa: SLF001
         if redirect_queued:
             queued = await session.submit_prompt(
-                command_id="command:queued-source", content=PromptContent.text("new direction"),
+                command_id='command:yho3c4rglk2dvsolquvqw6dzb4', content=PromptContent.text("new direction"),
             )
             assert queued.prompt_delivery is not None
             outcome = await session.steer_queued_prompt(
-                command_id="command:steer",
+                command_id='command:qy6x2pry2q3ac6dixx4eq43ewy',
                 source_queue_item_id=queued.prompt_delivery.queue_item_id,
                 target_turn_id=session._active_turn_id,
             )
             assert outcome.public_code == "PROMPT_STEER_QUEUED"
         else:
             outcome = await session.steer_active_turn(
-                command_id="command:steer",
+                command_id='command:qy6x2pry2q3ac6dixx4eq43ewy',
                 content=PromptContent.text("new direction"),
                 target_turn_id=session._active_turn_id,  # noqa: SLF001
             )
@@ -936,7 +938,7 @@ def test_k3_root_output_seal_linearizes_and_cancels_late_steer_waiters(
             running = asyncio.create_task(
                 session.run_turn(
                     PromptContent.text("initial"),
-                    command_id="command:k3-output-seal-root",
+                    command_id='command:civk6p5ukyqjttijnxeelm6w3u',
                 )
             )
             await asyncio.wait_for(model.started.wait(), timeout=2)
@@ -947,14 +949,14 @@ def test_k3_root_output_seal_linearizes_and_cancels_late_steer_waiters(
 
             cancelled = asyncio.create_task(
                 session.steer_active_turn(
-                    command_id="command:k3-output-seal-cancelled",
+                    command_id='command:pvkwka23vs4sxgsbi7n263hcva',
                     content=PromptContent.text("cancel while sealed"),
                     target_turn_id=turn_id,
                 )
             )
             waiting = asyncio.create_task(
                 session.steer_active_turn(
-                    command_id="command:k3-output-seal-waiting",
+                    command_id='command:le435nlp27qz64kpudsrghfqau',
                     content=PromptContent.text("wait while sealed"),
                     target_turn_id=turn_id,
                 )
@@ -974,7 +976,7 @@ def test_k3_root_output_seal_linearizes_and_cancels_late_steer_waiters(
             assert late.status == "REJECTED"
             assert late.public_code == "STEER_TARGET_STALE"
             assert await session.query_command(
-                "command:k3-output-seal-cancelled"
+                'command:pvkwka23vs4sxgsbi7n263hcva'
             ) is None
         finally:
             await core.close_session(

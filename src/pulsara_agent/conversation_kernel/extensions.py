@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
@@ -11,7 +13,6 @@ import json
 from threading import RLock
 from time import monotonic
 from typing import Awaitable, Callable, Mapping
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.live import LiveAgentEvent
@@ -194,7 +195,9 @@ class KernelExtensionHost:
             )
             if active_registrations >= STAGE2_LIMITS.live_observer_hard_count:
                 raise RuntimeError("extension registration capacity is exhausted")
-            registration_id = f"extension-registration:{uuid4().hex}"
+            registration_id = random_id("extension")
+            while registration_id in self._registrations:
+                registration_id = random_id("extension")
             lease = ExtensionRegistrationLease(
                 registration_id=registration_id,
                 lease_generation=1,

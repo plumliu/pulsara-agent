@@ -30,7 +30,7 @@ from pulsara_agent.settings import LocalSettingsStore
 def test_related_search_keeps_sparse_results_when_dense_query_fails(monkeypatch):
     query = PostgresMemoryQuery(None)
     row = MemoryQueryRow(
-        fact_id="memory:sparse",
+        fact_id='memory:4inb4af7ovhkj6n2b2nq7odegq',
         memory_domain_id="u_local",
         context_id=CTX_GLOBAL,
         fact_kind="FACT",
@@ -48,7 +48,7 @@ def test_related_search_keeps_sparse_results_when_dense_query_fails(monkeypatch)
     monkeypatch.setattr(query, "_canonical_refetch", lambda **kwargs: kwargs["ranked"])
     binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext("u_local", "transient"),
-        host_workspace_id="workspace:related-fallback",
+        host_workspace_id='workspace:v6hucooyhwnkzdrxw2qko6x7qa',
     )
 
     result = query.related_candidates(
@@ -67,7 +67,7 @@ def test_related_search_keeps_sparse_results_when_dense_query_fails(monkeypatch)
 def test_five_recalled_facts_keep_source_variants_monotone(tmp_path, monkeypatch):
     binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext("u_local", "transient"),
-        host_workspace_id="workspace:recall-source",
+        host_workspace_id='workspace:zqlplsdebl5ex7taxzvulcyudy',
     )
     facts = tuple(
         MemoryQueryRow(
@@ -87,7 +87,7 @@ def test_five_recalled_facts_keep_source_variants_monotone(tmp_path, monkeypatch
         io = KernelSessionIO()
         port = KernelMemoryToolPort(
             repository=SimpleNamespace(connection_provider=None),
-            session_id="session:source-variants",
+            session_id='session:ha6ltf7obrd77ok24gq3nlagqm',
             read_binding=binding,
             embedding_config=EmbeddingBackendConfig(),
             feature_config=AdvisoryMemoryFeatureConfig(automatic_dense=False),

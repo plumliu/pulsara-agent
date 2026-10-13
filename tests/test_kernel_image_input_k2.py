@@ -1,6 +1,7 @@
 """K2 gates for Host image validation and typed canonical projections."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
 
 import asyncio
 from contextlib import suppress
@@ -93,7 +94,7 @@ def _frozen_image(
     width: int = 7,
     height: int = 5,
 ) -> LLMImagePart:
-    return LLMImagePart(media_type, payload, width, height)
+    return bound_test_image(media_type, payload, width, height)
 
 
 @pytest.mark.parametrize(
@@ -134,7 +135,7 @@ def test_local_image_validation_derives_mime_without_weakening_upload_checks() -
         image = await validator.freeze_local_image(
             png, deadline_monotonic=monotonic() + 10
         )
-        assert image == _frozen_image(png, "image/png")
+        assert image == LLMImagePart("image/png", png, 7, 5)
         await validator.aclose()
 
     asyncio.run(run())
@@ -194,15 +195,15 @@ def test_host_worker_freezes_one_interleaved_or_pure_image_submission() -> None:
         )
         assert mixed.parts == (
             LLMTextPart("before"),
-            _frozen_image(png, "image/png"),
+            LLMImagePart("image/png", png, 7, 5),
             LLMTextPart("between"),
-            _frozen_image(jpeg, "image/jpeg"),
+            LLMImagePart("image/jpeg", jpeg, 7, 5),
         )
         pure = await validator.freeze(
             PromptContent((PromptImagePart(png, "image/png"),)),
             deadline_monotonic=monotonic() + 10,
         )
-        assert pure.parts == (_frozen_image(png, "image/png"),)
+        assert pure.parts == (LLMImagePart("image/png", png, 7, 5),)
         await validator.aclose()
         with pytest.raises(RuntimeError, match="closed"):
             await validator.freeze(
@@ -501,7 +502,7 @@ def test_complete_content_is_the_inflight_hook_identity_and_text_projection() ->
     def key(prompt):
         return _IngressHookReservationKey(
             _IngressHookApiVariant.DIRECT,
-            "command:test",
+            'command:63iu4b6cbi3nyvtngv4tql2t7a',
             prompt,
             PermissionMode.BYPASS_PERMISSIONS,
             None,
@@ -525,7 +526,7 @@ def test_snapshot_codec_hydrates_in_owner_order_and_lowers_typed_content() -> No
     image_b = _frozen_image(jpeg, "image/jpeg")
     image_c = _frozen_image(webp, "image/webp")
     active = FrozenCompactionActiveRequest(
-        entry_id="entry:active",
+        entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
         entry_sequence=9,
         location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
         item_kind=FrozenProviderInputItemKind.USER,

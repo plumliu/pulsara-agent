@@ -7,6 +7,8 @@ supplements, while only canonical rows can create the frozen provider fact.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import require_id
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -100,15 +102,7 @@ class FrozenToolObservationTimingFact:
     fact_fingerprint: str
 
     def __post_init__(self) -> None:
-        if (
-            len(self.source_turn_ref) != 71
-            or not self.source_turn_ref.startswith("sha256:")
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.source_turn_ref[7:]
-            )
-        ):
-            raise ValueError("tool observation turn reference is invalid")
+        require_id(self.source_turn_ref, "turn", "history")
         parsed = datetime.fromisoformat(self.observed_at_utc.replace("Z", "+00:00"))
         if canonical_utc_timestamp(parsed) != self.observed_at_utc:
             raise ValueError("tool observation timestamp is not canonical UTC")
@@ -218,10 +212,7 @@ def freeze_tool_observation_timing_fact(
 def provider_visible_turn_ref(*, session_id: str, turn_id: str) -> str:
     if not session_id or not turn_id:
         raise ValueError("provider-visible turn reference identity is incomplete")
-    return context_fingerprint(
-        "pulsara:provider-visible-turn-ref:v1",
-        {"session_id": session_id, "turn_id": turn_id},
-    )
+    return require_id(turn_id, "turn")
 
 
 __all__ = [

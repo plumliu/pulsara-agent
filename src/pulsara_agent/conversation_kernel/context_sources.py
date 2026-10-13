@@ -667,7 +667,7 @@ class KernelContextSourceCollector:
             PlanHandoffKind.ENTERED_PLAN
         )
         workflow_full, _workflow_compact = _render_plan_workflow_body()
-        turn_ref = "sha256:" + ("0" * 64)
+        turn_ref = "turn:" + ("a" * 26)
         freshness = json.dumps(
             {
                 "current_turn_ref": turn_ref,

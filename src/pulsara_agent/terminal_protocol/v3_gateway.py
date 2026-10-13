@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import is_valid_id
+
+from pulsara_agent.identity import random_id
+
 import asyncio
 import base64
 import binascii
@@ -15,7 +19,6 @@ import secrets
 import stat
 from time import monotonic
 from typing import Callable
-from uuid import uuid4
 
 from google.protobuf.message import DecodeError, Message
 
@@ -106,10 +109,10 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 from pulsara_agent.terminal_process.models import TerminalProcessInfo
 
 
-PROTOCOL_MAJOR = 3
+PROTOCOL_MAJOR = 4
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:d7a6d7800182468368a72ee76f0793176570d63184aa40fffc24c3a94136fb4a"
+    "sha256:53e210ee1ee5aa5955bd321283e2a0e7b1cf08cf3e901f0161a426cea8077a8b"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -171,8 +174,8 @@ class TerminalKernelProtocolServer:
         self._session_provider = session_provider
         self._maximum_frame_bytes = maximum_frame_bytes
         self._server: asyncio.AbstractServer | None = None
-        self._connections: set[asyncio.Task[None]] = set()
-        self._launch_id = f"terminal-v3-launch:{uuid4().hex}"
+        self._connections: dict[asyncio.Task[None], _Connection] = {}
+        self._launch_id = random_id("launch")
         self._launch_capability = secrets.token_bytes(32)
         self._attachment_generation = 0
 
@@ -237,8 +240,8 @@ class TerminalKernelProtocolServer:
     ) -> None:
         task = asyncio.current_task()
         assert task is not None
-        self._connections.add(task)
         state = _Connection()
+        self._connections[task] = state
         try:
             while True:
                 frame = await self._read_frame(reader)
@@ -277,7 +280,7 @@ class TerminalKernelProtocolServer:
                 await writer.wait_closed()
             except OSError:
                 pass
-            self._connections.discard(task)
+            self._connections.pop(task, None)
 
     async def _dispatch(
         self, state: _Connection, frame: wire.ClientFrame
@@ -339,7 +342,7 @@ class TerminalKernelProtocolServer:
             or protocol.minor != PROTOCOL_MINOR
             or protocol.schema_fingerprint != PROTOCOL_SCHEMA_FINGERPRINT
         ):
-            return _error(request.request_id, "PROTOCOL_V3_REQUIRED")
+            return _error(request.request_id, "PROTOCOL_V4_REQUIRED")
         if request.launch_id != self._launch_id or not hmac.compare_digest(
             bytes(request.launch_capability), self._launch_capability
         ):
@@ -357,7 +360,14 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "ATTACHMENT_ROLE_INVALID")
         self._attachment_generation += 1
         attachment_generation = self._attachment_generation
-        attachment_id = f"terminal-v3-attachment:{uuid4().hex}"
+        attachment_id = random_id("attachment")
+        # The existing connection owner retains revoked attachments until their
+        # stream and delayed cleanup finish. They still occupy their identities.
+        while session.has_controller_attachment(attachment_id) or any(
+            connection.attachment_id == attachment_id
+            for connection in self._connections.values()
+        ):
+            attachment_id = random_id("attachment")
         # Bind cleanup before the awaitable attach/promote boundary so a
         # cancelled HELLO cannot leave an ownerless controller attachment.
         state.attachment_id = attachment_id
@@ -795,6 +805,7 @@ class TerminalKernelProtocolServer:
             ):
                 return _error(request.request_id, "STOP_REQUEST_INVALID")
             outcome = await state.host_session.request_stop_turn(
+                admission_deadline_ms=int(request.control_admission_deadline_ms),
                 command_id=request.command_id,
                 expected_session_id=request.expected_session_id,
                 expected_host_session_id=request.expected_host_session_id,
@@ -808,6 +819,7 @@ class TerminalKernelProtocolServer:
             ):
                 return _error(request.request_id, "SUBAGENT_CANCEL_REQUEST_INVALID")
             outcome = await state.host_session.request_cancel_subagent(
+                admission_deadline_ms=int(request.control_admission_deadline_ms),
                 command_id=request.command_id,
                 expected_session_id=request.expected_session_id,
                 expected_host_session_id=request.expected_host_session_id,
@@ -821,6 +833,7 @@ class TerminalKernelProtocolServer:
             ):
                 return _error(request.request_id, "PROCESS_CONTROL_REQUEST_INVALID")
             outcome = await state.host_session.request_terminate_background_process(
+                admission_deadline_ms=int(request.control_admission_deadline_ms),
                 command_id=request.command_id,
                 expected_session_id=request.expected_session_id,
                 expected_host_session_id=request.expected_host_session_id,
@@ -1202,8 +1215,6 @@ class TerminalKernelProtocolServer:
                     _outcome_to_wire(request.request_id, control.outcome)
                 )
             return wire.ServerFrame(query_command=response)
-        if request.command_id.startswith("command:control:"):
-            return _error(request.request_id, "CONTROL_QUERY_EXPECTATION_REQUIRED")
         outcome = await state.host_session.query_command(request.command_id)
         response = wire.QueryCommandResponse(
             request_id=request.request_id, found=outcome is not None
@@ -2011,6 +2022,7 @@ def _control_request_from_wire(
         expected.session_id,
         expected.host_session_id,
         UserControlTarget(kind, expected.target.target_id),
+        int(expected.admission_deadline_ms),
     )
 
 
@@ -2138,7 +2150,7 @@ def _encode_background_cursor(
 ) -> str:
     body = json.dumps(
         {
-            "v": 1,
+            "v": 2,
             "kind": "background-processes",
             "session_id": session_id,
             "host_session_id": host_session_id,
@@ -2169,14 +2181,16 @@ def _decode_background_cursor(
                 "started_at",
                 "process_id",
             }
-            or decoded["v"] != 1
+            or decoded["v"] != 2
             or decoded["kind"] != "background-processes"
             or decoded["session_id"] != session_id
             or decoded["host_session_id"] != host_session_id
             or not isinstance(decoded["started_at"], (int, float))
             or isinstance(decoded["started_at"], bool)
             or not isinstance(decoded["process_id"], str)
-            or not decoded["process_id"]
+            or not is_valid_id(decoded["process_id"], "process")
+            or not is_valid_id(session_id, "session")
+            or not is_valid_id(host_session_id, "host")
         ):
             raise ValueError
         return float(decoded["started_at"]), decoded["process_id"]
@@ -2195,7 +2209,7 @@ def _error(request_id: str, code: str) -> wire.ServerFrame:
         error=wire.ProtocolError(
             request_id=request_id,
             stable_code=code,
-            public_message="Protocol v3 request was rejected.",
+            public_message="Protocol v4 request was rejected.",
         )
     )
 
@@ -2214,8 +2228,7 @@ def _stable_error_code(exc: BaseException) -> str:
 
 
 def _valid_command_id(value: str) -> bool:
-    size = len(value.encode("utf-8"))
-    return bool(value) and size <= MAXIMUM_COMMAND_ID_BYTES and "\x00" not in value
+    return is_valid_id(value, "command")
 
 
 def _valid_prompt(value: str) -> bool:

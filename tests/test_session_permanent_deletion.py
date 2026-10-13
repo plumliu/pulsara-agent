@@ -154,8 +154,8 @@ def test_deleted_parent_preserves_fork_and_existing_only_cannot_resurrect(repo):
         repo.acquire_host_writer(
             intent="EXISTING",
             session_id=lease.guard.session_id,
-            workspace_id="ctx:workspace/nonexistent",
-            writer_owner_id="host:stale",
+            workspace_id='workspace:djt2auc66j65kynztzzvggseme',
+            writer_owner_id='host:yo7gabc43kdoxdyautdtmtzhqq',
             lease_seconds=30,
             deadline_monotonic=monotonic() + 30,
         )
@@ -375,7 +375,7 @@ def test_replan_revalidates_writer_after_takeover(repo, monkeypatch):
                 intent="EXISTING",
                 session_id=sid,
                 workspace_id=workspace,
-                writer_owner_id="host:takeover-after-replan",
+                writer_owner_id='host:6sddnxpwvxb4nxp77ymevcqaxq',
                 lease_seconds=30,
                 deadline_monotonic=monotonic() + 30,
             )

@@ -8,6 +8,8 @@ intentionally excluded from ``repr``.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -402,15 +404,7 @@ def _project_responses_reasoning_text_parts(
 def provider_replay_id(
     *, session_id: str, assistant_entry_id: str, wire_api: str
 ) -> str:
-    digest = context_fingerprint(
-        "pulsara.provider-assistant-replay-id:v1",
-        {
-            "session": session_id,
-            "entry": assistant_entry_id,
-            "wire_api": wire_api,
-        },
-    )
-    return "provider-replay:" + digest.removeprefix("sha256:")
+    return derive_id("replay", "assistant", session_id, assistant_entry_id, wire_api)
 
 
 @dataclass(frozen=True, slots=True)

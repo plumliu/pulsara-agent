@@ -7,6 +7,8 @@ They own no executor, callback, transport, repository, or mutable JSON value.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime
 from enum import StrEnum
@@ -52,13 +54,6 @@ def _fingerprint(namespace: str, payload: object) -> str:
     return canonical_digest(f"pulsara:round10:{namespace}:v1", payload)
 
 
-def _stable_id(namespace: str, *parts: str) -> str:
-    digest = sha256()
-    digest.update(f"pulsara:round10:{namespace}:v1\0".encode())
-    for part in parts:
-        digest.update(part.encode("utf-8"))
-        digest.update(b"\0")
-    return f"{namespace}:" + digest.hexdigest()
 
 
 class SubagentTaskStatus(StrEnum):
@@ -503,6 +498,7 @@ class SubagentTaskTerminalConfirmationKind(StrEnum):
 class PreparedToolResultAcceptanceFact(Protocol):
     """Narrow structural view needed by the process-local result composite."""
 
+    session_id: str
     result_entry_id: str
     result_id: str
     attempt_id: str | None
@@ -583,15 +579,7 @@ class PreparedSubagentTaskTerminalSettlement:
             or self.occurred_at.tzinfo is None
         ):
             raise ValueError("subagent task terminal settlement is invalid")
-        expected_event = _stable_id(
-            "subagent-task-terminal-event",
-            self.session_id,
-            self.task_id,
-            str(self.writer_generation),
-            self.status.value,
-            self.reason,
-            self.public_detail,
-        )
+        expected_event = derive_id("event", "accepted", self.session_id, "SUBAGENT_TASK_STATUS_ACCEPTED", "SUBAGENT_TASK", self.task_id, "terminal:" + str(self.writer_generation))
         if self.event_id != expected_event:
             raise ValueError("subagent task terminal settlement identity mismatch")
 
@@ -610,15 +598,7 @@ def build_subagent_task_terminal_settlement(
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedSubagentTaskTerminalSettlement:
-    event_id = _stable_id(
-        "subagent-task-terminal-event",
-        session_id,
-        task_id,
-        str(writer_generation),
-        status.value,
-        reason,
-        public_detail,
-    )
+    event_id = derive_id("event", "accepted", session_id, "SUBAGENT_TASK_STATUS_ACCEPTED", "SUBAGENT_TASK", task_id, "terminal:" + str(writer_generation))
     return PreparedSubagentTaskTerminalSettlement(
         session_id=session_id,
         workspace_id=workspace_id,
@@ -678,12 +658,7 @@ class PreparedSubagentTaskStart:
                 "terminal_material_body",
                 MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
             )
-        expected_event = _stable_id(
-            "subagent-start-event",
-            self.session_id,
-            self.task_id,
-            str(self.writer_generation),
-        )
+        expected_event = derive_id("event", "accepted", self.session_id, "SUBAGENT_TASK_STATUS_ACCEPTED", "SUBAGENT_TASK", self.task_id, "start:" + str(self.writer_generation))
         if self.event_id != expected_event:
             raise ValueError("subagent task start identity mismatch")
 
@@ -729,9 +704,7 @@ def build_subagent_task_start(
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedSubagentTaskStart:
-    event_id = _stable_id(
-        "subagent-start-event", session_id, task_id, str(writer_generation)
-    )
+    event_id = derive_id("event", "accepted", session_id, "SUBAGENT_TASK_STATUS_ACCEPTED", "SUBAGENT_TASK", task_id, "start:" + str(writer_generation))
     return PreparedSubagentTaskStart(
         session_id,
         workspace_id,
@@ -1090,16 +1063,14 @@ class PreparedSubagentTaskBatchAdmission:
             512,
         )
         _text(self.actor_id, "actor_id", 512)
-        expected_batch_id = _stable_id(
-            "subagent-batch", self.source_tool_attempt_id, "batch"
-        )
+        expected_batch_id = derive_id('batch', 'spawn', self.source_tool_attempt_id)
         if self.batch_id != expected_batch_id:
             raise ValueError("subagent batch stable identity mismatch")
         task_ids = tuple(item.task_id for item in self.ordered_tasks)
         if len(set(task_ids)) != len(task_ids):
             raise ValueError("subagent batch task identities are duplicated")
         if task_ids != tuple(
-            _stable_id("subagent-task", self.source_tool_attempt_id, str(ordinal))
+            derive_id('task', 'spawn', self.source_tool_attempt_id, str(ordinal))
             for ordinal in range(len(self.ordered_tasks))
         ):
             raise ValueError("subagent task stable identities mismatch")
@@ -1485,12 +1456,8 @@ class PreparedInterAgentMailboxItem:
         ):
             _text(value, field, 512)
         digest = "sha256:" + sha256(self.message.encode("utf-8")).hexdigest()
-        entry_id = _stable_id(
-            "inter-agent-entry", self.sender_tool_attempt_id, self.recipient_task_id
-        )
-        event_id = _stable_id(
-            "inter-agent-event", self.sender_tool_attempt_id, self.recipient_task_id
-        )
+        entry_id = derive_id('entry', 'agent-message', self.sender_tool_attempt_id, self.recipient_task_id)
+        event_id = derive_id("event", "accepted", self.session_id, "INTER_AGENT_MESSAGE_ACCEPTED", "ENTRY", entry_id, "")
         if (
             self.message_digest != digest
             or self.entry_id != entry_id

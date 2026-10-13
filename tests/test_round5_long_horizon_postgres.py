@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from tests.support.model_config import frozen_test_prompt
 from pulsara_agent.llm.input import FrozenPromptContent
 
@@ -10,7 +12,6 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from threading import Event
 from time import monotonic
-from uuid import uuid4
 from pathlib import Path
 
 import pytest
@@ -91,9 +92,7 @@ pytestmark = pytest.mark.postgres
 
 
 def _name(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _text_stream(text: str, *, block_id: str) -> list[object]:
@@ -512,15 +511,15 @@ def _lease(repository: ConversationKernelRepository) -> tuple[str, str, object]:
 
 
 def _prepare_subagent_task(repository, lease) -> ActiveSubagentFixtureId:
-    parent_turn_id = _name("parent-turn")
+    parent_turn_id = _name("turn")
     start_test_root_turn(
         repository,
         lease.guard,
-        command_id=_name("parent-command"),
+        command_id=_name("command"),
         turn_id=parent_turn_id,
-        entry_id=_name("parent-entry"),
-        context_binding_revision_id=_name("parent-revision"),
-        permission_snapshot_id=_name("parent-permission"),
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("binding"),
+        permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
         content=FrozenPromptContent.text('delegate'),
@@ -755,8 +754,8 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
     repository = ConversationKernelRepository(provider)
     session_id, _workspace_id, lease = _lease(repository)
     command_id = _name("command")
-    steer_command_id = _name("steer-command")
-    steer_queue_item_id = _name("steer-queue")
+    steer_command_id = _name("command")
+    steer_queue_item_id = _name("queue")
 
     def enqueue(request: KernelModelExecutionRequest) -> None:
         enqueue_test_prompt(
@@ -903,7 +902,7 @@ def test_round5_cancelled_root_admission_never_reissues_and_full_is_interrupted(
 
     async def scenario() -> None:
         operation = asyncio.create_task(
-            runner.run_turn(frozen_test_prompt("start"), command_id=_name("cancelled-command"))
+            runner.run_turn(frozen_test_prompt("start"), command_id=_name("command"))
         )
         assert await asyncio.to_thread(repository.started.wait, 5)
         operation.cancel()
@@ -939,7 +938,7 @@ def test_round5_cancelled_root_admission_joins_transient_confirmation_failures(
 
     async def scenario() -> None:
         operation = asyncio.create_task(
-            runner.run_turn(frozen_test_prompt("start"), command_id=_name("cancelled-command"))
+            runner.run_turn(frozen_test_prompt("start"), command_id=_name("command"))
         )
         assert await asyncio.to_thread(repository.started.wait, 5)
         operation.cancel()
@@ -1053,10 +1052,10 @@ def test_round5_subagent_admission_exact_joins_immutable_objective(
     mismatched = build_prepared_subagent_turn_admission(
         session_id=session_id,
         task_id=task_id,
-        turn_id=_name("mismatched-turn"),
-        entry_id=_name("mismatched-entry"),
-        context_binding_revision_id=_name("mismatched-revision"),
-        permission_snapshot_id=_name("mismatched-permission"),
+        turn_id=_name("turn"),
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("binding"),
+        permission_snapshot_id=_name("permission"),
         task_start_event_id=task_id.launch.task_start.event_id,
         expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"different objective"),
@@ -1081,10 +1080,10 @@ def test_round5_subagent_admission_exact_joins_immutable_objective(
     accepted_candidate = build_prepared_subagent_turn_admission(
         session_id=session_id,
         task_id=task_id,
-        turn_id=_name("accepted-turn"),
-        entry_id=_name("accepted-entry"),
-        context_binding_revision_id=_name("accepted-revision"),
-        permission_snapshot_id=_name("accepted-permission"),
+        turn_id=_name("turn"),
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("binding"),
+        permission_snapshot_id=_name("permission"),
         task_start_event_id=task_id.launch.task_start.event_id,
         expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"answer once"),
@@ -1445,7 +1444,7 @@ def test_real_file_write_failure_can_be_inspected_without_replaying_write(
     async def exercise():
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:file-failure",
+            host_owner_id='host:zvmka3c6ohpt4g7m4peilmratm',
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -1520,7 +1519,7 @@ def test_round5_stale_writer_never_accepts_or_hands_off_late_tool_result(
             intent="EXISTING",
             session_id=session_id,
             workspace_id=workspace_id,
-            writer_owner_id=_name("replacement-host"),
+            writer_owner_id=_name("host"),
             lease_seconds=30,
             deadline_monotonic=monotonic() + 30,
         )

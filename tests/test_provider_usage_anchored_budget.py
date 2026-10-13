@@ -66,7 +66,7 @@ def test_alias_priority_and_cumulative_carriers_do_not_add():
     assert merge_response_usage_reports(merged, transport_usage_report_from_mapping([])).usage == merged.usage
 
 
-def _anchor(request, reported=5, revision=1, nonce='epoch:test'):
+def _anchor(request, reported=5, revision=1, nonce='epoch:oqvlxjh4xkrycrokcvcpxjjspi'):
     call = request.prepared_call.call
     plan = request.wire_input_plan
     return ProviderInputUsageAnchor(

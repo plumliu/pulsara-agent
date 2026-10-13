@@ -33,7 +33,6 @@ from pulsara_agent.conversation_kernel.steer import (
     MemorySourceInvalidationReservation,
     build_memory_source_invalidation_reservation,
 )
-from pulsara_agent.model_input._stable_input_identity import memory_reservation_identity
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
 )
@@ -292,16 +291,6 @@ class MemoryDispatchSupport:
             provider_input_logical_bytes(system_prompt="", tools=(), messages=(message,))
             for message in invalidation_messages
         ]
-        full_message = None
-        if isinstance(desired, ContextSourceCandidate):
-            full_message = encode_runtime_observation(
-                source_kind=source_kind,
-                trust_class=desired.trust_class,
-                lifecycle=SourceObservationLifecycle.SNAPSHOT,
-                presence=SourceObservationPresence.VALUE,
-                contract_version=desired.source_contract_version,
-                body=desired.variants[0].text,
-            )
         return build_memory_source_invalidation_reservation(
             source_kind=source_kind,
             prior_presence=prior.presence,
@@ -311,15 +300,6 @@ class MemoryDispatchSupport:
                 self._memory_source_occurrence_fingerprint(desired)
             ),
             source_contract_fingerprint=desired.source_contract_fingerprint,
-            stable_identity=memory_reservation_identity(
-                source_kind=source_kind, prior=prior,
-                desired_presence=self._memory_source_presence(desired),
-                desired_fingerprint=self._memory_source_occurrence_fingerprint(desired),
-                contract=desired.source_contract_fingerprint,
-                invalidations=invalidation_messages, full_message=full_message,
-                epoch_bytes=max(byte_deltas),
-                estimator_fingerprint=prepared_call.compile_binding.estimator_fingerprint,
-            ),
             invalidation_input_token_ceiling=max(token_deltas),
             invalidation_epoch_bytes_ceiling=max(byte_deltas),
             estimator_fingerprint=(

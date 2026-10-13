@@ -1,4 +1,6 @@
 """Canonical usage is per logical execution and independent from visible replies."""
+from pulsara_agent.identity import derive_id
+from pulsara_agent.identity import random_id
 from dataclasses import replace
 from time import monotonic
 from uuid import uuid4
@@ -18,8 +20,8 @@ pytestmark = pytest.mark.postgres
 def observation(lease, turn_id, **fields):
     return ProviderCallUsageObservation(
         session_id=lease.guard.session_id, turn_id=turn_id,
-        resolved_model_call_id='model_call:'+uuid4().hex,
-        model_call_index=1, connection_id='model-connection:'+'a'*32,
+        resolved_model_call_id=random_id("call"),
+        model_call_index=1, connection_id='connection:gwnwgrwm3jzh55p233rw3lciq4',
         route_id='test', wire_api='openai_chat_completions',
         requested_model_id='requested', reported_model_id='alias',
         normalized_terminal_kind='COMPLETED', usage_status='partial', input_tokens=11,
@@ -48,7 +50,7 @@ def test_usage_equal_repeat_conflict_and_partial_unknowns(repo):
     assert after['input_tokens'] == 11
     assert after['conversation_scope_kind'] == 'ROOT'
     assert after['diagnostic_codes'] == ('partial_observation',)
-    assert repo.record_provider_call_usage(replace(value, resolved_model_call_id='model_call:'+uuid4().hex,
+    assert repo.record_provider_call_usage(replace(value, resolved_model_call_id=random_id("call"),
         normalized_terminal_kind=None, usage_status='missing', input_tokens=None,
         diagnostic_codes=('provider_terminal_not_observed',)), **args) is ProviderCallUsageWriteDisposition.INSERTED
     assert len(page(repo, lease.guard.session_id).usages) == 2
@@ -151,7 +153,7 @@ def test_real_host_three_calls_use_old_input_anchor_across_missing_usage(tmp_pat
         try:
             await session.update_model_call_binding(test_model_binding(runtime))
             for i in range(3):
-                result = await session.run_turn(PromptContent.text(f'question{i+1}'), command_id='command:usage:'+uuid4().hex)
+                result = await session.run_turn(PromptContent.text(f'question{i+1}'), command_id=derive_id("command", "test-fixture", 'command:bmlvqxpm2wdk24ikbvykya7xxa'+uuid4().hex))
                 assert result.final_text == f'reply{i+1}'
             assert len(requests) == 3
             first, middle, last = requests
@@ -176,7 +178,7 @@ def test_real_host_three_calls_use_old_input_anchor_across_missing_usage(tmp_pat
                 maximum_recent_human_messages=1, maximum_recent_human_text_utf8_bytes=8192)
             await _seed_completed_history(session, segments=3, repetitions=1000)
             before_compaction_preview = await session.read_context_usage()
-            outcome = await session.compact_context(command_id='command:usage-compact:'+uuid4().hex, force=True)
+            outcome = await session.compact_context(command_id=derive_id("command", "test-fixture", 'command:tz45pyeg2cm2fw6qdkje2gupse'+uuid4().hex), force=True)
             assert outcome.disposition is CompactionDisposition.COMPACTED, outcome
             assert all(slot.usage_anchor is None for slot in session._input_continuity._slots.values())
             after_compaction_preview = await session.read_context_usage()
@@ -186,7 +188,7 @@ def test_real_host_three_calls_use_old_input_anchor_across_missing_usage(tmp_pat
             # The summary call is excluded from AGENT_MODEL_LOOP history. The
             # actual adopted successor starts with a new heuristic wire quote.
             assert len((await core.read_provider_call_usage_page(session_id=session.session_id)).usages) == 3
-            result = await session.run_turn(PromptContent.text('after compaction'), command_id='command:usage:'+uuid4().hex)
+            result = await session.run_turn(PromptContent.text('after compaction'), command_id=derive_id("command", "test-fixture", 'command:bmlvqxpm2wdk24ikbvykya7xxa'+uuid4().hex))
             assert result.final_text == 'reply5'
             assert requests[-1].quote.budget_source == 'heuristic'
             assert len((await core.read_provider_call_usage_page(session_id=session.session_id)).usages) == 4

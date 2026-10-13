@@ -74,6 +74,7 @@ class UserControlRequest:
     session_id: str
     host_session_id: str
     target: UserControlTarget
+    admission_deadline_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,19 +142,6 @@ class UserControlOutcome:
     feedback: UserControlFeedbackState | None = None
 
 
-def parse_control_command_deadline_ms(command_id: str) -> int | None:
-    parts = command_id.split(":")
-    if len(parts) != 4 or parts[:2] != ["command", "control"]:
-        return None
-    try:
-        deadline = int(parts[2])
-    except ValueError:
-        return None
-    if deadline < 1 or not parts[3]:
-        return None
-    return deadline
-
-
 __all__ = [
     "CONTROL_ADMISSION_WINDOW_MS",
     "CONTROL_RESULT_RETENTION_MS",
@@ -173,5 +161,4 @@ __all__ = [
     "UserControlRequest",
     "UserControlTarget",
     "UserControlTargetKind",
-    "parse_control_command_deadline_ms",
 ]

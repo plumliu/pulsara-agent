@@ -1,6 +1,8 @@
 """Round 3 structured model-input compiler product and architecture gates."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
+from pulsara_agent.identity import derive_id
 
 import ast
 import asyncio
@@ -830,14 +832,14 @@ def _absent(
 def _snapshot(
     *items: FrozenProviderInputItem,
     scope: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    turn_id: str = "turn:test",
+    turn_id: str = 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
     scope_subagent_task_id: str | None = None,
     canonical_expanded_bytes: int | None = None,
 ) -> CanonicalModelInputSnapshot:
     scope_task = (
         None
         if scope is ModelInputScopeKind.ROOT
-        else scope_subagent_task_id or "task:test"
+        else scope_subagent_task_id or 'task:kmz6pl55dsqspcz6dgmhr7sxpy'
     )
     initial_entry_id = next(
         (
@@ -845,23 +847,23 @@ def _snapshot(
             for item in items
             if item.source_turn_id == turn_id and item.source_entry_id is not None
         ),
-        "entry:initial",
+        'entry:x6eevt4jzgsks3d5pdcognxexm',
     )
     identity = CanonicalModelInputIdentity(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         turn_id=turn_id,
         initial_entry_id=initial_entry_id,
-        context_binding_revision_id="revision:test",
+        context_binding_revision_id='binding:rpcv6lnowmsx57p73m43mjmbdm',
         provider_input_through_sequence=max(
             (item.source_entry_sequence or 0 for item in items), default=0
         ),
         conversation_scope_kind=scope,
         scope_subagent_task_id=scope_task,
         identity_fingerprint=canonical_model_input_identity_fingerprint(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             turn_id=turn_id,
             initial_entry_id=initial_entry_id,
-            context_binding_revision_id="revision:test",
+            context_binding_revision_id='binding:rpcv6lnowmsx57p73m43mjmbdm',
             provider_input_through_sequence=max(
                 (item.source_entry_sequence or 0 for item in items), default=0
             ),
@@ -893,12 +895,12 @@ def _user(
     text: str,
     *,
     sequence: int = 1,
-    turn_id: str = "turn:test",
+    turn_id: str = 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
     origin: CanonicalInputOriginKind = CanonicalInputOriginKind.HUMAN_MESSAGE,
 ):
     return FrozenProviderInputItem(
         FrozenProviderInputItemKind.USER,
-        f"entry:{sequence}",
+        derive_id("entry", "test-fixture", f"entry:{sequence}"),
         sequence,
         turn_id,
         (LLMTextPart(text),),
@@ -915,14 +917,14 @@ def _tool_result(
 ) -> FrozenProviderInputItem:
     return FrozenProviderInputItem(
         FrozenProviderInputItemKind.TOOL_RESULT,
-        f"entry:{sequence}",
+        derive_id("entry", "test-fixture", f"entry:{sequence}"),
         sequence,
         turn_id,
         (LLMTextPart(body),),
         tool_call_id=f"call:{sequence}",
-        tool_request_entry_id=f"entry:request:{sequence}",
+        tool_request_entry_id=derive_id("entry", "test-fixture", f"entry:request:{sequence}"),
         tool_result_context=ProviderToolResultContextMetadata(
-            result_id=f"result:{sequence}",
+            result_id=derive_id("result", "test-fixture", f"result:{sequence}"),
             result_state="SUCCESS",
             display_kind=ToolResultDisplayKind.COMPLETE,
             artifact_disposition=(
@@ -930,7 +932,7 @@ def _tool_result(
                 if artifact
                 else ToolOutputArtifactDisposition.NOT_REQUIRED
             ),
-            artifact_id=f"artifact:{sequence}" if artifact else None,
+            artifact_id=derive_id("artifact", "test-fixture", f"artifact:{sequence}") if artifact else None,
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             source_coverage_reason=None,
             artifact_unavailability_reason=None,
@@ -943,10 +945,7 @@ def _tool_result(
 
 def _tool_timing(turn_id: str) -> FrozenToolObservationTimingFact:
     values = {
-        "source_turn_ref": context_fingerprint(
-            "pulsara:provider-visible-turn-ref:v1",
-            {"session_id": "session:test", "turn_id": turn_id},
-        ),
+        "source_turn_ref": turn_id,
         "observed_at_utc": "2026-08-14T03:04:05.123456Z",
         "observation_duration_microseconds": 2_123_456,
         "duration_disposition": ToolObservationDurationDisposition.MEASURED,
@@ -1066,7 +1065,7 @@ def _prepared_request(
     _PREPARED_MODEL_CALLS[binding.binding_fingerprint] = (model, prepared)
     canonical_facts = canonical_facts or _canonical_facts(snapshot)
     return StructuredModelInputCompileRequest(
-        context_id="context:test",
+        context_id='context:maoywbssk6zspli7b2bnu3pala',
         model_call_index=1,
         canonical_input=snapshot,
         canonical_facts=canonical_facts,
@@ -1081,7 +1080,7 @@ def _canonical_facts(
     canonical = snapshot or _snapshot()
     binding = _context_binding_fact(canonical)
     permission = build_run_permission_snapshot(
-        snapshot_id="permission:test",
+        snapshot_id='permission:53mvfpeaityebpvslz3hltgfuy',
         requested_mode=PermissionMode.BYPASS_PERMISSIONS,
         effective_mode=PermissionMode.BYPASS_PERMISSIONS,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -1095,7 +1094,7 @@ def _canonical_facts(
     object.__setattr__(provisional, "approved_plan_materialization_fact", None)
     freshness = build_tool_observation_freshness_fact(
         session_id=canonical.identity.session_id,
-        workspace_id="workspace:test",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         current_turn_id=canonical.identity.turn_id,
         current_scope_kind=canonical.identity.conversation_scope_kind,
         scope_subagent_task_id=canonical.identity.scope_subagent_task_id,
@@ -1332,7 +1331,7 @@ def _replay_manifest_cut(
 
 def _permission_snapshot():
     return build_run_permission_snapshot(
-        snapshot_id="permission:test",
+        snapshot_id='permission:53mvfpeaityebpvslz3hltgfuy',
         requested_mode=PermissionMode.BYPASS_PERMISSIONS,
         effective_mode=PermissionMode.BYPASS_PERMISSIONS,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -1345,11 +1344,11 @@ def _round7_previous_fact(
     identity = facts.canonical_input.identity
     values = {
         "session_id": identity.session_id,
-        "workspace_id": "workspace:test",
+        "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         "current_turn_id": identity.turn_id,
         "current_scope_kind": identity.conversation_scope_kind,
         "scope_subagent_task_id": identity.scope_subagent_task_id,
-        "predecessor_turn_id": "turn:previous",
+        "predecessor_turn_id": 'turn:mcie4zq2f6b4g2mm2ogvtx2uwq',
         "predecessor_initial_entry_sequence": 1,
         "predecessor_terminal_at_utc": "2026-08-14T03:04:05.123456Z",
         "outcome_kind": PreviousTurnOutcomeKind.EXECUTION_FAILED,
@@ -1412,7 +1411,7 @@ def _with_round7_previous(
 def _approved_plan_compile_facts(
     *,
     disposition: PlanApprovedMaterializationDisposition,
-    workflow_id: str = "workflow:test",
+    workflow_id: str = 'plan:ff5em4o3lofovbbj5jawnllhku',
     interaction_id: str = "interaction:draft",
     transition_digest: str = "sha256:" + "2" * 64,
 ) -> tuple[FrozenCanonicalCompileSnapshot, str]:
@@ -1427,17 +1426,17 @@ def _approved_plan_compile_facts(
     assert isinstance(arguments, FrozenJsonObjectFact)
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:draft",
+        'entry:iucvuktd36hivez7ibvwjqibn4',
         1,
-        "turn:origin",
+        'turn:qb63tb3eshpbkryzmq6wzhzt2u',
         (LLMTextPart(""),),
         tool_calls=(ProviderToolCall("call:exit", "exit_plan", arguments),),
     )
     continuation = FrozenProviderInputItem(
         FrozenProviderInputItemKind.PLAN_CONTINUATION,
-        "entry:continuation",
+        'entry:ali6tyzqiwe3pcr33e2lleswoq',
         2,
-        "turn:implementation",
+        'turn:kd5kt7ezlfyprg4wjsc7fmkvem',
         (LLMTextPart(json.dumps(
             {
                 "pulsara_plan_continuation": {
@@ -1456,12 +1455,12 @@ def _approved_plan_compile_facts(
         is PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
         else (continuation,)
     )
-    snapshot = _snapshot(*items, turn_id="turn:implementation")
+    snapshot = _snapshot(*items, turn_id='turn:kd5kt7ezlfyprg4wjsc7fmkvem')
     handoff_values = {
-        "session_id": "session:test",
-        "workspace_id": "workspace:test",
-        "target_turn_id": "turn:implementation",
-        "carrier_entry_id": "entry:continuation",
+        "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte',
+        "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        "target_turn_id": 'turn:kd5kt7ezlfyprg4wjsc7fmkvem',
+        "carrier_entry_id": 'entry:ali6tyzqiwe3pcr33e2lleswoq',
         "carrier_entry_sequence": 2,
         "workflow_id": workflow_id,
         "workflow_ordinal": 1,
@@ -1484,19 +1483,19 @@ def _approved_plan_compile_facts(
     )
     extracted = extract_plan_draft(
         interaction_id=interaction_id,
-        assistant_entry_id="entry:draft",
+        assistant_entry_id='entry:iucvuktd36hivez7ibvwjqibn4',
         tool_call_id="call:exit",
         binding=binding,
         request_semantic_digest="sha256:" + "3" * 64,
         arguments=arguments,
     )
     approved_values = {
-        "session_id": "session:test",
-        "workspace_id": "workspace:test",
-        "target_turn_id": "turn:implementation",
+        "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte',
+        "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        "target_turn_id": 'turn:kd5kt7ezlfyprg4wjsc7fmkvem',
         "workflow_id": workflow_id,
         "interaction_id": interaction_id,
-        "assistant_entry_id": "entry:draft",
+        "assistant_entry_id": 'entry:iucvuktd36hivez7ibvwjqibn4',
         "tool_call_id": "call:exit",
         "request_contract_id": binding.contract_id,
         "request_contract_version": binding.contract_version,
@@ -1525,11 +1524,11 @@ def _approved_plan_compile_facts(
         ),
     )
     permission = build_run_permission_snapshot(
-        snapshot_id="permission:implementation",
+        snapshot_id='permission:cg5nthre3ofnd6pibptx4ahtoq',
         requested_mode=PermissionMode.ACCEPT_EDITS,
         effective_mode=PermissionMode.ACCEPT_EDITS,
         admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
-        inherited_from_turn_id="turn:origin",
+        inherited_from_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
     )
     provisional = FrozenCanonicalCompileSnapshot.__new__(FrozenCanonicalCompileSnapshot)
     binding = _context_binding_fact(snapshot)
@@ -1541,7 +1540,7 @@ def _approved_plan_compile_facts(
     object.__setattr__(provisional, "approved_plan_materialization_fact", approved)
     freshness = build_tool_observation_freshness_fact(
         session_id=snapshot.identity.session_id,
-        workspace_id="workspace:test",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         current_turn_id=snapshot.identity.turn_id,
         current_scope_kind=snapshot.identity.conversation_scope_kind,
         scope_subagent_task_id=snapshot.identity.scope_subagent_task_id,
@@ -1630,7 +1629,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
         disposition=(
             PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
         ),
-        workflow_id="workflow:first",
+        workflow_id='plan:cq5hqdlbohr4bpeuuijqhk5dim',
         interaction_id="interaction:first",
         transition_digest="sha256:" + "4" * 64,
     )
@@ -1638,7 +1637,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
         disposition=(
             PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
         ),
-        workflow_id="workflow:second",
+        workflow_id='plan:5xcc3tuwl5glk3pq5co5wyo6ya',
         interaction_id="interaction:first",
         transition_digest="sha256:" + "5" * 64,
     )
@@ -1682,7 +1681,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
             second_sources,
             canonical_facts=second_facts,
         ),
-        context_id="context:second-plan-workflow",
+        context_id='context:mn5fcvobmfyw7ylprenz3ors3y',
         model_call_index=2,
     )
     _second, second_view = _compile_and_install_append(
@@ -1714,9 +1713,9 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
     snapshot = _snapshot(
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
-            "entry:1",
+            'entry:jfasfwsw2puygc3hrueckpvgba',
             1,
-            "turn:test",
+            'turn:klmmazz67vfgsfsvg6ceqgdsfu',
             (LLMTextPart('{"pulsara_plan_continuation":{"feedback":{"presence":"ABSENT"},'
             '"status":"ACTIVE","transition":"REVISION_REQUESTED"}}'),),
             input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
@@ -1726,12 +1725,12 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
 
     def facts(revision: int, digest_digit: str) -> FrozenCanonicalCompileSnapshot:
         values = {
-            "session_id": "session:test",
-            "workspace_id": "workspace:test",
-            "target_turn_id": "turn:test",
-            "carrier_entry_id": "entry:1",
+            "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte',
+            "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            "target_turn_id": 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+            "carrier_entry_id": 'entry:jfasfwsw2puygc3hrueckpvgba',
             "carrier_entry_sequence": 1,
-            "workflow_id": "workflow:repeat-revision",
+            "workflow_id": 'plan:ebqql3zcpwu3l6iwsyv4tmflwy',
             "workflow_ordinal": 1,
             "workflow_revision_at_transition": revision,
             "interaction_id": "interaction:review",
@@ -2056,9 +2055,9 @@ def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
     call = ProviderToolCall("call:1", "terminal", frozen)  # type: ignore[arg-type]
     tool_only = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:1",
+        'entry:jfasfwsw2puygc3hrueckpvgba',
         1,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart(""),),
         tool_calls=(call,),
     )
@@ -2093,10 +2092,10 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
     envelope = {
         "pulsara_inter_agent_message": {
             "message_type": "FINAL_ANSWER",
-            "sender": {"kind": "SUBAGENT_TASK", "task_id": "task:worker"},
+            "sender": {"kind": "SUBAGENT_TASK", "task_id": 'task:tlsrbpf4gxzu2ie45knrwgy7xi'},
             "content": {
                 "message_type": "FINAL_ANSWER",
-                "task_id": "task:worker",
+                "task_id": 'task:tlsrbpf4gxzu2ie45knrwgy7xi',
                 "task_key": "worker",
                 "label": "Review the implementation",
                 "display_role": "reviewer",
@@ -2104,7 +2103,7 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
                 "status": "COMPLETED",
                 "failure": None,
                 "result": {
-                    "result_id": "result:worker",
+                    "result_id": 'result:6xwwa5llhhrbdfifrakbr3kuo4',
                     "source": "EXPLICIT",
                     "summary": "exact delegated summary",
                 },
@@ -2118,9 +2117,9 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
     provider_text = canonical_json_bytes(envelope).decode("utf-8")
     completion = FrozenProviderInputItem(
         FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
-        "entry:accepted-completion",
+        'entry:3bqidg7vpe73nsmux3agyyt3ue',
         2,
-        "turn:root",
+        'turn:b565wrncq4ezfqthehjqni5ilm',
         (LLMTextPart(provider_text),),
         input_origin=CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
     )
@@ -2139,9 +2138,9 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
 
     human = FrozenProviderInputItem(
         FrozenProviderInputItemKind.USER,
-        "entry:human",
+        'entry:mihwq2ultstzsnx5er3y5ueauy',
         3,
-        "turn:root",
+        'turn:b565wrncq4ezfqthehjqni5ilm',
         (LLMTextPart("ordinary human text"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
@@ -2155,7 +2154,7 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
 
 
 def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> None:
-    item = _tool_result("🙂" * 10_000, sequence=2, turn_id="turn:test")
+    item = _tool_result("🙂" * 10_000, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     without_read = lower_canonical_item(
         item,
         artifact_read_available=False,
@@ -2197,8 +2196,8 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
 
 
 def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> None:
-    first_image = LLMImagePart("image/png", b"first", 3, 2)
-    second_image = LLMImagePart("image/png", b"second", 4, 2)
+    first_image = bound_test_image("image/png", b"first", 3, 2)
+    second_image = bound_test_image("image/png", b"second", 4, 2)
 
     def image_result(
         *, sequence: int, call_ordinal: int, image: LLMImagePart
@@ -2208,19 +2207,19 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
             _tool_result(
                 "placeholder",
                 sequence=sequence,
-                turn_id="turn:test",
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
                 artifact=False,
             ),
             content=content.parts,
             tool_call_id=f"call:{call_ordinal}",
-            tool_request_entry_id="entry:assistant-batch",
+            tool_request_entry_id='entry:5kfg7huz5awr2non2ldye5t3de',
             tool_result_body_text=frozen_tool_result_public_text(content),
                 tool_call_ordinal=call_ordinal,
                 tool_call_arguments=freeze_json(
                     (
                         {"path": f'/tmp/image "{call_ordinal}".png'}
                         if call_ordinal == 0
-                        else {"image_ref": image.content_digest}
+                        else {"image_ref": image.image_ref}
                     )
                 ),
         )
@@ -2268,15 +2267,15 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
     )
     assert sources == (
         {"path": '/tmp/image "0".png', "tool_call_id": "call:0"},
-        {"image_ref": second_image.content_digest, "tool_call_id": "call:1"},
+        {"image_ref": second_image.image_ref, "tool_call_id": "call:1"},
     )
     assert tuple(
         payload["pulsara_image"]["image_ref"]
         for payload in payloads
         if "pulsara_image" in payload
     ) == (
-        first_image.content_digest,
-        second_image.content_digest,
+        first_image.image_ref,
+        second_image.image_ref,
     )
     assert (
         sum(
@@ -2295,17 +2294,17 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
 
 
 def test_late_tool_image_reference_uses_the_same_labelled_carrier() -> None:
-    image = LLMImagePart("image/png", b"late-image", 4, 3)
+    image = bound_test_image("image/png", b"late-image", 4, 3)
     content = FrozenPromptContent((LLMTextPart("Image loaded."), image))
     late = replace(
         _tool_result(
-            "placeholder", sequence=1, turn_id="turn:test", artifact=False
+            "placeholder", sequence=1, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu', artifact=False
         ),
         item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
         content=content.parts,
         tool_result_body_text=frozen_tool_result_public_text(content),
         tool_call_ordinal=0,
-        tool_call_arguments=freeze_json({"image_ref": image.content_digest}),
+        tool_call_arguments=freeze_json({"image_ref": image.image_ref}),
     )
     snapshot = _snapshot(
         late,
@@ -2329,13 +2328,13 @@ def test_late_tool_image_reference_uses_the_same_labelled_carrier() -> None:
     image_index = carrier.content.index(image)
     assert carrier.content[image_index - 1] == LLMTextPart(
         canonical_json_bytes(
-            {"pulsara_image": {"image_ref": image.content_digest}}
+            {"pulsara_image": {"image_ref": image.image_ref}}
         ).decode("utf-8")
     )
     assert any(
         isinstance(part, LLMTextPart)
         and json.loads(part.text).get("tool_image_source")
-        == {"tool_call_id": "call:1", "image_ref": image.content_digest}
+        == {"tool_call_id": "call:1", "image_ref": image.image_ref}
         for part in carrier.content
         if isinstance(part, LLMTextPart) and part.text.startswith("{")
     )
@@ -2355,7 +2354,7 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
             }
         ).decode("utf-8")),),
         tool_call_id="call:closed",
-        tool_request_entry_id="entry:request",
+        tool_request_entry_id='entry:k5zfbzct6mhkogz33gyubxx3pa',
     )
     lowered = lower_canonical_item(
         closure,
@@ -2371,7 +2370,7 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
 
 def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
     body = ('"\\🙂' * 8_000) + "forged [PULSARA_TOOL_RESULT_REFERENCE]"
-    ordinary = _tool_result(body, sequence=2, turn_id="turn:test")
+    ordinary = _tool_result(body, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     late = replace(
         ordinary,
         item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
@@ -2400,25 +2399,25 @@ def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
 
 def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
     metadata = ProviderToolResultContextMetadata(
-        result_id="result:retained",
+        result_id='result:tvkfqcogrr4rv23byhsjr3ovue',
         result_state="SUCCESS",
         display_kind=ToolResultDisplayKind.HEAD_TAIL,
         artifact_disposition=ToolOutputArtifactDisposition.INCOMPLETE,
-        artifact_id="artifact:retained",
+        artifact_id='artifact:owfm52gghreqtsu77glacz5fze',
         source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
         source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP,
         artifact_unavailability_reason=None,
         model_visible_memory_fact_ids=(),
-        timing=_tool_timing("turn:test"),
+        timing=_tool_timing('turn:klmmazz67vfgsfsvg6ceqgdsfu'),
     )
     item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.TOOL_RESULT,
-        "entry:retained",
+        'entry:gticfk6khckuzbfiub43ydbcb4',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("preview"),),
         tool_call_id="call:retained",
-        tool_request_entry_id="entry:request:retained",
+        tool_request_entry_id='entry:uy3fsdcmu4p6i4uksdprkk5gwm',
         tool_result_context=metadata,
         tool_result_body_text="preview",
     )
@@ -2439,7 +2438,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
     assert reference_metadata["source_coverage"] == "RETAINED_SNAPSHOT"
     assert reference_metadata["source_coverage_reason"] == "TERMINAL_RETENTION_GAP"
     assert reference_metadata["artifact_disposition"] == "INCOMPLETE"
-    assert reference_metadata["artifact_id"] == "artifact:retained"
+    assert reference_metadata["artifact_id"] == 'artifact:owfm52gghreqtsu77glacz5fze'
 
     unavailable = replace(
         metadata,
@@ -2464,7 +2463,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
 
 
 def test_round3_wire_floor_degrades_prior_turn_result_before_current_turn() -> None:
-    snapshot = _snapshot(_tool_result("old " * 2_000, sequence=1, turn_id="turn:old"), _tool_result("new " * 2_000, sequence=2, turn_id="turn:test"))
+    snapshot = _snapshot(_tool_result("old " * 2_000, sequence=1, turn_id='turn:uyenyjpuysm57ziiygjzxjhcum'), _tool_result("new " * 2_000, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu'))
     request = _prepared_request(snapshot, _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",))), budget=4, tool_names=("artifact_read",))
     compiler = StructuredModelInputCompiler()
     full = compiler.compile(request)
@@ -2523,9 +2522,9 @@ def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> No
     )
     tool_request = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:tool",
+        'entry:bqaudgk7nim6e3ritkabopkyh4',
         1,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart(""),),
         tool_calls=(call,),
     )
@@ -2724,7 +2723,7 @@ def test_round3_compiler_rejects_expired_deadline_before_allocation() -> None:
 
     owner = new_test_provider_input_continuity_owner()
     scope = ProviderInputContinuityScope(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
@@ -2790,12 +2789,12 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
             _sources(changed_permission),
             budget=800,
         ),
-        context_id="context:overbudget-semantic-projection",
+        context_id='context:xqxwmyhiw3jvl77sfiqkabysey',
         model_call_index=2,
     )
     planning = owner.freeze_planning_input(
         scope=ProviderInputContinuityScope(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         ),
@@ -2856,7 +2855,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
 
 def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work() -> None:
     items = tuple(
-        _tool_result("x" * 1_024, sequence=index + 1, turn_id="turn:old")
+        _tool_result("x" * 1_024, sequence=index + 1, turn_id='turn:uyenyjpuysm57ziiygjzxjhcum')
         for index in range(4_096)
     )
     request = _prepared_request(
@@ -3368,8 +3367,8 @@ def test_round3_runtime_source_keeps_workspace_after_foreground_and_yielded_cd(
     yielded.mkdir()
     port = DirectKernelToolPort(
         workspace_root=tmp_path,
-        host_owner_id="host:cwd",
-        session_id="session:cwd",
+        host_owner_id='host:dugldp6ni2dxvuywv5a3utbnii',
+        session_id='session:yb3rgzdbtfst4jirqaeox4wo6a',
         live_bus=LiveAgentEventBus(),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
@@ -3380,7 +3379,7 @@ def test_round3_runtime_source_keeps_workspace_after_foreground_and_yielded_cd(
                 command=f"cd {shlex.quote(str(foreground))}",
                 yield_time_ms=2_000,
             ),
-            owner_host_session_id="host:cwd",
+            owner_host_session_id='host:dugldp6ni2dxvuywv5a3utbnii',
             decision_deadline_monotonic=port._deadlines.deadline(  # noqa: SLF001
                 KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
             ),
@@ -3393,7 +3392,7 @@ def test_round3_runtime_source_keeps_workspace_after_foreground_and_yielded_cd(
                 yield_time_ms=5,
                 max_lifetime_seconds=10,
             ),
-            owner_host_session_id="host:cwd",
+            owner_host_session_id='host:dugldp6ni2dxvuywv5a3utbnii',
             decision_deadline_monotonic=port._deadlines.deadline(  # noqa: SLF001
                 KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
             ),
@@ -3437,21 +3436,21 @@ def test_round3_tool_invocation_rejects_other_subagent_access() -> None:
     tools = StructuredToolPort(object(), tool_names=("read_file",))
     prepared = tools.snapshot_tool_surface(
         conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id="subagent-task:a",
+        scope_subagent_task_id='task:kjvbuwdmbnizp5h7dzj7d5ud6m',
     )
     borrow = tools.borrow_tool_surface(prepared)
     try:
         with pytest.raises(ValueError, match="scope access does not exact-join"):
             KernelToolInvocationContext(
-                session_id="session:test",
-                workspace_id="workspace:test",
-                turn_id="turn:test",
-                assistant_entry_id="entry:assistant",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+                workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:test",
-                attempt_id="attempt:test",
-                result_entry_id="entry:result",
+                attempt_id='attempt:wfltiqfg6cmo6cuivaxvkm4dr4',
+                result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK.value,
-                scope_subagent_task_id="subagent-task:b",
+                scope_subagent_task_id='task:unkaqjydspswdzyvuyxcqh43ke',
                 host_owner_epoch=1,
                 authorization_reference="authorization:test",
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
@@ -3472,8 +3471,8 @@ def test_tool_runtime_dispatch_observation_requires_registry_current_borrow(
 ) -> None:
     port = DirectKernelToolPort(
         workspace_root=tmp_path,
-        host_owner_id="host:test",
-        session_id="session:test",
+        host_owner_id='host:yinyxklzunar54s7objjdbphcy',
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         live_bus=LiveAgentEventBus(),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
@@ -3521,8 +3520,8 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
         ports = tuple(
             DirectKernelToolPort(
                 workspace_root=tmp_path,
-                host_owner_id=f"host:{name}",
-                session_id="session:test",
+                host_owner_id=derive_id("host", "test-fixture", f"host:{name}"),
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
                 live_bus=LiveAgentEventBus(),
                 authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             )
@@ -3546,21 +3545,21 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 tool_name="read_file",
                 arguments={"path": "README.md"},
                 tool_call_id="call:test",
-                turn_id="turn:test",
-                assistant_entry_id="entry:assistant",
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 surface_borrow=borrow,
                 permission_snapshot=_permission_snapshot(),
                 memory_context=FrozenModelCallMemoryContext(),
             )
             assert authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
             invocation = KernelToolInvocationContext(
-                session_id="session:test",
-                workspace_id="workspace:test",
-                turn_id="turn:test",
-                assistant_entry_id="entry:assistant",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+                workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:test",
-                attempt_id="attempt:test",
-                result_entry_id="entry:result",
+                attempt_id='attempt:wfltiqfg6cmo6cuivaxvkm4dr4',
+                result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.ROOT.value,
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
@@ -3574,10 +3573,10 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 ),
                 surface_borrow=borrow,
                 subagent_parent_context_subject=build_parent_context_call_subject(
-                    session_id="session:test",
-                    caller_turn_id="turn:test",
+                    session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+                    caller_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
                     provider_input_cut_fingerprint="cut:test",
-                    continuity_epoch_nonce="epoch:test",
+                    continuity_epoch_nonce='epoch:oqvlxjh4xkrycrokcvcpxjjspi',
                     continuity_epoch_revision=0,
                     compiled_semantic_input_fingerprint="semantic:test",
                     compiled_message_placements_fingerprint="placements:test",
@@ -3589,9 +3588,9 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                     tool_name="read_file",
                     arguments={"path": "README.md"},
                     tool_call_id="call:test",
-                    attempt_id="attempt:test",
-                    turn_id="turn:test",
-                    assistant_entry_id="entry:assistant",
+                    attempt_id='attempt:wfltiqfg6cmo6cuivaxvkm4dr4',
+                    turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+                    assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                     invocation_context=invocation,
                 )
         finally:
@@ -3607,8 +3606,8 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
 ) -> None:
     port = DirectKernelToolPort(
         workspace_root=tmp_path,
-        host_owner_id="host:test",
-        session_id="session:test",
+        host_owner_id='host:yinyxklzunar54s7objjdbphcy',
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         live_bus=LiveAgentEventBus(),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
@@ -3620,7 +3619,7 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
     child = prepare_test_direct_tool_surface(
         port,
         conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id="task:test",
+        scope_subagent_task_id='task:kmz6pl55dsqspcz6dgmhr7sxpy',
     )
     assert "terminal_monitor" in {tool.name for tool in root.model_surface.tool_specs}
     assert "terminal_monitor" not in {
@@ -3655,7 +3654,7 @@ def test_round3_tool_call_argument_owners_are_strictly_frozen() -> None:
 def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
     secret = "secret-user-prompt-never-project"
     items = tuple(
-        _tool_result(f"{secret}:{index}", sequence=index + 1, turn_id="turn:test")
+        _tool_result(f"{secret}:{index}", sequence=index + 1, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
         for index in range(70)
     )
     compiled = StructuredModelInputCompiler().compile(
@@ -3673,11 +3672,11 @@ def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
     offers: list[object] = []
     owner = SimpleNamespace(
         _extensions=SimpleNamespace(offer_operational_nowait=offers.append),
-        _writer_lease=SimpleNamespace(guard=SimpleNamespace(session_id="session:test")),
+        _writer_lease=SimpleNamespace(guard=SimpleNamespace(session_id='session:336wrfwkamrr3up6kjtsgvgcte')),
     )
     ConversationKernelRunner._offer_compile_observation(
         owner,  # type: ignore[arg-type]
-        turn_id="turn:test",
+        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         model_call_index=1,
         compiled=compiled,
     )
@@ -3698,7 +3697,7 @@ def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
     )
     ConversationKernelRunner._offer_compile_observation(
         failing_owner,  # type: ignore[arg-type]
-        turn_id="turn:test",
+        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         model_call_index=1,
         compiled=compiled,
     )
@@ -3714,7 +3713,7 @@ def test_round3_diagnostic_projector_is_the_bounded_public_owner() -> None:
             _snapshot(
                 *(
                     _tool_result(
-                        f"private-body-{index}", sequence=index + 1, turn_id="turn:test"
+                        f"private-body-{index}", sequence=index + 1, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu'
                     )
                     for index in range(70)
                 )
@@ -3793,7 +3792,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     binding = request.compile_binding
     call_fact = binding.call_fact.model_copy(
-        update={"resolved_model_call_id": "model_call:golden"}
+        update={"resolved_model_call_id": 'call:qopfzujppvkypg6y3pum26lln4'}
     )
     request = replace(
         request,
@@ -3818,9 +3817,9 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # V3 changes the estimator identity and tool JSON quote. Source and
-        # budget decisions stay the same; the target-bound identity changes.
-        "sha256:449f69c07fd3bf261d2cac32d133d4d5b8c83e7219876191bc9c3c99fd6e3354"
+        # Canonical session/turn/connection IDs change the complete semantic
+        # input identity; source content and budget decisions stay the same.
+        "sha256:90698405d53861d32c3ccf9e75d7bfeb5b67397058c708f2bbcea26a4ee2d25f"
     )
     assert not hasattr(compiled, "final_estimate")
 
@@ -3839,9 +3838,9 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
 
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("answer"),),
     )
     second_request = replace(
@@ -3849,7 +3848,7 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
             _snapshot(initial, assistant),
             _sources(_candidate(ContextSourceKind.RUNTIME_CLOCK, ("clock=B", "B"))),
         ),
-        context_id="context:second",
+        context_id='context:227vr3lxxerzucei2odo5zvd24',
         model_call_index=2,
     )
     second, successor = _compile_and_install_append(
@@ -3890,9 +3889,9 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
 
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("answer"),),
     )
     hook = _candidate(
@@ -3904,7 +3903,7 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
     )
     second_request = replace(
         _prepared_request(_snapshot(initial, assistant), _sources(hook)),
-        context_id="context:hook",
+        context_id='context:24u7sp4dhbfdnbipigvd3tetji',
         model_call_index=2,
     )
     _second, successor = _compile_and_install_append(
@@ -3934,7 +3933,7 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
             _snapshot(initial, assistant, follow_up),
             _sources(),
         ),
-        context_id="context:after-hook",
+        context_id='context:vgcg7k4ft2kgvxluklis4t7ooi',
         model_call_index=3,
     )
     _third, third_view = _compile_and_install_append(
@@ -4069,14 +4068,14 @@ def test_memory_write_hint_call_append_does_not_repeat_on_tool_loop() -> None:
     )
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("continuing after a tool result"),),
     )
     second_request = replace(
         _prepared_request(_snapshot(initial, assistant), _sources()),
-        context_id="context:memory-write-hint-tool-loop",
+        context_id='context:w7dwwdwyxz3j6ezkyvaivwwsse',
         model_call_index=2,
     )
     _second, second_view = _compile_and_install_append(
@@ -4181,7 +4180,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
     )
     public_message = LLMMessage.assistant("answer")
     fragment = completion.bind_assistant_entry(
-        assistant_entry_id="entry:2",
+        assistant_entry_id='entry:yym6qf3l4xz6437gradtmhjrke',
         public_projection_fingerprint=(
             provider_assistant_message_public_projection_fingerprint(public_message)
         ),
@@ -4199,9 +4198,9 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
 
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("answer"),),
     )
     second_request = replace(
@@ -4210,7 +4209,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
             _sources(),
             route_wire_profile=profile,
         ),
-        context_id="context:second",
+        context_id='context:227vr3lxxerzucei2odo5zvd24',
         model_call_index=2,
     )
     second_result, successor = _compile_and_install_append(
@@ -4246,7 +4245,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
             _sources(),
             route_wire_profile=profile,
         ),
-        context_id="context:third",
+        context_id='context:kvh63xitqwutzhjtmtzdnzf52a',
         model_call_index=3,
     )
     _third, third_view = _compile_and_install_append(
@@ -4318,7 +4317,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
     )
     public_message = LLMMessage.assistant("answer")
     fragment = completion.bind_assistant_entry(
-        assistant_entry_id="entry:2",
+        assistant_entry_id='entry:yym6qf3l4xz6437gradtmhjrke',
         public_projection_fingerprint=(
             provider_assistant_message_public_projection_fingerprint(public_message)
         ),
@@ -4334,9 +4333,9 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
     owner.promote_assistant_replay_fragment(reservation)
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("answer"),),
     )
     second_request = replace(
@@ -4345,7 +4344,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
             _sources(),
             route_wire_profile=profile,
         ),
-        context_id="context:responses:second",
+        context_id='context:bcip5ing3nhb3ftvodtb37wjd4',
         model_call_index=2,
     )
     second_result, successor = _compile_and_install_append(
@@ -4384,9 +4383,9 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
 
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("tool loop result"),),
     )
     no_change_request = replace(
@@ -4401,7 +4400,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
                 )
             ),
         ),
-        context_id="context:no-change",
+        context_id='context:vihnfesbndv24h2lyznpjfu4di',
         model_call_index=2,
     )
     _no_change, second_view = _compile_and_install_append(
@@ -4432,7 +4431,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
                 )
             ),
         ),
-        context_id="context:clear",
+        context_id='context:o5atf3kxq776wqobg3sbmht65u',
         model_call_index=3,
     )
     _clear, third_view = _compile_and_install_append(
@@ -4453,9 +4452,9 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
 
     final_assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:4",
+        'entry:sl4u5jswxd3scaiqwxdy27gwqi',
         4,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("final"),),
     )
     repeated_clear_request = replace(
@@ -4470,7 +4469,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
                 )
             ),
         ),
-        context_id="context:repeat-clear",
+        context_id='context:ir4vl3wozvcvw7eeqxowyf4rji',
         model_call_index=4,
     )
     _repeat, fourth_view = _compile_and_install_append(
@@ -4550,9 +4549,9 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
 
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("done"),),
     )
     followup = _user("follow up", sequence=3)
@@ -4566,7 +4565,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
                 )
             ),
         ),
-        context_id="context:skill-catalog-successor",
+        context_id='context:bgh75rlgas3pnqhqastlsfpa54',
         model_call_index=2,
     )
     _second, second_view = _compile_and_install_append(
@@ -4578,9 +4577,9 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
 
     next_assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:4",
+        'entry:sl4u5jswxd3scaiqwxdy27gwqi',
         4,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("done again"),),
     )
     next_user = _user("one more", sequence=5)
@@ -4594,7 +4593,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
             _snapshot(initial, assistant, followup, next_assistant, next_user),
             _sources(unavailable),
         ),
-        context_id="context:skill-catalog-unavailable",
+        context_id='context:nb2lgu6rcswxqsajsn35stmohe',
         model_call_index=3,
     )
     _third, third_view = _compile_and_install_append(
@@ -4622,9 +4621,9 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
 
     final_assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:6",
+        'entry:l435chuy7gehczrvroodvtofye',
         6,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("final"),),
     )
     final_user = _user("last", sequence=7)
@@ -4641,7 +4640,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
             ),
             _sources(unavailable),
         ),
-        context_id="context:skill-catalog-unavailable-repeat",
+        context_id='context:23echlsxzf4za4z6h4gcopsxvy',
         model_call_index=4,
     )
     _fourth, fourth_view = _compile_and_install_append(
@@ -4693,14 +4692,14 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
 
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("completed successor"),),
     )
     clear_request = replace(
         _prepared_request(_snapshot(initial, assistant), _sources()),
-        context_id="context:round7-clear",
+        context_id='context:lsyyqcsrgf5wrc4sk6o5qu5lnm',
         model_call_index=2,
     )
     _clear, second_view = _compile_and_install_append(
@@ -4727,14 +4726,14 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
 
     final = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:3",
+        'entry:nvhyc6ehb7acx2htbxgk6cev4q',
         3,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart("another success"),),
     )
     repeated_request = replace(
         _prepared_request(_snapshot(initial, assistant, final), _sources()),
-        context_id="context:round7-clear-repeat",
+        context_id='context:gafig7cv7oktyyki43l6syobhy',
         model_call_index=3,
     )
     _repeat, third_view = _compile_and_install_append(
@@ -4766,7 +4765,7 @@ def test_round7_freshness_frontier_appends_without_reclassifying_old_messages() 
         compiler=compiler, owner=owner, request=first_request
     )
 
-    result = _tool_result("exact tool body", sequence=2, turn_id="turn:test")
+    result = _tool_result("exact tool body", sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     second_freshness = _candidate(
         ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
         (
@@ -4776,7 +4775,7 @@ def test_round7_freshness_frontier_appends_without_reclassifying_old_messages() 
     )
     second_request = replace(
         _prepared_request(_snapshot(initial, result), _sources(second_freshness)),
-        context_id="context:round7-freshness",
+        context_id='context:rgdkqxcsblisb2drvya4yicq4y',
         model_call_index=2,
     )
     _second, second_view = _compile_and_install_append(
@@ -4872,15 +4871,15 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
         items.append(
             FrozenProviderInputItem(
                 FrozenProviderInputItemKind.ASSISTANT,
-                f"entry:{call_index}",
+                derive_id("entry", "test-fixture", f"entry:{call_index}"),
                 call_index,
-                "turn:test",
+                'turn:klmmazz67vfgsfsvg6ceqgdsfu',
                 (LLMTextPart(f"settle {previous_presence}"),),
             )
         )
         previous_request = replace(
             _prepared_request(_snapshot(*items), source_state(previous_presence, "A")),
-            context_id=f"context:previous:{previous_presence}",
+            context_id=derive_id("context", "test-fixture", f"context:previous:{previous_presence}"),
             model_call_index=call_index,
         )
         _compile_and_install_append(
@@ -4890,7 +4889,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
 
     before = owner.current_view(
         ProviderInputContinuityScope(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )
@@ -4899,9 +4898,9 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
     items.append(
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT,
-            f"entry:{call_index}",
+            derive_id("entry", "test-fixture", f"entry:{call_index}"),
             call_index,
-            "turn:test",
+            'turn:klmmazz67vfgsfsvg6ceqgdsfu',
             (LLMTextPart("matrix transition"),),
         )
     )
@@ -4911,7 +4910,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
             source_state(current_presence, "B" if semantic_changed else "A"),
         ),
         context_id=(
-            f"context:matrix:{previous_presence}:{current_presence}:{semantic_changed}"
+            derive_id("context", "test-fixture", f"context:matrix:{previous_presence}:{current_presence}:{semantic_changed}")
         ),
         model_call_index=call_index,
     )
@@ -4974,7 +4973,7 @@ def test_empty_cold_registration_rejects_preparation_drift(drift: str) -> None:
                 ProviderInputContinuityScope(
                     session_id=candidate.scope.session_id,
                     scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                    scope_subagent_task_id="task:other",
+                    scope_subagent_task_id='task:b3pqjvjpgab3uwzucbs6fg2rmq',
                 )
                 if drift == "scope"
                 else transition.scope
@@ -5062,7 +5061,7 @@ def test_round3_1_compatible_epoch_rejects_old_canonical_rewrite() -> None:
     rewritten = _prepared_request(_snapshot(_user("rewritten")), _sources())
 
     scope = ProviderInputContinuityScope(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
@@ -5082,9 +5081,9 @@ def test_round3_1_compatible_epoch_rejects_old_canonical_rewrite() -> None:
 def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
     compiler = StructuredModelInputCompiler()
     owner = new_test_provider_input_continuity_owner()
-    first_user = _user("turn one", sequence=1, turn_id="turn:one")
+    first_user = _user("turn one", sequence=1, turn_id='turn:xayicncb3vcols33532v4oov6a')
     first_request = _prepared_request(
-        _snapshot(first_user, turn_id="turn:one"), _sources()
+        _snapshot(first_user, turn_id='turn:xayicncb3vcols33532v4oov6a'), _sources()
     )
     _first, first_view = _compile_and_install_append(
         compiler=compiler, owner=owner, request=first_request
@@ -5092,18 +5091,18 @@ def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
 
     answer = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:one",
+        'turn:xayicncb3vcols33532v4oov6a',
         (LLMTextPart("answer one"),),
     )
-    second_user = _user("turn two", sequence=3, turn_id="turn:two")
+    second_user = _user("turn two", sequence=3, turn_id='turn:hd5xd6xkjf6qdywoaszspvokyq')
     second_request = replace(
         _prepared_request(
-            _snapshot(first_user, answer, second_user, turn_id="turn:two"),
+            _snapshot(first_user, answer, second_user, turn_id='turn:hd5xd6xkjf6qdywoaszspvokyq'),
             _sources(),
         ),
-        context_id="context:turn-two",
+        context_id='context:e52mb2kzg6mrmlmarekyisz2xy',
         model_call_index=2,
     )
     _second, second_view = _compile_and_install_append(
@@ -5115,7 +5114,7 @@ def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
 
     replacement = new_test_provider_input_continuity_owner()
     scope = ProviderInputContinuityScope(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
@@ -5132,9 +5131,9 @@ def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
 def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> None:
     compiler = StructuredModelInputCompiler()
     owner = new_test_provider_input_continuity_owner()
-    first_user = _user("turn one", sequence=1, turn_id="turn:one")
+    first_user = _user("turn one", sequence=1, turn_id='turn:xayicncb3vcols33532v4oov6a')
     first_request = _prepared_request(
-        _snapshot(first_user, turn_id="turn:one"),
+        _snapshot(first_user, turn_id='turn:xayicncb3vcols33532v4oov6a'),
         _sources(
             _candidate(
                 ContextSourceKind.RETAINED_SKILL_CONTEXT,
@@ -5150,17 +5149,17 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
 
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:one",
+        'turn:xayicncb3vcols33532v4oov6a',
         (LLMTextPart("continue same run"),),
     )
     same_turn_request = replace(
         _prepared_request(
-            _snapshot(first_user, assistant, turn_id="turn:one"),
+            _snapshot(first_user, assistant, turn_id='turn:xayicncb3vcols33532v4oov6a'),
             _sources(),
         ),
-        context_id="context:retained-same-turn",
+        context_id='context:3tcuomtajdw45ceqgpu4sbvo5e',
         model_call_index=2,
     )
     _same, same_turn_view = _compile_and_install_append(
@@ -5185,20 +5184,20 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
         if item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
     )
     assert same_turn_head.presence is SourceObservationPresence.VALUE
-    assert same_turn_head.last_emitted_turn_id == "turn:one"
+    assert same_turn_head.last_emitted_turn_id == 'turn:xayicncb3vcols33532v4oov6a'
 
-    second_user = _user("turn two", sequence=3, turn_id="turn:two")
+    second_user = _user("turn two", sequence=3, turn_id='turn:hd5xd6xkjf6qdywoaszspvokyq')
     next_turn_request = replace(
         _prepared_request(
             _snapshot(
                 first_user,
                 assistant,
                 second_user,
-                turn_id="turn:two",
+                turn_id='turn:hd5xd6xkjf6qdywoaszspvokyq',
             ),
             _sources(),
         ),
-        context_id="context:retained-next-turn",
+        context_id='context:pfjirowgpbxcntqrowuphfzg74',
         model_call_index=1,
     )
     _next, next_turn_view = _compile_and_install_append(
@@ -5226,7 +5225,7 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
         if item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
     )
     assert next_turn_head.presence is SourceObservationPresence.CLEARED
-    assert next_turn_head.last_emitted_turn_id == "turn:two"
+    assert next_turn_head.last_emitted_turn_id == 'turn:hd5xd6xkjf6qdywoaszspvokyq'
 
 
 def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
@@ -5235,7 +5234,7 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
 
     def install_child(task_id: str, sequence: int):
         scope = ProviderInputContinuityScope(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
             scope_subagent_task_id=task_id,
         )
@@ -5249,14 +5248,14 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
         objective = _user(
             f"objective {task_id}",
             sequence=sequence,
-            turn_id=f"turn:{task_id}",
+            turn_id=derive_id("turn", "test-fixture", f"turn:{task_id}"),
             origin=CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
         )
         request = _prepared_request(
             _snapshot(
                 objective,
                 scope=ModelInputScopeKind.SUBAGENT_TASK,
-                turn_id=f"turn:{task_id}",
+                turn_id=derive_id("turn", "test-fixture", f"turn:{task_id}"),
                 scope_subagent_task_id=task_id,
             ),
             _sources(),
@@ -5265,11 +5264,11 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
             compiler=compiler, owner=owner, request=request
         )[1]
 
-    first = install_child("task:a", 1)
-    second = install_child("task:b", 2)
+    first = install_child('task:7ekouunh3opwy6r5hpnpyw22fa', 1)
+    second = install_child('task:ofq7v6vy25ozw4nkz722653tpy', 2)
     assert first.epoch_revision == second.epoch_revision == 1
     assert first.scope != second.scope
-    third = install_child("task:c", 3)
+    third = install_child('task:k54rac52bbww5e7xbz2thtmlkq', 3)
     assert third.epoch_revision == 1
     owner.retire_terminal_subagent_scope(first.scope)
     assert owner.current_view(first.scope) is None
@@ -5285,7 +5284,7 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
         )
     with pytest.raises(ProviderInputContinuityConflict, match="another session"):
         new_test_provider_input_continuity_owner(
-            "session:other"
+            'session:sjiboxs4asbh5n6mg6cpdgcsqu'
         ).freeze_planning_input(
             scope=second.scope,
             canonical_frontier=second.canonical_frontier,
@@ -5308,11 +5307,11 @@ def test_round3_1_root_drift_cannot_rebuild_an_installed_epoch() -> None:
             _snapshot(initial, _user("next", sequence=2)),
             _sources(changed_base),
         ),
-        context_id="context:reset",
+        context_id='context:ixdyu2ouniccgm3t6nguaoc37a',
         model_call_index=2,
     )
     scope = ProviderInputContinuityScope(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )

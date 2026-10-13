@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from pulsara_agent.llm.input import FrozenPromptContent
 
 import asyncio
@@ -8,7 +10,6 @@ from datetime import datetime, timezone
 import json
 from time import monotonic
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 
@@ -66,22 +67,20 @@ from tests.support.postgres import verified_postgres_provider
 
 
 def _id(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
-def _content(*, session_id: str = "session:one") -> ProcessControlFeedbackContent:
+def _content(*, session_id: str = 'session:5dyf7lfzp7z22pphjtostkgsjm') -> ProcessControlFeedbackContent:
     return ProcessControlFeedbackContent(
-        command_id="command:control:999999:one",
+        command_id='command:puikocs6s5dnd4lsqgrippsicq',
         session_id=session_id,
-        host_session_id="host:one",
-        process_id="process:one",
+        host_session_id='host:gubylb5v44ganghpuxoqfvlrji',
+        process_id='process:34npgaljkboupr4n456vrmou6a',
         command="python worker.py --literal 你好",
         cwd="/tmp/work tree",
-        origin_turn_id="turn:origin",
+        origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
         origin_subagent_task_id=None,
-        target_root_turn_id="turn:target",
+        target_root_turn_id='turn:pt4zsuyxvb527qliae4ba7inwi',
         process=UserControlProcessFact(
             "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
         ),
@@ -95,8 +94,8 @@ def _feedback_host() -> tuple[KernelHostSession, _UserControlAttempt, str]:
     host = object.__new__(KernelHostSession)
     host._workspace_recreated_at = None
     host._workspace_feedback_candidate = None
-    host.session_id = "session:one"
-    host.host_session_id = "host:one"
+    host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'
+    host.host_session_id = 'host:gubylb5v44ganghpuxoqfvlrji'
     host._lock = asyncio.Lock()
     host._control_monotonic = lambda: 100.0
     host._active_task = None
@@ -117,17 +116,17 @@ def _feedback_host() -> tuple[KernelHostSession, _UserControlAttempt, str]:
     )
     request = UserControlRequest(
         UserControlOperation.TERMINATE_BACKGROUND_PROCESS,
-        "command:control:999999:one",
+        'command:puikocs6s5dnd4lsqgrippsicq',
         host.session_id,
         host.host_session_id,
-        UserControlTarget(UserControlTargetKind.BACKGROUND_PROCESS, "process:one"),
-    )
+        UserControlTarget(UserControlTargetKind.BACKGROUND_PROCESS, 'process:34npgaljkboupr4n456vrmou6a'),
+     admission_deadline_ms=host.control_admission_deadline_ms())
     feedback = UserControlFeedbackState(
         FeedbackCanonicalStatus.ACCEPTED,
         FeedbackInclusionStatus.PENDING,
         FeedbackOwnerAvailability.AVAILABLE,
-        target_root_turn_id="turn:A",
-        entry_id="entry:feedback",
+        target_root_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
+        entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau',
     )
     control = UserControlOutcome(
         request.operation,
@@ -148,7 +147,7 @@ def _feedback_host() -> tuple[KernelHostSession, _UserControlAttempt, str]:
             "done",
             user_control=control,
         ),
-        feedback_target_turn_id="turn:A",
+        feedback_target_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
         feedback_provider_text=provider_text,
     )
     host._user_control_attempts = {request.command_id: attempt}
@@ -159,7 +158,7 @@ def _provider_request(
     *, turn_id: str, entry_id: str, body: str, revision: str = "revision:one"
 ):
     return SimpleNamespace(
-        session_id="session:one",
+        session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
         turn_id=turn_id,
         model_call_index=2,
         compiled_input=SimpleNamespace(
@@ -179,17 +178,17 @@ def test_pr03_inclusion_requires_exact_final_placement_body_and_root() -> None:
         host, attempt, provider_text = _feedback_host()
         await host._record_user_control_provider_input_install(
             _provider_request(
-                turn_id="turn:B", entry_id="entry:feedback", body=provider_text
+                turn_id='turn:paqqn75nkrrptym5iw4zxx6u6e', entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau', body=provider_text
             )
         )
         await host._record_user_control_provider_input_install(
             _provider_request(
-                turn_id="turn:A", entry_id="entry:other", body=provider_text
+                turn_id='turn:74y74rvr2pht5lydgxvy57nxgq', entry_id='entry:nmbapdwcbtoosuijmfe5ytg5g4', body=provider_text
             )
         )
         await host._record_user_control_provider_input_install(
             _provider_request(
-                turn_id="turn:A", entry_id="entry:feedback", body="similar"
+                turn_id='turn:74y74rvr2pht5lydgxvy57nxgq', entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau', body="similar"
             )
         )
         assert attempt.outcome.user_control is not None
@@ -200,7 +199,7 @@ def test_pr03_inclusion_requires_exact_final_placement_body_and_root() -> None:
         )
 
         exact = _provider_request(
-            turn_id="turn:A", entry_id="entry:feedback", body=provider_text
+            turn_id='turn:74y74rvr2pht5lydgxvy57nxgq', entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau', body=provider_text
         )
         await host._record_user_control_provider_input_install(exact)
         feedback = attempt.outcome.user_control.feedback
@@ -210,8 +209,8 @@ def test_pr03_inclusion_requires_exact_final_placement_body_and_root() -> None:
 
         await host._record_user_control_transport_invocation(
             _provider_request(
-                turn_id="turn:A",
-                entry_id="entry:feedback",
+                turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
+                entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau',
                 body=provider_text,
                 revision="revision:other",
             ),
@@ -237,11 +236,11 @@ def test_pr03_early_inclusion_and_transport_observations_reconcile_after_ack() -
         assert feedback is not None
         candidate = UserControlFeedbackInstallationAttempt(
             session_id=host.session_id,
-            workspace_id="workspace:one",
+            workspace_id='workspace:scvzq3m6ilgcdfi5qvvqwjwvla',
             writer_generation=1,
-            target_root_turn_id="turn:A",
-            entry_id="entry:feedback",
-            content=replace(_content(), target_root_turn_id="turn:A"),
+            target_root_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
+            entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau',
+            content=replace(_content(), target_root_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq'),
             occurred_at=datetime.now(timezone.utc),
             actor_id=host.host_session_id,
         )
@@ -259,7 +258,7 @@ def test_pr03_early_inclusion_and_transport_observations_reconcile_after_ack() -
             ),
         )
         request = _provider_request(
-            turn_id="turn:A",
+            turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
             entry_id=candidate.entry_id,
             body=provider_text,
         )
@@ -298,17 +297,17 @@ def test_pr03_normal_root_completion_fences_feedback_into_the_next_request() -> 
         host, attempt, provider_text = _feedback_host()
         active = asyncio.create_task(asyncio.Event().wait())
         host._active_task = active
-        host._active_turn_id = "turn:A"
+        host._active_turn_id = 'turn:74y74rvr2pht5lydgxvy57nxgq'
         host._canonical_deadline = lambda: monotonic() + 1
         feedback = attempt.outcome.user_control.feedback
         assert feedback is not None
         candidate = UserControlFeedbackInstallationAttempt(
             session_id=host.session_id,
-            workspace_id="workspace:one",
+            workspace_id='workspace:scvzq3m6ilgcdfi5qvvqwjwvla',
             writer_generation=1,
-            target_root_turn_id="turn:A",
-            entry_id="entry:feedback",
-            content=replace(_content(), target_root_turn_id="turn:A"),
+            target_root_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
+            entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau',
+            content=replace(_content(), target_root_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq'),
             occurred_at=datetime.now(timezone.utc),
             actor_id=host.host_session_id,
         )
@@ -326,12 +325,12 @@ def test_pr03_normal_root_completion_fences_feedback_into_the_next_request() -> 
             ),
         )
 
-        assert await host._coordinate_user_control_feedback_at_root_completion("turn:A")
+        assert await host._coordinate_user_control_feedback_at_root_completion('turn:74y74rvr2pht5lydgxvy57nxgq')
         await host._settle_user_control_feedback_root_completion(
-            "turn:A", turn_completed=False
+            'turn:74y74rvr2pht5lydgxvy57nxgq', turn_completed=False
         )
         barrier = asyncio.create_task(
-            host._await_user_control_feedback_before_root_provider("turn:A")
+            host._await_user_control_feedback_before_root_provider('turn:74y74rvr2pht5lydgxvy57nxgq')
         )
         await asyncio.sleep(0)
         assert not barrier.done()
@@ -349,16 +348,16 @@ def test_pr03_normal_root_completion_fences_feedback_into_the_next_request() -> 
         await barrier
         await host._record_user_control_provider_input_install(
             _provider_request(
-                turn_id="turn:A",
+                turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
                 entry_id=candidate.entry_id,
                 body=attempt.feedback_provider_text,
             )
         )
         assert not await host._coordinate_user_control_feedback_at_root_completion(
-            "turn:A"
+            'turn:74y74rvr2pht5lydgxvy57nxgq'
         )
         await host._settle_user_control_feedback_root_completion(
-            "turn:A", turn_completed=True
+            'turn:74y74rvr2pht5lydgxvy57nxgq', turn_completed=True
         )
         active.cancel()
         await asyncio.gather(active, return_exceptions=True)
@@ -382,7 +381,7 @@ def test_pr03_cancelled_completion_wait_releases_its_exact_writer_seal() -> None
         )
 
         coordinating = asyncio.create_task(
-            host._coordinate_user_control_feedback_at_root_completion("turn:A")
+            host._coordinate_user_control_feedback_at_root_completion('turn:74y74rvr2pht5lydgxvy57nxgq')
         )
         for _ in range(20):
             await asyncio.sleep(0)
@@ -396,7 +395,7 @@ def test_pr03_cancelled_completion_wait_releases_its_exact_writer_seal() -> None
         with pytest.raises(asyncio.CancelledError):
             await coordinating
         await host._settle_user_control_feedback_root_completion(
-            "turn:A", turn_completed=False
+            'turn:74y74rvr2pht5lydgxvy57nxgq', turn_completed=False
         )
 
         assert host._control_completion_write_reservation is None
@@ -418,7 +417,7 @@ def test_pr03_accepted_feedback_fences_without_waiting_for_a_future_request() ->
         assert feedback.inclusion_status is FeedbackInclusionStatus.PENDING
 
         assert await asyncio.wait_for(
-            host._coordinate_user_control_feedback_at_root_completion("turn:A"),
+            host._coordinate_user_control_feedback_at_root_completion('turn:74y74rvr2pht5lydgxvy57nxgq'),
             timeout=0.1,
         )
         assert attempt.normal_end_coordination_fenced
@@ -433,7 +432,7 @@ def test_pr03_accepted_feedback_stops_fencing_at_its_existing_watchdog() -> None
         attempt.normal_end_coordination_deadline = monotonic() - 1
 
         results = [
-            await host._coordinate_user_control_feedback_at_root_completion("turn:A")
+            await host._coordinate_user_control_feedback_at_root_completion('turn:74y74rvr2pht5lydgxvy57nxgq')
             for _ in range(3)
         ]
 
@@ -460,7 +459,7 @@ def test_pr03_normal_root_completion_does_not_wait_past_existing_watchdog() -> N
         attempt.feedback_candidate_ready.clear()
         host._canonical_deadline = lambda: monotonic() + 0.01
         assert not await host._coordinate_user_control_feedback_at_root_completion(
-            "turn:A"
+            'turn:74y74rvr2pht5lydgxvy57nxgq'
         )
         assert attempt.normal_end_coordination_exhausted
 
@@ -472,15 +471,15 @@ def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
         host, attempt, _provider_text = _feedback_host()
         active = asyncio.create_task(asyncio.Event().wait())
         host._active_task = active
-        host._active_turn_id = "turn:A"
-        host.workspace = SimpleNamespace(workspace_key="workspace:one")
+        host._active_turn_id = 'turn:74y74rvr2pht5lydgxvy57nxgq'
+        host.workspace = SimpleNamespace(workspace_key='workspace:scvzq3m6ilgcdfi5qvvqwjwvla')
         host._lease = SimpleNamespace(guard=SimpleNamespace(writer_generation=1))
         host._canonical_deadline = lambda: monotonic() + 1
         attempt.process_at_admission = SimpleNamespace(
-            process_id="process:one",
+            process_id='process:34npgaljkboupr4n456vrmou6a',
             command="python worker.py",
             cwd="/tmp",
-            origin=SimpleNamespace(turn_id="turn:origin", scope_subagent_task_id=None),
+            origin=SimpleNamespace(turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u', scope_subagent_task_id=None),
         )
         feedback = attempt.outcome.user_control.feedback
         assert feedback is not None
@@ -539,7 +538,7 @@ def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
         async with host._lock:
             host._active_task = None
             host._active_turn_id = None
-            host._mark_feedback_target_ended_locked("turn:A")
+            host._mark_feedback_target_ended_locked('turn:74y74rvr2pht5lydgxvy57nxgq')
             still_pending = attempt.outcome.user_control.feedback
             assert still_pending is not None
             assert still_pending.canonical_status is FeedbackCanonicalStatus.PENDING
@@ -564,15 +563,15 @@ def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit() -> None:
         host, attempt, _provider_text = _feedback_host()
         active = asyncio.create_task(asyncio.Event().wait())
         host._active_task = active
-        host._active_turn_id = "turn:A"
-        host.workspace = SimpleNamespace(workspace_key="workspace:one")
+        host._active_turn_id = 'turn:74y74rvr2pht5lydgxvy57nxgq'
+        host.workspace = SimpleNamespace(workspace_key='workspace:scvzq3m6ilgcdfi5qvvqwjwvla')
         host._lease = SimpleNamespace(guard=SimpleNamespace(writer_generation=1))
         host._canonical_deadline = lambda: monotonic() + 1
         attempt.process_at_admission = SimpleNamespace(
-            process_id="process:one",
+            process_id='process:34npgaljkboupr4n456vrmou6a',
             command="python worker.py",
             cwd="/tmp",
-            origin=SimpleNamespace(turn_id="turn:origin", scope_subagent_task_id=None),
+            origin=SimpleNamespace(turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u', scope_subagent_task_id=None),
         )
         feedback = attempt.outcome.user_control.feedback
         assert feedback is not None
@@ -635,7 +634,7 @@ def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit() -> None:
         assert attempt.feedback_candidate is not None
         assert attempt.feedback_provider_text is not None
         request = _provider_request(
-            turn_id="turn:A",
+            turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
             entry_id=attempt.feedback_candidate.entry_id,
             body=attempt.feedback_provider_text,
         )
@@ -672,20 +671,20 @@ def test_pr03_terminal_input_selection_failure_closes_only_pending_inclusion(
 ) -> None:
     async def scenario() -> None:
         host, attempt, provider_text = _feedback_host()
-        await host._record_user_control_provider_input_failure("turn:A", reason)
+        await host._record_user_control_provider_input_failure('turn:74y74rvr2pht5lydgxvy57nxgq', reason)
         feedback = attempt.outcome.user_control.feedback
         assert feedback is not None
         assert feedback.canonical_status is FeedbackCanonicalStatus.ACCEPTED
         assert feedback.inclusion_status is FeedbackInclusionStatus.FAILED
         assert feedback.reason == reason
-        host._mark_feedback_target_ended_locked("turn:A")
+        host._mark_feedback_target_ended_locked('turn:74y74rvr2pht5lydgxvy57nxgq')
         assert attempt.outcome.user_control.feedback == feedback
 
         included_host, included_attempt, _ = _feedback_host()
         await included_host._record_user_control_provider_input_install(
             _provider_request(
-                turn_id="turn:A",
-                entry_id="entry:feedback",
+                turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
+                entry_id='entry:wjpsgrxbemc5aujvbgajmwfoau',
                 body=provider_text,
             )
         )
@@ -693,7 +692,7 @@ def test_pr03_terminal_input_selection_failure_closes_only_pending_inclusion(
         assert included is not None
         assert included.inclusion_status is FeedbackInclusionStatus.INCLUDED
         await included_host._record_user_control_provider_input_failure(
-            "turn:A", reason
+            'turn:74y74rvr2pht5lydgxvy57nxgq', reason
         )
         assert included_attempt.outcome.user_control.feedback == included
 
@@ -752,7 +751,7 @@ def test_pr03_feedback_entry_and_unique_event_commit_together_and_lower_exactly(
         command_id=_id("command"),
         turn_id=turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=binding,
@@ -767,10 +766,10 @@ def test_pr03_feedback_entry_and_unique_event_commit_together_and_lower_exactly(
         workspace_id=workspace_id,
         writer_generation=lease.guard.writer_generation,
         target_root_turn_id=turn_id,
-        entry_id=_id("entry:user-control"),
+        entry_id=_id("entry"),
         content=content,
         occurred_at=datetime.now(timezone.utc),
-        actor_id="host:one",
+        actor_id='host:gubylb5v44ganghpuxoqfvlrji',
     )
     safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
     prospective = repository.prepare_user_control_feedback_provider_input_candidate(

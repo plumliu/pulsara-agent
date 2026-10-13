@@ -83,7 +83,7 @@ def test_archive_restore_is_explicit_idempotent_and_keeps_history(repo):
             workspace_id=rows(
                 repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (sid,)
             )[0]["workspace_id"],
-            writer_owner_id="host:cannot-restore",
+            writer_owner_id='host:tue3xa5ggckqqx2ylxwzm66t7e',
             lease_seconds=30,
             deadline_monotonic=monotonic() + 30,
         )
@@ -105,7 +105,7 @@ def test_archive_restore_is_explicit_idempotent_and_keeps_history(repo):
         params = {"closed_writer": None} if method == repo.archive_session else {}
         with pytest.raises(KeyError):
             method(
-                session_id="session:missing",
+                session_id='session:fm2rm2somi3jg6eq4ey4mtfkwm',
                 memory_domain_id="u_local",
                 deadline_monotonic=monotonic() + 30,
                 **params,

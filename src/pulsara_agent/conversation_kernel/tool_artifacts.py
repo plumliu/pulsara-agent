@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, require_id
+
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -124,6 +126,7 @@ class ToolOutputArtifactProcessor:
     def prepare(
         self,
         *,
+        session_id: str,
         workspace_id: str,
         result_entry_id: str,
         public_output: str,
@@ -160,7 +163,7 @@ class ToolOutputArtifactProcessor:
                 ToolOutputArtifactUnavailabilityReason.ARTIFACT_CONTENT_TOO_LARGE
             )
         else:
-            artifact_id = _artifact_id(result_entry_id)
+            artifact_id = _artifact_id(session_id, result_entry_id)
             blob, unavailable_reason = self._publish_exact(
                 workspace_id=workspace_id,
                 body=body,
@@ -490,9 +493,8 @@ def _coverage_warning(candidate: ToolOutputArtifactCandidate) -> str:
     )
 
 
-def _artifact_id(result_entry_id: str) -> str:
-    digest = sha256(f"{result_entry_id}\0OUTPUT".encode("utf-8")).hexdigest()
-    return f"artifact:tool-result:{digest}"
+def _artifact_id(session_id: str, result_entry_id: str) -> str:
+    return derive_id("artifact", "tool-output", session_id, result_entry_id)
 
 
 class PostgresToolArtifactReadPort:
@@ -559,6 +561,7 @@ class PostgresToolArtifactReadPort:
         return content
 
     def _fetch(self, artifact_id: str) -> Mapping[str, object] | None:
+        require_id(artifact_id, "artifact")
         if not artifact_id:
             return None
         query = """

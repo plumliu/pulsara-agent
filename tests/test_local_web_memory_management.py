@@ -1,3 +1,4 @@
+from pulsara_agent.identity import derive_id
 import asyncio
 import json
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from tests.test_local_web_http_surface import _model_server_dependencies
 
 
 def records(*, preview=False, count=1):
-    header = dict(type="HEADER", view="global", workspace_id=None, root="memory:root")
+    header = dict(type="HEADER", view="global", workspace_id=None, root='memory:nnkziyqmj23e76kmcr3oisbiha')
     if not preview:
         header["disposition"] = "READY"
     entries = [header]
@@ -27,7 +28,7 @@ def records(*, preview=False, count=1):
                 {
                     "type": "FACT_DELETE",
                     "fact": dict(
-                        fact_id=f"memory:{index}",
+                        fact_id=derive_id("memory", "test-fixture", f"memory:{index}"),
                         context_id="ctx:global",
                         kind="FACT",
                         lifecycle="ACTIVE",
@@ -97,7 +98,7 @@ def test_stream_over_eight_mib_reaches_executor_with_exact_complete_records(tmp_
         try:
             async with ClientSession() as client:
                 async with client.delete(
-                    server.origin + "/api/memories/memory:root",
+                    server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha",
                     data=chunks(),
                     headers={
                         "Content-Type": "application/x-ndjson",
@@ -146,7 +147,7 @@ def test_malformed_confirmation_never_opens_executor(tmp_path, mutation):
         try:
             async with ClientSession() as client:
                 async with client.delete(
-                    server.origin + "/api/memories/memory:root",
+                    server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha",
                     data=b"\n".join(stream) + b"\n",
                     headers={"Content-Type": "application/x-ndjson"},
                 ) as response:
@@ -175,10 +176,10 @@ def test_all_memory_routes_share_readiness_gate(tmp_path, state):
                 for method, path in (
                     ("GET", ""),
                     ("GET", "/projects"),
-                    ("GET", "/memory:root"),
-                    ("POST", "/memory:root/deletion-preview"),
-                    ("PATCH", "/memory:root/statement"),
-                    ("DELETE", "/memory:root"),
+                    ("GET", "/memory:nnkziyqmj23e76kmcr3oisbiha"),
+                    ("POST", "/memory:nnkziyqmj23e76kmcr3oisbiha/deletion-preview"),
+                    ("PATCH", "/memory:nnkziyqmj23e76kmcr3oisbiha/statement"),
+                    ("DELETE", "/memory:nnkziyqmj23e76kmcr3oisbiha"),
                 ):
                     async with client.request(
                         method, server.origin + "/api/memories" + path
@@ -203,7 +204,7 @@ def test_memory_page_projects_and_source_do_not_read_selected_conversation(tmp_p
                 async with client.get(server.origin + "/api/memories/projects") as response:
                     assert response.status == 200, await response.text()
                 async with client.get(
-                    server.origin + "/api/memories/memory:root?view=global"
+                    server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha?view=global"
                 ) as response:
                     assert response.status == 200, await response.text()
             core.memory_management_projects.assert_awaited_once_with(
@@ -229,7 +230,7 @@ def test_memory_page_text_edit_is_scoped_to_server_owned_domain(tmp_path):
         try:
             async with ClientSession() as client:
                 async with client.patch(
-                    server.origin + "/api/memories/memory:root/statement",
+                    server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha/statement",
                     json=body,
                     headers={"Origin": server.origin},
                 ) as response:
@@ -241,14 +242,14 @@ def test_memory_page_text_edit_is_scoped_to_server_owned_domain(tmp_path):
                 assert kwargs["selection"].workspace_id is None
                 assert kwargs["statement"] == "new text"
                 assert kwargs["expected_updated_at"] == body["expected_updated_at"]
-                assert kwargs["fact_id"] == "memory:root"
+                assert kwargs["fact_id"] == 'memory:nnkziyqmj23e76kmcr3oisbiha'
                 for malformed in (
                     {**body, "memory_domain_id": "attacker"},
                     {**body, "view": 123},
                     {**body, "statement": "x" * 55000},
                 ):
                     async with client.patch(
-                        server.origin + "/api/memories/memory:root/statement",
+                        server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha/statement",
                         json=malformed,
                     ) as response:
                         assert response.status == 400, await response.text()
@@ -272,7 +273,7 @@ def test_temp_storage_failure_never_calls_database(tmp_path, monkeypatch):
         try:
             async with ClientSession() as client:
                 async with client.delete(
-                    server.origin + "/api/memories/memory:root",
+                    server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha",
                     data=b"\n".join(records()) + b"\n",
                     headers={"Content-Type": "application/x-ndjson"},
                 ) as response:
@@ -297,7 +298,7 @@ def test_preview_drift_and_same_origin_boundary(tmp_path):
             async with ClientSession() as client:
                 body = b"\n".join(records()) + b"\n"
                 async with client.delete(
-                    server.origin + "/api/memories/memory:root",
+                    server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha",
                     data=body,
                     headers={
                         "Content-Type": "application/x-ndjson",
@@ -307,7 +308,7 @@ def test_preview_drift_and_same_origin_boundary(tmp_path):
                     assert response.status == 403
                 core.execute_memory_deletion.assert_not_called()
                 async with client.delete(
-                    server.origin + "/api/memories/memory:root",
+                    server.origin + "/api/memories/memory:nnkziyqmj23e76kmcr3oisbiha",
                     data=body,
                     headers={
                         "Content-Type": "application/x-ndjson",

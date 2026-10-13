@@ -81,7 +81,7 @@ def _resolved(route: str, model: str, api: WireApi):
         catalog=catalog,
         target=ModelTargetKey(route, api, model),
         route_wires=production_route_wire_registry(),
-        connection_id=ModelConnectionId("model-connection:" + "a" * 32),
+        connection_id=ModelConnectionId('connection:gwnwgrwm3jzh55p233rw3lciq4'),
     )
 
 
@@ -102,7 +102,7 @@ def _resolved_call(
         target=ModelTargetKey(route, api, model),
         route_wires=production_route_wire_registry(),
         reasoning_wire_profile=profile,
-        connection_id=ModelConnectionId("model-connection:" + "c" * 32),
+        connection_id=ModelConnectionId('connection:tsjr6n6baxe2etbc5xzt5letd4'),
     ).config
     binding = ModelCallBinding(connection.id, selection)
     timeout = OpenAITransportTimeoutPolicy(1, 1, 1, 1, None)
@@ -152,7 +152,7 @@ def _user_declared_call(
         ),
         route_wires=route_wires,
         reasoning_wire_profile=profile,
-        connection_id=ModelConnectionId("model-connection:" + "9" * 32),
+        connection_id=ModelConnectionId('connection:aovgfwkuyy4flznihmke26xglu'),
     ).config
     binding = ModelCallBinding(connection.id, selection)
     target = resolve_model_target(
@@ -1174,7 +1174,7 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
         ),
         route_wires=route_wires,
         reasoning_wire_profile=ReasoningWireProfile.EFFORT,
-        connection_id=ModelConnectionId("model-connection:" + "d" * 32),
+        connection_id=ModelConnectionId('connection:2i3zbrkopewgthng3jvqzw64ai'),
     )
     binding = ModelCallBinding(
         resolved.config.id,

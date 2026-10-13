@@ -52,7 +52,7 @@ def test_mcp_settings_preserve_other_fields_and_exact_owner(tmp_path):
     async def scenario():
         store = LocalSettingsStore(tmp_path / "private" / "local-settings.yaml")
         owner = McpCredentialOwner("local", "USER", "test")
-        other = McpCredentialOwner("local", "workspace:test", "test")
+        other = McpCredentialOwner("local", 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', "test")
         binding = McpCredentialBinding(owner, "bearer")
         second = McpCredentialBinding(other, "bearer")
         await store.replace_mcp_secrets(owner, ((binding, "private-test-token"),))

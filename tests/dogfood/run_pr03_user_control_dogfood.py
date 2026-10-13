@@ -7,6 +7,7 @@ read-only and configured API-key values are scrubbed from the report.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.llm.input import PromptContent
 import argparse
@@ -217,11 +218,11 @@ def _control_request(
 ) -> UserControlRequest:
     return UserControlRequest(
         operation,
-        f"command:control:{session.control_admission_deadline_ms()}:{suffix}",
+        derive_id("command", "test-fixture", f"command:control:{session.control_admission_deadline_ms()}:{suffix}"),
         session.session_id,
         session.host_session_id,
         UserControlTarget(target_kind, target_id),
-    )
+     admission_deadline_ms=session.control_admission_deadline_ms())
 
 
 async def _wait_control(session, request: UserControlRequest, *, feedback: bool):
@@ -335,14 +336,14 @@ async def _run_stop_race(session) -> dict[str, object]:
             PromptContent.text("Call terminal exactly once with command "
             f"{hold!r}, yield_time_ms 30000 and max_output_chars 2000. "
             "Wait for that tool call and do not call anything else."),
-            command_id="command:pr03:stop-race-a",
+            command_id='command:o47pnkx7plzi4wuiftsqw2oxgi',
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
     )
     turn_a = await _wait_active_turn(session)
     await _wait_tool_command(session, hold)
     queued = await session.submit_prompt(
-        command_id="command:pr03:stop-race-b",
+        command_id='command:2sdvl6qpmwysv53to43t34ovc4',
         content=PromptContent.text("Reply exactly B_CONTINUED. Do not call tools."),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -360,7 +361,7 @@ async def _run_stop_race(session) -> dict[str, object]:
         expected_session_id=request.session_id,
         expected_host_session_id=request.host_session_id,
         target_turn_id=turn_a,
-    )
+     admission_deadline_ms=session.control_admission_deadline_ms())
     if accepted.status != "PENDING":
         raise RuntimeError("STOP A was not accepted asynchronously")
     await delayed_io.entered.wait()
@@ -411,7 +412,7 @@ async def _run_background_controls(session) -> dict[str, object]:
         "Both must return running. Register terminal_monitor for only the second "
         "process with action register and otherwise default settings. Do not poll or "
         "kill either process. Finish with one short sentence."),
-        command_id="command:pr03:background-start",
+        command_id='command:xah3sjy3vikjqvd2l33npxbe6u',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     processes = await _wait_processes(session, {command_a, command_b})
@@ -447,7 +448,7 @@ async def _run_background_controls(session) -> dict[str, object]:
                 f"{delay!r}, yield_time_ms 10000 and max_output_chars 2000. "
                 "After it returns, summarize any typed user-control feedback visible in "
                 "your next request. Do not call other tools."),
-                command_id="command:pr03:feedback-active-root",
+                command_id='command:qhmzqss2kxbf5jrmcv6obbud6e',
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
         )
@@ -471,7 +472,7 @@ async def _run_background_controls(session) -> dict[str, object]:
                 expected_session_id=request.session_id,
                 expected_host_session_id=session.host_session_id,
                 process_id=process.process_id,
-            )
+             admission_deadline_ms=session.control_admission_deadline_ms())
             if accepted.status != "PENDING":
                 raise RuntimeError(f"background control {label} was not accepted")
             requests.append(request)
@@ -532,7 +533,7 @@ async def _run_background_controls(session) -> dict[str, object]:
         PromptContent.text("Call terminal for each command exactly once and do not register monitors. "
         f"First command {idle_long!r}, yield_time_ms 50. Second command {natural!r}, "
         "yield_time_ms 50. Use max_output_chars 2000 for both, then stop."),
-        command_id="command:pr03:idle-processes",
+        command_id='command:6ild2gmqhgnjeqkvnno7kce3de',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     idle_processes = await _wait_processes(session, {idle_long, natural})
@@ -576,7 +577,7 @@ async def _run_background_controls(session) -> dict[str, object]:
             expected_session_id=request.session_id,
             expected_host_session_id=request.host_session_id,
             process_id=process.process_id,
-        )
+         admission_deadline_ms=session.control_admission_deadline_ms())
         idle_controls.append(
             _control_fact(await _wait_control(session, request, feedback=False))
         )
@@ -663,7 +664,7 @@ async def _run_task_controls(session, workspace: Path) -> dict[str, object]:
     )
     root_result = await session.run_turn(
         PromptContent.text(prompt),
-        command_id="command:pr03:task-group",
+        command_id='command:npud5dax6c2el76l53spuogcjm',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
 
@@ -693,7 +694,7 @@ async def _run_task_controls(session, workspace: Path) -> dict[str, object]:
             expected_session_id=request.session_id,
             expected_host_session_id=request.host_session_id,
             task_id=task_id,
-        )
+         admission_deadline_ms=session.control_admission_deadline_ms())
         if accepted.status == "PENDING":
             outcome = await _wait_control(session, request, feedback=False)
         else:
@@ -725,7 +726,7 @@ async def _run_task_controls(session, workspace: Path) -> dict[str, object]:
     single_result = await session.run_turn(
         PromptContent.text("Call spawn_agent exactly once with task_name single_worker and objective "
         "'Call report_agent_result alone with summary SINGLE_OK'. Return immediately."),
-        command_id="command:pr03:single-task",
+        command_id='command:jpytdnfk5tloh7p2jin4oy6soq',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
 

@@ -22,7 +22,7 @@ CREATE TABLE pulsara_v3.workspaces (
     memory_domain_id text NOT NULL CHECK (
         memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
     ),
-    id text NOT NULL,
+    id text CHECK (id ~ '^workspace:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
     workspace_kind text NOT NULL CHECK (workspace_kind IN ('project', 'transient')),
     workspace_root text NOT NULL CHECK (workspace_root <> ''),
     workspace_label text NOT NULL CHECK (workspace_label <> ''),
@@ -30,15 +30,15 @@ CREATE TABLE pulsara_v3.workspaces (
     UNIQUE (memory_domain_id, workspace_kind, workspace_root),
     CHECK (
         (workspace_kind = 'project'
-            AND id ~ '^ctx:workspace/[a-z0-9][a-z0-9._-]{0,127}$')
+            AND id ~ '^workspace:[a-z2-7]{25}[aeimquy4]$')
         OR
         (workspace_kind = 'transient'
-            AND id ~ '^transient:[0-9a-f]{64}$')
+            AND id ~ '^workspace:[a-z2-7]{25}[aeimquy4]$')
     )
 );
 
 CREATE TABLE pulsara_v3.sessions (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^session:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     workspace_id text NOT NULL,
     memory_domain_id text NOT NULL CHECK (
         memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
@@ -46,7 +46,7 @@ CREATE TABLE pulsara_v3.sessions (
     model_call_binding jsonb,
     lifecycle text NOT NULL CHECK (lifecycle IN ('OPEN', 'ARCHIVED')),
     writer_generation bigint NOT NULL CHECK (writer_generation >= 1),
-    writer_lease_owner_id text,
+    writer_lease_owner_id text CHECK (writer_lease_owner_id ~ '^host:[a-z2-7]{25}[aeimquy4]$'),
     writer_lease_expires_at timestamptz,
     latest_entry_sequence bigint NOT NULL DEFAULT 0 CHECK (latest_entry_sequence >= 0),
     latest_event_sequence bigint NOT NULL DEFAULT 0 CHECK (latest_event_sequence >= 0),
@@ -73,7 +73,7 @@ CREATE INDEX idx_pulsara_v3_sessions_workspace_fk
     ON pulsara_v3.sessions (memory_domain_id, workspace_id);
 
 CREATE TABLE pulsara_v3.blobs (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^(blob|image):[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     workspace_id text NOT NULL,
     storage_identity text NOT NULL UNIQUE,
     logical_digest text NOT NULL CHECK (logical_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -87,7 +87,7 @@ CREATE TABLE pulsara_v3.blobs (
 );
 
 CREATE TABLE pulsara_v3.context_snapshots (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^snapshot:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     source_through_sequence bigint NOT NULL CHECK (source_through_sequence >= 0),
@@ -112,11 +112,11 @@ CREATE TABLE pulsara_v3.context_snapshots (
 );
 
 CREATE TABLE pulsara_v3.subagent_tasks (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^task:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     parent_turn_id text NOT NULL,
-    batch_id text,
+    batch_id text CHECK (batch_id ~ '^batch:[a-z2-7]{25}[aeimquy4]$'),
     task_key text,
     label text,
     profile_kind text NOT NULL CHECK (profile_kind IN (
@@ -212,7 +212,7 @@ CREATE TABLE pulsara_v3.subagent_task_dependencies (
 );
 
 CREATE TABLE pulsara_v3.turns (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^turn:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     conversation_scope_kind text NOT NULL CHECK (conversation_scope_kind IN ('ROOT', 'SUBAGENT_TASK')),
@@ -222,7 +222,7 @@ CREATE TABLE pulsara_v3.turns (
     initial_entry_id text NOT NULL,
     final_entry_id text,
     current_context_binding_revision_id text,
-    permission_snapshot_id text NOT NULL,
+    permission_snapshot_id text CHECK (permission_snapshot_id ~ '^permission:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
     requested_permission_mode text NOT NULL CHECK (requested_permission_mode IN (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
@@ -306,7 +306,7 @@ CREATE TABLE pulsara_v3.turns (
 
 CREATE TABLE pulsara_v3.provider_call_usage (
     resolved_model_call_id text PRIMARY KEY CHECK (
-        resolved_model_call_id ~ '^model_call:[0-9a-f]{32}$'
+        resolved_model_call_id ~ '^call:[a-z2-7]{25}[aeimquy4]$'
     ),
     session_id text NOT NULL,
     turn_id text NOT NULL,
@@ -380,7 +380,7 @@ ALTER TABLE pulsara_v3.subagent_tasks ADD CONSTRAINT subagent_tasks_parent_turn_
     REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.turn_context_binding_revisions (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^binding:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     turn_id text NOT NULL,
     revision_ordinal integer NOT NULL CHECK (revision_ordinal >= 0),
@@ -406,7 +406,7 @@ ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_current_context_revision_fk
 
 CREATE TABLE pulsara_v3.session_commands (
     session_id text NOT NULL,
-    command_id text NOT NULL,
+    command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
     command_kind text NOT NULL CHECK (command_kind IN (
         'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'RUN_SCHEDULED_TASK', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT',
         'RESOLVE_INTERACTION', 'ACCEPT_SUBAGENT_COMPLETION',
@@ -456,7 +456,7 @@ CREATE TABLE pulsara_v3.session_commands (
 );
 
 CREATE TABLE pulsara_v3.imported_history_groups (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^history:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     status text NOT NULL CHECK (status IN ('COMPLETED', 'INTERRUPTED')),
@@ -471,7 +471,7 @@ CREATE TABLE pulsara_v3.imported_history_groups (
 );
 
 CREATE TABLE pulsara_v3.transcript_entries (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^entry:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     origin_entry_id text NOT NULL CHECK (origin_entry_id <> ''),
     session_id text NOT NULL,
     workspace_id text NOT NULL,
@@ -683,7 +683,7 @@ CREATE TABLE pulsara_v3.session_context_genesis (
 );
 
 CREATE TABLE pulsara_v3.assistant_message_blocks (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^block:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     assistant_entry_id text NOT NULL,
@@ -719,7 +719,7 @@ CREATE TABLE pulsara_v3.assistant_message_blocks (
 );
 
 CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^replay:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     assistant_entry_id text NOT NULL,
@@ -765,7 +765,7 @@ CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
 );
 
 CREATE TABLE pulsara_v3.tool_execution_attempts (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^attempt:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     assistant_entry_id text NOT NULL,
     tool_call_id text NOT NULL,
@@ -792,7 +792,7 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
 );
 
 CREATE TABLE pulsara_v3.tool_results (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^result:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     tool_call_entry_id text NOT NULL,
@@ -971,12 +971,12 @@ CREATE TABLE pulsara_v3.imported_tool_call_closures (
 );
 
 CREATE TABLE pulsara_v3.prompt_queue_items (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^queue:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     queue_sequence bigint NOT NULL CHECK (queue_sequence >= 1),
-    command_id text NOT NULL,
-    client_submission_id text NOT NULL,
+    command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
+    client_submission_id text CHECK (client_submission_id ~ '^command:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
     delivery_mode text NOT NULL CHECK (delivery_mode IN ('NEW_TURN', 'STEER_ACTIVE_TURN')),
     input_origin text NOT NULL CHECK (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'SCHEDULED_TASK')),
     scheduled_task_id text,
@@ -993,7 +993,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     ),
     model_call_binding jsonb,
     target_turn_id text,
-    permission_snapshot_id text,
+    permission_snapshot_id text CHECK (permission_snapshot_id ~ '^permission:[a-z2-7]{25}[aeimquy4]$'),
     requested_permission_mode text CHECK (requested_permission_mode IN (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
@@ -1109,7 +1109,7 @@ CREATE UNIQUE INDEX uq_pulsara_v3_queue_plan_handoff_claim
     ) WHERE pending_plan_handoff_workflow_id IS NOT NULL;
 
 CREATE TABLE pulsara_v3.scheduled_tasks (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^schedule:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
     name text NOT NULL CHECK (length(btrim(name)) > 0),
     prompt text NOT NULL CHECK (length(btrim(prompt)) > 0),
@@ -1136,7 +1136,7 @@ CREATE TABLE pulsara_v3.canonical_image_refs (
     transcript_entry_id text,
     context_snapshot_id text,
     ref_ordinal integer NOT NULL CHECK (ref_ordinal >= 0),
-    blob_id text NOT NULL,
+    blob_id text CHECK (blob_id ~ '^image:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, queue_item_id)
@@ -1217,9 +1217,9 @@ CREATE INDEX ix_pulsara_v3_assistant_visualization_blob
     WHERE blob_id IS NOT NULL;
 
 CREATE TABLE pulsara_v3.interaction_decisions (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^decision:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
-    command_id text,
+    command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$'),
     subject_kind text NOT NULL CHECK (subject_kind IN ('TOOL_CALL', 'MCP_INPUT')),
     subject_tool_call_entry_id text,
     subject_tool_call_id text,
@@ -1269,7 +1269,7 @@ CREATE UNIQUE INDEX uq_pulsara_v3_tool_call_human_decision
     ) WHERE subject_kind = 'TOOL_CALL' AND actor_kind = 'human';
 
 CREATE TABLE pulsara_v3.plan_workflows (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^plan:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     workflow_ordinal bigint NOT NULL CHECK (workflow_ordinal >= 1),
@@ -1322,7 +1322,7 @@ CREATE UNIQUE INDEX uq_pulsara_v3_active_plan_workflow
     ON pulsara_v3.plan_workflows (session_id) WHERE status = 'ACTIVE';
 
 CREATE TABLE pulsara_v3.plan_interactions (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^plan-interaction:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     plan_workflow_id text NOT NULL,
@@ -1459,10 +1459,12 @@ ALTER TABLE pulsara_v3.prompt_queue_items ADD CONSTRAINT queue_handoff_plan_inte
     REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.subagent_task_children (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^(agent-result|agent-message):[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     task_id text NOT NULL,
     child_kind text NOT NULL CHECK (child_kind IN ('MESSAGE', 'RESULT')),
+    CHECK ((child_kind = 'MESSAGE' AND id ~ '^agent-message:[a-z2-7]{25}[aeimquy4]$')
+        OR (child_kind = 'RESULT' AND id ~ '^agent-result:[a-z2-7]{25}[aeimquy4]$')),
     child_ordinal integer NOT NULL CHECK (child_ordinal >= 0),
     entry_id text NOT NULL,
     result_source text CHECK (result_source IN ('EXPLICIT', 'INFERRED')),
@@ -1508,11 +1510,11 @@ ADD CONSTRAINT transcript_entries_source_inter_agent_attempt_fk
     REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.memory_facts (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^memory:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     memory_domain_id text NOT NULL,
     context_id text NOT NULL CHECK (
         context_id = 'ctx:global'
-        OR context_id ~ '^ctx:workspace/[a-z0-9][a-z0-9._-]{0,127}$'
+        OR context_id ~ '^workspace:[a-z2-7]{25}[aeimquy4]$'
     ),
     project_workspace_id text GENERATED ALWAYS AS (
         CASE WHEN context_id = 'ctx:global' THEN NULL ELSE context_id END
@@ -1556,7 +1558,7 @@ CREATE INDEX idx_pulsara_v3_memory_bm25 ON pulsara_v3.memory_facts USING bm25
     WITH (key_field='id',text_fields='{"statement":{"tokenizer":{"type":"jieba","search_mode":true,"stopwords":["!","\"","#","$","%","&","''","(",")","*","+",",","-",".","/",":",";","<","=",">","?","@","[","\\","]","^","_","`","{","|","}","~"," ","\t","\n","\r","，","。","！","？","；","：","、","（","）","【","】","《","》","“","”","‘","’","—","…"]}},"statement_en":{"tokenizer":{"type":"default","stemmer":"English"}},"statement_tech":{"tokenizer":{"type":"regex","pattern":"[./:@+-]*[A-Za-z0-9_][A-Za-z0-9_./:@+-]*"}}}');
 
 CREATE TABLE pulsara_v3.memory_relations (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^relation:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     memory_domain_id text NOT NULL,
     created_by_tool_result_id text,
     source_context_id text NOT NULL,
@@ -1598,7 +1600,7 @@ CREATE TABLE pulsara_v3.memory_relations (
             AND ordinal BETWEEN 0 AND 7
             AND ((source_context_id = 'ctx:global'
                     AND target_context_id = 'ctx:global')
-                OR (source_context_id ~ '^ctx:workspace/[a-z0-9][a-z0-9._-]{0,127}$'
+                OR (source_context_id ~ '^workspace:[a-z2-7]{25}[aeimquy4]$'
                     AND (target_context_id = 'ctx:global'
                         OR source_context_id = target_context_id))))
         OR
@@ -1856,7 +1858,7 @@ AFTER INSERT OR UPDATE ON pulsara_v3.memory_relations
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_direct_memory_lineage();
 CREATE TABLE pulsara_v3.agent_events (
-    event_id text PRIMARY KEY,
+    event_id text CHECK (event_id ~ '^event:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     workspace_id text NOT NULL,
     session_id text NOT NULL,
     event_sequence bigint NOT NULL CHECK (event_sequence >= 1),

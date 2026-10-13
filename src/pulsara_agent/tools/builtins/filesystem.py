@@ -7,11 +7,12 @@ deterministic line operations; ``write_file`` is create-only.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import content_revision, REVISION_PATTERN, ID_PAYLOAD_PATTERN
+
 import difflib
 import errno
 import base64
 import json
-from hashlib import sha256
 import os
 import re
 import subprocess
@@ -51,8 +52,8 @@ DEFAULT_SEARCH_LIMIT = 50
 MAX_SEARCH_LIMIT = 1_000
 UTF8_BOM = "\ufeff"
 UTF8_BOM_BYTES = b"\xef\xbb\xbf"
-CONTENT_REVISION_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
-IMAGE_REFERENCE_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+CONTENT_REVISION_PATTERN = re.compile(REVISION_PATTERN)
+IMAGE_REFERENCE_PATTERN = re.compile("image:" + ID_PAYLOAD_PATTERN)
 CHANGED_WINDOW_CONTEXT_LINES = 3
 # Changed windows precede the diff in the result. Keeping their complete JSON
 # below this budget ensures the existing 8,000-character head/tail projection
@@ -873,7 +874,7 @@ class WriteFileTool(WorkspaceTool):
 
 
 def _content_revision(raw_bytes: bytes) -> str:
-    return f"sha256:{sha256(raw_bytes).hexdigest()}"
+    return content_revision(raw_bytes)
 
 
 def _requested_leaf_path(raw_path: str | None, workspace_root: Path) -> Path:

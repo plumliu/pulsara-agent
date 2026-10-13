@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from psycopg.errors import UniqueViolation
+from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
+
+from pulsara_agent.identity import random_id
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from threading import RLock
 from typing import ContextManager, Iterator, Protocol
-from uuid import uuid4
 
 from psycopg import Connection, IsolationLevel
 
@@ -141,7 +145,7 @@ class BorrowedVerifiedPostgresConnectionProvider:
     def __init__(self, provider: "VerifiedPostgresConnectionProvider") -> None:
         self._provider = provider
         self._released = False
-        self._borrower_id = f"postgres-borrower:{uuid4().hex}"
+        self._borrower_id = random_id("borrow")
         self._lock = RLock()
         provider._retain_borrower()
 
@@ -226,9 +230,13 @@ class VerifiedPostgresConnectionProvider:
             yield connection
             if not connection.closed and connection.info.transaction_status.name != "IDLE":
                 connection.commit()
-        except BaseException:
+        except BaseException as exc:
             if "connection" in locals() and not connection.closed and connection.info.transaction_status.name != "IDLE":
                 connection.rollback()
+            # PK collisions cannot be retried after a candidate is frozen.
+            # Semantic idempotency remains the accepting owner's responsibility.
+            if isinstance(exc, UniqueViolation) and (exc.diag.constraint_name or "").endswith("_pkey"):
+                raise ConversationKernelConflict("IDENTITY_CONFLICT: canonical key is occupied") from exc
             raise
         finally:
             if "connection" in locals() and not connection.closed:

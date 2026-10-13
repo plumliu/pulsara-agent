@@ -1,6 +1,8 @@
 """Direct foreground model-port regression tests."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
+from pulsara_agent.identity import derive_id
 
 import asyncio
 import base64
@@ -43,7 +45,6 @@ from pulsara_agent.llm.adapters.openai.responses import (
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.input import (
-    LLMImagePart,
     LLMMessage,
     LLMTextPart,
     LLMToolCall,
@@ -140,8 +141,8 @@ def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128
     )
     prepared = port.prepare_target(
         KernelModelTargetPreparationRequest(
-            session_id="session:budget",
-            turn_id="turn:budget",
+            session_id='session:otdf3zbbht4rja6u3r7fk7ayou',
+            turn_id='turn:ex373f542bxd4xoqa6idiev5yq',
             model_call_index=1,
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=None,
@@ -456,9 +457,9 @@ def _prepared_execution(
     scope_subagent_task_id: str | None = None,
     canonical_items: tuple[FrozenProviderInputItem, ...] = (),
 ) -> tuple[KernelModelExecutionRequest, StructuredToolPort]:
-    session_id = "session:test"
-    turn_id = "turn:test"
-    revision_id = "binding:test"
+    session_id = 'session:336wrfwkamrr3up6kjtsgvgcte'
+    turn_id = 'turn:klmmazz67vfgsfsvg6ceqgdsfu'
+    revision_id = 'binding:2vbfj7ycdmvjuwmj3feeoqytyi'
     sequence = max(
         (item.source_entry_sequence or 0 for item in canonical_items), default=0
     )
@@ -485,7 +486,7 @@ def _prepared_execution(
     identity = CanonicalModelInputIdentity(
         session_id=session_id,
         turn_id=turn_id,
-        initial_entry_id="entry:initial",
+        initial_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
         context_binding_revision_id=revision_id,
         provider_input_through_sequence=sequence,
         conversation_scope_kind=scope_kind,
@@ -493,7 +494,7 @@ def _prepared_execution(
         identity_fingerprint=canonical_model_input_identity_fingerprint(
             session_id=session_id,
             turn_id=turn_id,
-            initial_entry_id="entry:initial",
+            initial_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
             context_binding_revision_id=revision_id,
             provider_input_through_sequence=sequence,
             conversation_scope_kind=scope_kind,
@@ -520,7 +521,7 @@ def _prepared_execution(
     sources = StaticContextSourceCollector().collect(canonical_facts=canonical_facts)
     compiled = StructuredModelInputCompiler().compile(
         StructuredModelInputCompileRequest(
-            context_id="context:test",
+            context_id='context:maoywbssk6zspli7b2bnu3pala',
             model_call_index=1,
             canonical_input=snapshot,
             canonical_facts=canonical_facts,
@@ -853,12 +854,12 @@ def test_k3_typed_image_compiles_once_into_the_exact_final_payload(
 ) -> None:
     output = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(output, "PNG")
-    image = LLMImagePart("image/png", output.getvalue(), 7, 5)
+    image = bound_test_image("image/png", output.getvalue(), 7, 5)
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:initial",
+        source_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
         source_entry_sequence=1,
-        source_turn_id="turn:test",
+        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         content=(LLMTextPart("before"), image, LLMTextPart("after"), image),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
@@ -905,7 +906,7 @@ def test_k3_typed_image_compiles_once_into_the_exact_final_payload(
         image_type,
     ]
     expected_reference = canonical_json_bytes(
-        {"pulsara_image": {"image_ref": image.content_digest}}
+        {"pulsara_image": {"image_ref": image.image_ref}}
     ).decode("utf-8")
     assert [
         part["text"] for part in content if part["type"] == text_type
@@ -1009,7 +1010,7 @@ def test_k3_followup_quote_counts_image_dimensions_and_elides_payload_tokens(
             role=MessageRole.USER,
             content=(
                 LLMTextPart("source"),
-                LLMImagePart("image/png", payload, width, height),
+                bound_test_image("image/png", payload, width, height),
             ),
         )
         return quote_provider_followup_wire_resources(
@@ -1047,8 +1048,8 @@ def test_k3_followup_quote_uses_native_replay_in_place_of_generic_assistant() ->
     assert not isinstance(native_item, tuple)
     replay = build_prepared_durable_provider_assistant_replay(
         session_id=request.session_id,
-        workspace_id="workspace:test",
-        assistant_entry_id="entry:assistant",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         target=port.replay_target_for_resolved_call(request.prepared_call.call),
         public_projection_fingerprint="sha256:" + "1" * 64,
         ordered_items=(native_item,),
@@ -1153,20 +1154,20 @@ def test_final_wire_quote_is_one_shot_without_creating_an_executable_plan(
 def test_native_replay_preserves_inline_visualization_marker(
     api: str,
 ) -> None:
-    assistant_entry_id = "entry:visualization-owner"
+    assistant_entry_id = 'entry:blzvcxjwbvctrcbukdihh2ftim'
     marker_text = "answer\n\n```pulsara-visualization\nchart.html\n```"
     assistant = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.ASSISTANT,
         source_entry_id=assistant_entry_id,
         source_entry_sequence=1,
-        source_turn_id="turn:earlier",
+        source_turn_id='turn:6jm3rew3jceuvfhjqj2bpxvkhy',
         content=(LLMTextPart(marker_text),),
     )
     next_user = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:initial",
+        source_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
         source_entry_sequence=2,
-        source_turn_id="turn:test",
+        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         content=(LLMTextPart("continue"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
@@ -1199,8 +1200,8 @@ def test_native_replay_preserves_inline_visualization_marker(
         )
         frozen_native_item = freeze_json(native_item)
         candidate = build_prepared_durable_provider_assistant_replay(
-            session_id="session:test",
-            workspace_id="workspace:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
             assistant_entry_id=assistant_entry_id,
             target=target,
             public_projection_fingerprint=(
@@ -1332,7 +1333,7 @@ def test_round3_1_adapter_wire_items_preserve_strict_prefix_and_steer_order(
     second_context = replace(
         first_context,
         messages=first_context.messages + steer_messages,
-        context_id="context:successor",
+        context_id='context:ztxjvul5qblmfspej6wxozekxi',
         model_call_index=2,
         provider_wire_input_plan=None,
     )
@@ -1420,7 +1421,7 @@ def test_round3_1_adapter_preserves_twelve_call_strict_prefix_trajectory(
             replace(
                 previous,
                 messages=previous.messages + suffix,
-                context_id=f"context:trajectory:{call_index}",
+                context_id=derive_id("context", "test-fixture", f"context:trajectory:{call_index}"),
                 model_call_index=call_index,
             )
         )
@@ -1459,7 +1460,7 @@ def test_round3_execution_exactly_joins_provider_cut_before_open() -> None:
             request,
             cut=replace(
                 request.cut,
-                context_binding_revision_id="binding:other",
+                context_binding_revision_id='binding:q6ok2vol7zofof5kqdikkvooee',
                 provider_input_through_sequence=1,
             ),
         )
@@ -1519,12 +1520,12 @@ def test_round3_execution_rejects_other_subagent_surface_access() -> None:
     request_a, _tool_port_a = _prepared_execution(
         port,
         scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id="subagent-task:a",
+        scope_subagent_task_id='task:kjvbuwdmbnizp5h7dzj7d5ud6m',
     )
     request_b, _tool_port_b = _prepared_execution(
         port,
         scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id="subagent-task:b",
+        scope_subagent_task_id='task:unkaqjydspswdzyvuyxcqh43ke',
     )
     with pytest.raises(ValueError, match="structurally joined"):
         replace(

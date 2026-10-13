@@ -83,9 +83,9 @@ def test_controller_rename_uses_current_domain_without_loading_runtime():
         core = SimpleNamespace(rename_session=AsyncMock(return_value="saved"))
         controller = SimpleNamespace(_lock=asyncio.Lock(), _closing=False, core=core,
                                      memory_domain_id="domain:test")
-        assert await LocalSessionController.rename_session(controller, "session:test", " saved ") == {
-            "session_id": "session:test", "title": "saved"}
-        core.rename_session.assert_awaited_once_with("session:test", memory_domain_id="domain:test", title=" saved ")
+        assert await LocalSessionController.rename_session(controller, 'session:336wrfwkamrr3up6kjtsgvgcte', " saved ") == {
+            "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte', "title": "saved"}
+        core.rename_session.assert_awaited_once_with('session:336wrfwkamrr3up6kjtsgvgcte', memory_domain_id="domain:test", title=" saved ")
     asyncio.run(run())
 
 
@@ -98,7 +98,7 @@ def test_title_http_shape_security_and_missing_target(tmp_path):
 
     async def run():
         sessions = _Sessions()
-        sessions.rename_session = AsyncMock(return_value={"session_id": "one", "title": "new"})
+        sessions.rename_session = AsyncMock(return_value={"session_id": 'session:5dofirezik2z5wyc4ouhsixn3i', "title": "new"})
         (tmp_path / "index.html").write_text("Pulsara")
         server = LocalHttpServer(sessions=cast(LocalSessionController, sessions),
             bridge=cast(LocalBrowserBridge, _Bridge()), static_root=tmp_path, requested_port=0,
@@ -115,7 +115,7 @@ def test_title_http_shape_security_and_missing_target(tmp_path):
                 sessions.rename_session.assert_not_awaited()
                 async with client.put(url, json={"title": "new"}) as response:
                     assert response.status == 200
-                    assert await response.json() == {"session_id": "one", "title": "new"}
+                    assert await response.json() == {"session_id": 'session:5dofirezik2z5wyc4ouhsixn3i', "title": "new"}
                 sessions.rename_session.assert_awaited_once_with("one", "new")
                 for error, status in [(KeyError("one"), 404), (ValueError("invalid"), 400)]:
                     sessions.rename_session.side_effect = error

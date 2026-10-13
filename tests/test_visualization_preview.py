@@ -30,7 +30,7 @@ class Bridge:
 
 
 def target(bridge):
-    return {'entry_id': 'entry:a', 'ordinal': 0, 'digest': 'sha256:' + sha256(bridge.content).hexdigest(), 'size': len(bridge.content)}
+    return {'entry_id': 'entry:2sznqhykjyk6in3xlwrxfuvbze', 'ordinal': 0, 'digest': 'sha256:' + sha256(bridge.content).hexdigest(), 'size': len(bridge.content)}
 
 
 def test_thumbnail_uses_exact_owner_chunks_and_checks_owner_after_render():

@@ -1,6 +1,7 @@
 """Canonical settlement bounds for real previews and late image results."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
 
 from dataclasses import replace
 from hashlib import sha256
@@ -26,7 +27,6 @@ from pulsara_agent.conversation_kernel.runner import (
 from pulsara_agent.conversation_kernel.tool_artifacts import ToolOutputArtifactProcessor
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
-    LLMImagePart,
     LLMTextPart,
     frozen_tool_result_public_text,
 )
@@ -56,8 +56,9 @@ def _preview_and_late_charge(body: str) -> tuple[CompletedToolCallBlock, int]:
     projection = ToolOutputArtifactProcessor(
         object(), publisher=_MemoryArtifactPublisher()
     ).prepare(
-        workspace_id="workspace:test",
-        result_entry_id="entry:result",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
         public_output=body,
         candidate=None,
         artifact_inline_result=False,
@@ -67,7 +68,7 @@ def _preview_and_late_charge(body: str) -> tuple[CompletedToolCallBlock, int]:
     preview = projection.canonical_preview.canonical_bytes.decode("utf-8")
     assert preview.startswith(body)
     call = CompletedToolCallBlock(
-        "block:call", "call:7", "read_file", freeze_json({"path": "control.txt"})
+        'block:eahusw3qjz45fyozavqv6xlbxa', "call:7", "read_file", freeze_json({"path": "control.txt"})
     )
     # Match the reader's plain LATE_TOOL_OUTCOME storage contract, then charge
     # the hydrated item with the production canonical resource owner.
@@ -80,7 +81,7 @@ def _preview_and_late_charge(body: str) -> tuple[CompletedToolCallBlock, int]:
         }
     ).decode("utf-8")
     late = replace(
-        _tool_result(preview, sequence=7, turn_id="turn:test"),
+        _tool_result(preview, sequence=7, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu'),
         item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
         content=(LLMTextPart(late_body),),
     )
@@ -136,12 +137,12 @@ def test_control_character_late_preview_is_rejected_before_canonical_exhaustion(
 def test_late_image_canonical_charge_fits_text_base_plus_exact_image_increment():
     encoded = BytesIO()
     Image.new("RGB", (8, 8), "white").save(encoded, format="PNG")
-    image = LLMImagePart("image/png", encoded.getvalue(), 8, 8)
+    image = bound_test_image("image/png", encoded.getvalue(), 8, 8)
     content = FrozenPromptContent((LLMTextPart("Image loaded."), image))
     frozen = freeze_canonical_prompt(content)
     public_text = frozen_tool_result_public_text(content)
     call = CompletedToolCallBlock(
-        "block:image", "call:7", "view_image", freeze_json({"path": "image.png"})
+        'block:mst7dl2g5akhu3ok7gosyqjp2q', "call:7", "view_image", freeze_json({"path": "image.png"})
     )
     late_body = canonical_json_bytes(
         {
@@ -152,7 +153,7 @@ def test_late_image_canonical_charge_fits_text_base_plus_exact_image_increment()
         }
     ).decode("utf-8")
     late = replace(
-        _tool_result(public_text, sequence=7, turn_id="turn:image", artifact=False),
+        _tool_result(public_text, sequence=7, turn_id='turn:hei4tpo3ncy7wcxg6s4x3caeae', artifact=False),
         item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
         content=(LLMTextPart(late_body), image),
         tool_call_ordinal=0,

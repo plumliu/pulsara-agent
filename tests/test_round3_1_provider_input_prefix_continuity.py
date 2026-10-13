@@ -46,13 +46,13 @@ _REPOSITORY_ROOT = Path(__file__).parents[1]
 
 def test_compaction_release_authorities_reject_another_adoption_candidate() -> None:
     scope = ProviderInputContinuityScope(
-        session_id="session:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
     adoption_scope = SimpleNamespace(
-        session_id="session:1",
-        turn_id="turn:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+        turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
@@ -60,7 +60,7 @@ def test_compaction_release_authorities_reject_another_adoption_candidate() -> N
         scope=adoption_scope,
         predecessor=SimpleNamespace(binding_revision_id="revision:old"),
         snapshot=SimpleNamespace(
-            snapshot_id="snapshot:adopted", source_through_sequence=1
+            snapshot_id='snapshot:6o3xmslpq2n33xesrawlqysksy', source_through_sequence=1
         ),
         binding=SimpleNamespace(binding_revision_id="revision:adopted"),
     )
@@ -81,20 +81,20 @@ def test_compaction_release_authorities_reject_another_adoption_candidate() -> N
         NoContinuationAdmissionFence(
             scope=scope,
             predecessor=object(),  # type: ignore[arg-type]
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             attempt_token=SimpleNamespace(
-                session_id="session:1",
-                turn_id="turn:1",
+                session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
             ),
             confirmation=confirmation,
             candidate=candidate_b,
-            cut=PreparedProviderInputCut("session:1", "turn:1", "revision:old", 1),
+            cut=PreparedProviderInputCut('session:cbauiajfisf4gvpdotrq4qgxhq', 'turn:nzc36cttgo7xxki7bcjc7ops7a', "revision:old", 1),
             destination=SimpleNamespace(  # type: ignore[arg-type]
-                session_id="session:1", turn_id="turn:1"
+                session_id='session:cbauiajfisf4gvpdotrq4qgxhq', turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a'
             ),
-            adopted_snapshot_id="snapshot:adopted",
+            adopted_snapshot_id='snapshot:6o3xmslpq2n33xesrawlqysksy',
             adopted_binding_revision_id="revision:adopted",
             fence_nonce="fence:1",
             _seal=_NO_CONTINUATION_FENCE_SEAL,
@@ -103,20 +103,20 @@ def test_compaction_release_authorities_reject_another_adoption_candidate() -> N
         NoContinuationAdmissionFence(
             scope=scope,
             predecessor=object(),  # type: ignore[arg-type]
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             attempt_token=SimpleNamespace(
-                session_id="session:1",
-                turn_id="turn:1",
+                session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
             ),
             confirmation=confirmation,
             candidate=candidate_a,
-            cut=PreparedProviderInputCut("session:1", "turn:1", "revision:old", 2),
+            cut=PreparedProviderInputCut('session:cbauiajfisf4gvpdotrq4qgxhq', 'turn:nzc36cttgo7xxki7bcjc7ops7a', "revision:old", 2),
             destination=SimpleNamespace(  # type: ignore[arg-type]
-                session_id="session:1", turn_id="turn:1"
+                session_id='session:cbauiajfisf4gvpdotrq4qgxhq', turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a'
             ),
-            adopted_snapshot_id="snapshot:adopted",
+            adopted_snapshot_id='snapshot:6o3xmslpq2n33xesrawlqysksy',
             adopted_binding_revision_id="revision:adopted",
             fence_nonce="fence:2",
             _seal=_NO_CONTINUATION_FENCE_SEAL,
@@ -177,22 +177,22 @@ def test_round3_1_prefix_fingerprint_changes_on_any_old_message_rewrite() -> Non
 
 def test_round3_1_scope_and_frontier_are_closed() -> None:
     root = ProviderInputContinuityScope(
-        session_id="session:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
     child = ProviderInputContinuityScope(
-        session_id="session:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id="task:1",
+        scope_subagent_task_id='task:itnsbirlmxzeu74pn7keq6zuzi',
     )
     assert root != child
 
     with pytest.raises(ValueError):
         ProviderInputContinuityScope(
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id="task:1",
+            scope_subagent_task_id='task:itnsbirlmxzeu74pn7keq6zuzi',
         )
     with pytest.raises(ValueError):
         ProcessLocalCanonicalFrontier(

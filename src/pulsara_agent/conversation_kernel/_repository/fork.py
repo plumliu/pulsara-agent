@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, is_valid_id
+
 from bisect import bisect_right
 from dataclasses import dataclass, replace
-import re
 from time import monotonic
 
 from psycopg import Connection, IsolationLevel, sql
@@ -32,7 +33,10 @@ from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 from pulsara_agent.llm.provider_replay import rebind_durable_provider_assistant_replay
 from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from .contracts import ConversationKernelConflict, _id, _content_columns
+from .contracts import (
+    ConversationKernelConflict,
+    _content_columns,
+)
 from pulsara_agent.conversation_kernel.annotations import remap_annotation_sources
 from pulsara_agent.conversation_kernel.prompt_content import (
     PROMPT_BODY_MEDIA_TYPE,
@@ -81,7 +85,7 @@ class _ForkOperations:
         memory_domain_id: str,
         deadline_monotonic: float,
     ) -> CanonicalForkCreation:
-        if re.fullmatch(r"session:[0-9a-f]{32}", child_session_id) is None:
+        if not is_valid_id(child_session_id, "session"):
             return CanonicalForkCreation(
                 child_session_id, False, "INVALID_CHILD_SESSION_ID"
             )
@@ -115,10 +119,10 @@ class _ForkOperations:
                     deadline_monotonic,
                 )
                 entry_map = {
-                    str(entry["id"]): _id("entry") for entry in material.entries
+                    str(entry["id"]): derive_id("entry", "fork", child_session_id, str(entry["id"])) for entry in material.entries
                 }
                 group_map = {
-                    group.source_group_key: _id("history-group")
+                    group.source_group_key: derive_id("history", "fork", child_session_id, group.source_group_kind, group.source_group_key)
                     for group in material.imported_groups
                 }
                 sequence_map = {
@@ -173,19 +177,17 @@ class _ForkOperations:
                     raise ConversationKernelConflict(
                         "workspace canonical metadata conflict"
                     )
-                _insert(
-                    connection,
-                    "sessions",
-                    {
-                        "id": child_session_id,
-                        "workspace_id": material.workspace_id,
-                        "memory_domain_id": material.memory_domain_id,
-                        "model_call_binding": Jsonb(model),
-                        "lifecycle": "OPEN",
-                        "writer_generation": 1,
-                        "latest_entry_sequence": len(material.entries),
-                    },
-                )
+                inserted = connection.execute(
+                    """INSERT INTO pulsara_v3.sessions (
+                        id, workspace_id, memory_domain_id, model_call_binding,
+                        lifecycle, writer_generation, latest_entry_sequence
+                    ) VALUES (%s,%s,%s,%s,'OPEN',1,%s)
+                    ON CONFLICT (id) DO NOTHING RETURNING id""",
+                    (child_session_id, material.workspace_id, material.memory_domain_id,
+                     Jsonb(model), len(material.entries)),
+                ).fetchone()
+                if inserted is None:
+                    return CanonicalForkCreation(child_session_id, False, "CHILD_SESSION_ALREADY_EXISTS")
                 for group in material.imported_groups:
                     _insert(
                         connection,
@@ -321,7 +323,7 @@ class _ForkOperations:
                         )
                     }
                     values.update(
-                        id=_id("block"),
+                        id=derive_id("block", "fork", child_session_id, str(block["id"])),
                         session_id=child_session_id,
                         workspace_id=material.workspace_id,
                         assistant_entry_id=entry_map[str(block["assistant_entry_id"])],
@@ -364,7 +366,7 @@ class _ForkOperations:
                     }
                     values.pop("entry_sequence")
                     values.update(
-                        id=_id("tool-result"),
+                        id=derive_id("result", "fork", child_session_id, str(result["id"])),
                         session_id=child_session_id,
                         workspace_id=material.workspace_id,
                         tool_call_entry_id=entry_map[str(result["tool_call_entry_id"])],
@@ -445,7 +447,7 @@ class _ForkOperations:
                             for request in material.retained_historical_requests
                         ),
                     )
-                    snapshot_id = _id("context-snapshot")
+                    snapshot_id = derive_id("snapshot", "fork", child_session_id, anchor_entry_id)
                     source = material.snapshot
                     publication = materialize_compaction_snapshot(
                         connection,

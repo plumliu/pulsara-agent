@@ -63,11 +63,11 @@ def test_context_usage_http_reads_the_selected_session_without_a_command(
                 }
             ) as client:
                 async with client.get(
-                    f"{server.origin}/api/sessions/session:preview/context-usage"
+                    f"{server.origin}/api/sessions/session:3qxtzxvijvgyee37kduym2gofi/context-usage"
                 ) as response:
                     assert response.status == 200
                     assert await response.json() == payload
-                read.assert_awaited_once_with("session:preview")
+                read.assert_awaited_once_with('session:3qxtzxvijvgyee37kduym2gofi')
         finally:
             await server.aclose()
 
@@ -210,7 +210,7 @@ class _Sessions:
     async def list_sessions(self) -> list[dict[str, object]]:
         return [
             {
-                "id": "session-1",
+                "id": "session:bwpogagzox7onyn52iumyctnkq",
                 "title": "Bare loopback session",
                 "status": "ready",
             }
@@ -228,7 +228,7 @@ class _Sessions:
         self.create_model_bindings.append(model_call_binding)
         if self.create_model_error is not None:
             raise self.create_model_error
-        return SimpleNamespace(session_id="session-1")
+        return SimpleNamespace(session_id='session:bwpogagzox7onyn52iumyctnkq')
 
     async def list_session_tasks(
         self,
@@ -238,7 +238,7 @@ class _Sessions:
         cursor: str | None,
         batch_id: str | None,
     ) -> dict[str, object]:
-        assert session_id == "session-1"
+        assert session_id == "session:bwpogagzox7onyn52iumyctnkq"
         assert maximum_items == 17
         assert cursor == "next-page"
         self.task_page_calls.append((session_id, maximum_items, cursor, batch_id))
@@ -261,7 +261,7 @@ class _Sessions:
         self.task_group_calls.append((session_id, maximum_items, cursor))
         return {
             "session_id": session_id,
-            "groups": [{"group_id": "batch:1", "task_count": 1}],
+            "groups": [{"group_id": 'batch:74urk6dg3qulsypr3wftaay3dm', "task_count": 1}],
             "next_cursor": None,
         }
 
@@ -278,7 +278,7 @@ class _Sessions:
             "session_id": session_id,
             "task_id": task_id,
             "objective": "inspect exact activity",
-            "activities": [{"entry_id": "entry:1", "kind": "ASSISTANT_MESSAGE"}],
+            "activities": [{"entry_id": 'entry:jfasfwsw2puygc3hrueckpvgba', "kind": "ASSISTANT_MESSAGE"}],
             "next_cursor": None,
         }
 
@@ -505,8 +505,8 @@ def test_subagent_capacity_preserves_body_after_admission_read(
         (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
         bridge = _Bridge()
         body = {
-            "expected_session_id": "session:capacity",
-            "expected_host_session_id": "host:capacity",
+            "expected_session_id": 'session:h5s55h6wdwcq7jfbvl3txv32ge',
+            "expected_host_session_id": 'host:wwcxgflwxmmjovez6gxjhmeqmi',
             "read_only": read_only,
             "target": 0 if read_only else 4,
         }
@@ -580,9 +580,9 @@ async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
     image_bytes = b'\x00\xff\\"' * 1_000_000
     encoded_image = base64.b64encode(image_bytes).decode("ascii")
     command = {
-        "command_id": "command:http-boundary",
+        "command_id": 'command:wfcgaonmaocj4datyiymt4jab4',
         "command_kind": "SUBMIT_PROMPT",
-        "client_submission_id": "command:http-boundary",
+        "client_submission_id": 'command:wfcgaonmaocj4datyiymt4jab4',
         "requested_permission_mode": "PERMISSION_MODE_READ_ONLY",
         "prompt_content": {
             "parts": [
@@ -744,7 +744,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 },
                 headers=mutation_headers,
             ) as response:
-                assert response.status == 201
+                assert response.status == 201, await response.text()
                 payload = await response.json()
                 rendered = str(payload)
                 assert secret not in rendered
@@ -781,7 +781,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 },
                 headers=mutation_headers,
             ) as response:
-                assert response.status == 201
+                assert response.status == 201, await response.text()
                 custom = (await response.json())["model_configuration"]
                 assert custom["source"] == "user_declared"
                 assert custom["route_name"] == "Local No Auth"
@@ -950,7 +950,7 @@ async def _exercise_model_configuration_edit(
                     json=draft,
                     headers=headers,
                 ) as response:
-                    assert response.status == 201
+                    assert response.status == 201, await response.text()
                     connection_id = (await response.json())["model_configuration"]["id"]
                 url = f"{server.origin}/api/model-configurations/{connection_id}"
                 before = store.read()
@@ -1289,7 +1289,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 assert response.status == 400
 
             async with client.get(
-                f"{server.origin}/api/sessions/session-1/tasks",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/tasks",
                 params={"limit": "17", "cursor": "next-page"},
             ) as response:
                 assert response.status == 200
@@ -1297,52 +1297,52 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 assert payload["tasks"] == [{"id": "task-1", "status": "ACTIVE"}]
 
             async with client.get(
-                f"{server.origin}/api/sessions/session-1/tasks",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/tasks",
                 params={
                     "limit": "17",
                     "cursor": "next-page",
-                    "batch_id": "batch:1",
+                    "batch_id": 'batch:74urk6dg3qulsypr3wftaay3dm',
                 },
             ) as response:
                 assert response.status == 200
             assert sessions.task_page_calls[-1] == (
-                "session-1",
+                "session:bwpogagzox7onyn52iumyctnkq",
                 17,
                 "next-page",
-                "batch:1",
+                'batch:74urk6dg3qulsypr3wftaay3dm',
             )
 
             async with client.get(
-                f"{server.origin}/api/sessions/session-1/task-groups",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/task-groups",
                 params={"limit": "9", "cursor": "group:next"},
             ) as response:
                 assert response.status == 200
                 assert (await response.json())["groups"] == [
-                    {"group_id": "batch:1", "task_count": 1}
+                    {"group_id": 'batch:74urk6dg3qulsypr3wftaay3dm', "task_count": 1}
                 ]
-            assert sessions.task_group_calls == [("session-1", 9, "group:next")]
+            assert sessions.task_group_calls == [("session:bwpogagzox7onyn52iumyctnkq", 9, "group:next")]
 
             async with client.get(
-                f"{server.origin}/api/sessions/session-1/tasks/task-1/activities",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/tasks/task-1/activities",
                 params={"limit": "11", "cursor": "activity:next"},
             ) as response:
                 assert response.status == 200
                 activity_page = await response.json()
                 assert activity_page["objective"] == "inspect exact activity"
-                assert activity_page["activities"][0]["entry_id"] == "entry:1"
+                assert activity_page["activities"][0]["entry_id"] == 'entry:jfasfwsw2puygc3hrueckpvgba'
             assert sessions.task_activity_calls == [
-                ("session-1", "task-1", 11, "activity:next")
+                ("session:bwpogagzox7onyn52iumyctnkq", "task-1", 11, "activity:next")
             ]
 
             async with client.get(
-                f"{server.origin}/api/sessions/session-1/capabilities"
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities"
             ) as response:
                 assert response.status == 200
                 assert (await response.json())["mcp"]["servers"][0]["id"] == "docs"
 
             async with client.get(
                 f"{server.origin}/api/capabilities",
-                params={"active_session_id": "session-1"},
+                params={"active_session_id": "session:bwpogagzox7onyn52iumyctnkq"},
             ) as response:
                 assert response.status == 200
                 payload = await response.json()
@@ -1356,7 +1356,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 json={
                     "path": "/Users/test/.agents/skills/review/SKILL.md",
                     "enabled": False,
-                    "active_session_id": "session-1",
+                    "active_session_id": "session:bwpogagzox7onyn52iumyctnkq",
                 },
                 headers={
                     "Origin": server.origin,
@@ -1368,7 +1368,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     (
                         "/Users/test/.agents/skills/review/SKILL.md",
                         False,
-                        "session-1",
+                        "session:bwpogagzox7onyn52iumyctnkq",
                     )
                 ]
 
@@ -1377,7 +1377,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 json={
                     "config": {"enabled": False},
                     "expected_identity": "current-docs",
-                    "active_session_id": "session-1",
+                    "active_session_id": "session:bwpogagzox7onyn52iumyctnkq",
                 },
                 headers={
                     "Origin": server.origin,
@@ -1385,20 +1385,20 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 },
             ) as response:
                 assert response.status == 200
-                assert sessions.user_mcp_toggle_calls == [("docs", False, "session-1")]
+                assert sessions.user_mcp_toggle_calls == [("docs", False, "session:bwpogagzox7onyn52iumyctnkq")]
 
             async with client.post(
-                f"{server.origin}/api/sessions/session-1/capabilities/mcp/docs/reconnect",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/mcp/docs/reconnect",
                 headers={
                     "Origin": server.origin,
                     "Sec-Fetch-Site": "same-origin",
                 },
             ) as response:
                 assert response.status == 200
-                assert sessions.reconnect_calls == [("session-1", "docs")]
+                assert sessions.reconnect_calls == [("session:bwpogagzox7onyn52iumyctnkq", "docs")]
 
             async with client.post(
-                f"{server.origin}/api/sessions/session-1/capabilities/skills/install",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/skills/install",
                 json={"source_path": "/tmp/pdf"},
                 headers={
                     "Origin": server.origin,
@@ -1407,20 +1407,20 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             ) as response:
                 assert response.status == 200
                 assert (await response.json())["installation"]["installed"] is True
-                assert sessions.install_calls == [("session-1", "/tmp/pdf")]
+                assert sessions.install_calls == [("session:bwpogagzox7onyn52iumyctnkq", "/tmp/pdf")]
 
             async with client.post(
-                f"{server.origin}/api/sessions/session-1/capabilities/skills/enabled",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/skills/enabled",
                 json={"skill_id": "pulsara:review", "enabled": False},
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
                 assert response.status == 200
                 assert sessions.project_skill_toggle_calls == [
-                    ("session-1", "pulsara:review", False)
+                    ("session:bwpogagzox7onyn52iumyctnkq", "pulsara:review", False)
                 ]
 
             async with client.post(
-                f"{server.origin}/api/sessions/session-1/capabilities/mcp",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/mcp",
                 json={
                     "server_id": "project-docs",
                     "config": {
@@ -1434,24 +1434,24 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 },
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
-                assert response.status == 201
+                assert response.status == 201, await response.text()
                 assert sessions.project_mcp_create_calls == [
-                    ("session-1", "project-docs")
+                    ("session:bwpogagzox7onyn52iumyctnkq", "project-docs")
                 ]
 
             async with client.post(
-                f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs/enabled",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/mcp/project-docs/enabled",
                 json={"enabled": False, "config_identity": "config-v1"},
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
                 assert response.status == 200
                 assert sessions.project_mcp_toggle_calls == [
-                    ("session-1", "project-docs", "config-v1", False)
+                    ("session:bwpogagzox7onyn52iumyctnkq", "project-docs", "config-v1", False)
                 ]
 
             sessions.project_mcp_toggle_error = McpManagementConflict("changed")
             async with client.post(
-                f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs/enabled",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/mcp/project-docs/enabled",
                 json={"enabled": True, "config_identity": "config-v1"},
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
@@ -1462,13 +1462,13 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             sessions.project_mcp_toggle_error = None
 
             async with client.delete(
-                f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/mcp/project-docs",
                 json={"config_identity": "config-v1"},
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
                 assert response.status == 200
                 assert sessions.project_mcp_remove_calls == [
-                    ("session-1", "project-docs", "config-v1")
+                    ("session:bwpogagzox7onyn52iumyctnkq", "project-docs", "config-v1")
                 ]
 
             async with client.post(
@@ -1479,11 +1479,11 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     "Sec-Fetch-Site": "same-origin",
                 },
             ) as response:
-                assert response.status == 201
-                assert (await response.json())["session"]["id"] == "session-1"
+                assert response.status == 201, await response.text()
+                assert (await response.json())["session"]["id"] == "session:bwpogagzox7onyn52iumyctnkq"
 
             initial_binding = {
-                "connection_id": "model-connection:00000000000000000000000000000000",
+                "connection_id": "connection:7dy6gjvd3p64ynsewun5vkwc2e",
                 "reasoning": {"kind": "effort", "value": "high"},
             }
             async with client.post(
@@ -1491,7 +1491,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 json={"workspace_kind": "quick", "model_call_binding": initial_binding},
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
-                assert response.status == 201
+                assert response.status == 201, await response.text()
             from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 
             assert (
@@ -1535,9 +1535,9 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             sessions.create_model_error = None
 
             async with client.post(
-                f"{server.origin}/api/sessions/session-1/connections",
+                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/connections",
                 json={
-                    "browser_instance_id": ("00000000-0000-4000-8000-000000000001"),
+                    "browser_instance_id": ("transport:bmfvi4e2s3vzud2yulgcsnpqr4"),
                     "takeover": True,
                 },
                 headers={
@@ -1545,24 +1545,24 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     "Sec-Fetch-Site": "same-origin",
                 },
             ) as response:
-                assert response.status == 201
+                assert response.status == 201, await response.text()
                 assert (await response.json())["role"] == "controller"
                 assert bridge.connect_calls == [
                     (
-                        "session-1",
-                        "00000000-0000-4000-8000-000000000001",
+                        "session:bwpogagzox7onyn52iumyctnkq",
+                        "transport:bmfvi4e2s3vzud2yulgcsnpqr4",
                         True,
                     )
                 ]
 
             control = {
                 "command_id": (
-                    "command:control:9999999999999:55555555-5555-4555-8555-555555555555"
+                    'command:epo527lkblm6x3argyixvfuhtq'
                 ),
                 "command_kind": "TERMINATE_BACKGROUND_PROCESS",
-                "expected_session_id": "session-1",
-                "expected_host_session_id": "host:session-1",
-                "target_process_id": "process:exact",
+                "expected_session_id": "session:bwpogagzox7onyn52iumyctnkq",
+                "expected_host_session_id": 'host:ietg2wofhfxet4wnk5kpqmbsq4',
+                "target_process_id": 'process:77t67dg5pb4j4dif5xd3xcidwe',
             }
             async with client.post(
                 f"{server.origin}/api/connections/connection-1/command",
@@ -1577,8 +1577,8 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             async with client.post(
                 f"{server.origin}/api/connections/connection-1/list-background-processes",
                 json={
-                    "expected_session_id": "session-1",
-                    "expected_host_session_id": "host:session-1",
+                    "expected_session_id": "session:bwpogagzox7onyn52iumyctnkq",
+                    "expected_host_session_id": 'host:ietg2wofhfxet4wnk5kpqmbsq4',
                     "maximum_items": 13,
                 },
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
@@ -1588,9 +1588,9 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             async with client.post(
                 f"{server.origin}/api/connections/connection-1/read-background-process-log",
                 json={
-                    "expected_session_id": "session-1",
-                    "expected_host_session_id": "host:session-1",
-                    "process_id": "process:exact",
+                    "expected_session_id": "session:bwpogagzox7onyn52iumyctnkq",
+                    "expected_host_session_id": 'host:ietg2wofhfxet4wnk5kpqmbsq4',
+                    "process_id": 'process:77t67dg5pb4j4dif5xd3xcidwe',
                     "output_cursor": "output:2",
                     "max_output_chars": 4096,
                 },
@@ -1607,8 +1607,8 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     "list-background-processes",
                     "connection-1",
                     {
-                        "expected_session_id": "session-1",
-                        "expected_host_session_id": "host:session-1",
+                        "expected_session_id": "session:bwpogagzox7onyn52iumyctnkq",
+                        "expected_host_session_id": 'host:ietg2wofhfxet4wnk5kpqmbsq4',
                         "maximum_items": 13,
                     },
                 ),
@@ -1616,9 +1616,9 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     "read-background-process-log",
                     "connection-1",
                     {
-                        "expected_session_id": "session-1",
-                        "expected_host_session_id": "host:session-1",
-                        "process_id": "process:exact",
+                        "expected_session_id": "session:bwpogagzox7onyn52iumyctnkq",
+                        "expected_host_session_id": 'host:ietg2wofhfxet4wnk5kpqmbsq4',
+                        "process_id": 'process:77t67dg5pb4j4dif5xd3xcidwe',
                         "output_cursor": "output:2",
                         "max_output_chars": 4096,
                     },
@@ -2075,17 +2075,17 @@ def test_scheduled_http_filters_active_session_and_returns_activation_conflicts(
             async with ClientSession() as client:
                 url = f"{server.origin}/api/scheduled-tasks"
                 async with client.get(
-                    url, params={"status": "ACTIVE", "session_id": "session:target"}
+                    url, params={"status": "ACTIVE", "session_id": 'session:qlp745d22i4ns5hrvdxtssrowu'}
                 ) as response:
                     assert response.status == 200
                     assert await response.json() == {"tasks": [], "next_cursor": None}
                 tasks.list.assert_awaited_once_with(
-                    cursor=None, status="ACTIVE", session_id="session:target"
+                    cursor=None, status="ACTIVE", session_id='session:qlp745d22i4ns5hrvdxtssrowu'
                 )
-                async with client.get(url + "/sessions", params={"query": "报告", "cursor": "session:a"}) as response:
+                async with client.get(url + "/sessions", params={"query": "报告", "cursor": 'session:3vmecxqlkj5gxwetbhs6yz2f5e'}) as response:
                     assert response.status == 200
                     assert await response.json() == {"sessions": [], "next_cursor": None}
-                tasks.list_sessions.assert_awaited_once_with(query="报告", cursor="session:a")
+                tasks.list_sessions.assert_awaited_once_with(query="报告", cursor='session:3vmecxqlkj5gxwetbhs6yz2f5e')
                 async with client.get(url + "/sessions", params={"status": "ACTIVE"}) as response:
                     assert response.status == 400
                 async with client.get(url, params={"session_id": ""}) as response:
@@ -2093,23 +2093,23 @@ def test_scheduled_http_filters_active_session_and_returns_activation_conflicts(
                 assert tasks.list.await_count == 1
                 async with client.post(
                     url,
-                    json={"session_id": "session:target", "values": {}, "status": "ACTIVE"},
+                    json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": {}, "status": "ACTIVE"},
                     headers={"Origin": server.origin},
                 ) as response:
                     assert response.status == 409
                     value = await response.json()
                     assert value["error"]["code"] == "ACTIVE_TASK_CONFLICT"
                     assert "先暂停或取消" in value["error"]["message"]
-                tasks.create.assert_awaited_once_with(session_id="session:target", values={}, status="ACTIVE")
+                tasks.create.assert_awaited_once_with(session_id='session:qlp745d22i4ns5hrvdxtssrowu', values={}, status="ACTIVE")
                 tasks.create.side_effect = None
                 tasks.create.return_value = {"status": "PAUSED", "next_run_at": None}
                 for status_fields in ({}, {"status": None}, {"status": "PAUSED"}):
-                    async with client.post(url, json={"session_id": "session:target", "values": {}, **status_fields}, headers={"Origin": server.origin}) as response:
-                        assert response.status == 201
-                    tasks.create.assert_awaited_with(session_id="session:target", values={}, **status_fields)
+                    async with client.post(url, json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": {}, **status_fields}, headers={"Origin": server.origin}) as response:
+                        assert response.status == 201, await response.text()
+                    tasks.create.assert_awaited_with(session_id='session:qlp745d22i4ns5hrvdxtssrowu', values={}, **status_fields)
                 accepted = tasks.create.await_count
                 for invalid in ("", "active", False, 0, [], {}):
-                    async with client.post(url, json={"session_id": "session:target", "values": {}, "status": invalid}, headers={"Origin": server.origin}) as response:
+                    async with client.post(url, json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": {}, "status": invalid}, headers={"Origin": server.origin}) as response:
                         assert response.status == 400
                 assert tasks.create.await_count == accepted
         finally:
@@ -2119,13 +2119,15 @@ def test_scheduled_http_filters_active_session_and_returns_activation_conflicts(
 
 
 def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path):
+    from pulsara_agent.identity import random_id
 
     async def exercise():
+        task_id, target_id = random_id("schedule"), random_id("schedule")
         (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
         tasks = SimpleNamespace(
             run_now=AsyncMock(
                 return_value={
-                    "queue_item_id": "queue:one",
+                    "queue_item_id": 'queue:go2sr4bw2g7jcnyhej4mv6lowy',
                     "status": "PENDING",
                     "coalesced": False,
                 }
@@ -2146,12 +2148,12 @@ def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path)
         try:
             async with ClientSession() as client:
                 headers = {"Origin": server.origin}
-                url = f"{server.origin}/api/scheduled-tasks/task-a"
+                url = f"{server.origin}/api/scheduled-tasks/{task_id}"
                 request = {
-                    "task_id": "task-a",
-                    "session_id": "session-a",
+                    "task_id": task_id,
+                    "session_id": 'session:l4p7t6tyfjlsv5msxuzr6iecxa',
                     "expected_revision": 1,
-                    "client_command_id": "command-a",
+                    "client_command_id": 'command:ixcb4wvcqu377kfd6vpgk2sc3u',
                     "request_at_utc": "2026-10-13T00:00:00Z",
                 }
                 async with client.post(
@@ -2168,7 +2170,7 @@ def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path)
                 assert tasks.run_now.await_count == 1
                 target = {
                     "kind": "existing",
-                    "task_id": "task-b",
+                    "task_id": target_id,
                     "expected_revision": 2,
                 }
                 async with client.post(
@@ -2178,7 +2180,7 @@ def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path)
                 ) as response:
                     assert response.status == 200
                 tasks.switch.assert_awaited_once_with(
-                    task_id="task-a", expected_revision=1, target=target
+                    task_id=task_id, expected_revision=1, target=target
                 )
         finally:
             await server.aclose()

@@ -1,4 +1,6 @@
 """History search contracts against the real pg_search engine and canonical owners."""
+from uuid import uuid4
+from pulsara_agent.identity import derive_id
 
 from time import monotonic
 import pytest
@@ -72,7 +74,7 @@ def search(repo, scope, query, **kwargs):
     "query", ["检索", "runs", "API_key", "qwen3.5", "/src/my-file.py"]
 )
 def test_engine_actual_fields_byte_positions_and_shared_tool_results(repo, query):
-    domain = identity("domain").replace(":", "_")
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
     target = new(repo, domain)
     turn(
@@ -114,7 +116,7 @@ def test_engine_actual_fields_byte_positions_and_shared_tool_results(repo, query
 
 
 def test_QA_QAQ_mutually_exclusive_eligibility_before_topk(repo):
-    domain = identity("domain").replace(":", "_")
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
     sid = caller.guard.session_id
     _, _, a = turn(repo, caller.guard, "first alpha", answer="answer beta")
@@ -227,7 +229,7 @@ def test_project_scope_and_visible_precise_fork_exclusion(repo):
 
 
 def test_relevance_cursor_lossless_and_old_cursor_rejected(repo, stage2_migrated_postgres_database):
-    domain = identity("domain").replace(":", "_")
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
     target = new(repo, domain)
     for i in range(7):
@@ -282,7 +284,7 @@ def doc(texts):
         messages.append(
             {
                 "region": region,
-                "entry_id": f"entry:{i}",
+                "entry_id": derive_id("entry", "test-fixture", f"entry:{i}"),
                 "text": text,
                 "annotated": annotated,
                 "sequence": i,
@@ -430,7 +432,7 @@ def test_visible_Q2_selects_QA_and_its_words_never_enter_score(repo):
 def test_automatic_invalid_excerpts_do_not_fetch_the_twenty_first_unit(repo, monkeypatch):
     from pulsara_agent.conversation_kernel import history_search
 
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller = new(repo, domain)
     workspace = rows(repo, 'SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s', (caller.guard.session_id,))[0]['workspace_id']
     target = new(repo, domain, workspace)
@@ -454,7 +456,7 @@ def test_automatic_invalid_excerpts_do_not_fetch_the_twenty_first_unit(repo, mon
 
 def test_unrestorable_Q2_selects_complete_QA_without_its_query_terms(repo, monkeypatch):
     from pulsara_agent.conversation_kernel import history_projection
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller = new(repo, domain)
     target = new(repo, domain)
     turn(repo, target.guard, 'restorablequestion', answer='restorableanswer')
@@ -477,7 +479,7 @@ def test_unrestorable_Q2_selects_complete_QA_without_its_query_terms(repo, monke
 
 def test_explicit_pagination_continues_after_a_full_page_of_invalid_excerpts(repo, monkeypatch):
     from pulsara_agent.conversation_kernel import history_search
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller, target = new(repo, domain), new(repo, domain)
     for i in range(4):
         turn(repo, target.guard, f'continueprobe question {i}', answer='continueprobe answer')
@@ -520,7 +522,7 @@ def test_center_annotation_expands_both_sides_and_redistributes_budget(quote_len
 @pytest.mark.parametrize("failure", ["postgres", "statement_timeout", "decode"])
 def test_projection_failure_preserves_canonical_turn_and_later_refresh(repo, monkeypatch, failure):
     from pulsara_agent.conversation_kernel import history_projection
-    domain = identity("domain").replace(":", "_")
+    domain = uuid4().hex.replace(":", "_")
     source = new(repo, domain)
     caller = new(repo, domain, rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (source.guard.session_id,))[0]["workspace_id"])
     original = history_projection.refresh_history_question
@@ -576,7 +578,7 @@ def test_failed_projection_refresh_leaves_old_rows_but_never_returns_stale_body(
     from pulsara_agent.conversation_kernel.contracts import InlineContent
     from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
 
-    domain = identity("domain").replace(":", "_")
+    domain = uuid4().hex.replace(":", "_")
     source = new(repo, domain)
     workspace = rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (source.guard.session_id,))[0]["workspace_id"]
     caller = new(repo, domain, workspace)
@@ -607,7 +609,7 @@ def test_failed_projection_refresh_leaves_old_rows_but_never_returns_stale_body(
 def test_relevance_paging_survives_corpus_score_drift(isolated_history_repo):
     """Unrelated canonical writes must not strand results above an old score."""
     repo = isolated_history_repo
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller, target = new(repo, domain), new(repo, domain)
     for i in range(2):
         turn(repo, target.guard, f'scoredriftneedle question {i}', answer='scoredriftneedle answer')
@@ -620,7 +622,7 @@ def test_relevance_paging_survives_corpus_score_drift(isolated_history_repo):
     before = invoke(args)['items']
     first = invoke({**args, 'limit': 1})
     assert len(before) == 2 and first['next_cursor']
-    unrelated = new(repo, identity('domain').replace(':', '_'))
+    unrelated = new(repo, uuid4().hex.replace(':', '_'))
     for i in range(20):
         turn(repo, unrelated.guard, f'unrelated corpus document {i}', answer='independent background material ' * 400)
     now = invoke(args)['items']
@@ -635,7 +637,7 @@ def test_relevance_paging_survives_corpus_score_drift(isolated_history_repo):
 
 def test_relevance_cursor_does_not_consume_budget_rejected_item(repo, monkeypatch):
     from pulsara_agent.conversation_kernel import session_content
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller, target = new(repo, domain), new(repo, domain)
     for i in range(3):
         turn(repo, target.guard, f'pagebudgetneedle question {i}', answer='pagebudgetneedle answer')
@@ -659,7 +661,7 @@ def test_relevance_cursor_does_not_consume_budget_rejected_item(repo, monkeypatc
 def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo, monkeypatch):
     from pulsara_agent.conversation_kernel import history_search
     from pulsara_agent.conversation_kernel.session_content import _decode, _encode, SessionQueryError
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller, target = new(repo, domain), new(repo, domain)
     for i in range(4):
         turn(repo, target.guard, f'reorderneedle question {i}', answer='reorderneedle answer')
@@ -712,7 +714,7 @@ def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo,
 
 @pytest.mark.parametrize('query', ['的 了 和 是', 'the is and to', '的 the 了 IS and', '啊 呀 呢 吧 嘛 么 嗯', 'a an am was were being', '的啊 the BE', '呗 嘞 喽 噢 哟 唷 嘿 呵 哇', 'please PLEASE'])
 def test_shared_lexical_analyzer_stopwords_do_not_match_any_field(repo, query):
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller = new(repo, domain)
     target = new(repo, domain)
     turn(repo, target.guard, '的 了 和 是 the is and to 啊 呀 呢 吧 嘛 么 嗯 a an am was were being BE 呗 嘞 喽 噢 哟 唷 嘿 呵 哇 please PLEASE', answer='没有相关实词')
@@ -721,7 +723,7 @@ def test_shared_lexical_analyzer_stopwords_do_not_match_any_field(repo, query):
 
 
 def test_stopword_filter_keeps_body_positions_and_removes_unrelated_matches(repo):
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller = new(repo, domain)
     target = new(repo, domain)
     turn(repo, target.guard, '的 了 the 哇 please', answer='无关旧任务')
@@ -742,7 +744,7 @@ def test_stopword_filter_keeps_body_positions_and_removes_unrelated_matches(repo
 
 @pytest.mark.parametrize('query', ['不', '没有', '可以', '当前', '之前', '2026', 'not', 'if', 'can', 'one', '我', 'you', '得', '都', '只有', '必须', '就', 'no', 'or', 'all', 'we', 'this'])
 def test_query_analyzer_preserves_task_bearing_words(repo, query):
-    domain = identity('domain').replace(':', '_')
+    domain = uuid4().hex.replace(':', '_')
     caller = new(repo, domain)
     target = new(repo, domain)
     turn(repo, target.guard, query, answer='保留原文')

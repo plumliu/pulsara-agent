@@ -1,6 +1,7 @@
 """Pure contracts for the process-local Round 5B compaction workflow."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.conversation_kernel.interruption import TurnInterruptionNotice
 
@@ -226,15 +227,8 @@ def build_prepared_manual_compaction_command(
     )
 
 
-def manual_compaction_stable_suffix(*, session_id: str, command_id: str) -> str:
-    """Return the stable row-id suffix for one semantic manual command."""
-
-    if not session_id or not command_id:
-        raise ValueError("manual compaction stable identity is incomplete")
-    return context_fingerprint(
-        "pulsara:manual-compaction-stable-identity:v1",
-        {"session_id": session_id, "command_id": command_id},
-    ).removeprefix("sha256:")
+def manual_compaction_snapshot_id(*, session_id: str, command_id: str) -> str:
+    return derive_id("snapshot", "explicit", session_id, command_id)
 
 
 class CompactionSourceCompatibility(StrEnum):
@@ -1397,7 +1391,7 @@ __all__ = [
     "freeze_compaction_canonical_read",
     "freeze_compaction_headroom_preflight",
     "manual_compaction_command_semantic_digest",
-    "manual_compaction_stable_suffix",
+    "manual_compaction_snapshot_id",
     "provider_input_item_canonical_expanded_bytes",
     "resolved_compaction_headroom_bounds",
 ]

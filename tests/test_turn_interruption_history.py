@@ -220,7 +220,7 @@ def test_fork_outcome_cut_nested_copy_parent_delete_and_summary_inventory(repo):
             "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
             (nested.child_session_id,),
         )[0]["workspace_id"],
-        writer_owner_id="test:resume",
+        writer_owner_id='host:4dehy22l2qpqltf47slpt3kjdy',
         lease_seconds=300,
         deadline_monotonic=monotonic() + 30,
     )
@@ -288,11 +288,11 @@ def test_runner_terminal_classification_uses_sanitized_error_and_no_fake_answer(
         ForegroundCancellationCause,
     )
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
-    from pulsara_agent.conversation_kernel.runner import _stable_id
+    from pulsara_agent.identity import derive_id
 
     command_id = _name("command")
     intent = ActiveTurnCancellationIntent(
-        _stable_id("turn", lease.guard.session_id, command_id),
+        derive_id("turn", "command", lease.guard.session_id, command_id),
         ModelInputScopeKind.ROOT,
         None,
     )
@@ -443,7 +443,7 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
         intent="EXISTING",
         session_id=child.child_session_id,
         workspace_id=workspace_id,
-        writer_owner_id="test:summary",
+        writer_owner_id='host:z4m5y7kg22rs2sivbqavrhcqte',
         lease_seconds=300,
         deadline_monotonic=monotonic() + 30,
     )
@@ -453,7 +453,7 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     destination = test_model_runtime(
         model_id="destination-notice",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
         limits=test_model_limits(
             max_input_tokens=20_000,
             max_output_tokens=1000,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id, require_id
+
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import os
@@ -12,7 +14,6 @@ import subprocess
 from threading import Condition, Event, RLock, Thread, Timer, current_thread
 from time import monotonic, sleep
 from typing import Callable, IO
-from uuid import uuid4
 
 from pulsara_agent.terminal_process.environment import TerminalEnvironmentOwner
 from pulsara_agent.terminal_process.models import (
@@ -48,6 +49,10 @@ class ProcessLimitError(RuntimeError):
 
 class ProcessInputError(RuntimeError):
     pass
+
+
+class ProcessDecisionIdentityConflict(RuntimeError):
+    """Admission rejected without acquiring the existing decision owner."""
 
 
 class ProcessPhysicalJoinError(RuntimeError):
@@ -137,6 +142,7 @@ class ProcessRegistry:
         maximum_host_retained_bytes: int = TERMINAL_HOST_RETAINED_HARD_BYTES,
         completion_subscriber: TerminalCompletionSubscriber | None = None,
     ) -> None:
+        self._owner_identity = random_id("terminal-owner")
         self.max_live_processes = max_live_processes
         self.max_finished_processes = max_finished_processes
         self.finished_ttl_seconds = finished_ttl_seconds
@@ -175,7 +181,7 @@ class ProcessRegistry:
         decision_deadline_monotonic: float | None = None,
     ) -> tuple[_ProcessState, bool]:
         decision_handle = TerminalForegroundDecisionAttemptHandle(
-            attempt_id=decision_attempt_id or f"terminal-decision:{uuid4().hex}",
+            attempt_id=decision_attempt_id or random_id("terminal-decision"),
             owner_host_session_id=owner_host_session_id,
         )
         with self._launch_condition:
@@ -193,9 +199,15 @@ class ProcessRegistry:
             self._launching_by_owner[owner_host_session_id] = (
                 self._launching_by_owner.get(owner_host_session_id, 0) + 1
             )
+            if decision_attempt_id is None:
+                while decision_handle.attempt_id in self._decision_attempts:
+                    decision_handle = TerminalForegroundDecisionAttemptHandle(
+                        attempt_id=random_id("terminal-decision"),
+                        owner_host_session_id=owner_host_session_id,
+                    )
             if decision_handle.attempt_id in self._decision_attempts:
                 self._release_launch_locked(owner_host_session_id)
-                raise RuntimeError("terminal foreground decision attempt already exists")
+                raise ProcessDecisionIdentityConflict("IDENTITY_CONFLICT: terminal foreground decision attempt already exists")
             decision = _TerminalForegroundDecisionAttempt(
                 handle=decision_handle,
                 state=TerminalForegroundDecisionState.PREPARING,
@@ -226,6 +238,7 @@ class ProcessRegistry:
             if remaining <= 0:
                 raise TimeoutError("terminal foreground decision expired before spawn")
             state = self._spawn(
+                decision_attempt_id=decision_handle.attempt_id,
                 command=command,
                 cwd=cwd,
                 tty=tty,
@@ -235,7 +248,7 @@ class ProcessRegistry:
                 origin=(
                     origin
                     or TerminalProcessOrigin(
-                        turn_id=f"terminal-owner:{owner_host_session_id}",
+                        turn_id=self._owner_identity,
                         conversation_scope_kind="ROOT",
                     )
                 ),
@@ -250,7 +263,7 @@ class ProcessRegistry:
         live_subscription = (
             None
             if output_subscriber is None
-            else f"terminal-output-subscription:{uuid4().hex}"
+            else random_id("subscription")
         )
         closed_during_launch = False
         decision_aborted = False
@@ -464,6 +477,7 @@ class ProcessRegistry:
     def _spawn(
         self,
         *,
+        decision_attempt_id: str,
         command: str,
         cwd: Path,
         tty: bool,
@@ -472,7 +486,16 @@ class ProcessRegistry:
         env: dict[str, str],
         origin: TerminalProcessOrigin,
     ) -> _ProcessState:
-        process_id = f"proc_{uuid4().hex}"
+        with self._lock:
+            process_id = random_id("process")
+            while process_id in self._states or any(
+                attempt.process_id == process_id for attempt in self._decision_attempts.values()
+            ):
+                process_id = random_id("process")
+            # Reserve in the already-held foreground decision before spawning.
+            # Another pending launch must see this identity as occupied too.
+            decision = self._decision_attempts[decision_attempt_id]
+            decision.process_id = process_id
         output = TerminalOutputOwner(
             owner_epoch=owner_host_session_id,
             process_id=process_id,
@@ -586,6 +609,8 @@ class ProcessRegistry:
                 ):
                     decision_aborted = True
                 else:
+                    if state.process_id in self._states:
+                        raise RuntimeError("IDENTITY_CONFLICT: process identity occupied after spawn")
                     current_decision.state = (
                         TerminalForegroundDecisionState.PROCESS_INSTALLED
                     )
@@ -656,6 +681,7 @@ class ProcessRegistry:
                     pass
 
     def _owned(self, process_id: str, owner: str) -> _ProcessState:
+        require_id(process_id, "process")
         with self._lock:
             state = self._states.get(process_id)
         if state is None or state.owner_host_session_id != owner:
@@ -1177,38 +1203,51 @@ class TerminalManager:
                 cwd=str(self.workspace_root),
                 error=f"terminal preflight failed ({type(exc).__name__}): {exc}",
             )
-        attempt_id = decision_attempt_id or f"terminal-decision:{uuid4().hex}"
-        try:
-            process, _yielded = self.process_registry.exec_with_yield(
-                command=request.command,
-                cwd=cwd,
-                yield_time_ms=request.yield_time_ms,
-                tty=request.tty,
-                max_lifetime_seconds=request.max_lifetime_seconds,
-                owner_host_session_id=owner_host_session_id,
-                shell_argv=environment.shell.command_argv(request.command),
-                env=environment.values,
-                output_subscriber=output_subscriber,
-                origin=origin,
-                decision_attempt_id=attempt_id,
-                decision_deadline_monotonic=decision_deadline_monotonic,
-            )
-            return replace(
-                _snapshot(process, request.max_output_chars),
-                shell_diagnostic=environment.diagnostic,
-            )
-        except ProcessLimitError as exc:
-            return TerminalResult(
-                status=TerminalStatus.BLOCKED,
-                output="",
-                exit_code=-1,
-                cwd=str(cwd),
-                error=str(exc),
-                reason=TerminalFailureReason.PROCESS_CAPACITY_EXHAUSTED,
-                shell_diagnostic=environment.diagnostic,
-            )
-        finally:
-            self.process_registry.settle_foreground_decision(attempt_id)
+        while True:
+            attempt_id = decision_attempt_id or random_id("terminal-decision")
+            try:
+                process, _yielded = self.process_registry.exec_with_yield(
+                    command=request.command,
+                    cwd=cwd,
+                    yield_time_ms=request.yield_time_ms,
+                    tty=request.tty,
+                    max_lifetime_seconds=request.max_lifetime_seconds,
+                    owner_host_session_id=owner_host_session_id,
+                    shell_argv=environment.shell.command_argv(request.command),
+                    env=environment.values,
+                    output_subscriber=output_subscriber,
+                    origin=origin,
+                    decision_attempt_id=attempt_id,
+                    decision_deadline_monotonic=decision_deadline_monotonic,
+                )
+            except ProcessDecisionIdentityConflict:
+                # Only this unpublished local allocation may change. Admission
+                # did not acquire the occupied slot, so never settle its owner.
+                if decision_attempt_id is not None:
+                    raise
+                if (decision_deadline_monotonic is not None
+                        and monotonic() >= decision_deadline_monotonic):
+                    raise TimeoutError("terminal decision allocation deadline expired")
+                continue
+            except ProcessLimitError as exc:
+                return TerminalResult(
+                    status=TerminalStatus.BLOCKED,
+                    output="",
+                    exit_code=-1,
+                    cwd=str(cwd),
+                    error=str(exc),
+                    reason=TerminalFailureReason.PROCESS_CAPACITY_EXHAUSTED,
+                    shell_diagnostic=environment.diagnostic,
+                )
+            # Failed launches are settled (or retained for physical joining)
+            # by the registry. Only a returned result transfers settlement here.
+            try:
+                return replace(
+                    _snapshot(process, request.max_output_chars),
+                    shell_diagnostic=environment.diagnostic,
+                )
+            finally:
+                self.process_registry.settle_foreground_decision(attempt_id)
 
     def list_processes(self, **kwargs):
         return self.process_registry.list_processes(**kwargs)

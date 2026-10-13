@@ -1,4 +1,7 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 from tests.support.model_config import frozen_test_prompt
 from pulsara_agent.llm.input import FrozenPromptContent
@@ -12,7 +15,6 @@ from pathlib import Path
 import shlex
 import sys
 from time import monotonic
-from uuid import uuid4
 
 import psycopg
 import pytest
@@ -110,15 +112,13 @@ from tests.support.model_config import (
 
 
 def _name(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _terminal_output(maximum_bytes: int) -> TerminalOutputOwner:
     return TerminalOutputOwner(
         owner_epoch="round1-test-host",
-        process_id=_name("terminal-process"),
+        process_id=_name("process"),
         maximum_bytes=maximum_bytes,
     )
 
@@ -144,7 +144,7 @@ class _RecordingPublisher:
             raise self.failure
         digest = "sha256:" + sha256(value).hexdigest()
         return BlobContent(
-            f"blob:{workspace_id}:{digest.removeprefix('sha256:')}",
+            derive_id("blob", "content", workspace_id, media_type, codec, digest),
             digest,
             len(value),
             media_type,
@@ -257,7 +257,8 @@ def test_round1_preview_threshold_matrix(
 ) -> None:
     publisher = _RecordingPublisher()
     projection = _processor(publisher).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=text,
         candidate=None,
@@ -302,7 +303,8 @@ def test_round7_1_canonical_complete_uses_candidate_utf8_bytes(
     expected_display: ToolResultDisplayKind,
 ) -> None:
     projection = _processor(_RecordingPublisher()).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=text,
         candidate=None,
@@ -330,8 +332,9 @@ def test_round2_cursor_artifact_replaces_only_the_selected_terminal_delta() -> N
     )
 
     projection = _processor(_RecordingPublisher()).prepare(
-        workspace_id="workspace",
-        result_entry_id="entry:cursor-delta",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
+        result_entry_id='entry:blfofqa53wpo4e3uhy3e2l6frq',
         public_output=public_output,
         candidate=candidate,
         artifact_inline_result=False,
@@ -346,7 +349,8 @@ def test_round1_archive_bytes_and_display_chars_are_independent() -> None:
     text = "中" * 2_667
     publisher = _RecordingPublisher()
     projection = _processor(publisher).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=text,
         candidate=None,
@@ -366,7 +370,8 @@ def test_round1_multibyte_preview_preserves_coverage_when_storage_is_unavailable
         failure=KnownArtifactPublicationFailure("storage unavailable")
     )
     projection = _processor(publisher).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=text,
         candidate=None,
@@ -385,8 +390,9 @@ def test_round1_multibyte_preview_preserves_coverage_when_storage_is_unavailable
     complete = _processor(
         _RecordingPublisher(failure=KnownArtifactPublicationFailure("no storage"))
     ).prepare(
-        workspace_id="workspace",
-        result_entry_id="entry:complete",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
+        result_entry_id='entry:q24fajcpck5djrlanpj6aoeg5i',
         public_output="x" * 9_000,
         candidate=None,
         artifact_inline_result=False,
@@ -418,7 +424,7 @@ class _LostPublicationAckPublisher:
             raise psycopg.OperationalError("injected lost blob acknowledgement")
         digest = "sha256:" + sha256(value).hexdigest()
         return BlobContent(
-            f"blob:{workspace_id}:{digest.removeprefix('sha256:')}",
+            derive_id("blob", "content", workspace_id, media_type, codec, digest),
             digest,
             len(value),
             media_type,
@@ -433,7 +439,8 @@ def test_round1_blob_ack_unknown_reissues_only_the_exact_candidate() -> None:
         object(),
         publisher=publisher,  # type: ignore[arg-type]
     ).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=source,
         candidate=None,
@@ -449,16 +456,18 @@ def test_round1_same_body_dedupes_blob_but_not_result_artifact_handle() -> None:
     processor = _processor(publisher)
     source = "same-body" * 1_001
     first = processor.prepare(
-        workspace_id="workspace",
-        result_entry_id="entry:one",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
+        result_entry_id='entry:ay6zkjbalezbshcgcgqzdhosi4',
         public_output=source,
         candidate=None,
         artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     second = processor.prepare(
-        workspace_id="workspace",
-        result_entry_id="entry:two",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
+        result_entry_id='entry:2bwbmrtya5moiyvghzawdiliz4',
         public_output=source,
         candidate=None,
         artifact_inline_result=False,
@@ -473,7 +482,8 @@ def test_round1_oversized_artifact_keeps_known_output_without_publishing() -> No
     publisher = _RecordingPublisher()
     source = "x" * ((16 << 20) + 1)
     projection = _processor(publisher).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=source,
         candidate=None,
@@ -500,7 +510,8 @@ def test_round1_retained_snapshot_keeps_both_failure_axes() -> None:
         failure=KnownArtifactPublicationFailure("publication failed")
     )
     projection = _processor(publisher).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=json.dumps(
             {
@@ -540,7 +551,8 @@ def test_round2_sanitizer_unavailable_remains_distinct_from_retention_gap(
         failure=KnownArtifactPublicationFailure("publication failed")
     )
     projection = _processor(publisher).prepare(
-        workspace_id="workspace",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=json.dumps(
             {"status": "success", "output": candidate.text}, ensure_ascii=False
@@ -601,9 +613,9 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
             session_id=session_id,
             tool_name="terminal",
             tool_call_id="call:terminal",
-            attempt_id="attempt:terminal",
-            turn_id="turn:terminal",
-            assistant_entry_id="entry:terminal",
+            attempt_id='attempt:j2pdqslxs6mgma3br6ay5w4aoq',
+            turn_id='turn:vmlprtvcqs6oi7vfc6vmq2kihm',
+            assistant_entry_id='entry:sbiagibpxtliyjd5secwb5mwxu',
         )
         try:
             return await port.invoke(
@@ -614,9 +626,9 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
                     "max_output_chars": 2_000,
                 },
                 tool_call_id="call:terminal",
-                attempt_id="attempt:terminal",
-                turn_id="turn:terminal",
-                assistant_entry_id="entry:terminal",
+                attempt_id='attempt:j2pdqslxs6mgma3br6ay5w4aoq',
+                turn_id='turn:vmlprtvcqs6oi7vfc6vmq2kihm',
+                assistant_entry_id='entry:sbiagibpxtliyjd5secwb5mwxu',
                 invocation_context=invocation_context,
             )
         finally:
@@ -637,7 +649,8 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
 
     publisher = _RecordingPublisher()
     projection = _processor(publisher).prepare(
-        workspace_id="workspace",
+        session_id=session_id,
+        workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
         result_entry_id="entry",
         public_output=result.content.decode("utf-8"),
         candidate=candidate,
@@ -814,6 +827,7 @@ def test_round1_blob_before_event_conflict_rolls_back_all_canonical_rows(
     )
     result_entry_id = _name("entry")
     projection = ToolOutputArtifactProcessor(provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=result_entry_id,
         public_output="x" * 9_000,
@@ -956,7 +970,7 @@ def _install_tool_call(
         deadline_monotonic=monotonic() + 30,
     )
     turn_id = _name("turn")
-    permission_snapshot_id = _name("permission-snapshot")
+    permission_snapshot_id = _name("permission")
     start_test_root_turn(
         repository,
         lease.guard,
@@ -1035,6 +1049,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     # Artifact identity is tied to result_entry_id, so prepare the final
     # candidate once with that exact identity.
     projection = ToolOutputArtifactProcessor(provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=result_entry_id,
         public_output=source,
@@ -1325,6 +1340,7 @@ def test_round1_retention_gap_and_blob_failure_persist_as_independent_reasons(
             failure=KnownArtifactPublicationFailure("injected publication failure")
         ),
     ).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=result_entry_id,
         public_output=json.dumps(
@@ -1454,6 +1470,7 @@ def test_round1_retained_snapshot_artifact_offset_zero_is_retained_body_start(
     retained = bounded.artifact_candidate()
     result_entry_id = _name("entry")
     projection = ToolOutputArtifactProcessor(provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=result_entry_id,
         public_output=json.dumps(
@@ -1517,6 +1534,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
     )
     result_entry_id = _name("entry")
     projection = ToolOutputArtifactProcessor(provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=result_entry_id,
         public_output="x" * 9_000,

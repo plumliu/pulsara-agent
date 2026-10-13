@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id, derive_id, require_id
+
 import asyncio
 import logging
 from dataclasses import dataclass, field, replace
@@ -9,7 +11,6 @@ from enum import StrEnum
 import json
 from threading import Lock
 from typing import AsyncIterator, Awaitable, Callable
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
@@ -716,7 +717,7 @@ class DirectKernelModelPort:
             target=target,
             binding=binding,
             purpose=request.purpose,
-            resolved_model_call_id=f"model_call:{uuid4().hex}",
+            resolved_model_call_id=random_id("call"),
         )
         input_budget = target.context_budget.input_budget_tokens
         if request.maximum_input_tokens is not None:
@@ -796,7 +797,7 @@ class DirectKernelModelPort:
             target=target,
             binding=binding,
             purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
-            resolved_model_call_id=f"model_call:{uuid4().hex}",
+            resolved_model_call_id=random_id("call"),
         )
 
     @staticmethod
@@ -1690,27 +1691,26 @@ def freeze_provider_wire_measurement(
 def _wire_plan_semantic_identity(
     semantic_input: ProviderWireSemanticInput,
 ) -> tuple[str, str]:
-    context_id = getattr(semantic_input, "context_id", None) or context_fingerprint(
-        "pulsara.provider-wire-structural-context-id:v1",
-        {
-            "canonical": semantic_input.canonical_input_identity.identity_fingerprint,
-            "placements": compiled_message_placements_fingerprint(
-                semantic_input.message_placements
-            ),
-            "binding": semantic_input.compile_binding_fingerprint,
-        },
+    from pulsara_agent.model_input.contracts import FrozenModelInputSemanticProjection
+    from pulsara_agent.conversation_kernel.compaction.model_call import PreparedCompactionSummarySemanticInput
+
+    if isinstance(semantic_input, (FrozenCompiledModelInput, PreparedCompactionSummarySemanticInput)):
+        return require_id(semantic_input.context_id, "context"), semantic_input.compiled_semantic_fingerprint
+    if not isinstance(semantic_input, FrozenModelInputSemanticProjection):
+        raise TypeError("wire measurement requires a closed semantic input type")
+    context_id = derive_id(
+        "context", "structural",
+        semantic_input.canonical_input_identity.identity_fingerprint,
+        compiled_message_placements_fingerprint(semantic_input.message_placements),
+        semantic_input.compile_binding_fingerprint,
     )
-    compiled_semantic_fingerprint = getattr(
-        semantic_input, "compiled_semantic_fingerprint", None
-    ) or context_fingerprint(
+    compiled_semantic_fingerprint = context_fingerprint(
         "pulsara.provider-wire-structural-semantic-input:v1",
         {
             "canonical": semantic_input.canonical_input_identity,
             "system": semantic_input.system_prompt,
             "messages": semantic_input.messages,
-            "placements": compiled_message_placements_fingerprint(
-                semantic_input.message_placements
-            ),
+            "placements": compiled_message_placements_fingerprint(semantic_input.message_placements),
             "tools": semantic_input.tools,
             "binding": semantic_input.compile_binding_fingerprint,
         },

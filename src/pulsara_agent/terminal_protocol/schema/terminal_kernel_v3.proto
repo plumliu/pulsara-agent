@@ -790,6 +790,7 @@ message CommandRequest {
   string target_process_id = 17;
   string target_queue_item_id = 18;
   PromptContent prompt_content = 19;
+  uint64 control_admission_deadline_ms = 20;
 }
 
 message PromptImagePart {
@@ -914,6 +915,7 @@ message ExpectedUserControl {
   string session_id = 2;
   string host_session_id = 3;
   UserControlTarget target = 4;
+  uint64 admission_deadline_ms = 5;
 }
 
 message CommandOutcome {

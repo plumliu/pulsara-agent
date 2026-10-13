@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from dataclasses import dataclass, replace
-from uuid import uuid4
 
 from pulsara_agent.llm.errors import (
     ModelInputBudgetUnavailable,
@@ -168,7 +169,7 @@ def resolve_model_call(
         else ModelContextMode.DIRECT
     )
     fact = ResolvedModelCallFact(
-        resolved_model_call_id=(resolved_model_call_id or f"model_call:{uuid4().hex}"),
+        resolved_model_call_id=(resolved_model_call_id or random_id("call")),
         purpose=purpose,
         context_mode=mode,
         target=target.fact,

@@ -1,3 +1,4 @@
+import { webcrypto } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -77,7 +78,7 @@ function inlineContent(value: string) {
 }
 
 function promptBody(...texts: string[]): string {
-  return JSON.stringify({ schema: 'pulsara.prompt/v1', parts: texts.map((text) => ({ type: 'text', text })) });
+  return JSON.stringify({ schema: 'pulsara.prompt/v2', parts: texts.map((text) => ({ type: 'text', text })) });
 }
 
 function inlinePrompt(...texts: string[]) {
@@ -159,7 +160,7 @@ function connectPayload(
 }
 
 it('preserves PR03 exact control/query identities and typed query retirement states', async () => {
-  vi.stubGlobal('crypto', {
+  vi.stubGlobal('crypto', { getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
     ...globalThis.crypto,
     randomUUID: () => '66666666-6666-4666-8666-666666666666',
   });
@@ -243,6 +244,7 @@ it('preserves PR03 exact control/query identities and typed query retirement sta
     body: {
       command_id: reference.commandId,
       command_kind: 'STOP_ACTIVE_TURN',
+      control_admission_deadline_ms: 9000,
       client_submission_id: '',
       expected_session_id: 'session-1',
       expected_host_session_id: 'host:one',
@@ -388,8 +390,8 @@ describe('exact prompt projection', () => {
     const bytes = Uint8Array.from([0xff, 0x00, 0x89, 0x50, 0x4e, 0x47]);
     const digest = sha256Digest(bytes);
     const body = {
-      ...inlineContent(JSON.stringify({ schema: 'pulsara.prompt/v1', parts: [{
-        type: 'image', digest, encoded_bytes: bytes.length,
+      ...inlineContent(JSON.stringify({ schema: 'pulsara.prompt/v2', parts: [{
+        type: 'image', image_ref: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa', digest, encoded_bytes: bytes.length,
         media_type: 'image/png', width: 3, height: 2,
       }] })),
       media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8',
@@ -488,11 +490,11 @@ describe('exact prompt projection', () => {
 
   it('hydrates canonical view_image content into its exact tool trace owner', async () => {
     const imageBody = JSON.stringify({
-      schema: 'pulsara.prompt/v1',
+      schema: 'pulsara.prompt/v2',
       parts: [
         { type: 'text', text: 'Image loaded.' },
         {
-          type: 'image', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 3,
+          type: 'image', image_ref: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 3,
           media_type: 'image/png', width: 2, height: 1,
         },
       ],
@@ -665,7 +667,7 @@ describe('exact prompt projection', () => {
         },
       },
     ];
-    vi.stubGlobal('crypto', { randomUUID: () => 'test' });
+    vi.stubGlobal('crypto', { getRandomValues: webcrypto.getRandomValues.bind(webcrypto), randomUUID: () => 'test' });
     vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.body) bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return new Response(JSON.stringify(responses.shift()), {
@@ -2162,9 +2164,9 @@ describe('source text fidelity hard cut', () => {
   it.each(['history', 'queue'])('projects %s images as typed owner-scoped content', async (location) => {
     const content = {
       ...inlineContent(JSON.stringify({
-        schema: 'pulsara.prompt/v1',
+        schema: 'pulsara.prompt/v2',
         parts: [{ type: 'text', text: '看图' }, {
-          type: 'image', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 4,
+          type: 'image', image_ref: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 4,
           media_type: 'image/png', width: 7, height: 5,
         }],
       })),
@@ -2187,7 +2189,7 @@ describe('source text fidelity hard cut', () => {
       ? projection.messages[0]?.promptContent
       : projection.queuedPrompts[0]?.content;
     expect(projected).toEqual({ parts: [{ type: 'text', text: '看图' }, {
-      type: 'image', source: 'canonical',
+      type: 'image', source: 'canonical', imageRef: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa',
       digest: `sha256:${'a'.repeat(64)}`, encodedBytes: 4,
       mediaType: 'image/png', width: 7, height: 5, refOrdinal: 0,
       owner: location === 'history'

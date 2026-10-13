@@ -222,7 +222,7 @@ class ResolvedModelCallFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     contract_version: Literal["resolved-model-call:v2"] = "resolved-model-call:v2"
-    resolved_model_call_id: str = Field(pattern=r"^model_call:[0-9a-f]{32}$")
+    resolved_model_call_id: str = Field(pattern=r"^call:[a-z2-7]{25}[aeimquy4]$")
     purpose: ModelCallPurpose
     context_mode: ModelContextMode
     target: ResolvedModelTargetFact

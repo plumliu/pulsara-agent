@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import os
 from pathlib import Path
@@ -49,7 +50,7 @@ def test_pr03_late_termination_preserves_confirmed_natural_terminal_state(
     expected_exit_code: int,
 ) -> None:
     registry = ProcessRegistry()
-    owner = f"host:late-terminal:{expected_status}"
+    owner = derive_id("host", "test-fixture", f"host:late-terminal:{expected_status}")
     completions: list[tuple[str, int | None]] = []
     registry._completion_subscriber = (  # noqa: SLF001
         lambda info, _snapshot: completions.append((info.status, info.exit_code))
@@ -89,7 +90,7 @@ def test_pr03_background_adopted_only_after_successful_yield_publication(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry()
-    owner = "host:background-adopted"
+    owner = 'host:pje5rsuwiavmtub5a75afno4my'
     state, yielded = _launch(
         registry,
         tmp_path,
@@ -123,7 +124,7 @@ def test_pr03_background_adopted_only_after_successful_yield_publication(
 
 def test_pr03_shell_exit_with_live_group_is_still_terminable(tmp_path: Path) -> None:
     registry = ProcessRegistry()
-    owner = "host:live-descendant"
+    owner = 'host:nugu3z6fffse4aijfiezvoh6u4'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="background descendant",
@@ -168,7 +169,7 @@ def test_pr03_natural_exit_during_physical_settlement_is_not_reported_as_termina
             super()._watch_process(state)
 
     registry = _PausedWatcherRegistry()
-    owner = "host:natural-settlement-race"
+    owner = 'host:oowmib5pn4xxiffdzeue5yypv4'
     state, _yielded = _launch(
         registry,
         tmp_path,

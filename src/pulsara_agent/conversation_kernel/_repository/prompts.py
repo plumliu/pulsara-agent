@@ -190,7 +190,7 @@ class _PromptOperations:
             payload["redirected_to_queue_item_id"] = replacement_id
         drafts = [self._event(
             CommittedEventType.PROMPT_CANCELLED, SubjectSlot.QUEUE_ITEM,
-            candidate.source_queue_item_id, occurred_at=occurred_at,
+            candidate.source_queue_item_id, session_id=candidate.session_id, occurrence_key="", occurred_at=occurred_at,
             actor_kind="human", actor_id=actor_id, payload=payload,
         )]
         if replacement_id is not None:
@@ -226,7 +226,7 @@ class _PromptOperations:
             )
             drafts.append(self._event(
                 CommittedEventType.PROMPT_QUEUED, SubjectSlot.QUEUE_ITEM,
-                replacement_id, occurred_at=occurred_at, actor_kind="human",
+                replacement_id, session_id=candidate.session_id, occurrence_key="", occurred_at=occurred_at, actor_kind="human",
                 actor_id=actor_id, payload={
                     "queue_sequence": int(sequence), "delivery_mode": "STEER_ACTIVE_TURN",
                     "redirected_from_queue_item_id": candidate.source_queue_item_id,
@@ -779,7 +779,7 @@ class _PromptOperations:
                     CommittedEventType.PROMPT_QUEUED,
                     SubjectSlot.QUEUE_ITEM,
                     candidate.queue_item_id,
-                    occurred_at=occurred_at,
+                    session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                     actor_kind="runtime" if candidate.scheduled is not None else "human",
                     actor_id=actor_id,
                     payload={
@@ -1056,7 +1056,7 @@ class _PromptOperations:
                             CommittedEventType.PROMPT_REJECTED,
                             SubjectSlot.QUEUE_ITEM,
                             candidate.queue_item_id,
-                            occurred_at=candidate.occurred_at,
+                            session_id=guard.session_id, occurrence_key="", occurred_at=candidate.occurred_at,
                             actor_kind="runtime",
                             actor_id=candidate.actor_id,
                             payload={"reason": "PLAN_CONTEXT_CHANGED_BEFORE_DELIVERY"},
@@ -1321,7 +1321,7 @@ class _PromptOperations:
                         CommittedEventType.PROMPT_REJECTED,
                         SubjectSlot.QUEUE_ITEM,
                         candidate.queue_item_id,
-                        occurred_at=candidate.occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=candidate.occurred_at,
                         actor_kind="runtime",
                         actor_id=candidate.actor_id,
                         payload={"reason": reason},
@@ -1641,7 +1641,7 @@ class _PromptOperations:
                         CommittedEventType.PROMPT_REJECTED,
                         SubjectSlot.QUEUE_ITEM,
                         str(item["id"]),
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id=actor_id,
                         payload={"reason": "TARGET_TURN_TERMINAL"},
@@ -2261,7 +2261,7 @@ class _PromptOperations:
                         CommittedEventType.PROMPT_CANCELLED,
                         SubjectSlot.QUEUE_ITEM,
                         queue_item_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="human",
                         actor_id=actor_id,
                         payload={"reason": "USER_CANCELLED"},

@@ -131,7 +131,7 @@ class PluginHookSourceIdentity:
         if not re.fullmatch(
             r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",
             self.plugin_id,
-        ) or not re.fullmatch(r"pkg_[0-9a-f]{32}", self.package_install_id):
+        ) or not re.fullmatch(r"package:[a-z2-7]{25}[aeimquy4]", self.package_install_id):
             raise ValueError("Plugin Hook source identity is invalid")
         if (self.visibility_scope is HookVisibilityScope.WORKSPACE) != (
             self.workspace_state_key is not None

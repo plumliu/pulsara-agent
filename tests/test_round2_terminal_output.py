@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 import json
@@ -91,7 +92,7 @@ def test_round2_sanitizer_bounds_undecided_secret_and_escape_payloads() -> None:
 
 
 def test_round2_output_cursor_exact_delta_invalid_and_delivery_head_tail() -> None:
-    owner = TerminalOutputOwner(owner_epoch="host:1", process_id="process:1")
+    owner = TerminalOutputOwner(owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i')
     owner.append_raw("one 🙂 ".encode())
     first = owner.snapshot(maximum_chars=512)
     owner.append_raw("two 三 ".encode())
@@ -100,7 +101,7 @@ def test_round2_output_cursor_exact_delta_invalid_and_delivery_head_tail() -> No
     assert delta.text == "two 三 "
     assert delta.output_cursor != first.output_cursor
 
-    other = TerminalOutputOwner(owner_epoch="host:2", process_id="process:1")
+    other = TerminalOutputOwner(owner_epoch='host:6iyzp7i34pqz7i24elu5kbb5ee', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i')
     foreign = other.snapshot(maximum_chars=512).output_cursor
     with pytest.raises(InvalidTerminalOutputCursor, match="INVALID_CURSOR"):
         owner.snapshot(maximum_chars=512, since_cursor=foreign)
@@ -129,7 +130,7 @@ def test_round2_output_cursor_exact_delta_invalid_and_delivery_head_tail() -> No
 
 
 def test_round2_cursor_snapshot_and_artifact_share_the_exact_selected_range() -> None:
-    owner = TerminalOutputOwner(owner_epoch="host:cursor", process_id="process:cursor")
+    owner = TerminalOutputOwner(owner_epoch='host:zjsm3f2owadqv4iq7jxzofo2ne', process_id='process:s7nqc7t2naosfs4kxvxdcmftdu')
     owner.append_raw(b"old-output ")
     cursor = owner.snapshot(maximum_chars=512).output_cursor
     owner.append_raw("new-output 🙂\n".encode())
@@ -148,23 +149,23 @@ def test_round2_cursor_snapshot_and_artifact_share_the_exact_selected_range() ->
 
 @pytest.mark.parametrize("foreign", (False, True))
 def test_terminal_cursor_rejection_returns_actionable_tool_error(foreign: bool) -> None:
-    owner = TerminalOutputOwner(owner_epoch="host:1", process_id="process:1")
-    other = TerminalOutputOwner(owner_epoch="host:2", process_id="process:1")
+    owner = TerminalOutputOwner(owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i')
+    other = TerminalOutputOwner(owner_epoch='host:6iyzp7i34pqz7i24elu5kbb5ee', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i')
     cursor = other.snapshot(maximum_chars=512).output_cursor if foreign else "bad-cursor-token"
 
     class Manager:
         def poll_process(self, process_id, *, since_cursor, **kwargs):
-            assert process_id == "process:1"
+            assert process_id == 'process:72qov6ocdngiw5hv6gjo4g2o7i'
             return owner.snapshot(maximum_chars=512, since_cursor=since_cursor)
 
     result = _execute_terminal_tool_call(
-        _DirectTerminalProcessTool(Manager(), "host:1"),
+        _DirectTerminalProcessTool(Manager(), 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
         ToolCall("call:cursor", "terminal_process", {
-            "action": "poll", "process_id": "process:1", "since_cursor": cursor,
+            "action": "poll", "process_id": 'process:72qov6ocdngiw5hv6gjo4g2o7i', "since_cursor": cursor,
         }),
         None,
-        TerminalProcessOrigin("turn:1", "ROOT"),
-        "attempt:1",
+        TerminalProcessOrigin('turn:nzc36cttgo7xxki7bcjc7ops7a', "ROOT"),
+        'attempt:dvce4jlhrqd3hzcfpszy4gujye',
         DEFAULT_PERMISSION_MODE,
         deadline_monotonic=monotonic() + 10,
     )
@@ -180,8 +181,8 @@ def test_round2_sanitizer_failure_cannot_claim_complete_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     owner = TerminalOutputOwner(
-        owner_epoch="host:sanitizer-failure",
-        process_id="process:sanitizer-failure",
+        owner_epoch='host:7zmdm4lrdmmufns3t4oceqqwge',
+        process_id='process:ucydwjspkajlven4frynbxlfgu',
     )
 
     def fail_feed(_raw: bytes) -> bytes:
@@ -202,7 +203,7 @@ def test_round2_sanitizer_failure_cannot_claim_complete_artifact(
 
 def test_round2_retention_gap_is_orthogonal_to_response_and_delivery_bounds() -> None:
     owner = TerminalOutputOwner(
-        owner_epoch="host:1", process_id="process:1", maximum_bytes=100
+        owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i', maximum_bytes=100
     )
     before = owner.snapshot(maximum_chars=512).output_cursor
     owner.append_raw(("A" * 200 + " TAIL ").encode())
@@ -229,7 +230,7 @@ def test_round2_retention_gap_is_orthogonal_to_response_and_delivery_bounds() ->
 
 def test_round2_output_metadata_stays_bounded_after_many_tiny_segments() -> None:
     owner = TerminalOutputOwner(
-        owner_epoch="host:1", process_id="process:1", maximum_bytes=4096
+        owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i', maximum_bytes=4096
     )
     for _ in range(100_000):
         owner.append_raw(b"x ")
@@ -244,7 +245,7 @@ def test_round2_host_aggregate_evicts_finished_output_before_live_output(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry(maximum_host_retained_bytes=160)
-    owner = "host:aggregate"
+    owner = 'host:a7spea6nd2vrstsjuwtwmja5qu'
     registry.activate_owner(owner)
     completed, yielded = registry.exec_with_yield(
         command="finished",
@@ -290,7 +291,7 @@ def test_round2_physical_retirement_joins_reader_watcher_timer_and_group(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry()
-    owner = "host:physical-close"
+    owner = 'host:puh6z6agmicmckuyxxmxo7ogdy'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="parent-and-child",
@@ -338,7 +339,7 @@ def test_round2_leader_exit_does_not_complete_or_release_capacity_until_group_ex
         max_live_processes=1,
         completion_subscriber=lambda info, _snapshot: completions.append(info),
     )
-    owner = "host:leader-group"
+    owner = 'host:ix3nohnwtzq2x6sp4quoyn3rjy'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="background-descendant",
@@ -390,7 +391,7 @@ def test_round2_wait_uses_physical_group_completion_not_shell_leader(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry()
-    owner = "host:wait-group"
+    owner = 'host:aqt7wpe23it5i7olb3kwsd2dyy'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="background-descendant",
@@ -426,7 +427,7 @@ def test_round2_foreground_yield_waits_for_physical_group_completion(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry()
-    owner = "host:foreground-group"
+    owner = 'host:3ehju3fhpjuzncouocjw2yiy6e'
     registry.activate_owner(owner)
     started = monotonic()
     state, yielded = registry.exec_with_yield(
@@ -452,7 +453,7 @@ def test_round2_process_admission_linearizes_launching_reservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = ProcessRegistry(max_live_processes=1)
-    owner = "host:launch-capacity"
+    owner = 'host:x4xw6dfw5wfh7j4znysugeob54'
     registry.activate_owner(owner)
     entered_spawn = Event()
     release_spawn = Event()
@@ -513,7 +514,7 @@ def test_round2_launch_reservation_releases_on_spawn_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = ProcessRegistry(max_live_processes=1)
-    owner = "host:launch-failure"
+    owner = 'host:sdbhxx563fsxwbcscru6urfove'
     registry.activate_owner(owner)
 
     def fail_spawn(**_kwargs):
@@ -541,7 +542,7 @@ def test_round2_owner_close_waits_unpublished_launch_and_physical_drain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = ProcessRegistry(max_live_processes=1)
-    owner = "host:close-during-launch"
+    owner = 'host:umelk3unbnaxh4mq3qhwep54by'
     registry.activate_owner(owner)
     spawned = Event()
     release_spawn = Event()
@@ -607,7 +608,7 @@ def test_round2_pty_close_stdin_sends_eot_and_produces_real_eof(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry()
-    owner = "host:pty-eof"
+    owner = 'host:ihvenc32vhuzgcvu7skwfnepzq'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="cat",
@@ -642,7 +643,7 @@ def test_round2_finished_process_reaches_joined_before_prunable_without_regressi
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry(finished_ttl_seconds=0)
-    owner = "host:retirement-state"
+    owner = 'host:gidkf6f2rztokjbqhgozoqtk6y'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="true",
@@ -671,18 +672,18 @@ def test_round2_terminal_live_handoff_overflow_is_typed_gap_not_process_failure(
         observer_id, generation, revision = bus.subscribe()
         sink = _ToolResultLiveSink(
             live_bus=bus,
-            session_id="session:live-overflow",
-            turn_id="turn:live-overflow",
-            draft_identity="entry:live-overflow",
-            block_identity="block:live-overflow",
+            session_id='session:qhmvdqg3toq5tzttzandfhghwm',
+            turn_id='turn:eiiaqfpbb2xyxlo2egc4k6bjlq',
+            draft_identity='entry:lcjlwvs7a4eqvwo37cc4yuyx2y',
+            block_identity='block:p33dmpkex2vzqug7efvolum7dq',
             attribution={
                 "scope_kind": "ROOT",
                 "scope_subagent_task_id": None,
                 "channel_kind": LiveChannelKind.TOOL_RESULT,
                 "channel_tool_call_id": "call:live-overflow",
-                "channel_attempt_id": "attempt:live-overflow",
-                "generation_id": "tool-result:live-overflow",
-                "proposed_entry_id": "entry:live-overflow",
+                "channel_attempt_id": 'attempt:lmcvqas4frx3x7lakdn5cth5nq',
+                "generation_id": 'result:pek4tcoe5qo7xjurhmtn2voveu',
+                "proposed_entry_id": 'entry:lcjlwvs7a4eqvwo37cc4yuyx2y',
             },
         )
         sink._MAXIMUM_PENDING_BYTES = 32  # noqa: SLF001
@@ -699,8 +700,8 @@ def test_round2_terminal_live_handoff_overflow_is_typed_gap_not_process_failure(
 
 def test_round2_exact_retention_boundary_and_artifact_coverage() -> None:
     owner = TerminalOutputOwner(
-        owner_epoch="host:retention-hard",
-        process_id="process:retention-hard",
+        owner_epoch='host:tdahjz2mljqvyap65p7pzvbayi',
+        process_id='process:74j7y3ougqqtlyst7kqeuluboa',
     )
     owner.append_raw(b"a" * (16 * 1024 * 1024))
     complete = owner.artifact_candidate()
@@ -716,8 +717,8 @@ def test_round2_exact_retention_boundary_and_artifact_coverage() -> None:
 
 def test_round2_concurrent_append_and_snapshot_preserve_exact_utf8_stream() -> None:
     owner = TerminalOutputOwner(
-        owner_epoch="host:concurrent",
-        process_id="process:concurrent",
+        owner_epoch='host:yligxmbjudkuiyy54tmpzi64iq',
+        process_id='process:luoz34x2hpwhcaa3ng5dfw6bvq',
         maximum_bytes=1_000_000,
     )
     chunk = "line🙂\n".encode()
@@ -747,7 +748,7 @@ def test_round5_post_spawn_installation_fault_rolls_back_every_physical_owner(
     fault_stage: str,
 ) -> None:
     registry = ProcessRegistry()
-    owner = f"host:post-spawn-{fault_stage}"
+    owner = derive_id("host", "test-fixture", f"host:post-spawn-{fault_stage}")
     registry.activate_owner(owner)
     spawned: list[object] = []
     original_spawn = registry._spawn  # noqa: SLF001
@@ -837,7 +838,7 @@ def test_round2_observation_lease_and_join_failure_block_prune(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = ProcessRegistry(finished_ttl_seconds=0)
-    owner = "host:prune-fence"
+    owner = 'host:ewaub5xwugq7adj3hvgm2kbxia'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="finished",
@@ -869,7 +870,7 @@ def test_round2_observation_lease_and_join_failure_block_prune(
 
 def test_round2_host_close_invalidates_process_and_cursor(tmp_path: Path) -> None:
     registry = ProcessRegistry()
-    owner = "host:cursor-close"
+    owner = 'host:ctksd42blb2fbtzdejub6oxqem'
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
         command="running",
@@ -901,7 +902,7 @@ def test_round2_workspace_cwd_preflight_host_scope_and_no_probe(
     nested = workspace / "a" / "b"
     nested.mkdir(parents=True)
     manager = TerminalManager(workspace)
-    owner = "host:cwd-faults"
+    owner = 'host:rccdoitmfnbdfmzbwgmclwlhae'
     manager.activate_owner(owner)
     manager.environment_owner.config = manager.environment_owner.config.__class__(
         enable_shell_snapshot=False

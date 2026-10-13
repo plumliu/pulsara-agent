@@ -15,7 +15,7 @@ from tests.test_memory_retrieval_adapters import VECTOR
 def _memory_port(settings):
     return KernelMemoryToolPort(
         repository=SimpleNamespace(connection_provider=object()),
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         read_binding=object(),
         embedding_config=EmbeddingBackendConfig(),
         rerank_config=RerankBackendConfig(),
@@ -74,7 +74,7 @@ def test_missing_or_unreadable_settings_degrade_without_opening_provider(
         mixed = MemoryQueryResult(
             disposition=MemoryRetrievalDisposition.COMPLETE,
             facts=("ordinary", HistoryCandidate(
-                session_id="session:old", q1_entry_id="entry:old", title="old",
+                session_id='session:2gshm5wjf42flcppodmqqhvruu', q1_entry_id='entry:hsbhejqlvgm3oe42nqmhybryyu', title="old",
                 score=1.0, document={}, messages=(),
             )),
             attempted_stages=(),

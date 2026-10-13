@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import asyncio
 from datetime import datetime, timezone
 import inspect
@@ -12,7 +14,6 @@ import sys
 from threading import Event
 from time import monotonic
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 
@@ -101,11 +102,11 @@ def test_capacity_raise_releases_host_lock_before_child_todo_activation() -> Non
         manager._closed = False
         manager._scheduler_task = None
         manager._scheduler_reschedule = False
-        manager._guard = SimpleNamespace(session_id="session:capacity")
+        manager._guard = SimpleNamespace(session_id='session:h5s55h6wdwcq7jfbvl3txv32ge')
         host._subagents = manager
         prepared = build_child_activation(
-            session_id="session:capacity", subagent_task_id="task:child",
-            exact_turn_id="turn:child", exact_initial_entry_id="entry:child",
+            session_id='session:h5s55h6wdwcq7jfbvl3txv32ge', subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
+            exact_turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', exact_initial_entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve',
             exact_context_binding_revision_id="revision:child",
         )
 
@@ -113,7 +114,7 @@ def test_capacity_raise_releases_host_lock_before_child_todo_activation() -> Non
             # This is the production finalizer called by child turn admission.
             assert not host._lock.locked()
             await host._finalize_todo_run_activation(
-                prepared, SimpleNamespace(turn_id="turn:child", entry_id="entry:child"),
+                prepared, SimpleNamespace(turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve'),
             )
 
         manager._start_available_tasks_worker = launch
@@ -127,7 +128,7 @@ def test_capacity_raise_releases_host_lock_before_child_todo_activation() -> Non
     asyncio.run(exercise())
 
 def _name(prefix: str) -> str:
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 class _RecordingDeadlineFactory(KernelExecutionDeadlineFactory):
@@ -157,8 +158,9 @@ def test_tool_result_preview_is_utf8_safe_and_obeys_final_hard_cap() -> None:
     processor = ToolOutputArtifactProcessor(object(), publisher=Publisher())  # type: ignore[arg-type]
     text = "🙂" * 20_000
     prepared = processor.prepare(
-        workspace_id="workspace:test",
-        result_entry_id="entry:test",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        result_entry_id='entry:yizmduice57hcs52bz2usckgc4',
         public_output=text,
         candidate=ToolOutputArtifactCandidate(
             role="OUTPUT",
@@ -457,7 +459,7 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         calls = 0
 
         class BlockingSession:
-            session_id = "session:blocking"
+            session_id = 'session:sq4icqul3fdtrhy5k5mhtdz5lq'
 
             async def aclose(
                 self,
@@ -475,21 +477,21 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         core._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         core._close_attempts = {}  # type: ignore[attr-defined]
         session = BlockingSession()
-        core._sessions = {"host:blocking": session}  # type: ignore[attr-defined]
+        core._sessions = {'host:fnw4mc7b3olk5l3w34pyvmunhu': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
 
         first = asyncio.create_task(
-            core.close_session("host:blocking")
+            core.close_session('host:fnw4mc7b3olk5l3w34pyvmunhu')
         )
         await started.wait()
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
-        assert core._sessions == {"host:blocking": session}  # type: ignore[attr-defined]  # noqa: SLF001
+        assert core._sessions == {'host:fnw4mc7b3olk5l3w34pyvmunhu': session}  # type: ignore[attr-defined]  # noqa: SLF001
         assert calls == 1
 
         second = asyncio.create_task(
-            core.close_session("host:blocking")
+            core.close_session('host:fnw4mc7b3olk5l3w34pyvmunhu')
         )
         await asyncio.sleep(0)
         assert calls == 1
@@ -520,7 +522,7 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         received_deadlines: list[float] = []
 
         class BlockingSession:
-            session_id = "session:deadline"
+            session_id = 'session:tlvhlzyhaqgtzehsjkwyfvjuji'
 
             async def aclose(
                 self,
@@ -538,11 +540,11 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         )
         core._close_attempts = {}  # type: ignore[attr-defined]
         session = BlockingSession()
-        core._sessions = {"host:deadline": session}  # type: ignore[attr-defined]
+        core._sessions = {'host:67ai47ry4ikif6v6w7ef4cpyl4': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
 
         first = asyncio.create_task(
-            core.close_session("host:deadline")
+            core.close_session('host:67ai47ry4ikif6v6w7ef4cpyl4')
         )
         await started.wait()
         assert received_deadlines == [10_037.0]
@@ -551,11 +553,11 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         # waiter must not mint or extend the installed close deadline.
         now[0] += 10_000.0
         second = asyncio.create_task(
-            core.close_session("host:deadline")
+            core.close_session('host:67ai47ry4ikif6v6w7ef4cpyl4')
         )
         await asyncio.sleep(0)
         assert deadline_factory_calls == 1
-        installed_attempt = core._close_attempts["host:deadline"]  # type: ignore[attr-defined]  # noqa: SLF001
+        installed_attempt = core._close_attempts['host:67ai47ry4ikif6v6w7ef4cpyl4']  # type: ignore[attr-defined]  # noqa: SLF001
         assert installed_attempt.deadline_monotonic == 10_037.0
         release.set()
         await asyncio.gather(first, second)
@@ -581,9 +583,9 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
         )
         deadlines = KernelExecutionDeadlineFactory(policy)
         guard = HostWriterGuard(
-            session_id="session:renew",
+            session_id='session:cbzaikgw4by5g4zbwrkzyhd3hu',
             writer_generation=1,
-            writer_owner_id="host:renew",
+            writer_owner_id='host:4e52gs3f3hr7qof3y4tr26limm',
         )
         initial = WriterLease(
             guard=guard,
@@ -647,7 +649,7 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
 def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
     async def scenario() -> None:
         class FailingSession:
-            session_id = "session:failing"
+            session_id = 'session:sazovd3stvpuqithbe4s25br3u'
             physically_terminal = False
 
             async def aclose(
@@ -664,16 +666,16 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
         core._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         core._close_attempts = {}  # type: ignore[attr-defined]
         session = FailingSession()
-        core._sessions = {"host:failing": session}  # type: ignore[attr-defined]
+        core._sessions = {'host:bam5ezzvqmifzdnm7w6o5l26iy': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
 
         with pytest.raises(TimeoutError, match="physical owner"):
-            await core.close_session("host:failing")
-        attempt = core._close_attempts["host:failing"]  # type: ignore[attr-defined]  # noqa: SLF001
+            await core.close_session('host:bam5ezzvqmifzdnm7w6o5l26iy')
+        attempt = core._close_attempts['host:bam5ezzvqmifzdnm7w6o5l26iy']  # type: ignore[attr-defined]  # noqa: SLF001
         assert attempt.state is HostSessionCloseState.CLOSE_FAILED_QUARANTINED
         assert session.physically_terminal
-        assert core._sessions == {"host:failing": session}  # type: ignore[attr-defined]  # noqa: SLF001
+        assert core._sessions == {'host:bam5ezzvqmifzdnm7w6o5l26iy': session}  # type: ignore[attr-defined]  # noqa: SLF001
         with pytest.raises(TimeoutError, match="physical owner"):
-            await core.close_session("host:failing")
+            await core.close_session('host:bam5ezzvqmifzdnm7w6o5l26iy')
 
     asyncio.run(scenario())

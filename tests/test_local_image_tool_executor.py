@@ -1,6 +1,8 @@
 """Focused scheduling contracts for builtin view_image batches."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import replace
@@ -52,7 +54,7 @@ from tests.support.round3 import direct_tool_invocation_context
 
 def _call(ordinal: int) -> CompletedToolCallBlock:
     return CompletedToolCallBlock(
-        f"block:{ordinal}",
+        derive_id("block", "test-fixture", f"block:{ordinal}"),
         f"call:{ordinal}",
         "view_image",
         freeze_json({"path": f"/tmp/{ordinal}.png"}),
@@ -61,10 +63,10 @@ def _call(ordinal: int) -> CompletedToolCallBlock:
 
 def _reference_call(ordinal: int) -> CompletedToolCallBlock:
     return CompletedToolCallBlock(
-        f"block:{ordinal}",
+        derive_id("block", "test-fixture", f"block:{ordinal}"),
         f"call:{ordinal}",
         "view_image",
-        freeze_json({"image_ref": "sha256:" + f"{ordinal:064x}"}),
+        freeze_json({"image_ref": derive_id("image", "test-fixture", str(ordinal))}),
     )
 
 
@@ -116,8 +118,8 @@ def _partition_executor(kinds, events: list[str]):
 
 def _partition_kwargs(calls, *, hook_scope=None, hook_view=None):
     return {
-        "turn_id": "turn:1",
-        "assistant_entry_id": "entry:assistant",
+        "turn_id": 'turn:nzc36cttgo7xxki7bcjc7ops7a',
+        "assistant_entry_id": 'entry:5qidalqvkujk5ykzzzfpwie2qy',
         "calls": calls,
         "canonical_facts": SimpleNamespace(run_permission_snapshot=object()),
         "canonical_identity": object(),
@@ -309,8 +311,8 @@ def test_reverse_physical_completion_still_releases_settlement_in_call_order() -
         )
 
         result = await executor._execute_concurrent_view_segment(
-            turn_id="turn:1",
-            assistant_entry_id="entry:assistant",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
             calls=calls,
             preauthorizations=prepared,
             canonical_facts=object(),
@@ -348,20 +350,20 @@ def test_view_image_uses_the_frozen_target_modality_tristate_before_read(
         validator = HostPromptImageValidator()
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:image-modalities",
-            session_id="session:image-modalities",
+            host_owner_id='host:gnt4uwt66odkgmxsteq3xo44oi',
+            session_id='session:7rzhir4ub5kes44wp2llo7kcxe',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             image_validator=validator,
         )
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id="session:image-modalities",
+            session_id='session:7rzhir4ub5kes44wp2llo7kcxe',
             tool_name="view_image",
             tool_call_id="call:image",
-            attempt_id="attempt:image",
-            turn_id="turn:image",
-            assistant_entry_id="entry:assistant",
+            attempt_id='attempt:g6lyg5qu5b6lsmxjrpkv3wjm4y',
+            turn_id='turn:hei4tpo3ncy7wcxg6s4x3caeae',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         )
         try:
             binding = borrow.execution_binding("view_image")
@@ -381,9 +383,9 @@ def test_view_image_uses_the_frozen_target_modality_tristate_before_read(
                 tool_name="view_image",
                 arguments={"path": "missing.png"},
                 tool_call_id="call:image",
-                attempt_id="attempt:image",
-                turn_id="turn:image",
-                assistant_entry_id="entry:assistant",
+                attempt_id='attempt:g6lyg5qu5b6lsmxjrpkv3wjm4y',
+                turn_id='turn:hei4tpo3ncy7wcxg6s4x3caeae',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=replace(
                     context,
                     input_modalities=modalities,
@@ -413,14 +415,14 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
     read_error,
     expected_error,
 ) -> None:
-    image = LLMImagePart("image/png", b"canonical-image", 4, 3)
+    image = bound_test_image("image/png", b"canonical-image", 4, 3, workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau")
     quoted_contents = []
 
     class ReferencePort:
         def read_image(self, **kwargs):
-            assert kwargs["session_id"] == "session:image-reference"
-            assert kwargs["workspace_id"] == "workspace:test"
-            assert kwargs["image_ref"] == image.content_digest
+            assert kwargs["session_id"] == 'session:k2pz6c4sr6wup4p3gce6i77yqe'
+            assert kwargs["workspace_id"] == 'workspace:wdl6b3mtrkghwnvjo4an3ekbau'
+            assert kwargs["image_ref"] == image.image_ref
             assert kwargs["maximum_encoded_bytes"] > len(image.immutable_bytes)
             if read_error is not None:
                 raise read_error("reference read rejected")
@@ -429,7 +431,7 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
     class QuoteOwner:
         def quote(self, *, source, content, **_kwargs):
             assert source.kind is ViewImageSourceKind.IMAGE_REF
-            assert source.value == image.content_digest
+            assert source.value == image.image_ref
             assert len(content.parts) == 2
             assert isinstance(content.parts[0], LLMTextPart)
             assert content.parts[1] == image
@@ -439,20 +441,20 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
     async def scenario() -> None:
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:image-reference",
-            session_id="session:image-reference",
+            host_owner_id='host:ls3zb3vy3674q3vwfhhiwkzgfu',
+            session_id='session:k2pz6c4sr6wup4p3gce6i77yqe',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             image_reference_read_port=ReferencePort(),
         )
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id="session:image-reference",
+            session_id='session:k2pz6c4sr6wup4p3gce6i77yqe',
             tool_name="view_image",
             tool_call_id="call:image-reference",
-            attempt_id="attempt:image-reference",
-            turn_id="turn:image-reference",
-            assistant_entry_id="entry:assistant",
+            attempt_id='attempt:b2fgctpyeklxqoxnhe3qgawn54',
+            turn_id='turn:rqybqkquqqfi6dff7gc7kjykdm',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         )
         binding = borrow.execution_binding("view_image")
         allowance = FrozenImageToolResourceAllowance(
@@ -468,11 +470,11 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
         try:
             result = await port.invoke(
                 tool_name="view_image",
-                arguments={"image_ref": image.content_digest},
+                arguments={"image_ref": image.image_ref},
                 tool_call_id="call:image-reference",
-                attempt_id="attempt:image-reference",
-                turn_id="turn:image-reference",
-                assistant_entry_id="entry:assistant",
+                attempt_id='attempt:b2fgctpyeklxqoxnhe3qgawn54',
+                turn_id='turn:rqybqkquqqfi6dff7gc7kjykdm',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=replace(
                     context,
                     input_modalities=("text", "image"),
@@ -510,20 +512,20 @@ def test_view_image_reference_rejects_text_only_target_before_database_read(
     async def scenario() -> None:
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:image-reference-text-only",
-            session_id="session:image-reference-text-only",
+            host_owner_id='host:7qyyxjcbupfxhnkzj2hq3kf5ma',
+            session_id='session:wpnbbsygovmvaoy4bnzn2ao4n4',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             image_reference_read_port=ReferencePort(),
         )
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id="session:image-reference-text-only",
+            session_id='session:wpnbbsygovmvaoy4bnzn2ao4n4',
             tool_name="view_image",
             tool_call_id="call:image-reference-text-only",
-            attempt_id="attempt:image-reference-text-only",
-            turn_id="turn:image-reference-text-only",
-            assistant_entry_id="entry:assistant",
+            attempt_id='attempt:37tsqlhbithvq6qpgl372ha2mq',
+            turn_id='turn:ap2ak63go72kw6rpjrsxslbr5q',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         )
         binding = borrow.execution_binding("view_image")
         allowance = FrozenImageToolResourceAllowance(
@@ -539,11 +541,11 @@ def test_view_image_reference_rejects_text_only_target_before_database_read(
         try:
             result = await port.invoke(
                 tool_name="view_image",
-                arguments={"image_ref": "sha256:" + "1" * 64},
+                arguments={"image_ref": "image:" + "a" * 26},
                 tool_call_id="call:image-reference-text-only",
-                attempt_id="attempt:image-reference-text-only",
-                turn_id="turn:image-reference-text-only",
-                assistant_entry_id="entry:assistant",
+                attempt_id='attempt:37tsqlhbithvq6qpgl372ha2mq',
+                turn_id='turn:ap2ak63go72kw6rpjrsxslbr5q',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=replace(
                     context,
                     input_modalities=("text",),
@@ -627,8 +629,8 @@ def test_concurrent_view_window_queues_tail_until_physical_completion() -> None:
         )
         running = asyncio.create_task(
             executor._execute_concurrent_view_segment(
-                turn_id="turn:1",
-                assistant_entry_id="entry:assistant",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 calls=calls,
                 preauthorizations=prepared,
                 canonical_facts=object(),
@@ -691,8 +693,8 @@ def test_cancelling_concurrent_view_segment_drains_started_calls() -> None:
         )
         running = asyncio.create_task(
             executor._execute_concurrent_view_segment(
-                turn_id="turn:1",
-                assistant_entry_id="entry:assistant",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 calls=calls,
                 preauthorizations=prepared,
                 canonical_facts=object(),
@@ -726,10 +728,10 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
         path = tmp_path / 'chart.html'
         path.write_text('<h1>' + 'x' * 10000 + '</h1>')
         validator = HostPromptImageValidator()
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:html', session_id='session:html',
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:hi4pnm7cfz5jwlcsfvvcx4rpjq', session_id='session:eghkqizzionnli27oxvk6kkcgu',
             live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy(), image_validator=validator)
-        borrow, context = direct_tool_invocation_context(port, session_id='session:html', tool_name='view_image',
-            tool_call_id='call:html', attempt_id='attempt:html', turn_id='turn:html', assistant_entry_id='entry:assistant')
+        borrow, context = direct_tool_invocation_context(port, session_id='session:eghkqizzionnli27oxvk6kkcgu', tool_name='view_image',
+            tool_call_id='call:html', attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm', turn_id='turn:4s6voic575fjaadstkw7z4cttq', assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy')
         rendered = []
         quoted = []
         output = BytesIO()
@@ -751,7 +753,7 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
                 canonical_bytes=10 if mode == 'png_budget' else 4096, logical_bytes=4096,wire_bytes=4096,input_tokens=4096,
                 quote_owner=SimpleNamespace(quote=quote))
             result = await port.invoke(tool_name='view_image', arguments={'path':'missing.html' if mode == 'missing' else 'chart.html'},
-                tool_call_id='call:html',attempt_id='attempt:html',turn_id='turn:html',assistant_entry_id='entry:assistant',
+                tool_call_id='call:html',attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm',turn_id='turn:4s6voic575fjaadstkw7z4cttq',assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=replace(context,input_modalities=('text',) if mode=='text_only' else ('text','image'),image_resource_allowance=allowance))
             if mode == 'success':
                 assert result.state == 'SUCCESS'

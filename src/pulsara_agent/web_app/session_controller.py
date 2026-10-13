@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id, require_id
+
 import asyncio
 import base64
 from dataclasses import dataclass
@@ -9,6 +11,7 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
+from time import monotonic
 import shlex
 from typing import Literal, Mapping
 from uuid import uuid4
@@ -1775,7 +1778,7 @@ class LocalSessionController:
                 raise KernelHostCoreClosing("Local Web application is draining")
             if source_session_id in self._operations:
                 raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
-            child_session_id = f"session:{uuid4().hex}"
+            child_session_id = random_id("session")
             task = asyncio.create_task(
                 self._fork_owner(source_session_id, anchor_entry_id, child_session_id),
                 name=f"local-web-fork:{child_session_id}",
@@ -1791,12 +1794,24 @@ class LocalSessionController:
     async def _fork_owner(
         self, source_session_id: str, anchor_entry_id: str, child_session_id: str
     ) -> dict[str, object]:
-        creation = await self.core.fork_conversation(
-            source_session_id=source_session_id,
-            anchor_entry_id=anchor_entry_id,
-            child_session_id=child_session_id,
-            memory_domain_id=self.memory_domain_id,
-        )
+        deadline = self.core._canonical_deadline()
+        while True:
+            creation = await self.core.fork_conversation(
+                source_session_id=source_session_id,
+                anchor_entry_id=anchor_entry_id,
+                child_session_id=child_session_id,
+                memory_domain_id=self.memory_domain_id,
+                deadline_monotonic=deadline,
+            )
+            if creation.public_code != "CHILD_SESSION_ALREADY_EXISTS":
+                break
+            if monotonic() >= deadline:
+                raise TimeoutError("fork allocation deadline expired")
+            async with self._lock:
+                if self._closing:
+                    raise KernelHostCoreClosing("Local Web application is draining")
+                child_session_id = random_id("session")
+                self._fork_sessions[asyncio.current_task()] = frozenset((source_session_id, child_session_id))
         if not creation.created:
             return {
                 "outcome": "NOT_CREATED",
@@ -2039,7 +2054,7 @@ class LocalSessionController:
             raise RuntimeError("Session does not have a stable no-live state")
         return StableNoLiveHostObservation(
             session_id=session_id,
-            operation_nonce=f"no-live-host:{uuid4().hex}",
+            operation_nonce=random_id("operation"),
             owner=self,
             _seal=_NO_LIVE_HOST_SEAL,
         )
@@ -2305,7 +2320,7 @@ class LocalSessionController:
             operation = PreparedRawCloseOperation(
                 session_id=session_id,
                 handle=handle,
-                operation_nonce=f"raw-close:{uuid4().hex}",
+                operation_nonce=random_id("operation"),
                 owner=self,
                 _seal=_RAW_CLOSE_OPERATION_SEAL,
             )
@@ -2439,7 +2454,7 @@ class LocalSessionController:
                 observation._consume(self)
                 operation = PreparedRuntimeResumeOperation(
                     session_id=session_id,
-                    operation_nonce=f"runtime-resume:{uuid4().hex}",
+                    operation_nonce=random_id("operation"),
                     owner=self,
                     _seal=_RUNTIME_REOPEN_OPERATION_SEAL,
                 )
@@ -2454,7 +2469,7 @@ class LocalSessionController:
                 operation = PreparedRuntimeReopenOperation(
                     session_id=session_id,
                     old_handle=handle,
-                    operation_nonce=f"runtime-reopen:{uuid4().hex}",
+                    operation_nonce=random_id("operation"),
                     host_quiescence=quiescence,
                     owner=self,
                     _seal=_RUNTIME_REOPEN_OPERATION_SEAL,
@@ -3521,7 +3536,7 @@ def _encode_task_cursor(
 ) -> str:
     body = json.dumps(
         {
-            "v": 1,
+            "v": 2,
             "kind": "tasks",
             "session_id": session_id,
             "batch_id": batch_id,
@@ -3560,13 +3575,16 @@ def _decode_task_cursor(
     }:
         raise ValueError("task cursor is invalid")
     if (
-        value["v"] != 1
+        value["v"] != 2
         or value["kind"] != "tasks"
         or value["session_id"] != session_id
         or value["batch_id"] != batch_id
     ):
         raise ValueError("task cursor is invalid")
-    task_id = value["task_id"]
+    require_id(session_id, "session")
+    if batch_id is not None:
+        require_id(batch_id, "batch")
+    task_id = require_id(value["task_id"], "task")
     seen_count = value["seen_count"]
     if not isinstance(task_id, str) or not task_id:
         raise ValueError("task cursor is invalid")
@@ -3594,7 +3612,7 @@ def _encode_task_group_cursor(
 ) -> str:
     body = json.dumps(
         {
-            "v": 1,
+            "v": 2,
             "kind": "task-groups",
             "session_id": session_id,
             "first_accepted_at": first_accepted_at.isoformat(),
@@ -3630,12 +3648,13 @@ def _decode_task_group_cursor(
     }:
         raise ValueError("task group cursor is invalid")
     if (
-        value["v"] != 1
+        value["v"] != 2
         or value["kind"] != "task-groups"
         or value["session_id"] != session_id
     ):
         raise ValueError("task group cursor is invalid")
-    batch_id = value["batch_id"]
+    require_id(session_id, "session")
+    batch_id = require_id(value["batch_id"], "batch")
     seen_count = value["seen_count"]
     if not isinstance(batch_id, str) or not batch_id:
         raise ValueError("task group cursor is invalid")
@@ -3659,7 +3678,7 @@ def _encode_task_activity_cursor(
 ) -> str:
     body = json.dumps(
         {
-            "v": 1,
+            "v": 2,
             "kind": "task-activities",
             "session_id": session_id,
             "task_id": task_id,
@@ -3688,9 +3707,11 @@ def _decode_task_activity_cursor(cursor: str, *, session_id: str, task_id: str) 
         "after_entry_sequence",
     }:
         raise ValueError("task activity cursor is invalid")
+    require_id(session_id, "session")
+    require_id(task_id, "task")
     sequence = value["after_entry_sequence"]
     if (
-        value["v"] != 1
+        value["v"] != 2
         or value["kind"] != "task-activities"
         or value["session_id"] != session_id
         or value["task_id"] != task_id

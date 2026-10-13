@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import require_id
+
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from itertools import zip_longest
@@ -140,6 +142,8 @@ class _MemoryManagementOperations:
         page_size(limit)
         filters = {"domain": memory_domain_id, "directory": "projects"}
         key = decode_cursor(cursor, filters, 2)
+        if key is not None:
+            require_id(key[-1], "workspace")
         with self._management_connection(deadline_monotonic=deadline_monotonic) as c:
             _remaining(c, deadline_monotonic)
             rows = c.execute(
@@ -206,6 +210,8 @@ class _MemoryManagementOperations:
                 "search": search,
             }
             key = decode_cursor(cursor, filters, 2)
+            if key is not None:
+                require_id(key[-1], "memory")
             # strpos is a literal substring: %, _ and backslash have no SQL pattern meaning.
             rows = c.execute(
                 f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation
@@ -279,6 +285,8 @@ class _MemoryManagementOperations:
                 "fact_id": fact_id,
             }
             key = decode_cursor(cursor, filters, 3)
+            if key is not None:
+                require_id(key[-1], "relation")
             row = c.execute(
                 f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation,
                 owner_result.id AS owner_result_id,

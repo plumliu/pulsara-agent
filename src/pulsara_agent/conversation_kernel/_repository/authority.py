@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.repository_errors import UnpublishedIdentityCollision
+
 from datetime import timedelta
 from pathlib import Path
 from typing import Literal
@@ -146,7 +148,7 @@ class _AuthorityOperations:
                 if intent != "NEW" and row is None:
                     raise ConversationKernelConflict("session is unavailable")
                 if intent == "NEW" and row is not None:
-                    raise ConversationKernelConflict("new session identity already exists")
+                    raise UnpublishedIdentityCollision("IDENTITY_CONFLICT: new session identity exists")
                 # For an existing Session this follows the frozen
                 # session -> workspace order; for first creation there is no
                 # Session row to lock yet. The workspace is immutable and the
@@ -188,16 +190,17 @@ class _AuthorityOperations:
                     or str(workspace["workspace_label"]) != normalized_workspace_label
                 ):
                     raise ConversationKernelConflict(
-                        "workspace canonical metadata conflict"
+                        "IDENTITY_CONFLICT: workspace canonical metadata differs"
                     )
                 if row is None:
-                    connection.execute(
+                    inserted = connection.execute(
                         """
                         INSERT INTO pulsara_v3.sessions (
                             id, workspace_id, memory_domain_id,
                             lifecycle, writer_generation,
                             writer_lease_owner_id, writer_lease_expires_at
                         ) VALUES (%s, %s, %s, 'OPEN', 1, %s, %s)
+                        ON CONFLICT (id) DO NOTHING RETURNING id
                         """,
                         (
                             session_id,
@@ -206,7 +209,9 @@ class _AuthorityOperations:
                             writer_owner_id,
                             expires_at,
                         ),
-                    )
+                    ).fetchone()
+                    if inserted is None:
+                        raise UnpublishedIdentityCollision("IDENTITY_CONFLICT: new session identity exists")
                     generation = 1
                     acquisition_kind = HostWriterAcquisitionKind.NEW_SESSION
                 else:

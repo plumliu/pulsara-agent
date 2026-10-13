@@ -1,6 +1,7 @@
 """Explicit search ranks its bounded candidate pool before applying the limit."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 import json
@@ -47,10 +48,10 @@ async def _search(
     io = KernelSessionIO()
     port = KernelMemoryToolPort(
         repository=SimpleNamespace(connection_provider=None),
-        session_id="session:rerank-selection",
+        session_id='session:sajtkthmd5afsimxzxsl25a67q',
         read_binding=freeze_memory_read_context_binding(
             domain=MemoryDomainContext("u_local", "transient"),
-            host_workspace_id="workspace:rerank-selection",
+            host_workspace_id='workspace:vxdcqtelc6tinoq2fbwkz4oxe4',
         ),
         embedding_config=EmbeddingBackendConfig(),
         io_owner=io,
@@ -60,7 +61,7 @@ async def _search(
         await save_model(port._settings, ranking_mode, "test-key", activate=True)
     facts = tuple(
         MemoryQueryRow(
-            fact_id=f"memory:{index}",
+            fact_id=derive_id("memory", "test-fixture", f"memory:{index}"),
             memory_domain_id="u_local",
             context_id=CTX_GLOBAL,
             fact_kind=(
@@ -81,8 +82,8 @@ async def _search(
 
     history = tuple(
         HistoryCandidate(
-            session_id=f"session:history:{i}",
-            q1_entry_id=f"entry:q:{i}",
+            session_id=derive_id("session", "test-fixture", f"session:history:{i}"),
+            q1_entry_id=derive_id("entry", "test-fixture", f"entry:q:{i}"),
             title=f"history {i}",
             score=float(100 - i),
             document={"identity": [i]},
@@ -219,7 +220,7 @@ def test_rerank_can_promote_a_candidate_outside_the_return_limit(
 ):
     body, observed = asyncio.run(_search(tmp_path, monkeypatch, limit=limit))
     ids = tuple(item["memory_id"] for item in body["memories"])
-    expected = ("memory:11", *(f"memory:{index}" for index in range(40) if index != 11))
+    expected = ('memory:wnc5htbuf7tyr364wwomqvp6wu', *(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(40) if index != 11))
     assert ids == expected[:limit]
     assert len(observed.candidates) == max(20, limit)
     assert len(observed.documents) == 20
@@ -234,7 +235,7 @@ def test_rerank_fallback_returns_only_the_requested_rrf_prefix(
 ):
     body, observed = asyncio.run(_search(tmp_path, monkeypatch, limit=5, mode=mode))
     ids = tuple(item["memory_id"] for item in body["memories"])
-    assert ids == tuple(f"memory:{index}" for index in range(5))
+    assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
     assert len(observed.candidates) == 20
     assert observed.relations == ids
     assert body["retrieval_summary"]["ranking"] == "SPARSE_ONLY"
@@ -252,11 +253,11 @@ def test_rerank_pool_preserves_requested_kind_priority_and_relaxation_threshold(
         assert observed.stages == ["DECISION", None]
         assert len(observed.documents) == 20
         assert [item["memory_id"] for item in body["memories"]] == [
-            "memory:0",
-            "memory:1",
-            "memory:11",
-            "memory:2",
-            "memory:3",
+            'memory:wjqlt4qvqiyumufn5ztzwrzlba',
+            'memory:cw6aa73zp6zcl2gg23ht25tx5e',
+            'memory:wnc5htbuf7tyr364wwomqvp6wu',
+            'memory:terdwxk6s7h3fpqh4gdp6vh4ey',
+            'memory:4mstzwylibbbjah5uvrqv37oia',
         ]
         assert [item["filter_match"] for item in body["memories"]] == [
             "EXACT",
@@ -280,8 +281,8 @@ def test_automatic_recall_still_selects_five_rrf_results_without_rerank(
         _search(tmp_path, monkeypatch, limit=5, automatic=True)
     )
     ids = tuple(item["memory_id"] for item in body["items"])
-    assert ids == tuple(f"memory:{index}" for index in range(5))
-    assert observed.candidates == tuple(f"memory:{index}" for index in range(20))
+    assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
+    assert observed.candidates == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(20))
     assert observed.documents == ()
     assert observed.relations == ids
 
@@ -305,9 +306,9 @@ def test_implicit_recall_ranks_twenty_before_injecting_five(
     assert len(observed.documents) == 20
     assert observed.purpose == "automatic_recall"
     if mode == "success":
-        assert ids == ("memory:11", "memory:0", "memory:1", "memory:2", "memory:3")
+        assert ids == ('memory:wnc5htbuf7tyr364wwomqvp6wu', 'memory:wjqlt4qvqiyumufn5ztzwrzlba', 'memory:cw6aa73zp6zcl2gg23ht25tx5e', 'memory:terdwxk6s7h3fpqh4gdp6vh4ey', 'memory:4mstzwylibbbjah5uvrqv37oia')
     else:
-        assert ids == tuple(f"memory:{index}" for index in range(5))
+        assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
     assert observed.relations == ids
 
 
@@ -320,9 +321,9 @@ def test_remember_related_rerank_uses_relation_inspection_purpose(
     assert observed.purpose == "related_memory"
     assert len(observed.documents) == 20
     assert tuple(item.memory_id for item in related) == (
-        "memory:11",
-        "memory:0",
-        "memory:1",
+        'memory:wnc5htbuf7tyr364wwomqvp6wu',
+        'memory:wjqlt4qvqiyumufn5ztzwrzlba',
+        'memory:cw6aa73zp6zcl2gg23ht25tx5e',
     )
     assert coverage["rerank"] == "APPLIED"
 
@@ -419,8 +420,8 @@ def test_automatic_route_timeout_preserves_other_source(
     assert len(body["items"]) == 1
     assert len(observed.documents) == int(rank_automatic)
     if timed_out_route == "history":
-        assert body["items"][0]["memory_id"] == "memory:0"
-        assert observed.candidates == ("memory:0",)
+        assert body["items"][0]["memory_id"] == 'memory:wjqlt4qvqiyumufn5ztzwrzlba'
+        assert observed.candidates == ('memory:wjqlt4qvqiyumufn5ztzwrzlba',)
     else:
         assert body["items"][0]["source"] == "session_history"
 
@@ -428,9 +429,9 @@ def test_automatic_route_timeout_preserves_other_source(
 @pytest.mark.parametrize(
     "scores,expected",
     [
-        ([0.699, 0.7, 0.95, 0.0, 0.8], ("memory:2", "memory:4", "memory:1")),
+        ([0.699, 0.7, 0.95, 0.0, 0.8], ('memory:terdwxk6s7h3fpqh4gdp6vh4ey', 'memory:vsoux3qrotuascpf7m6x65toni', 'memory:cw6aa73zp6zcl2gg23ht25tx5e')),
         ([0.0, 0.5, 0.699, 0.1, 0.2], ()),
-        ([0.8] * 7, tuple(f"memory:{i}" for i in range(5))),
+        ([0.8] * 7, tuple(derive_id("memory", "test-fixture", f"memory:{i}") for i in range(5))),
     ],
 )
 def test_implicit_decision_admission_filters_before_top_five(
@@ -473,7 +474,7 @@ def test_implicit_decision_uses_same_threshold_for_memory_and_history(
     )
     assert [item.get("memory_id", item.get("title")) for item in body["items"]] == [
         "history 0",
-        "memory:1",
+        'memory:cw6aa73zp6zcl2gg23ht25tx5e',
         "history 2",
     ]
     assert len(seen.documents) == 5
@@ -509,9 +510,9 @@ def test_failed_implicit_decision_does_not_bypass_history_admission(
         )
     )
     assert tuple(item["memory_id"] for item in body["items"]) == tuple(
-        f"memory:{i}" for i in range(memory_count)
+        derive_id("memory", "test-fixture", f"memory:{i}") for i in range(memory_count)
     )
-    assert seen.relations == tuple(f"memory:{i}" for i in range(memory_count))
+    assert seen.relations == tuple(derive_id("memory", "test-fixture", f"memory:{i}") for i in range(memory_count))
 
 
 @pytest.mark.parametrize("related", [False, True])
@@ -532,18 +533,18 @@ def test_explicit_decision_and_related_inspection_do_not_use_implicit_threshold(
     if related:
         related_items, coverage = result
         assert tuple(item.memory_id for item in related_items) == (
-            "memory:1",
-            "memory:4",
-            "memory:3",
+            'memory:cw6aa73zp6zcl2gg23ht25tx5e',
+            'memory:vsoux3qrotuascpf7m6x65toni',
+            'memory:4mstzwylibbbjah5uvrqv37oia',
         )
         assert coverage["rerank"] == "APPLIED"
         assert seen.purpose == "related_memory"
     else:
         assert tuple(item["memory_id"] for item in result["memories"]) == (
-            "memory:1",
-            "memory:4",
-            "memory:3",
-            "memory:0",
-            "memory:2",
+            'memory:cw6aa73zp6zcl2gg23ht25tx5e',
+            'memory:vsoux3qrotuascpf7m6x65toni',
+            'memory:4mstzwylibbbjah5uvrqv37oia',
+            'memory:wjqlt4qvqiyumufn5ztzwrzlba',
+            'memory:terdwxk6s7h3fpqh4gdp6vh4ey',
         )
         assert seen.purpose == "recall"

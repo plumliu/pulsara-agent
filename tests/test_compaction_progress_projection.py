@@ -23,8 +23,8 @@ def test_progress_follows_root_fence_in_snapshot_and_observation(role: int, trig
     async def run() -> None:
         owner = HostCompactionRuntimeOwner()
         host = SimpleNamespace(
-            session_id='session:test', host_session_id='host:test', _compaction=owner,
-            live_bus=LiveAgentEventBus(), live_control=SessionLiveControlOwner(session_id='session:test'),
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte', host_session_id='host:yinyxklzunar54s7objjdbphcy', _compaction=owner,
+            live_bus=LiveAgentEventBus(), live_control=SessionLiveControlOwner(session_id='session:336wrfwkamrr3up6kjtsgvgcte'),
             current_todo_snapshots=lambda: (), active_root_turn_id=lambda: None,
             control_admission_deadline_ms=lambda: 10000, take_presentation_notices=lambda _: (),
             current_compaction_projection=owner.current_projection,
@@ -32,15 +32,15 @@ def test_progress_follows_root_fence_in_snapshot_and_observation(role: int, trig
         host.root_compaction_in_progress = lambda: KernelHostSession.root_compaction_in_progress(host)
         observer, epoch, revision = host.live_bus.subscribe()
         state = _Connection(
-            attachment_id='attachment:test', attachment_generation=1, host_session=host,
+            attachment_id='attachment:hmfv6qyb4msxxwadjyltzzsdse', attachment_generation=1, host_session=host,
             granted_role=role, authenticated=True, live_observer_id=observer,
             live_epoch=epoch, live_revision=revision,
             protocol_reader=SimpleNamespace(observe_committed=lambda **_: SimpleNamespace(
                 projections=(), through_event_sequence=0, gap_reason=None)),
         )
         server = TerminalKernelProtocolServer(socket_path=Path('/tmp/compaction-progress-test.sock'), session_provider=lambda _: host)
-        root = CompactionScope('session:test', 'workspace:test', 'turn:test', ModelInputScopeKind.ROOT, None)
-        child = CompactionScope('session:test', 'workspace:test', 'turn:child', ModelInputScopeKind.SUBAGENT_TASK, 'task:test')
+        root = CompactionScope('session:336wrfwkamrr3up6kjtsgvgcte', 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', 'turn:klmmazz67vfgsfsvg6ceqgdsfu', ModelInputScopeKind.ROOT, None)
+        child = CompactionScope('session:336wrfwkamrr3up6kjtsgvgcte', 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', ModelInputScopeKind.SUBAGENT_TASK, 'task:kmz6pl55dsqspcz6dgmhr7sxpy')
         task = asyncio.current_task()
         assert task is not None
 

@@ -7,7 +7,7 @@ from enum import StrEnum
 import re
 
 
-_CALL_ID = re.compile(r"^model_call:[0-9a-f]{32}$")
+_CALL_ID = re.compile(r"^call:[a-z2-7]{25}[aeimquy4]$")
 _MAX_BIGINT = 2**63 - 1
 _USAGE_STATUSES = frozenset({"reported", "partial", "missing", "invalid"})
 _WIRE_APIS = frozenset({"openai_chat_completions", "openai_responses"})

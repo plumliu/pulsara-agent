@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -10,7 +12,6 @@ from time import monotonic
 from threading import Event
 from types import SimpleNamespace
 from typing import cast
-from uuid import uuid4
 
 from PIL import Image
 import psycopg
@@ -26,7 +27,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     PromptDeliveryMode,
 )
 from tests.support.round3 import new_test_provider_input_continuity_owner
-from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt, bind_prompt_images
 from pulsara_agent.conversation_kernel.prompt_content import (
     PROMPT_BODY_CODEC,
     PROMPT_BODY_MEDIA_TYPE,
@@ -86,9 +87,7 @@ pytestmark = pytest.mark.postgres
 
 
 def _id(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _png(*, size: tuple[int, int] = (7, 5)) -> bytes:
@@ -97,8 +96,13 @@ def _png(*, size: tuple[int, int] = (7, 5)) -> bytes:
     return output.getvalue()
 
 
-def _image(payload: bytes | None = None) -> LLMImagePart:
-    return LLMImagePart("image/png", payload or _png(), 7, 5)
+def _image(payload: bytes | None = None, *, workspace_id: str | None = None) -> LLMImagePart:
+    image = LLMImagePart("image/png", payload or _png(), 7, 5)
+    return image if workspace_id is None else bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[0]
+
+
+def _workspace(repository, lease):
+    return str(_rows(repository, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (lease.guard.session_id,))[0]["workspace_id"])
 
 
 def _repository(database) -> ConversationKernelRepository:
@@ -130,10 +134,10 @@ def _direct_intent(repository, lease, runtime, content: FrozenPromptContent):
         command_id=_id("command"),
         turn_id=_id("turn"),
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        canonical_prompt=freeze_canonical_prompt(content),
+        canonical_prompt=freeze_canonical_prompt(content, workspace_id=_workspace(repository, lease)),
         occurred_at=datetime.now(timezone.utc),
     )
     resolution_snapshot = runtime.freeze_resolution_snapshot()
@@ -179,7 +183,7 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
     lease, runtime, _binding = _bound_session(
         repository, workspace_id=workspace_id
     )
-    image = _image()
+    image = _image(workspace_id=_workspace(repository, lease))
     content = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("after"), image)
     )
@@ -280,7 +284,7 @@ def test_known_image_reference_requires_one_committed_owner_in_the_bound_session
     repository = _repository(stage2_migrated_postgres_database)
     workspace_id = _id("workspace")
     lease, runtime, _binding = _bound_session(repository, workspace_id=workspace_id)
-    image = _image()
+    image = _image(workspace_id=_workspace(repository, lease))
     _direct_intent(
         repository,
         lease,
@@ -295,7 +299,7 @@ def test_known_image_reference_requires_one_committed_owner_in_the_bound_session
     reread = reader.read_image(
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
-        image_ref=image.content_digest,
+        image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
     )
@@ -316,7 +320,7 @@ def test_known_image_reference_requires_one_committed_owner_in_the_bound_session
         reader.read_image(
             session_id=lease.guard.session_id,
             workspace_id=workspace_id,
-            image_ref=image.content_digest,
+            image_ref=image.image_ref,
             maximum_encoded_bytes=len(image.immutable_bytes) - 1,
             deadline_monotonic=monotonic() + 30,
         )
@@ -334,12 +338,12 @@ def test_known_image_reference_requires_one_committed_owner_in_the_bound_session
         other_reader.read_image(
             session_id=other_lease.guard.session_id,
             workspace_id=workspace_id,
-            image_ref=image.content_digest,
+            image_ref=image.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
         )
 
-    orphan = _image(_png(size=(8, 6)))
+    orphan = _image(_png(size=(8, 6)), workspace_id=_workspace(repository, lease))
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.ARTIFACT,
         row_factory=dict_row,
@@ -356,7 +360,7 @@ def test_known_image_reference_requires_one_committed_owner_in_the_bound_session
         reader.read_image(
             session_id=lease.guard.session_id,
             workspace_id=workspace_id,
-            image_ref=orphan.content_digest,
+            image_ref=orphan.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
         )
@@ -429,7 +433,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
             deadline_monotonic=monotonic() + 30,
         )
 
-    shared_image = _image()
+    shared_image = _image(workspace_id=_workspace(repository, lease))
 
     def candidate(
         *, ordinal: int, image: LLMImagePart, result_entry_id: str
@@ -542,10 +546,10 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
         current_range=SessionContentRange(state["latest_entry_sequence"]),
         tool_call_id="call:history", deadline_monotonic=monotonic() + 30,
     )
-    assert shared_image.content_digest in page["items"][0]["text"]
+    assert shared_image.image_ref in page["items"][0]["text"]
     assert page["items"][0]["tool_name"] == "view_image"
 
-    rollback_image = _image(_png(size=(8, 6)))
+    rollback_image = _image(_png(size=(8, 6)), workspace_id=_workspace(repository, lease))
     rollback_entry_id = _id("entry")
     rollback_candidate = candidate(
         ordinal=2,
@@ -614,7 +618,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
     assert reference_reader.read_image(
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
-        image_ref=shared_image.content_digest,
+        image_ref=shared_image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
     ) == shared_image
@@ -641,7 +645,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
         reference_reader.read_image(
             session_id=lease.guard.session_id,
             workspace_id=workspace_id,
-            image_ref=shared_image.content_digest,
+            image_ref=shared_image.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
         )
@@ -667,7 +671,7 @@ def test_compaction_headroom_counts_one_snapshot_with_repeated_image_refs_once(
         )[0]["workspace_id"]
     )
     snapshot_id = _id("snapshot")
-    revision_id = _id("revision")
+    revision_id = _id("binding")
     body = InlineContent.from_bytes(
         b"{}",
         media_type="application/vnd.pulsara.context-snapshot+json",
@@ -680,6 +684,7 @@ def test_compaction_headroom_counts_one_snapshot_with_repeated_image_refs_once(
     ) as connection:
         blob = PostgresCanonicalBlobStore.publish_in_connection(
             connection,
+            validated_image=_image(_png(), workspace_id=workspace_id),
             workspace_id=workspace_id,
             content=_png(),
             media_type="image/png",
@@ -750,7 +755,7 @@ def test_full_confirmation_reads_body_blob_but_not_image_payload(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, _binding = _bound_session(repository)
-    image = _image()
+    image = _image(workspace_id=_workspace(repository, lease))
     content = FrozenPromptContent((LLMTextPart("x" * 70_000), image))
     intent, _accepted, _admission = _direct_intent(
         repository, lease, runtime, content
@@ -827,7 +832,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
             (lease.guard.session_id,),
         )[0]["workspace_id"]
     )
-    image = _image()
+    image = _image(workspace_id=_workspace(repository, lease))
     initial_content = FrozenPromptContent((image,))
     permission_id = _id("permission")
     expected_permission = repository.prepare_root_permission_snapshot(
@@ -840,7 +845,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
         session_id=lease.guard.session_id,
         command_id=_id("command"),
         queue_item_id=_id("queue"),
-        client_submission_id=_id("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=permission_id,
@@ -872,7 +877,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
         reference_reader.read_image(
             session_id=lease.guard.session_id,
             workspace_id=workspace_id,
-            image_ref=image.content_digest,
+            image_ref=image.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
         )
@@ -897,7 +902,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     assert reference_reader.read_image(
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
-        image_ref=image.content_digest,
+        image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
     ) == image
@@ -921,7 +926,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
         session_id=lease.guard.session_id,
         command_id=_id("command"),
         queue_item_id=_id("queue"),
-        client_submission_id=_id("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=second_permission_id,
@@ -939,7 +944,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     )
     action = QueuedPromptAction(
         session_id=lease.guard.session_id,
-        command_id=_id("redirect"),
+        command_id=random_id("command"),
         source_queue_item_id=second.queue_item_id,
         target_turn_id=queued.exact_turn_id,
     )
@@ -1049,10 +1054,10 @@ def test_direct_publication_rolls_back_body_image_refs_and_command_together(
         command_id=_id("command"),
         turn_id=_id("turn"),
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        canonical_prompt=freeze_canonical_prompt(FrozenPromptContent((_image(),))),
+        canonical_prompt=freeze_canonical_prompt(FrozenPromptContent((_image(workspace_id=_workspace(repository, lease)),))),
         occurred_at=datetime.now(timezone.utc),
     )
     resolution_snapshot = runtime.freeze_resolution_snapshot()
@@ -1116,6 +1121,7 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     ) as attach:
         blob = PostgresCanonicalBlobStore.publish_in_connection(
             attach,
+            validated_image=_image(payload, workspace_id=workspace_id),
             workspace_id=str(workspace_id),
             content=payload,
             media_type="image/png",
@@ -1216,6 +1222,7 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     ) as publication:
         deleted = PostgresCanonicalBlobStore.publish_in_connection(
             publication,
+            validated_image=_image(payload + b"different", workspace_id=workspace_id),
             workspace_id=str(workspace_id),
             content=payload + b"different",
             media_type="image/png",
@@ -1361,6 +1368,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     with psycopg.connect(runtime_dsn, row_factory=dict_row) as publication:
         attach_first_blob = PostgresCanonicalBlobStore.publish_in_connection(
             publication,
+            validated_image=_image(attach_first_payload, workspace_id=workspace_id),
             workspace_id=workspace_id,
             content=attach_first_payload,
             media_type="image/png",
@@ -1384,6 +1392,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     with psycopg.connect(runtime_dsn, row_factory=dict_row) as attach:
         reused = PostgresCanonicalBlobStore.publish_in_connection(
             attach,
+            validated_image=_image(attach_first_payload, workspace_id=workspace_id),
             workspace_id=workspace_id,
             content=attach_first_payload,
             media_type="image/png",
@@ -1420,6 +1429,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     with psycopg.connect(runtime_dsn, row_factory=dict_row) as publication:
         delete_first_blob = PostgresCanonicalBlobStore.publish_in_connection(
             publication,
+            validated_image=_image(delete_first_payload, workspace_id=workspace_id),
             workspace_id=workspace_id,
             content=delete_first_payload,
             media_type="image/png",
@@ -1487,7 +1497,7 @@ def test_scope_misbinding_and_extra_ref_fail_before_image_hydration(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, _binding = _bound_session(repository)
-    image = _image()
+    image = _image(workspace_id=_workspace(repository, lease))
     content = FrozenPromptContent((image,))
     intent, _accepted, _admission = _direct_intent(
         repository, lease, runtime, content

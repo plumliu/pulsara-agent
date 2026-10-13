@@ -1,6 +1,7 @@
 """PR05 R12–R15: real PostgreSQL transactions and real Unix bridge takeover."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.llm.input import FrozenPromptContent
 
@@ -44,23 +45,23 @@ from tests.test_stage2_conversation_kernel_postgres import _repository, _start_r
 def pg_owner(database):
     repository = _repository(database)
     identity = uuid4().hex
-    session_id = "session:pr05:" + identity
+    session_id = derive_id("session", "test-fixture", identity)
     deadline = monotonic() + 30
     lease = repository.acquire_host_writer(
         intent="NEW",
         session_id=session_id,
-        workspace_id="ctx:workspace/" + identity,
-        writer_owner_id="host:" + identity,
+        workspace_id=derive_id("workspace", "test-fixture", identity),
+        writer_owner_id=derive_id("host", "test-fixture", identity),
         lease_seconds=30,
         deadline_monotonic=deadline,
     )
     turn_id, entry_id, call_id = (
-        "turn:" + identity,
-        "entry:assistant:" + identity,
+        derive_id("turn", "test-fixture", identity),
+        derive_id("entry", "test-fixture", identity),
         "call:" + identity,
     )
     permission = build_run_permission_snapshot(
-        snapshot_id="permission:" + identity,
+        snapshot_id=derive_id("permission", "test-fixture", identity),
         requested_mode=PermissionMode.ASK_PERMISSIONS,
         effective_mode=PermissionMode.ASK_PERMISSIONS,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -68,10 +69,10 @@ def pg_owner(database):
     _start_root_turn(
         repository,
         lease.guard,
-        command_id="command:prompt:" + identity,
+        command_id=derive_id("command", "test-fixture", identity),
         turn_id=turn_id,
-        entry_id="entry:prompt:" + identity,
-        context_binding_revision_id="revision:" + identity,
+        entry_id=derive_id("entry", "test-fixture", identity, "initial"),
+        context_binding_revision_id=derive_id("binding", "test-fixture", identity),
         permission_snapshot_id=permission.snapshot_id,
         requested_permission_mode=PermissionMode.ASK_PERMISSIONS,
         content=FrozenPromptContent.text('PR05 harmless operation'),
@@ -88,7 +89,7 @@ def pg_owner(database):
         parent_content=InlineContent.from_bytes(b"tool request"),
         blocks=(
             AssistantToolCallBlock(
-                block_id="block:" + identity,
+                block_id=derive_id("block", "test-fixture", identity),
                 tool_call_id=call_id,
                 tool_name="terminal",
                 arguments=freeze_json({"command": "true"}),
@@ -130,7 +131,7 @@ def decision_request(owner, live, decision="ALLOW", actor="controller:1"):
         expected_owner_epoch=snapshot.owner_epoch,
         expected_live_revision=snapshot.revision,
         interaction_id=snapshot.current_interaction.interaction_id,
-        command_id="command:decision:" + uuid4().hex,
+        command_id=derive_id("command", "test-fixture", 'command:e27az67pled5zthrriyljftgua' + uuid4().hex),
         decision=decision,
         actor_id=actor,
     )
@@ -493,10 +494,10 @@ def test_r14_exact_confirmation_rejects_partial_and_wrong_identity(
         {"redacted_subject": "other tool"},
         {"permission_snapshot_fingerprint": "other permission"},
         {"tool_call_id": "call:other"},
-        {"decision_id": "decision:other"},
+        {"decision_id": 'decision:yrpgdzyt4sns2er2kyq4nvbqcy'},
         # Existing attempt/result with neither of the requested command/decision
         # rows is partial truth, never proof that no decision was committed.
-        {"command_id": "command:absent", "decision_id": "decision:absent"},
+        {"command_id": 'command:jarev2752java7zv4frgw72ot4', "decision_id": 'decision:6hwj4ympnl72yimgi2qrbsjkke'},
     ]
     for mutation in mutations:
         with pytest.raises(ConversationKernelConflict):

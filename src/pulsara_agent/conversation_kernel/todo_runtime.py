@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, random_id
+
+
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import RLock
-from uuid import uuid4
 
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.tools.builtins.todo import FrozenTodoCandidate, FrozenTodoItem
 
 
@@ -290,7 +291,9 @@ class TodoRunStateOwner:
                 >= MAXIMUM_PENDING_TODO_SETTLEMENTS_PER_RUN
             ):
                 raise RuntimeError("TODO settlement capacity is exhausted")
-            token_id = f"todo-settlement:{uuid4().hex}"
+            token_id = random_id("todo-settlement")
+            while token_id in record.pending_settlements:
+                token_id = random_id("todo-settlement")
             prepared = PreparedTodoReplacement(
                 run_identity=record.run_identity,
                 attempt_id=attempt_id,
@@ -476,10 +479,7 @@ def build_root_activation(
         admission_kind == "QUEUED" and not queued
     ):
         raise ValueError("TODO ROOT admission identity union is invalid")
-    proposed = "todo-root-run:" + context_fingerprint(
-        "pulsara:todo-root-run-id:v1",
-        {"session_id": session_id, "turn_id": exact_turn_id},
-    ).removeprefix("sha256:")
+    proposed = derive_id("todo-run", "root", session_id, exact_turn_id)
     return PreparedTodoRootRunActivation(
         session_id=session_id,
         admission_kind=admission_kind,

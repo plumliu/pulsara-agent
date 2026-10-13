@@ -32,7 +32,7 @@ def prompt_history_text(parts, *, image_references: bool | None):
                 text = HISTORICAL_IMAGE_MARKER
             elif image_references:
                 text = image_reference_text(
-                    digest=part.digest,
+                    image_ref=part.image_ref,
                     media_type=part.media_type,
                     width=part.width,
                     height=part.height,

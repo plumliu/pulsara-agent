@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from dataclasses import dataclass
 
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
@@ -108,7 +110,7 @@ async def probe_model_connection(
         )
         context = LLMContext(
             messages=(LLMMessage.user("Reply with OK."),),
-            context_id="model-connection-probe",
+            context_id=random_id("context"),
             resolved_model_call_id=call.resolved_model_call_id,
             model_call_index=None,
         )

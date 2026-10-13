@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from dataclasses import dataclass, field
 from enum import StrEnum
 import base64
@@ -9,7 +11,6 @@ import hashlib
 import hmac
 import secrets
 from threading import RLock
-from uuid import uuid4
 
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import canonical_json_bytes
@@ -123,15 +124,17 @@ class ProcessLocalNewMcpToolRefOwner:
             tool_route_fingerprint=tool_route_fingerprint,
             issued_by_host_authority=self._authority,
         )
-        settlement_id = f"mcp-ref-settlement:{uuid4().hex}"
-        prepared = PreparedNewMcpToolRefSettlement(
-            settlement_token_id=settlement_id,
-            result_entry_id=result_entry_id,
-            ref=ref,
-        )
         with self._lock:
             if self._closed:
                 raise RuntimeError("new MCP ref owner is closed")
+            settlement_id = random_id("settlement")
+            while settlement_id in self._prepared:
+                settlement_id = random_id("settlement")
+            prepared = PreparedNewMcpToolRefSettlement(
+                settlement_token_id=settlement_id,
+                result_entry_id=result_entry_id,
+                ref=ref,
+            )
             record = self._refs.get(token)
             if record is None:
                 epoch_count = sum(
@@ -151,9 +154,6 @@ class ProcessLocalNewMcpToolRefOwner:
                 )
             elif record.ref != ref:
                 raise RuntimeError("new MCP ref token collision")
-            existing = self._prepared.get(settlement_id)
-            if existing is not None and existing != prepared:
-                raise RuntimeError("new MCP ref settlement identity conflicts")
             self._prepared[settlement_id] = prepared
         return prepared
 

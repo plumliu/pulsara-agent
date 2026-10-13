@@ -1,6 +1,8 @@
 """Round 9.2 production-composition Hook lifecycle integration gates."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import replace
@@ -548,7 +550,7 @@ def test_round9_2_host_sources_stop_and_prefix_continuity(
         )
         result = await session.run_turn(
             PromptContent.text("exercise source ordering and Stop"),
-            command_id="command:round9-2-lifecycle",
+            command_id='command:uxm2w5fekibpr57pjqmliwlqla',
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         assert result.final_text == "FINAL_AFTER_STOP_HOOK"
@@ -629,13 +631,13 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("active-turn-A"),
-                command_id="command:queued-context:A",
+                command_id='command:tpgehs3uhmgjkeoauyzosnr3ue',
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
         )
         await asyncio.wait_for(model.active_provider_started.wait(), timeout=5)
         queued = await session.submit_prompt(
-            command_id="command:queued-context:B",
+            command_id='command:sfgcypahovuavymkmavwwfmyei',
             content=PromptContent.text("queued-turn-B"),
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
@@ -645,7 +647,7 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
         assert active.final_text == "ACTIVE_TURN_A_COMPLETE"
         deadline = monotonic() + 10
         while True:
-            outcome = await session.query_command("command:queued-context:B")
+            outcome = await session.query_command('command:sfgcypahovuavymkmavwwfmyei')
             assert outcome is not None
             if outcome.status == "SUCCEEDED":
                 break
@@ -714,13 +716,13 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("active before image queue"),
-                command_id="command:k2-image-queue-active",
+                command_id='command:bq7hbdteq7c55io3sph77jiarm',
             )
         )
         await asyncio.wait_for(model.active_provider_started.wait(), timeout=5)
         queued_task = asyncio.create_task(
             session.submit_prompt(
-                command_id="command:k2-image-queue",
+                command_id='command:4dryq3dxkrx7t7xwdw3ylqe73e',
                 content=pure_image,
             )
         )
@@ -737,7 +739,7 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
             await asyncio.sleep(0.01)
 
         conflict = await session.submit_prompt(
-            command_id="command:k2-image-queue",
+            command_id='command:4dryq3dxkrx7t7xwdw3ylqe73e',
             content=PromptContent(
                 (
                     LLMTextPart("different"),
@@ -753,7 +755,7 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
         queued = await asyncio.wait_for(queued_task, timeout=5)
         assert queued.status == "PENDING"
         exact_retry = await session.submit_prompt(
-            command_id="command:k2-image-queue",
+            command_id='command:4dryq3dxkrx7t7xwdw3ylqe73e',
             content=pure_image,
         )
         assert (
@@ -798,14 +800,14 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
     assert [value["prompt"] for value in logs].count("different") == 0
     assert len(logs) == 2
     assert model.semantic_input is not None
-    projected_image = LLMImagePart("image/png", image_bytes, 7, 5)
+    projected_image = bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", workspace.resolve().as_posix()))
     assert any(
         message.role is MessageRole.USER
         and message.content
         == (
             LLMTextPart(
                 '{"pulsara_image":{"image_ref":"'
-                + projected_image.content_digest
+                + projected_image.image_ref
                 + '"}}'
             ),
             projected_image,
@@ -865,7 +867,7 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
         )
         result = await session.run_turn(
             PromptContent.text("exercise tool Hooks"),
-            command_id="command:round9-2-tools",
+            command_id='command:qvobbjdrl3pvvt7mex5os2ukr4',
             requested_permission_mode=PermissionMode.ASK_PERMISSIONS,
         )
         assert result.final_text == "TOOLS_COMPLETE"
@@ -1035,7 +1037,7 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
         try:
             result = await session.run_turn(
                 PromptContent.text("Reload the reviewed Hook source, then read one file."),
-                command_id="command:round9-2-reload",
+                command_id='command:6sm54fiz2umliomu4ki22ohtuq',
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
             assert result.final_text == "RELOAD_COMPLETE"
@@ -1167,7 +1169,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
             test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         entered = await session.enter_plan(
-            command_id="command:round9-2-enter-plan",
+            command_id='command:jocoa7xxrnrv744feyy7cltls4',
             entry_reason="exercise delayed Plan settlement",
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
@@ -1175,7 +1177,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("Ask the planned question"),
-                command_id="command:round9-2-plan-question",
+                command_id='command:oby2jygwmo7eb2s3kziocrqkhy',
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
         )
@@ -1213,7 +1215,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
             ).fetchone()
         assert workflow == {"workflow_revision": 2}
         resolution = await session.resolve_plan_question(
-            command_id="command:round9-2-answer",
+            command_id='command:ip22uxhlcrmegnas3upzsgydrq',
             workflow_id=entered.target_id,
             expected_workflow_revision=2,
             interaction_id=opened.interaction_id,
@@ -1312,7 +1314,7 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
         try:
             result = await session.run_turn(
                 PromptContent.text("Delegate one child lifecycle probe."),
-                command_id="command:round9-2-subagent",
+                command_id='command:i4edho72yhopiobty7ordlrooa',
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
             assert result.final_text == "ROOT_AFTER_CHILD_COMPLETE"
@@ -1419,12 +1421,12 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
         for index in range(3):
             result = await session.run_turn(
                 PromptContent.text(f"history request {index}: " + ("context " * 4096)),
-                command_id=f"command:round9-2-history:{index}",
+                command_id=derive_id("command", "test-fixture", f"command:round9-2-history:{index}"),
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
             assert result.final_text.endswith("HISTORY_RESPONSE")
         outcome = await session.compact_context(
-            command_id="command:round9-2-idle-compact",
+            command_id='command:twwkfwp4aqirfamrkvljbq42ca',
             force=True,
         )
         assert outcome.disposition is CompactionDisposition.COMPACTED
@@ -1445,7 +1447,7 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
         assert snapshots[0]["source_through_sequence"] > 0
         after = await session.run_turn(
             PromptContent.text("continue after idle compaction"),
-            command_id="command:round9-2-after-idle-compact",
+            command_id='command:wmqx2ceyufuagahjy3w6wewue4',
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         assert after.final_text == "AFTER_IDLE_COMPACTION"
@@ -1533,7 +1535,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         for index in range(6):
             result = await first.run_turn(
                 PromptContent.text(f"resume history {index}: " + ("context " * 4096)),
-                command_id=f"command:round9-2-resume-history:{index}",
+                command_id=derive_id("command", "test-fixture", f"command:round9-2-resume-history:{index}"),
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
             assert result.final_text == f"RESUME_HISTORY_{index}"
@@ -1561,7 +1563,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         )
         result = await resumed.run_turn(
             PromptContent.text("resume first physical attempt: " + ("context " * 4096)),
-            command_id="command:round9-2-resume-compaction",
+            command_id='command:4bh63uwp24ufzoyeec4uq3p4fy',
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         assert result.final_text == "RESUME_COMPACTION_COMPLETE"
@@ -1637,7 +1639,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             for index in range(3):
                 result = await session.run_turn(
                     PromptContent.text(f"active history {index}: " + ("context " * 4096)),
-                    command_id=f"command:round9-2-active-history:{index}",
+                    command_id=derive_id("command", "test-fixture", f"command:round9-2-active-history:{index}"),
                     requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                 )
                 assert result.final_text == (
@@ -1646,7 +1648,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             running = asyncio.create_task(
                 session.run_turn(
                     PromptContent.text("active compaction request: " + ("context " * 4096)),
-                    command_id="command:round9-2-active-turn",
+                    command_id='command:vgxmnbslvpzl2mqst4a2lygz34',
                     requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                 )
             )
@@ -1655,7 +1657,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             assert active_turn_id is not None
             compacting = asyncio.create_task(
                 session.compact_context(
-                    command_id="command:round9-2-active-compact",
+                    command_id='command:ryzh4hl54myfkiogcx65edh4fu',
                     force=True,
                     expected_active_turn_id=active_turn_id,
                 )
@@ -1663,7 +1665,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             deadline = monotonic() + 5
             while (
                 await session._compaction.find_manual(  # noqa: SLF001
-                    command_id="command:round9-2-active-compact",
+                    command_id='command:ryzh4hl54myfkiogcx65edh4fu',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
                 )

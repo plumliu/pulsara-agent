@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
+
 from datetime import datetime
 from typing import Mapping
 
@@ -55,7 +58,6 @@ from .contracts import (
     ConversationKernelConflict,
     PreparedAutomaticSubagentCompletion,
     SubagentCompletionDisposition,
-    _stable_identity,
 )
 
 
@@ -109,9 +111,7 @@ class _SubagentCompletionOperations:
                 guard,
                 task_id=task_id,
                 turn_id=turn_id,
-                entry_id=_stable_identity(
-                    "entry", guard.session_id, task_id, turn_id, "subagent-completion"
-                ),
+                entry_id=derive_id('entry', 'agent-completion-active', turn_id, task_id),
                 source_workspace_id=str(task["workspace_id"]),
                 storage_body=body,
                 lock=False,
@@ -170,9 +170,7 @@ class _SubagentCompletionOperations:
                 guard,
                 task_id=task_id,
                 turn_id=turn_id,
-                entry_id=_stable_identity(
-                    "entry", guard.session_id, task_id, turn_id, "subagent-completion"
-                ),
+                entry_id=derive_id('entry', 'agent-completion', turn_id),
                 context_binding_revision_id=new_context_binding_revision_id,
                 source_workspace_id=str(task["workspace_id"]),
                 requested_permission_mode=requested_permission_mode,
@@ -228,13 +226,7 @@ class _SubagentCompletionOperations:
                 workspace_id=str(task["workspace_id"]),
                 task_id=task_id,
                 target_turn_id=expected_provider_input_cut.turn_id,
-                entry_id=_stable_identity(
-                    "entry",
-                    guard.session_id,
-                    task_id,
-                    expected_provider_input_cut.turn_id,
-                    "subagent-completion",
-                ),
+                entry_id=derive_id('entry', 'agent-completion-active', expected_provider_input_cut.turn_id, task_id),
                 expected_provider_input_cut=expected_provider_input_cut,
                 storage_body=body,
             )
@@ -475,8 +467,10 @@ class _SubagentCompletionOperations:
                 accepted_entry,
             )
 
-        entry_id = _stable_identity(
-            "entry", guard.session_id, task_id, turn_id, "subagent-completion"
+        entry_id = (
+            derive_id('entry', 'agent-completion', turn_id)
+            if new_context_binding_revision_id is not None
+            else derive_id('entry', 'agent-completion-active', turn_id, task_id)
         )
         body = self._completion_storage_body(
             connection,
@@ -584,13 +578,7 @@ class _SubagentCompletionOperations:
             workspace_id=str(task["workspace_id"]),
             drafts=(
                 CommittedEventDraft(
-                    event_id=_stable_identity(
-                        "event",
-                        guard.session_id,
-                        task_id,
-                        turn_id,
-                        "InterAgentMessageAccepted",
-                    ),
+                    event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.name, SubjectSlot.ENTRY.name, entry_id, ""),
                     event_type=CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED,
                     subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
                     actor_kind=("runtime" if automatic else "user"),
@@ -744,7 +732,7 @@ class _SubagentCompletionOperations:
         permission = self._freeze_root_permission_snapshot(
             connection,
             session_id=guard.session_id,
-            snapshot_id=_stable_identity("permission-snapshot", turn_id),
+            snapshot_id=derive_id('permission', 'admission', turn_id),
             requested_mode=requested_permission_mode,
             admission_source=(
                 RunPermissionAdmissionSource.SUBAGENT_COMPLETION_COMMAND
@@ -1021,7 +1009,7 @@ class _SubagentCompletionOperations:
         permission = self._freeze_root_permission_snapshot(
             connection,
             session_id=guard.session_id,
-            snapshot_id=_stable_identity("permission-snapshot", turn_id),
+            snapshot_id=derive_id('permission', 'admission', turn_id),
             requested_mode=requested_permission_mode,
             admission_source=RunPermissionAdmissionSource.SUBAGENT_COMPLETION_COMMAND,
         )

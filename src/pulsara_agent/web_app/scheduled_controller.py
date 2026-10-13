@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from aiohttp import web
+from pulsara_agent.identity import is_valid_id
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
 from pulsara_agent.scheduling.requests import validate_action
 
@@ -32,10 +33,9 @@ class ScheduledTaskController:
         return value
 
     async def list(self, request):
-        if set(request.query) - {"cursor", "status", "session_id"}:
-            raise ScheduledTaskError("INVALID_REQUEST", "列表查询字段无效。")
-        if "session_id" in request.query and not request.query["session_id"]:
-            raise ScheduledTaskError("INVALID_REQUEST", "会话身份不能为空。")
+        if "action" in request.query:
+            raise ScheduledTaskError("INVALID_REQUEST", "任务查询字段无效。")
+        validate_action({"action": "list", **dict(request.query)})
         return web.json_response(
             await self.service.list(
                 cursor=request.query.get("cursor"), status=request.query.get("status"),
@@ -46,11 +46,14 @@ class ScheduledTaskController:
     async def list_sessions(self, request):
         if set(request.query) - {"query", "cursor"}:
             raise ScheduledTaskError("INVALID_REQUEST", "会话查询字段无效。")
+        if "cursor" in request.query and not is_valid_id(request.query["cursor"], "session"):
+            raise ScheduledTaskError("INVALID_ID", "会话身份字段无效。")
         return web.json_response(await self.service.list_sessions(
             query=request.query.get("query", ""), cursor=request.query.get("cursor"),
         ))
 
     async def get(self, request):
+        validate_action({"action": "get", "task_id": request.match_info["task_id"]})
         return web.json_response(await self.service.get(request.match_info["task_id"]))
 
     async def create(self, request):
@@ -68,6 +71,7 @@ class ScheduledTaskController:
 
     async def update(self, request):
         value = await self.body(request, {"expected_revision", "values"})
+        validate_action({"action": "update", "task_id": request.match_info["task_id"], **value})
         return web.json_response(
             await self.service.mutate(
                 task_id=request.match_info["task_id"], action="update", **value
@@ -78,6 +82,7 @@ class ScheduledTaskController:
         action = request.match_info["action"]
         if action == "switch":
             value = await self.body(request, {"expected_revision", "target"})
+            validate_action({"action": "switch", "task_id": request.match_info["task_id"], **value})
             return web.json_response(await self.service.switch(task_id=request.match_info["task_id"], **value))
         if action == "run-now":
             value = await self.body(
@@ -96,6 +101,7 @@ class ScheduledTaskController:
         if action not in {"pause", "resume", "delete"}:
             raise ScheduledTaskError("INVALID_ACTION", "任务操作无效。")
         value = await self.body(request, {"expected_revision"})
+        validate_action({"action": action, "task_id": request.match_info["task_id"], **value})
         result = await self.service.mutate(
             task_id=request.match_info["task_id"], action=action, **value
         )

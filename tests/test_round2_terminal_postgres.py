@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from pulsara_agent.llm.input import FrozenPromptContent
 
 from datetime import datetime, timezone
 import json
 from time import monotonic
-from uuid import uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -61,9 +62,7 @@ pytestmark = pytest.mark.postgres
 
 
 def _name(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _content(*, observation_id: str) -> TerminalObservationContentV1:
@@ -112,7 +111,7 @@ def _candidate(
         through_cursor="cursor:through",
         target=target,
         occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
     )
 
 
@@ -166,8 +165,8 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
-        permission_snapshot_id=_name("permission-snapshot"),
+        context_binding_revision_id=_name("binding"),
+        permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
         content=FrozenPromptContent.text('human prompt'),
@@ -273,8 +272,8 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         command_id=_name("command"),
         turn_id=origin_turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
-        permission_snapshot_id=_name("permission-snapshot"),
+        context_binding_revision_id=_name("binding"),
+        permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
         content=FrozenPromptContent.text('origin'),
@@ -285,11 +284,11 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         lease.guard,
         turn_id=origin_turn_id,
         reason="terminal observation fixture",
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
-    target = NewTurnInstallation(_name("turn"), _name("revision"), _name("entry"))
+    target = NewTurnInstallation(_name("turn"), _name("binding"), _name("entry"))
     candidate = _candidate(
         session_id=session_id,
         workspace_id=workspace_id,
@@ -348,7 +347,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         deadline_monotonic=monotonic() + 30,
     )
     invalid_permission = build_run_permission_snapshot(
-        snapshot_id=_name("permission-snapshot"),
+        snapshot_id=_name("permission"),
         requested_mode=DEFAULT_PERMISSION_MODE,
         effective_mode=DEFAULT_PERMISSION_MODE,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -620,8 +619,8 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
-        permission_snapshot_id=_name("permission-snapshot"),
+        context_binding_revision_id=_name("binding"),
+        permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
         content=FrozenPromptContent.text('run terminal'),

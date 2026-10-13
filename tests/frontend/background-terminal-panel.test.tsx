@@ -39,7 +39,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
   });
 
   it('freezes one exact reference, shows retained output, and keeps partial failure visible', async () => {
-    vi.stubGlobal('crypto', { randomUUID: () => 'control-uuid' });
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0) });
     const terminate = vi.fn(async (reference: UserControlCommandRef): Promise<CommandReceipt> => ({
       commandId: reference.commandId,
       status: 'failed',
@@ -72,7 +72,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
     expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('line-1\nline-2');
     fireEvent.click(screen.getByRole('button', { name: '终止 printf long-output' }));
     await waitFor(() => expect(terminate).toHaveBeenCalledWith(expect.objectContaining({
-      commandId: 'command:control:42000:control-uuid',
+      commandId: 'command:aaaaaaaaaaaaaaaaaaaaaaaaaa', admissionDeadlineMs: 42000,
       sessionId: 'session-a', hostSessionId: 'host-a', targetId: 'process-a',
     })));
     expect(screen.getByText('进程已结束，但 monitor 关闭失败。')).toBeTruthy();

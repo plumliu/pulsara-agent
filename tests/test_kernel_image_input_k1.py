@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.prompt_content import (
     CanonicalPromptBody,
+    bind_prompt_images,
     MAXIMUM_PROMPT_MULTIPART_BYTES,
     PROMPT_BODY_CODEC,
     PROMPT_BODY_MEDIA_TYPE,
@@ -67,12 +68,13 @@ def _validated_image(
 ) -> LLMImagePart:
     # K2 owns actual codec validation; this fixture starts at K1's frozen-value
     # boundary and never claims the placeholder bytes form a decodable image.
-    return LLMImagePart(
+    image = LLMImagePart(
         media_type=media_type,
         immutable_bytes=payload,
         width=width,
         height=height,
     )
+    return bind_prompt_images(FrozenPromptContent((image,)), "workspace:" + "a" * 26).parts[0]
 
 
 def test_prompt_content_is_one_ordered_typed_ingress_vocabulary() -> None:
@@ -160,6 +162,7 @@ def test_complete_content_identity_covers_image_bytes_shape_order_and_occurrence
     assert descriptor == {
         "type": "image",
         "digest": image.content_digest,
+        "image_ref": image.image_ref,
         "encoded_bytes": 1,
         "media_type": "image/png",
         "width": 31,
@@ -207,7 +210,7 @@ def test_canonical_prompt_codec_preserves_interleaving_and_duplicate_refs() -> N
     assert PROMPT_BODY_MEDIA_TYPE == "application/vnd.pulsara.prompt+json"
     assert PROMPT_BODY_CODEC == "utf-8"
     assert PROMPT_IMAGE_BLOB_CODEC == "binary"
-    assert value["schema"] == PROMPT_BODY_SCHEMA == "pulsara.prompt/v1"
+    assert value["schema"] == PROMPT_BODY_SCHEMA == "pulsara.prompt/v2"
     assert [part["type"] for part in value["parts"]] == [
         "text",
         "image",
@@ -266,10 +269,10 @@ def test_canonical_prompt_decoder_and_hydration_are_exact() -> None:
 @pytest.mark.parametrize(
     "body",
     (
-        b'{"parts":[{"text":"x","type":"text"}],"schema":"pulsara.prompt/v1","schema":"pulsara.prompt/v1"}',
-        b'{"extra":0,"parts":[{"text":"x","type":"text"}],"schema":"pulsara.prompt/v1"}',
-        b'{"parts":[{"extra":0,"text":"x","type":"text"}],"schema":"pulsara.prompt/v1"}',
-        b'{"schema": "pulsara.prompt/v1", "parts": [{"type": "text", "text": "x"}]}',
+        b'{"parts":[{"text":"x","type":"text"}],"schema":"pulsara.prompt/v2","schema":"pulsara.prompt/v2"}',
+        b'{"extra":0,"parts":[{"text":"x","type":"text"}],"schema":"pulsara.prompt/v2"}',
+        b'{"parts":[{"extra":0,"text":"x","type":"text"}],"schema":"pulsara.prompt/v2"}',
+        b'{"schema": "pulsara.prompt/v2", "parts": [{"type": "text", "text": "x"}]}',
     ),
 )
 def test_canonical_prompt_decoder_rejects_duplicate_unknown_and_noncanonical_json(
@@ -288,12 +291,10 @@ def test_complete_multipart_limit_uses_exact_body_plus_each_occurrence() -> None
 
 def test_descriptor_quote_rejects_expanded_content_before_hydration() -> None:
     image = _validated_image(b"x")
-    body = (
-        b'{"parts":[{"digest":"'
-        + image.content_digest.encode("ascii")
-        + b'","encoded_bytes":16777216,"height":1,"media_type":"image/png",'
-        b'"type":"image","width":1}],"schema":"pulsara.prompt/v1"}'
-    )
+    body = json.dumps({"parts": [{"digest": image.content_digest,
+        "image_ref": image.image_ref, "encoded_bytes": 16777216,
+        "height": 1, "media_type": "image/png", "type": "image", "width": 1}],
+        "schema": "pulsara.prompt/v2"}, sort_keys=True, separators=(",", ":")).encode()
     decoded = decode_canonical_prompt_body(body)
 
     with pytest.raises(ValueError, match="multipart bound"):

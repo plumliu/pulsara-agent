@@ -1,4 +1,6 @@
 """Minimum feedback admission and actual compiler/wire delivery boundaries."""
+from tests.support.images import bound_test_image
+from pulsara_agent.identity import derive_id
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -98,7 +100,7 @@ def test_minimum_upper_bounds_real_omitted_normal_and_late_metadata(api, origin)
         ),
         api,
     )
-    base = _tool_result("body", sequence=3, turn_id="turn:test")
+    base = _tool_result("body", sequence=3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     duration_values = (
         (None,)
         if origin is ToolObservationOrigin.POLICY
@@ -116,12 +118,12 @@ def test_minimum_upper_bounds_real_omitted_normal_and_late_metadata(api, origin)
         (ToolOutputArtifactDisposition.NOT_REQUIRED, None, None),
         (
             ToolOutputArtifactDisposition.AVAILABLE,
-            "artifact:tool-result:" + "f" * 64,
+            'artifact:uoos2whccxrk6enuwziavscou4',
             None,
         ),
         (
             ToolOutputArtifactDisposition.INCOMPLETE,
-            "artifact:tool-result:" + "f" * 64,
+            'artifact:uoos2whccxrk6enuwziavscou4',
             None,
         ),
         *(
@@ -145,7 +147,7 @@ def test_minimum_upper_bounds_real_omitted_normal_and_late_metadata(api, origin)
     cases += [
         (
             ToolOutputArtifactDisposition.INCOMPLETE,
-            "artifact:tool-result:" + "f" * 64,
+            'artifact:uoos2whccxrk6enuwziavscou4',
             None,
             ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
             ToolOutputSourceCoverageReason.TERMINAL_SANITIZER_UNAVAILABLE,
@@ -168,8 +170,8 @@ def test_minimum_upper_bounds_real_omitted_normal_and_late_metadata(api, origin)
         reported,
     ) in cases:
         timing = freeze_tool_observation_timing_fact(
-            session_id="s",
-            turn_id="t",
+            session_id='session:uol64i4tlakqmd3ow6kdvbdqpy',
+            turn_id="turn:" + "a" * 26,
             observed_at=datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc),
             observation_duration_microseconds=duration,
             tool_reported_duration_microseconds=reported,
@@ -223,24 +225,24 @@ def _results(body, *, provenance=(), full=False, plan=False):
     tool_name = "artifact_read" if full else "read_file"
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (),
         tool_calls=(ProviderToolCall("call:3", tool_name, args),),
     )
-    result = _tool_result(body, sequence=3, turn_id="turn:test")
+    result = _tool_result(body, sequence=3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     metadata = replace(
         result.tool_result_context,
-        artifact_id="artifact:tool-result:" + "0" * 64,
+        artifact_id='artifact:uoos2whccxrk6enuwziavscou4' + "0" * 64,
         model_visible_memory_fact_ids=provenance,
     )
     if plan:
         metadata = replace(
             metadata,
             timing=freeze_tool_observation_timing_fact(
-                session_id="s",
-                turn_id="t",
+                session_id='session:uol64i4tlakqmd3ow6kdvbdqpy',
+                turn_id="turn:" + "a" * 26,
                 observed_at=datetime.now(timezone.utc),
                 observation_duration_microseconds=None,
                 tool_reported_duration_microseconds=None,
@@ -249,7 +251,7 @@ def _results(body, *, provenance=(), full=False, plan=False):
         )
     result = replace(
         result,
-        tool_request_entry_id="entry:2",
+        tool_request_entry_id='entry:yym6qf3l4xz6437gradtmhjrke',
         tool_call_ordinal=0,
         tool_call_arguments=args,
         tool_result_context=metadata,
@@ -397,7 +399,7 @@ def _runner_quote(monkeypatch, calls, api):
 def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, api):
     calls = [
         CompletedToolCallBlock(
-            f"block:{i}", f"call:{i}", "read_file", freeze_json({"path": "example.txt"})
+            derive_id("block", "test-fixture", f"block:{i}"), f"call:{i}", "read_file", freeze_json({"path": "example.txt"})
         )
         for i in range(3)
     ]
@@ -433,7 +435,7 @@ def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, a
     ),
 )
 def test_pre_effect_full_and_plan_keep_existing_carriers(monkeypatch, api, name, args):
-    call = CompletedToolCallBlock("block:1", "call:1", name, freeze_json(args))
+    call = CompletedToolCallBlock('block:b6jcz3ejkiu6yivknhzowsm5eu', "call:1", name, freeze_json(args))
     _, _, seen = _runner_quote(monkeypatch, [call], api)
     assert not any(
         "PULSARA_TOOL_RESULT_BODY_OMITTED" in part.text
@@ -525,7 +527,7 @@ def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
             for i in range(3)
             for message in _ordinary_result_followup_upper(
                 CompletedToolCallBlock(
-                    f"block:{i}",
+                    derive_id("block", "test-fixture", f"block:{i}"),
                     f"call:{i}",
                     "terminal",
                     freeze_json({"command": "true"}),
@@ -637,7 +639,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
     from pulsara_agent.conversation_kernel.direct_model import (
         quote_provider_followup_wire_resources,
     )
-    from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMMessage
+    from pulsara_agent.llm.input import FrozenPromptContent, LLMMessage
     from pulsara_agent.llm.provider_replay import (
         build_prepared_durable_provider_assistant_replay,
     )
@@ -668,8 +670,8 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
     native = freeze_json(native_value)
     replay = build_prepared_durable_provider_assistant_replay(
         session_id=request.session_id,
-        workspace_id="workspace:test",
-        assistant_entry_id="entry:assistant",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         target=port.replay_target_for_resolved_call(request.prepared_call.call),
         public_projection_fingerprint="sha256:" + "1" * 64,
         ordered_items=(native,),
@@ -729,7 +731,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
         carriers, increments = [], []
         for i, allowance in enumerate(allowances):
             source = parse_view_image_source({"path": f"/tmp/{i}.png"})
-            image = LLMImagePart("image/png", b"x" * (100 + i), 1, 1)
+            image = bound_test_image("image/png", b"x" * (100 + i), 1, 1)
             content = FrozenPromptContent((image,))
             increment = owner.quote(
                 tool_call_id=allowance.tool_call_id, source=source, content=content

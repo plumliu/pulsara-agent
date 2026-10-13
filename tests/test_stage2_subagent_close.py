@@ -41,7 +41,7 @@ class _Repository:
         draft = kwargs["candidate"].ordered_tasks[0]
         self.row = {
             "id": draft.task_id,
-            "workspace_id": "workspace:test",
+            "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
             "status": draft.initial_status.value,
             "terminal_reason": draft.terminal_reason,
             "result_id": None,
@@ -91,12 +91,12 @@ def test_host_close_interrupts_subagent_instead_of_user_cancelling_it() -> None:
         repository = _Repository()
         manager = KernelSubagentManager(
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="host:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch='host:yinyxklzunar54s7objjdbphcy'
             ),
             launch_preparation=StaticSubagentLaunchPreparationPort(),
             hook_workspace_root=Path.cwd,
@@ -105,10 +105,10 @@ def test_host_close_interrupts_subagent_instead_of_user_cancelling_it() -> None:
             lambda _scope: _BlockingRunner()  # type: ignore[arg-type]
         )
         subject = build_parent_context_call_subject(
-            session_id="session:test",
-            caller_turn_id="turn:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            caller_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
             provider_input_cut_fingerprint="sha256:cut",
-            continuity_epoch_nonce="epoch:test",
+            continuity_epoch_nonce='epoch:oqvlxjh4xkrycrokcvcpxjjspi',
             continuity_epoch_revision=0,
             compiled_semantic_input_fingerprint="sha256:semantic",
             compiled_message_placements_fingerprint="sha256:placements",
@@ -118,10 +118,10 @@ def test_host_close_interrupts_subagent_instead_of_user_cancelling_it() -> None:
             tool_name="spawn_agent",
             arguments={"task": "wait forever"},
             invocation_context=SimpleNamespace(
-                session_id="session:test",
-                workspace_id="workspace:test",
-                turn_id="turn:test",
-                attempt_id="attempt:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+                workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+                attempt_id='attempt:wfltiqfg6cmo6cuivaxvkm4dr4',
                 conversation_scope_kind="ROOT",
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
@@ -147,12 +147,12 @@ def test_round9_2_subagent_close_deadline_applies_to_first_producer_join() -> No
         repository = _Repository()
         manager = KernelSubagentManager(
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="host:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch='host:yinyxklzunar54s7objjdbphcy'
             ),
             launch_preparation=StaticSubagentLaunchPreparationPort(),
             hook_workspace_root=Path.cwd,

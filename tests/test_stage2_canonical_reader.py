@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from time import monotonic
-from uuid import uuid4
 
 import pytest
 from psycopg.rows import dict_row
@@ -118,9 +119,7 @@ def _root_provider_input_admission(
 
 
 def _id(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _start_turn(repository, lease, text: bytes):
@@ -132,8 +131,8 @@ def _start_turn(repository, lease, text: bytes):
         command_id=_id("command"),
         turn_id=turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
-        permission_snapshot_id=_id("permission-snapshot"),
+        context_binding_revision_id=_id("binding"),
+        permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=model_call_binding,
         content=FrozenPromptContent.text(text.decode("utf-8")),
@@ -222,7 +221,7 @@ def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
         lease.guard,
         command_id=_id("command"),
         queue_item_id=queue_item_id,
-        client_submission_id=_id("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),
@@ -319,7 +318,7 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
         lease.guard,
         command_id=_id("command"),
         queue_item_id=queue_item_id,
-        client_submission_id=_id("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),
@@ -700,7 +699,7 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
                 tool_name="artifact_read",
                 arguments=freeze_json(
                     {
-                        "artifact_id": "artifact:test",
+                        "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy',
                         "offset_chars": 0,
                         "max_chars": 20_000,
                     }
@@ -846,7 +845,7 @@ def test_reader_preflights_plan_continuation_before_loading_any_payload(
         turn_id=origin_turn_id,
         selected_tool_name="enter_plan",
         selected_arguments={"reason": "preflight plan continuation"},
-        workflow_id=_id("plan-workflow"),
+        workflow_id=_id("plan"),
         expected_workflow_revision=None,
     )
     accepted = repository.accept_plan_tool_batch(
@@ -1184,8 +1183,8 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
                     ),
                 ),
                 snapshot_id=_id("snapshot"),
-                binding_revision_id=_id("revision"),
-                event_id=_id("compaction-event"),
+                binding_revision_id=_id("binding"),
+                event_id=_id("event"),
                 source_through_sequence=first_answer.entry_sequence,
                 source_digest=canonical_compaction_range_digest(
                     compaction_read.lineage_base,
@@ -1282,7 +1281,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         task_id=task_id,
         turn_id=child_turn,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         task_start_event_id=task_id.launch.task_start.event_id,
         expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"return one exact result"),
@@ -1300,7 +1299,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         turn_id=child_turn,
         deadline_monotonic=monotonic() + 30,
     )
-    child_result_id = _id("subagent-result")
+    child_result_id = _id("agent-result")
     child_reply_entry_id = _id("entry")
     child_result_text = "the exact child result"
     child_result = build_subagent_result_public_fact(
@@ -1340,7 +1339,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
             turn_id=root_turn,
             task_id=task_id,
             command_id=command_id,
-            actor_id="host:test",
+            actor_id='host:yinyxklzunar54s7objjdbphcy',
             deadline_monotonic=monotonic() + 30,
         )
     with provider.connection(
@@ -1364,11 +1363,11 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         turn_id=root_turn,
         reason="PARENT_ALREADY_TERMINAL",
         occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
         deadline_monotonic=monotonic() + 30,
     )
     new_root_turn = _id("turn")
-    new_revision = _id("revision")
+    new_revision = _id("binding")
     provider_candidate = (
         repository.prepare_manual_subagent_completion_root_provider_input_candidate(
             lease.guard,
@@ -1389,7 +1388,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         task_id=task_id,
         command_id=command_id,
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
         deadline_monotonic=monotonic() + 30,
     )
     assert accepted.entry is not None
@@ -1425,7 +1424,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         task_id=task_id,
         command_id=command_id,
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
         deadline_monotonic=monotonic() + 30,
     )
     assert compatible == accepted

@@ -5,6 +5,9 @@ disposable loopback PostgreSQL database and a temporary Pulsara home.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 import asyncio
 from dataclasses import replace
@@ -126,7 +129,7 @@ async def _run() -> dict[str, object]:
                     first_call = len(calls)
                     result = await session.run_turn(
                         PromptContent.text(prompt),
-                        command_id=f"command:deepseek-epoch:{uuid4().hex}:{index}",
+                        command_id=derive_id("command", "test-fixture", f"command:deepseek-epoch:{uuid4().hex}:{index}"),
                     )
                     finals.append(result.final_text)
                     turn_calls.append(tuple(calls[first_call:]))
@@ -140,14 +143,14 @@ async def _run() -> dict[str, object]:
                     session, segments=6, repetitions=300
                 )
                 compaction = await session.compact_context(
-                    command_id=f"command:deepseek-epoch:compact:{uuid4().hex}",
+                    command_id=random_id("command"),
                     force=True,
                 )
                 await session.update_model_call_binding(_binding(delegate, responses))
                 first_call = len(calls)
                 after_compaction = await session.run_turn(
                     PromptContent.text("Reply exactly POST_COMPACTION_OK."),
-                    command_id=f"command:deepseek-epoch:resume:{uuid4().hex}",
+                    command_id=random_id("command"),
                 )
                 turn_calls.append(tuple(calls[first_call:]))
                 with session.repository.connection_provider.connection(

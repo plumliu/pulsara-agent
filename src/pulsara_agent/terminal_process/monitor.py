@@ -8,6 +8,8 @@ by supplying a pre-minted installation target.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id, require_id
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -15,7 +17,6 @@ from hashlib import sha256
 from threading import Condition, Lock, RLock, Thread
 from time import monotonic
 from typing import Callable
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
@@ -247,7 +248,7 @@ class TerminalMonitorCoordinator:
                 raise TerminalMonitorRejected(
                     TerminalMonitorRejectionReason.DUPLICATE_PROCESS_MONITOR
                 )
-        monitor_id = f"terminal-monitor:{uuid4().hex}"
+        monitor_id = random_id("monitor")
         callback_gate = Lock()
         buffered_callbacks: list[tuple[bytes, int, int]] = []
         callback_active = False
@@ -278,7 +279,7 @@ class TerminalMonitorCoordinator:
                 TerminalMonitorRejectionReason.PROCESS_ALREADY_TERMINAL
             )
         now = monotonic()
-        token_id = f"terminal-monitor-settlement:{uuid4().hex}"
+        token_id = random_id("monitor-settlement")
         expires = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() + policy.maximum_duration_seconds,
             tz=timezone.utc,
@@ -343,6 +344,14 @@ class TerminalMonitorCoordinator:
                     if duplicate
                     else TerminalMonitorRejectionReason.CAPACITY_EXHAUSTED
                 )
+            while monitor_id in self._registrations:
+                monitor_id = random_id("monitor")
+            while token_id in self._tokens:
+                token_id = random_id("monitor-settlement")
+            registration.monitor_id = monitor_id
+            prepared = PreparedTerminalMonitorRegistration(
+                token_id, monitor_id, process_id, snapshot.output_cursor, expires
+            )
             self._registrations[monitor_id] = registration
             self._tokens[token_id] = prepared
             self._condition.notify_all()
@@ -435,6 +444,7 @@ class TerminalMonitorCoordinator:
             )
 
     def cancel(self, monitor_id: str) -> str:
+        require_id(monitor_id, "monitor")
         with self._lock:
             registration = self._registrations.get(monitor_id)
             if registration is None:
@@ -931,7 +941,7 @@ def _build_content(
     included_source_utf8_bytes: int,
     omitted_by_delivery_bound_utf8_bytes: int,
 ) -> TerminalObservationContentV1:
-    observation_id = f"terminal-observation:{uuid4().hex}"
+    observation_id = random_id("observation")
     return TerminalObservationContentV1(
         observation_id=observation_id,
         monitor_id=monitor_id,

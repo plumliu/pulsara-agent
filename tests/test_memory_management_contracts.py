@@ -87,7 +87,7 @@ def test_context_search_and_cursor_contract():
 
 def test_confirmation_keeps_complete_text_and_subsecond_updated_at():
     fact = MemoryManagementFact(
-        "memory:a",
+        'memory:77n3iseeb7g5nrddf77nociut4',
         "ctx:global",
         "FACT",
         "ACTIVE",

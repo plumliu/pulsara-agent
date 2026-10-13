@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from tests.support.subagents import fixture_parent_target
 
 from pulsara_agent.llm.input import FrozenPromptContent
@@ -12,7 +14,6 @@ import json
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 
@@ -130,9 +131,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _id(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _round10_root_invocation_context(
@@ -183,7 +182,7 @@ def _round10_root_invocation_context(
         session_id=lease.guard.session_id,
         caller_turn_id=turn_id,
         provider_input_cut_fingerprint="sha256:round7-cut",
-        continuity_epoch_nonce="epoch:round7",
+        continuity_epoch_nonce='epoch:5jddaw3hjgu3cqnyuuwf2lazvy',
         continuity_epoch_revision=0,
         compiled_semantic_input_fingerprint="sha256:round7-semantic",
         compiled_message_placements_fingerprint="sha256:round7-placements",
@@ -210,7 +209,7 @@ def _round10_root_invocation_context(
 
 def _timing(
     *,
-    turn_id: str = "turn:test",
+    turn_id: str = 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
     origin: ToolObservationOrigin = ToolObservationOrigin.BUILTIN,
     duration: int | None = 12_345,
     reported: int | None = None,
@@ -224,7 +223,7 @@ def _timing(
     )
     values = {
         "source_turn_ref": provider_visible_turn_ref(
-            session_id="session:test", turn_id=turn_id
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte', turn_id=turn_id
         ),
         "observed_at_utc": "2026-08-14T03:04:05.123456Z",
         "observation_duration_microseconds": duration,
@@ -252,12 +251,12 @@ def _previous_fact(
     outcome: PreviousTurnOutcomeKind = PreviousTurnOutcomeKind.EXECUTION_FAILED,
 ) -> FrozenPreviousTurnOutcomeCompileFact:
     values = {
-        "session_id": "session:test",
-        "workspace_id": "workspace:test",
-        "current_turn_id": "turn:current",
+        "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte',
+        "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        "current_turn_id": 'turn:r4yi3mveq6mrj6bcyhwvx4sxky',
         "current_scope_kind": ModelInputScopeKind.ROOT,
         "scope_subagent_task_id": None,
-        "predecessor_turn_id": "turn:previous",
+        "predecessor_turn_id": 'turn:mcie4zq2f6b4g2mm2ogvtx2uwq',
         "predecessor_initial_entry_sequence": 1,
         "predecessor_terminal_at_utc": "2026-08-14T03:04:05.123456Z",
         "outcome_kind": outcome,
@@ -290,14 +289,14 @@ def _previous_fact(
 def _tool_result_item(body: str) -> FrozenProviderInputItem:
     return FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
-        source_entry_id="entry:result",
+        source_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
         source_entry_sequence=3,
-        source_turn_id="turn:test",
+        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         content=(LLMTextPart(body),),
         tool_call_id="call:test",
-        tool_request_entry_id="entry:request",
+        tool_request_entry_id='entry:k5zfbzct6mhkogz33gyubxx3pa',
         tool_result_context=ProviderToolResultContextMetadata(
-            result_id="result:test",
+            result_id='result:pvg3icg6wn2puqqgiuggdo2ej4',
             result_state="SUCCESS",
             display_kind=ToolResultDisplayKind.COMPLETE,
             artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
@@ -320,7 +319,7 @@ def test_round7_canonical_time_duration_and_process_local_cause_are_closed() -> 
     with pytest.raises(ValueError, match="duration"):
         _timing(duration=MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS + 1)
 
-    intent = ActiveTurnCancellationIntent("turn:test", ModelInputScopeKind.ROOT, None)
+    intent = ActiveTurnCancellationIntent('turn:klmmazz67vfgsfsvg6ceqgdsfu', ModelInputScopeKind.ROOT, None)
     assert (
         intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
         is ForegroundCancellationCause.USER_REQUEST
@@ -418,9 +417,9 @@ def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
     )
     item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.PLAN_CONTINUATION,
-        "entry:plan",
+        'entry:3l5haylzxbxjrbtnkybkafoypm',
         2,
-        "turn:plan",
+        'turn:lm5ibydqxua377vt3bxuuqgvvu',
         (LLMTextPart(carrier),),
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
@@ -490,9 +489,9 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
 
 def test_round7_result_visibility_helper_exactly_joins_cut() -> None:
     row = {
-        "result_entry_id": "entry:result",
+        "result_entry_id": 'entry:zvmjajlmix3vyoeoy2zhz6xd2a',
         "entry_sequence": 11,
-        "result_turn_id": "turn:test",
+        "result_turn_id": 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
     }
     assert visible_tool_result_at_cut(row, provider_input_through_sequence=10) is None
     assert visible_tool_result_at_cut(row, provider_input_through_sequence=11) is row
@@ -564,7 +563,7 @@ def _start_turn(repository, lease, text: bytes) -> str:
         command_id=_id("command"),
         turn_id=turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
@@ -603,7 +602,7 @@ def _start_active_child(repository, lease) -> tuple[str, str]:
         task_id=task_id,
         turn_id=child_turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         task_start_event_id=task_id.launch.task_start.event_id,
         expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"perform one bounded task"),
@@ -838,7 +837,7 @@ def test_round7_child_user_stop_atomically_settles_turn_task_and_occurrences(
         "terminal_public_detail": "The delegated task was stopped by the user.",
         "turn_reason": "USER_STOPPED",
         "occurred_at": occurred_at,
-        "actor_id": "host:test",
+        "actor_id": 'host:yinyxklzunar54s7objjdbphcy',
     }
     assert (
         repository.confirm_cancelled_subagent_turn_and_task(
@@ -901,7 +900,7 @@ class _CanonicalChildRaceRunner:
             task_id=task_id,
             turn_id=turn_id,
             entry_id=_id("entry"),
-            context_binding_revision_id=_id("revision"),
+            context_binding_revision_id=_id("binding"),
             task_start_event_id=launch.task_start.event_id,
             expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
             content=InlineContent.from_bytes(objective.encode()),
@@ -926,7 +925,7 @@ class _CanonicalChildRaceRunner:
             content = InlineContent.from_bytes(b"completed child")
             result = build_subagent_result_public_fact(
                 task_id=task_id,
-                result_id=_id("result"),
+                result_id=_id("agent-result"),
                 source=SubagentResultSource.INFERRED,
                 producer_entry_id=final_entry_id,
                 summary="completed child",
@@ -989,11 +988,11 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
     manager = KernelSubagentManager(
         repository=repository,
         guard=lease.guard,
-        host_owner_id="host:test",
+        host_owner_id='host:yinyxklzunar54s7objjdbphcy',
         io_owner=KernelSessionIO(),
         live_bus=LiveAgentEventBus(),
         todo_owner=TodoRunStateOwner(
-            session_id=lease.guard.session_id, owner_epoch="host:test"
+            session_id=lease.guard.session_id, owner_epoch='host:yinyxklzunar54s7objjdbphcy'
         ),
         launch_preparation=CanonicalSubagentLaunchPreparationPort(
             inherit_parent_target=fixture_parent_target,
@@ -1089,11 +1088,11 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
     manager = KernelSubagentManager(
         repository=repository,
         guard=lease.guard,
-        host_owner_id="host:test",
+        host_owner_id='host:yinyxklzunar54s7objjdbphcy',
         io_owner=KernelSessionIO(),
         live_bus=LiveAgentEventBus(),
         todo_owner=TodoRunStateOwner(
-            session_id=lease.guard.session_id, owner_epoch="host:test"
+            session_id=lease.guard.session_id, owner_epoch='host:yinyxklzunar54s7objjdbphcy'
         ),
         launch_preparation=CanonicalSubagentLaunchPreparationPort(
             inherit_parent_target=fixture_parent_target,
@@ -1209,7 +1208,7 @@ def test_round7_child_cancellation_event_failure_rolls_back_both_rows(
             ),
             turn_reason="SESSION_CLOSED",
             occurred_at=datetime.now(timezone.utc),
-            actor_id="host:test",
+            actor_id='host:yinyxklzunar54s7objjdbphcy',
             deadline_monotonic=monotonic() + 30,
         )
     with provider.connection(
@@ -1245,13 +1244,13 @@ def test_round7_freshness_body_contains_only_two_provider_refs() -> None:
     )
 
     fact = build_tool_observation_freshness_fact(
-        session_id="session:test",
-        workspace_id="workspace:test",
-        current_turn_id="turn:current",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        current_turn_id='turn:r4yi3mveq6mrj6bcyhwvx4sxky',
         current_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
         current_initial_entry_sequence=2,
-        immediate_predecessor_turn_id="turn:previous",
+        immediate_predecessor_turn_id='turn:mcie4zq2f6b4g2mm2ogvtx2uwq',
     )
     body = _render_tool_observation_freshness(fact)
     assert set(json.loads(body)) == {

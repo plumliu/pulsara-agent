@@ -67,7 +67,7 @@ def test_host_workspace_transient_resolution_uses_global_context_only(tmp_path) 
     assert resolved.display_label == "Scratch"
     assert resolved.workspace_context_id is None
     assert resolved.memory_domain.read_context_ids == frozenset({CTX_GLOBAL})
-    assert resolved.workspace_key.startswith("transient:")
+    assert resolved.workspace_key.startswith("workspace:")
     assert (
         resolve_workspace(
             HostWorkspaceInput(

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 import json
@@ -70,24 +71,24 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
 )
 
 
-def _root_activation(turn: str = "turn:1"):
+def _root_activation(turn: str = 'turn:nzc36cttgo7xxki7bcjc7ops7a'):
     return build_root_activation(
-        session_id="session:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         admission_kind="DIRECT",
-        command_id="command:1",
+        command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
         exact_turn_id=turn,
-        exact_initial_entry_id=f"entry:{turn}",
-        exact_context_binding_revision_id=f"context:{turn}",
+        exact_initial_entry_id=derive_id("entry", "test-fixture", f"entry:{turn}"),
+        exact_context_binding_revision_id=derive_id("context", "test-fixture", f"context:{turn}"),
     )
 
 
-def _child_activation(turn: str = "turn:child:1"):
+def _child_activation(turn: str = 'turn:nbjllslbuktypzvmqopgumgyjy'):
     return build_child_activation(
-        session_id="session:1",
-        subagent_task_id="subagent-task:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+        subagent_task_id='task:jjp4dy4hmhapm5toxqet6i7qkm',
         exact_turn_id=turn,
-        exact_initial_entry_id=f"entry:{turn}",
-        exact_context_binding_revision_id=f"context:{turn}",
+        exact_initial_entry_id=derive_id("entry", "test-fixture", f"entry:{turn}"),
+        exact_context_binding_revision_id=derive_id("context", "test-fixture", f"context:{turn}"),
     )
 
 
@@ -218,14 +219,14 @@ def test_todo_invalid_candidates_fail_before_owner_mutation(
 
 
 def test_todo_owner_isolates_root_children_and_freezes_handoff() -> None:
-    owner = TodoRunStateOwner(session_id="session:1", owner_epoch="host:1")
+    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
     owner.activate_root_run(_root_activation())
     child = build_child_activation(
-        session_id="session:1",
-        subagent_task_id="task:a",
-        exact_turn_id="turn:child",
-        exact_initial_entry_id="entry:child",
-        exact_context_binding_revision_id="context:child",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+        subagent_task_id='task:7ekouunh3opwy6r5hpnpyw22fa',
+        exact_turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
+        exact_initial_entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve',
+        exact_context_binding_revision_id='context:qfbpxjr42k7p4ehg2k7ki65k3y',
     )
     owner.activate_child_run(child)
     assert (
@@ -237,14 +238,14 @@ def test_todo_owner_isolates_root_children_and_freezes_handoff() -> None:
     assert (
         owner.snapshot(
             scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id="task:a",
+            scope_subagent_task_id='task:7ekouunh3opwy6r5hpnpyw22fa',
         ).revision
         == 0
     )
     assert (
         owner.snapshot(
             scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id="task:b",
+            scope_subagent_task_id='task:ofq7v6vy25ozw4nkz722653tpy',
         )
         is None
     )
@@ -260,9 +261,9 @@ def test_todo_owner_isolates_root_children_and_freezes_handoff() -> None:
     prepared = owner.prepare_replace(
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        exact_turn_id="turn:1",
-        attempt_id="attempt:1",
-        proposed_result_entry_id="entry:result",
+        exact_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+        attempt_id='attempt:dvce4jlhrqd3hzcfpszy4gujye',
+        proposed_result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
         candidate=candidate,
         acknowledgement=b'{"status":"UPDATED"}',
     )
@@ -308,35 +309,35 @@ def test_todo_owner_isolates_root_children_and_freezes_handoff() -> None:
 
 
 def test_todo_next_root_activation_closes_old_exact_run() -> None:
-    owner = TodoRunStateOwner(session_id="session:1", owner_epoch="host:1")
-    first = _root_activation("turn:1")
+    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
+    first = _root_activation('turn:nzc36cttgo7xxki7bcjc7ops7a')
     owner.activate_root_run(first)
     assert owner.activate_root_run(first) is None
     with pytest.raises(RuntimeError, match="before becoming idle"):
         owner.activate_root_run(
             build_root_activation(
-                session_id="session:1",
+                session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
                 admission_kind="QUEUED",
-                queue_item_id="queue:premature",
+                queue_item_id='queue:n643ni32rsjinkyftscv43x3y4',
                 queue_sequence=1,
-                exact_turn_id="turn:premature",
-                exact_initial_entry_id="entry:premature",
-                exact_context_binding_revision_id="context:premature",
+                exact_turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i',
+                exact_initial_entry_id='entry:rls5j3xowmv4ws2d3bms77ogzu',
+                exact_context_binding_revision_id='context:wmqcqsdd7yegc6yvrb6hshwwei',
             )
         )
-    owner.mark_root_idle(exact_turn_id="turn:1")
+    owner.mark_root_idle(exact_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a')
     closed = owner.activate_root_run(
         build_root_activation(
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             admission_kind="QUEUED",
-            queue_item_id="queue:2",
+            queue_item_id='queue:frtvnwjuu7muxu2y7xzgsrycay',
             queue_sequence=2,
-            exact_turn_id="turn:2",
-            exact_initial_entry_id="entry:2",
-            exact_context_binding_revision_id="context:2",
+            exact_turn_id='turn:u7jrb7ntdvxsawfkehwcc4rhu4',
+            exact_initial_entry_id='entry:yym6qf3l4xz6437gradtmhjrke',
+            exact_context_binding_revision_id='context:4bqlloqsjgcip73jgeokprl2oi',
         )
     )
-    assert closed.last_turn_id == "turn:1"
+    assert closed.last_turn_id == 'turn:nzc36cttgo7xxki7bcjc7ops7a'
     assert closed.closing_revision == 1
     assert closed.disposition is TodoLiveDisposition.CLOSED
     assert (
@@ -348,24 +349,24 @@ def test_todo_next_root_activation_closes_old_exact_run() -> None:
 
 
 def test_todo_external_continuation_tolerates_state_lost_with_host() -> None:
-    owner = TodoRunStateOwner(session_id="session:1", owner_epoch="host:replacement")
+    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:zgcu435qy75pmagj7jrf2g5wmi')
     assert not owner.bind_continuation_if_present(
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        turn_id="turn:external-after-takeover",
+        turn_id='turn:z3y7csg3jjgexbqxsnpkynjdsu',
     )
     assert owner.current_snapshots() == ()
 
-    owner.activate_root_run(_root_activation("turn:human"))
+    owner.activate_root_run(_root_activation('turn:jwcvnoms3gl66moynh76r32u34'))
     assert owner.bind_continuation_if_present(
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        turn_id="turn:external-same-host",
+        turn_id='turn:or2urxxbbqlxjsgc6dakbrpw3e',
     )
     owner.require_active(
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        exact_turn_id="turn:external-same-host",
+        exact_turn_id='turn:or2urxxbbqlxjsgc6dakbrpw3e',
     )
     assert (
         owner.snapshot(
@@ -406,8 +407,8 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         live_bus = LiveAgentEventBus()
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:1",
-            session_id="session:1",
+            host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -420,32 +421,32 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         }
         authorization = await authorize_direct_tool(
             port,
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             tool_name="todo",
             arguments=arguments,
             tool_call_id="call:todo",
-            turn_id="turn:1",
-            assistant_entry_id="entry:assistant",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         )
         assert authorization.kind is KernelToolAuthorizationKind.ALLOW
         observer, generation, baseline = live_bus.subscribe()
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             tool_name="todo",
             tool_call_id="call:todo",
-            attempt_id="attempt:todo",
-            turn_id="turn:1",
-            assistant_entry_id="entry:assistant",
+            attempt_id='attempt:llwufckx3a6axbwpqvkmkekppy',
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         )
         try:
             result = await port.invoke(
                 tool_name="todo",
                 arguments=arguments,
                 tool_call_id="call:todo",
-                attempt_id="attempt:todo",
-                turn_id="turn:1",
-                assistant_entry_id="entry:assistant",
+                attempt_id='attempt:llwufckx3a6axbwpqvkmkekppy',
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=context,
             )
         finally:
@@ -483,7 +484,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert b"sha256:" not in projected.SerializeToString(deterministic=True)
 
         resync = _live_control_snapshot_to_wire(
-            LiveControlSnapshot("session:1", 1, 0, None),
+            LiveControlSnapshot('session:cbauiajfisf4gvpdotrq4qgxhq', 1, 0, None),
             port.todo_owner.current_snapshots(),
         )
         assert len(resync.current_todos) == 1
@@ -498,29 +499,29 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
     async def exercise() -> None:
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:1",
-            session_id="session:1",
+            host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port.todo_owner.activate_root_run(_root_activation())
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             tool_name="todo",
             tool_call_id="call:todo",
-            attempt_id="attempt:todo",
-            turn_id="turn:1",
-            assistant_entry_id="entry:assistant",
+            attempt_id='attempt:llwufckx3a6axbwpqvkmkekppy',
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         )
         try:
             result = await port.invoke(
                 tool_name="todo",
                 arguments={"items": [{"text": "Finish close", "status": "completed"}]},
                 tool_call_id="call:todo",
-                attempt_id="attempt:todo",
-                turn_id="turn:1",
-                assistant_entry_id="entry:assistant",
+                attempt_id='attempt:llwufckx3a6axbwpqvkmkekppy',
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=context,
             )
         finally:
@@ -544,14 +545,14 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
 
 
 def test_todo_close_fails_closed_for_ownerless_pending_settlement() -> None:
-    owner = TodoRunStateOwner(session_id="session:1", owner_epoch="host:1")
+    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
     owner.activate_root_run(_root_activation())
     prepared = owner.prepare_replace(
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        exact_turn_id="turn:1",
-        attempt_id="attempt:1",
-        proposed_result_entry_id="entry:result",
+        exact_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+        attempt_id='attempt:dvce4jlhrqd3hzcfpszy4gujye',
+        proposed_result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
         candidate=parse_todo_replacement(
             {"items": [{"text": "settle before close", "status": "in_progress"}]}
         ),
@@ -586,21 +587,21 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
         live_bus = LiveAgentEventBus()
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:1",
-            session_id="session:1",
+            host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port.todo_owner.activate_root_run(_root_activation())
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:read-only",
+            snapshot_id='permission:bhwqiflryq5b4avuvzyhp3xn4q',
             requested_mode=PermissionMode.READ_ONLY,
             effective_mode=PermissionMode.READ_ONLY,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         invalid = await authorize_direct_tool(
             port,
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             tool_name="todo",
             arguments={
                 "items": [
@@ -609,31 +610,31 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
                 ]
             },
             tool_call_id="call:todo-invalid",
-            turn_id="turn:1",
-            assistant_entry_id="entry:assistant",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
             permission_snapshot=permission,
         )
         assert invalid.kind is KernelToolAuthorizationKind.INVALID_ARGUMENTS
         arguments = {"items": [{"text": "Advisory local state", "status": "pending"}]}
         authorization = await authorize_direct_tool(
             port,
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             tool_name="todo",
             arguments=arguments,
             tool_call_id="call:todo-race",
-            turn_id="turn:1",
-            assistant_entry_id="entry:assistant",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
             permission_snapshot=permission,
         )
         assert authorization.kind is KernelToolAuthorizationKind.ALLOW
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id="session:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             tool_name="todo",
             tool_call_id="call:todo-race",
-            attempt_id="attempt:todo-race",
-            turn_id="turn:1",
-            assistant_entry_id="entry:assistant",
+            attempt_id='attempt:vwhestkdi27h64gh7jeqo7mw3a',
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
             permission_snapshot=permission,
         )
         assert port.todo_owner.mark_closing(
@@ -644,9 +645,9 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
                 tool_name="todo",
                 arguments=arguments,
                 tool_call_id="call:todo-race",
-                attempt_id="attempt:todo-race",
-                turn_id="turn:1",
-                assistant_entry_id="entry:assistant",
+                attempt_id='attempt:vwhestkdi27h64gh7jeqo7mw3a',
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=context,
             )
         finally:
@@ -704,7 +705,7 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
         task = asyncio.create_task(
             coordinator._finalize_todo(
                 _root_activation(),
-                AcceptedEntry("entry:turn:1", "turn:1", 1, 1),
+                AcceptedEntry('entry:kbwuv6gdfgm4t6267hmfj2ylka', 'turn:nzc36cttgo7xxki7bcjc7ops7a', 1, 1),
             )
         )
         await started.wait()
@@ -721,7 +722,7 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
 
 def test_child_todo_activation_failure_preserves_postcommit_ownership() -> None:
     async def exercise() -> None:
-        accepted = AcceptedEntry("entry:turn:child:1", "turn:child:1", 1, 1)
+        accepted = AcceptedEntry('entry:5ymhkczans3dopadxofmoe5nay', 'turn:nbjllslbuktypzvmqopgumgyjy', 1, 1)
         terminalized: list[tuple[str, str]] = []
 
         async def finalizer(_prepared, _accepted) -> None:
@@ -751,7 +752,7 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
     class _ImmediateAdmissionIO:
         async def run(self, *_args, **_kwargs):
             return SimpleNamespace(
-                accepted=AcceptedEntry("entry:turn:1", "turn:1", 1, 1)
+                accepted=AcceptedEntry('entry:kbwuv6gdfgm4t6267hmfj2ylka', 'turn:nzc36cttgo7xxki7bcjc7ops7a', 1, 1)
             )
 
     async def exercise() -> None:
@@ -777,13 +778,13 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         coordinator._writer_lease = SimpleNamespace(guard=object())
         coordinator._todo_finalizer = finalizer
         coordinator.interrupt_turn = terminalize
-        intent = ActiveTurnCancellationIntent("turn:1", ModelInputScopeKind.ROOT, None)
+        intent = ActiveTurnCancellationIntent('turn:nzc36cttgo7xxki7bcjc7ops7a', ModelInputScopeKind.ROOT, None)
         candidate = SimpleNamespace(
-            session_id="session:1",
-            command_id="command:1",
-            turn_id="turn:1",
-            entry_id="entry:turn:1",
-            context_binding_revision_id="context:turn:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+            command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            entry_id='entry:kbwuv6gdfgm4t6267hmfj2ylka',
+            context_binding_revision_id='binding:ob5azto6we6xylhs2fep26ql3u',
         )
         task = asyncio.create_task(
             coordinator.accept_root_intent(
@@ -800,6 +801,6 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert terminalized == [("turn:1", "USER_STOPPED")]
+        assert terminalized == [('turn:nzc36cttgo7xxki7bcjc7ops7a', "USER_STOPPED")]
 
     asyncio.run(exercise())

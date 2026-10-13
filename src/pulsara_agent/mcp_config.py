@@ -138,7 +138,7 @@ class ManagedPackageMcpRuntimeSource:
         if (
             not self.store_scope_key
             or not self.package_owner_key
-            or not re.fullmatch(r"pkg_[0-9a-f]{32}", self.package_install_id)
+            or not re.fullmatch(r"package:[a-z2-7]{25}[aeimquy4]", self.package_install_id)
             or any(
                 "\x00" in item
                 for item in (self.store_scope_key, self.package_owner_key)

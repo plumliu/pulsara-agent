@@ -6,6 +6,11 @@ acquires a new writer generation and rehydrates canonical rows only.
 """
 
 from __future__ import annotations
+
+from pulsara_agent.conversation_kernel.repository_errors import UnpublishedIdentityCollision
+
+from pulsara_agent.identity import derive_id, random_id, is_valid_id
+
 from pulsara_agent.scheduling.contracts import ScheduledAdmission
 
 from pulsara_agent.conversation_kernel.annotations import AnnotationSourceInvalid
@@ -16,11 +21,9 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
-from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable, Mapping
-from uuid import uuid4
 
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
@@ -204,7 +207,6 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlRequest,
     UserControlTarget,
     UserControlTargetKind,
-    parse_control_command_deadline_ms,
 )
 from pulsara_agent.conversation_kernel.subagents.launch import (
     CanonicalSubagentLaunchPreparationPort,
@@ -306,7 +308,7 @@ from pulsara_agent.hooks.dispatcher import (
 )
 from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.hooks.source import LocalHookSourceProvider
-from pulsara_agent.hooks.presentation import hook_snapshot_public
+from pulsara_agent.hooks.presentation import hook_snapshot_model_public
 from pulsara_agent.capability.local_skill_management import LocalSkillManagementService
 from pulsara_agent.hooks.matcher import event_matcher_subject
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -1441,7 +1443,7 @@ class KernelHostSession:
                     if item.provenance.identity.kind is HookSourceKind.PLUGIN
                 )
             ),
-            "plugin_hook_sources": [hook_snapshot_public(item, inspect=False) for item in plugin_only_hooks],
+            "plugin_hook_sources": [hook_snapshot_model_public(item) for item in plugin_only_hooks],
             "mcp": mcp_status,
             "mcp_changed_server_ids": sorted(changed),
             "diagnostics": reload_diagnostics,
@@ -1804,8 +1806,8 @@ class KernelHostSession:
             content,
             deadline_monotonic=self._canonical_deadline(),
         )
-        canonical_prompt = freeze_canonical_prompt(frozen_content)
-        command = command_id or f"command:{uuid4().hex}"
+        canonical_prompt = freeze_canonical_prompt(frozen_content, workspace_id=self.workspace.workspace_key)
+        command = command_id or random_id("command")
         requested = requested_permission_mode or self._launch_permission_mode
         identity = build_direct_root_turn_identity(self.session_id, command)
         key = _IngressHookReservationKey(
@@ -2523,7 +2525,7 @@ class KernelHostSession:
         if origin_task is None:
             raise RuntimeError("Plan continuation has no Host-owned origin task")
 
-        attempt_id = f"plan-continuation:{candidate.candidate_fingerprint}"
+        attempt_id = ("plan-continuation", candidate.candidate_fingerprint)
 
         async def accept() -> AcceptedPlanToolBatch:
             prospective_dispatch: PreparedProspectiveRootDispatch | None = None
@@ -2724,9 +2726,9 @@ class KernelHostSession:
         requested_permission_mode: PermissionMode | None = None,
         _scheduled: ScheduledAdmission | None = None,
     ) -> KernelCommandOutcome:
-        if not command_id:
+        if not is_valid_id(command_id, "command"):
             return KernelCommandOutcome(
-                command_id, "REJECTED", "", "INVALID_REQUEST", "Command is invalid."
+                command_id, "REJECTED", "", "INVALID_ID", "Command is invalid."
             )
         if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
             return KernelCommandOutcome(
@@ -2741,7 +2743,7 @@ class KernelHostSession:
                 content,
                 deadline_monotonic=self._canonical_deadline(),
             )
-            canonical_prompt = freeze_canonical_prompt(frozen_content)
+            canonical_prompt = freeze_canonical_prompt(frozen_content, workspace_id=self.workspace.workspace_key)
         except ValueError as exc:
             return KernelCommandOutcome(
                 command_id, "REJECTED", "", "INVALID_PROMPT", str(exc)
@@ -2764,7 +2766,7 @@ class KernelHostSession:
                 _scheduled=_scheduled,
             )
         self.workspace_gate.require_available()
-        queue_item_id = _stable_id("queue-item", self.session_id, command_id)
+        queue_item_id = derive_id('queue', 'ingress', self.session_id, command_id)
         key = _IngressHookReservationKey(
             _IngressHookApiVariant.QUEUED,
             command_id,
@@ -2818,11 +2820,11 @@ class KernelHostSession:
         if not isinstance(canonical_prompt, FrozenCanonicalPrompt):
             raise TypeError("prompt owner requires a frozen canonical prompt")
         self._require_open()
-        queue_item_id = _stable_id("queue-item", self.session_id, command_id)
+        queue_item_id = derive_id('queue', 'ingress', self.session_id, command_id)
         permission_snapshot_id = (
             None
             if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
-            else _stable_id("permission-snapshot", self.session_id, queue_item_id)
+            else derive_id("permission", "admission", build_queued_root_turn_identity(self.session_id, queue_item_id).turn_id)
         )
         effective_requested_permission = (
             None
@@ -3275,7 +3277,7 @@ class KernelHostSession:
     ) -> KernelCommandOutcome:
         """Install a user-origin Plan workflow while the ROOT slot is idle."""
 
-        workflow_id = _stable_id("plan-workflow", self.session_id, command_id)
+        workflow_id = derive_id('plan', 'user', self.session_id, command_id)
         semantic_digest = canonical_digest(
             "pulsara:user-enter-plan:v1",
             {
@@ -3478,10 +3480,8 @@ class KernelHostSession:
         write_expected_writer_generation: int | None = None,
     ) -> AcceptedPlanResolution:
         self._require_open()
-        result_id = _stable_id("plan-question-result", self.session_id, command_id)
-        result_entry_id = _stable_id(
-            "plan-question-result-entry", self.session_id, command_id
-        )
+        result_id = derive_id('result', 'plan-answer', self.session_id, command_id)
+        result_entry_id = derive_id('entry', 'tool-result', derive_id('result', 'plan-answer', self.session_id, command_id))
         semantic_candidate_fingerprint = plan_question_resolution_semantic_fingerprint(
             workflow_id=workflow_id,
             expected_workflow_revision=expected_workflow_revision,
@@ -3605,8 +3605,8 @@ class KernelHostSession:
 
         async with self._lock:
             attempt = self._plan_continuations.start(
-                attempt_id=f"plan-question-resolution:{command_id}",
-                turn_id=f"question:{interaction_id}",
+                attempt_id=("plan-question-resolution", command_id),
+                turn_id=None,
                 semantic_candidate_fingerprint=semantic_candidate_fingerprint,
                 run=resolve,
                 before_start=reserve_question_write,
@@ -3633,17 +3633,17 @@ class KernelHostSession:
             PlanDraftDecision.REVISE,
         }
         continuation_turn_id = (
-            _stable_id("plan-review-turn", self.session_id, command_id)
+            derive_id('turn', 'plan-review', self.session_id, command_id)
             if creates_turn
             else None
         )
         continuation_entry_id = (
-            _stable_id("plan-review-entry", self.session_id, command_id)
+            derive_id('entry', 'plan-review', continuation_turn_id)
             if creates_turn
             else None
         )
         continuation_revision_id = (
-            _stable_id("context-revision", continuation_turn_id or "", "0")
+            derive_id('binding', 'revision', continuation_turn_id or "", "0")
             if creates_turn
             else None
         )
@@ -3686,7 +3686,7 @@ class KernelHostSession:
             )
         reserved = False
         write_reservation: CompactionWriteReservation | None = None
-        attempt_id = f"plan-review-continuation:{command_id}"
+        attempt_id = ("plan-review-continuation", command_id)
 
         async def admit() -> AcceptedPlanResolution:
             prospective_dispatch: PreparedProspectiveRootDispatch | None = None
@@ -3838,7 +3838,7 @@ class KernelHostSession:
 
             attempt = self._plan_continuations.start(
                 attempt_id=attempt_id,
-                turn_id=continuation_turn_id or f"no-continuation:{command_id}",
+                turn_id=continuation_turn_id,
                 semantic_candidate_fingerprint=semantic_candidate_fingerprint,
                 run=admit,
                 before_start=reserve_new_attempt,
@@ -4450,9 +4450,7 @@ class KernelHostSession:
                             else:
                                 target = ExistingTurnInstallation(
                                     turn_id=active_turn_id,
-                                    entry_id=_stable_id(
-                                        "entry", self.session_id, observation_id
-                                    ),
+                                    entry_id=derive_id("entry", "terminal-observation", derive_id("turn", "terminal-observation", self.session_id, observation_id)),
                                 )
                         elif (
                             not self._plan_exit_fence
@@ -4472,17 +4470,11 @@ class KernelHostSession:
                                 self._terminal_new_turn_observation_id = observation_id
                                 self._external_new_turn_settled.clear()
                                 reserved_new_turn = True
-                                turn_id = _stable_id(
-                                    "turn", self.session_id, observation_id
-                                )
+                                turn_id = derive_id("turn", "terminal-observation", self.session_id, observation_id)
                                 target = NewTurnInstallation(
                                     turn_id=turn_id,
-                                    context_binding_revision_id=_stable_id(
-                                        "context-revision", turn_id, "0"
-                                    ),
-                                    initial_entry_id=_stable_id(
-                                        "entry", self.session_id, observation_id
-                                    ),
+                                    context_binding_revision_id=derive_id('binding', 'revision', turn_id, "0"),
+                                    initial_entry_id=derive_id("entry", "terminal-observation", derive_id("turn", "terminal-observation", self.session_id, observation_id)),
                                 )
                 elif isinstance(target, NewTurnInstallation):
                     async with self._lock:
@@ -4722,7 +4714,7 @@ class KernelHostSession:
                 session_id=self.session_id,
                 host_session_id=self.host_session_id,
                 writer_generation=self._lease.guard.writer_generation,
-                operation_nonce=f"host-runtime-reopen:{uuid4().hex}",
+                operation_nonce=random_id("operation"),
                 owner=self,
                 _seal=_KERNEL_RUNTIME_REOPEN_QUIESCENCE_SEAL,
             )
@@ -4824,9 +4816,10 @@ class KernelHostSession:
                 "OWNER_UNAVAILABLE",
                 "The requested Host owner is closing or closed.",
             )
-        deadline_ms = parse_control_command_deadline_ms(request.command_id)
+        deadline_ms = request.admission_deadline_ms
         now_ms = int(self._control_monotonic() * 1000)
-        if deadline_ms is None or deadline_ms > now_ms + CONTROL_ADMISSION_WINDOW_MS:
+        if (not is_valid_id(request.command_id, "command") or type(deadline_ms) is not int
+                or deadline_ms < 1 or deadline_ms > now_ms + CONTROL_ADMISSION_WINDOW_MS):
             return self._control_rejection(
                 request,
                 "CONTROL_REQUEST_INVALID",
@@ -4906,7 +4899,7 @@ class KernelHostSession:
         attempt.outcome = outcome
         finished_ms = int(self._control_monotonic() * 1000)
         attempt.finished_monotonic_ms = finished_ms
-        deadline_ms = parse_control_command_deadline_ms(attempt.request.command_id)
+        deadline_ms = attempt.request.admission_deadline_ms
         assert deadline_ms is not None
         attempt.retain_until_monotonic_ms = max(
             deadline_ms,
@@ -5248,7 +5241,7 @@ class KernelHostSession:
             candidate = UserControlFeedbackInstallationAttempt(
                 session_id=self.session_id, workspace_id=self.workspace.workspace_key,
                 writer_generation=self._lease.guard.writer_generation,
-                target_root_turn_id=turn_id, entry_id=f"entry:workspace-recreated:{uuid4().hex}",
+                target_root_turn_id=turn_id, entry_id=random_id("entry"),
                 content=WorkspaceRecreatedFeedbackContent(
                     session_id=self.session_id, workspace_root=str(self.workspace.workspace_root),
                     created_at=observation, target_root_turn_id=turn_id),
@@ -5364,6 +5357,7 @@ class KernelHostSession:
         self,
         *,
         command_id: str,
+        admission_deadline_ms: int,
         expected_session_id: str,
         expected_host_session_id: str,
         target_turn_id: str,
@@ -5374,6 +5368,7 @@ class KernelHostSession:
             expected_session_id,
             expected_host_session_id,
             UserControlTarget(UserControlTargetKind.ROOT_TURN, target_turn_id),
+            admission_deadline_ms,
         )
         async with self._lock:
             existing = self._existing_control_outcome_locked(request)
@@ -5530,6 +5525,7 @@ class KernelHostSession:
         self,
         *,
         command_id: str,
+        admission_deadline_ms: int,
         expected_session_id: str,
         expected_host_session_id: str,
         task_id: str,
@@ -5540,6 +5536,7 @@ class KernelHostSession:
             expected_session_id,
             expected_host_session_id,
             UserControlTarget(UserControlTargetKind.SUBAGENT_TASK, task_id),
+            admission_deadline_ms,
         )
         async with self._lock:
             existing = self._existing_control_outcome_locked(request)
@@ -5660,6 +5657,7 @@ class KernelHostSession:
         self,
         *,
         command_id: str,
+        admission_deadline_ms: int,
         expected_session_id: str,
         expected_host_session_id: str,
         process_id: str,
@@ -5670,6 +5668,7 @@ class KernelHostSession:
             expected_session_id,
             expected_host_session_id,
             UserControlTarget(UserControlTargetKind.BACKGROUND_PROCESS, process_id),
+            admission_deadline_ms,
         )
         async with self._lock:
             existing = self._existing_control_outcome_locked(request)
@@ -5947,7 +5946,7 @@ class KernelHostSession:
             workspace_id=self.workspace.workspace_key,
             writer_generation=self._lease.guard.writer_generation,
             target_root_turn_id=target_turn_id,
-            entry_id=f"entry:user-control:{uuid4().hex}",
+            entry_id=random_id("entry"),
             content=ProcessControlFeedbackContent(
                 command_id=attempt.request.command_id,
                 session_id=self.session_id,
@@ -6772,11 +6771,9 @@ class KernelHostSession:
                 "PERMISSION_FIELD_NOT_ALLOWED",
                 "An existing ROOT turn already owns its permission snapshot.",
             )
-        resolved_turn_id = target_turn_id or _stable_id(
-            "turn", self.session_id, command_id
-        )
+        resolved_turn_id = target_turn_id or derive_id('turn', 'command', self.session_id, command_id)
         new_revision_id = (
-            _stable_id("context-revision", resolved_turn_id, "0") if new_turn else None
+            derive_id('binding', 'revision', resolved_turn_id, "0") if new_turn else None
         )
         write_reservation: CompactionWriteReservation | None = None
         active_cancellation_intent: ActiveTurnCancellationIntent | None = None
@@ -7447,9 +7444,6 @@ async def _join_task_beyond_logical_deadline(
     return deadline_expired, waiter_cancellation, task_error
 
 
-def _stable_id(namespace: str, *parts: str) -> str:
-    digest = sha256("\0".join(parts).encode("utf-8")).hexdigest()
-    return f"{namespace}:{digest}"
 
 
 def _list_resumable_session_rows(
@@ -7830,6 +7824,7 @@ class KernelHostCore:
         anchor_entry_id: str,
         child_session_id: str,
         memory_domain_id: str,
+        deadline_monotonic: float | None = None,
     ):
         """Canonical copy only. Opening the committed child uses ordinary resume."""
         settlement = await self._admit_session_open(source_session_id, child_session_id)
@@ -7839,7 +7834,7 @@ class KernelHostCore:
                 raise KeyError(source_session_id)
             require_workspace(summary.workspace_root)
             repository = await self._ensure_resources()
-            deadline = self._canonical_deadline()
+            deadline = self._canonical_deadline() if deadline_monotonic is None else deadline_monotonic
             worker = asyncio.create_task(
                 asyncio.to_thread(
                     repository.fork_conversation,
@@ -7869,7 +7864,7 @@ class KernelHostCore:
     ) -> KernelHostSession:
         return await self._open(
             workspace_input,
-            session_id=f"session:{uuid4().hex}",
+            session_id=random_id("session"),
             permission_policy=permission_policy,
             system_prompt=system_prompt,
             active_skill_names=active_skill_names,
@@ -7974,24 +7969,36 @@ class KernelHostCore:
         )
         repository = await self._ensure_resources()
         deadline = self._canonical_deadline()
-        host_id = f"host:{uuid4().hex}"
+        async with self._lock:
+            host_id = random_id("host")
+            while host_id in self._sessions:
+                host_id = random_id("host")
         io_owner = KernelSessionIO()
         writer_lease = None
         try:
-            writer_lease = await io_owner.run(
-                repository.acquire_host_writer,
-                intent="RESTORE" if restore_missing_workspace else
-                       "SCHEDULED" if scheduled else
-                       "NEW" if session_start_source == "startup" else "EXISTING",
-                session_id=session_id, workspace_id=workspace.workspace_key,
-                workspace_kind=workspace.workspace_kind,
-                workspace_root=str(workspace.workspace_root),
-                workspace_label=workspace.display_label,
-                memory_domain_id=workspace.memory_domain.memory_domain_id,
-                writer_owner_id=host_id,
-                lease_seconds=self._deadlines.policy.writer_lease_seconds,
-                deadline_monotonic=deadline,
-            )
+            while True:
+                try:
+                    writer_lease = await io_owner.run(
+                        repository.acquire_host_writer,
+                        intent="RESTORE" if restore_missing_workspace else
+                               "SCHEDULED" if scheduled else
+                               "NEW" if session_start_source == "startup" else "EXISTING",
+                        session_id=session_id, workspace_id=workspace.workspace_key,
+                        workspace_kind=workspace.workspace_kind,
+                        workspace_root=str(workspace.workspace_root),
+                        workspace_label=workspace.display_label,
+                        memory_domain_id=workspace.memory_domain.memory_domain_id,
+                        writer_owner_id=host_id,
+                        lease_seconds=self._deadlines.policy.writer_lease_seconds,
+                        deadline_monotonic=deadline,
+                    )
+                    break
+                except UnpublishedIdentityCollision:
+                    if session_start_source != "startup":
+                        raise
+                    if monotonic() >= deadline:
+                        raise TimeoutError("session allocation deadline expired")
+                    session_id = random_id("session")
             created_at = None
             if restore_missing_workspace:
                 renewed_lease = await io_owner.run(
@@ -8172,6 +8179,8 @@ class KernelHostCore:
                 raise KernelHostCoreClosing(
                     "Kernel Host shutdown won before session registration"
                 )
+            if session.host_session_id in self._sessions:
+                raise ConversationKernelConflict("IDENTITY_CONFLICT: Host identity already published")
             self._sessions[session.host_session_id] = session
             self._extension_routes[session.session_id] = (
                 session.host_session_id,

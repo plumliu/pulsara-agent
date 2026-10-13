@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+
+from pulsara_agent.identity import require_id
 
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -355,6 +357,12 @@ class TerminalMonitorCancelInput(_StrictInput):
             "Copy the exact monitor_id returned by terminal_monitor with action=register."
         ),
     )
+
+
+    @field_validator("monitor_id")
+    @classmethod
+    def canonical_monitor_id(cls, value: str) -> str:
+        return require_id(value, "monitor")
 
 
 TerminalMonitorInput: TypeAlias = Annotated[

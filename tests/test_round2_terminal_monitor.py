@@ -1,4 +1,7 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 import asyncio
 import json
@@ -7,7 +10,6 @@ from pathlib import Path
 import sys
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
-from uuid import uuid4
 
 import pytest
 
@@ -44,7 +46,7 @@ from tests.support.round3 import (
 
 
 def _name(prefix: str) -> str:
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _spawn_sleeping_process(registry: ProcessRegistry, owner: str, tmp_path: Path):
@@ -133,8 +135,8 @@ def test_round2_tool_close_terminates_process_before_draining_terminal_thread(
     async def scenario() -> None:
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:close-order",
-            session_id="session:close-order",
+            host_owner_id='host:yxs2scqfk5edwydkur4vtl4y7a',
+            session_id='session:pr52nocqxglhwexlvqa2agq3bi',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -145,7 +147,7 @@ def test_round2_tool_close_terminates_process_before_draining_terminal_thread(
         invocation = asyncio.create_task(
             invoke_direct_tool(
                 port,
-                session_id="session:close-order",
+                session_id='session:pr52nocqxglhwexlvqa2agq3bi',
                 tool_name="terminal",
                 arguments={
                     "command": (
@@ -155,9 +157,9 @@ def test_round2_tool_close_terminates_process_before_draining_terminal_thread(
                     "yield_time_ms": 10_000,
                 },
                 tool_call_id="call:close-order",
-                attempt_id="attempt:close-order",
-                turn_id="turn:close-order",
-                assistant_entry_id="entry:close-order",
+                attempt_id='attempt:kgm43uulgdp5vvsyzreo42cka4',
+                turn_id='turn:rafljvcia7jgtxrwdf5kwiqmvu',
+                assistant_entry_id='entry:zf2juceggf5fnzpoxsxecoagx4',
                 live_sink=sink,
             )
         )
@@ -181,8 +183,8 @@ def test_round2_foreground_and_yielded_cd_leave_workspace_default(
         (tmp_path / "background").mkdir()
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:cwd",
-            session_id="session:cwd",
+            host_owner_id='host:dugldp6ni2dxvuywv5a3utbnii',
+            session_id='session:yb3rgzdbtfst4jirqaeox4wo6a',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -193,7 +195,7 @@ def test_round2_foreground_and_yielded_cd_leave_workspace_default(
         async def invoke(command: str, *, yield_time_ms: int = 2_000):
             result = await invoke_direct_tool(
                 port,
-                session_id="session:cwd",
+                session_id='session:yb3rgzdbtfst4jirqaeox4wo6a',
                 tool_name="terminal",
                 arguments={"command": command, "yield_time_ms": yield_time_ms},
                 tool_call_id=_name("call"),
@@ -209,7 +211,7 @@ def test_round2_foreground_and_yielded_cd_leave_workspace_default(
         assert yielded["status"] == "running"
         await invoke_direct_tool(
             port,
-            session_id="session:cwd",
+            session_id='session:yb3rgzdbtfst4jirqaeox4wo6a',
             tool_name="terminal_process",
             arguments={
                 "action": "wait",
@@ -232,7 +234,7 @@ def test_round2_foreground_and_yielded_cd_leave_workspace_default(
 def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
     tmp_path: Path,
 ) -> None:
-    owner = "host:monitor"
+    owner = 'host:cokgwd42wr3sz45pia23zomsjm'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
@@ -249,7 +251,7 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
     assert yielded is True
     wakes: list[None] = []
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:monitor",
+        session_id='session:r3tnljzotfqlsqf6x7oyutgjcq',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -257,9 +259,9 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
     )
     prepared = coordinator.prepare_registration(
         process_id=state.process_id,
-        origin_turn_id="turn:origin",
-        origin_attempt_id="attempt:origin",
-        origin_result_entry_id="entry:origin-result",
+        origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
+        origin_attempt_id='attempt:k5lkisrtjrfo2x4h4sp54sznha',
+        origin_result_entry_id='entry:jjhxgegvfzt7fe53ocfbndr2q4',
         writer_generation=1,
         authorization_reference="policy:test",
         policy=TerminalMonitorPolicy(
@@ -273,14 +275,14 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
     state.output.append_raw(("HEAD-" + "🙂" * 1_000 + "-TAIL ").encode())
     coordinator._evaluate(prepared.monitor_id, monotonic() + 2_000)  # noqa: SLF001
     target = NewTurnInstallation(
-        "turn:observation", "revision:observation:0", "entry:observation"
+        'turn:aq53dqzrwqpuwmn4wsjba34uzq', "revision:observation:0", 'entry:n25d5ijed3stgnebhpwtxwytma'
     )
     attempt = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=target,
-        workspace_id="workspace:test",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         writer_generation=1,
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
     )
     assert attempt is not None
     assert attempt.content.delivery_coverage is TerminalDeliveryCoverage.HEAD_TAIL
@@ -300,9 +302,9 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
     next_attempt = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=target,
-        workspace_id="workspace:test",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         writer_generation=1,
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
     )
     assert next_attempt is not None
     assert next_attempt.content.delivery_coverage is TerminalDeliveryCoverage.COMPLETE
@@ -319,7 +321,7 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
 def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and_publish(
     tmp_path: Path,
 ) -> None:
-    owner = "host:registration-race"
+    owner = 'host:2rq7lgzlvfcbo5qch7mkux3ukm'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
@@ -335,7 +337,7 @@ def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and
     )
     assert yielded is True
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:registration-race",
+        session_id='session:zzjwyhle2djc4mhh3onktt3ywe',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -355,9 +357,9 @@ def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and
     registry.snapshot_and_subscribe = complete_after_snapshot  # type: ignore[method-assign]
     prepared = coordinator.prepare_registration(
         process_id=state.process_id,
-        origin_turn_id="turn:race",
-        origin_attempt_id="attempt:race",
-        origin_result_entry_id="entry:race",
+        origin_turn_id='turn:gxzq5vngv5b5jiz4coppto54yi',
+        origin_attempt_id='attempt:kzdvb63t626wuo5prljni4enzu',
+        origin_result_entry_id='entry:egjr7a5ft7ouzg3xc3zxfmr5xa',
         writer_generation=1,
         authorization_reference="policy:race",
         policy=TerminalMonitorPolicy(),
@@ -369,10 +371,10 @@ def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and
         sleep(0.01)
     attempt = coordinator.freeze(
         monitor_id=prepared.monitor_id,
-        target=NewTurnInstallation("turn:new", "revision:new", "entry:new"),
-        workspace_id="workspace:race",
+        target=NewTurnInstallation('turn:tgnq76so2tupmonbxpxhivfuya', "revision:new", 'entry:ljj6eunt5vctvos4pk3swztw5i'),
+        workspace_id='workspace:faare2dinqcrxzuvzmkoamb2a4',
         writer_generation=1,
-        actor_id="host:race",
+        actor_id='host:i5raubz73g443vpmydtsch6b2m',
     )
     assert attempt is not None
     assert attempt.content.observation_kind.value == "COMPLETION"
@@ -384,7 +386,7 @@ def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and
 def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settlement(
     tmp_path: Path,
 ) -> None:
-    owner = "host:cancel-after-freeze"
+    owner = 'host:yhq4qzylnijd3tjplcxzszk3se'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     state, yielded = registry.exec_with_yield(
@@ -400,7 +402,7 @@ def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settle
     )
     assert yielded is True
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:cancel-after-freeze",
+        session_id='session:wdojzy7ejlduqcyw2tocwl5tri',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -408,9 +410,9 @@ def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settle
     )
     prepared = coordinator.prepare_registration(
         process_id=state.process_id,
-        origin_turn_id="turn:cancel-race",
-        origin_attempt_id="attempt:cancel-race",
-        origin_result_entry_id="entry:cancel-race",
+        origin_turn_id='turn:ttyfwr7awvyjfl5hpwjdj55dpa',
+        origin_attempt_id='attempt:rz3wb4hricxqouo4rkiouiwlwu',
+        origin_result_entry_id='entry:km64byuv5pqjmcrqyqrpnxt5iq',
         writer_generation=1,
         authorization_reference="policy:cancel-race",
         policy=TerminalMonitorPolicy(
@@ -425,11 +427,11 @@ def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settle
     attempt = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=NewTurnInstallation(
-            "turn:cancel-winner", "revision:cancel-winner", "entry:cancel-winner"
+            'turn:c4cx4qeidvlnwg7lnfmi7rz6ge', "revision:cancel-winner", 'entry:iorpmxn257efsrpqg5ixbrw64a'
         ),
-        workspace_id="workspace:cancel-race",
+        workspace_id='workspace:q65um77jkwmxqhccpnn7bvy7oe',
         writer_generation=1,
-        actor_id="host:cancel-race",
+        actor_id='host:ry64k4v3wug7nqvhws6mh4hflu',
     )
     assert attempt is not None
 
@@ -455,13 +457,13 @@ def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settle
 def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
     tmp_path: Path,
 ) -> None:
-    owner = "host:monitor-policy"
+    owner = 'host:yyf7ssb3dzpgtdttqszjbjt26i'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     heartbeat_process = _spawn_sleeping_process(registry, owner, tmp_path)
     expiry_process = _spawn_sleeping_process(registry, owner, tmp_path)
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:monitor-policy",
+        session_id='session:kkmydvqiftka4o5cg5djcb4mwe',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -470,9 +472,9 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
 
     heartbeat = coordinator.prepare_registration(
         process_id=heartbeat_process.process_id,
-        origin_turn_id="turn:heartbeat",
-        origin_attempt_id="attempt:heartbeat",
-        origin_result_entry_id="entry:heartbeat",
+        origin_turn_id='turn:3oh4ib6u76lfoebttfo6pfuaby',
+        origin_attempt_id='attempt:yqcm5p7b33ymazbqy5xd7fp65u',
+        origin_result_entry_id='entry:tdnm3zimgdqdkmbvjfgcoadjoe',
         writer_generation=1,
         authorization_reference="policy:heartbeat",
         policy=TerminalMonitorPolicy(
@@ -488,11 +490,11 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
     heartbeat_attempt = coordinator.freeze(
         monitor_id=heartbeat.monitor_id,
         target=NewTurnInstallation(
-            "turn:heartbeat-wake", "revision:heartbeat-wake", "entry:heartbeat-wake"
+            'turn:w374ncj3rfior26ccteoe5euty', "revision:heartbeat-wake", 'entry:b6x4z57xcpip2aamgu3wmy4kre'
         ),
-        workspace_id="workspace:monitor-policy",
+        workspace_id='workspace:pjzzplieywc4j55n6nzst3pbe4',
         writer_generation=1,
-        actor_id="host:monitor-policy",
+        actor_id='host:yyf7ssb3dzpgtdttqszjbjt26i',
     )
     assert heartbeat_attempt is not None
     assert heartbeat_attempt.content.observation_kind.value == "HEARTBEAT"
@@ -500,9 +502,9 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
 
     expiry = coordinator.prepare_registration(
         process_id=expiry_process.process_id,
-        origin_turn_id="turn:expiry",
-        origin_attempt_id="attempt:expiry",
-        origin_result_entry_id="entry:expiry",
+        origin_turn_id='turn:baysdzt3jvqcn4lufvfcpby26a',
+        origin_attempt_id='attempt:33sugxz5xzstob5nzjpskexmxe',
+        origin_result_entry_id='entry:rmkat6sjcymmy5u2gb6mzbit64',
         writer_generation=1,
         authorization_reference="policy:expiry",
         policy=TerminalMonitorPolicy(maximum_duration_seconds=1),
@@ -512,11 +514,11 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
     expiry_attempt = coordinator.freeze(
         monitor_id=expiry.monitor_id,
         target=NewTurnInstallation(
-            "turn:expiry-wake", "revision:expiry-wake", "entry:expiry-wake"
+            'turn:4dui4i4bb5x6lz6n2drmq3eu3q', "revision:expiry-wake", 'entry:jmod6h5lpearhs6ozenwgzvkt4'
         ),
-        workspace_id="workspace:monitor-policy",
+        workspace_id='workspace:pjzzplieywc4j55n6nzst3pbe4',
         writer_generation=1,
-        actor_id="host:monitor-policy",
+        actor_id='host:yyf7ssb3dzpgtdttqszjbjt26i',
     )
     assert expiry_attempt is not None
     assert expiry_attempt.content.observation_kind.value == "EXPIRY"
@@ -532,12 +534,12 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
 def test_round2_monitor_completion_coalesces_pending_progress_and_cursor_advances(
     tmp_path: Path,
 ) -> None:
-    owner = "host:monitor-coalesce"
+    owner = 'host:rsyfierba4zhgi2ck5syindorm'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     state = _spawn_sleeping_process(registry, owner, tmp_path)
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:monitor-coalesce",
+        session_id='session:ijyvukpiquoyner3bnx2vu27uy',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -545,9 +547,9 @@ def test_round2_monitor_completion_coalesces_pending_progress_and_cursor_advance
     )
     prepared = coordinator.prepare_registration(
         process_id=state.process_id,
-        origin_turn_id="turn:coalesce",
-        origin_attempt_id="attempt:coalesce",
-        origin_result_entry_id="entry:coalesce",
+        origin_turn_id='turn:klcsjq3hftfxbhjldvoxc7cuca',
+        origin_attempt_id='attempt:nzfq4svsvrd634knzpiziabmja',
+        origin_result_entry_id='entry:bo6jk6vkknnuuguqspt3pv7ysi',
         writer_generation=1,
         authorization_reference="policy:coalesce",
         policy=TerminalMonitorPolicy(
@@ -566,11 +568,11 @@ def test_round2_monitor_completion_coalesces_pending_progress_and_cursor_advance
     completion = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=NewTurnInstallation(
-            "turn:coalesce-wake", "revision:coalesce-wake", "entry:coalesce-wake"
+            'turn:io4iuecj6cxmnrg6b6vjfk4iv4', "revision:coalesce-wake", 'entry:h2o4xscctd2o53zdue7433h5ni'
         ),
-        workspace_id="workspace:monitor-coalesce",
+        workspace_id='workspace:4suocxnymvtfebnb7rn74tu6pq',
         writer_generation=1,
-        actor_id="host:monitor-coalesce",
+        actor_id='host:rsyfierba4zhgi2ck5syindorm',
     )
     assert completion is not None
     assert completion.content.observation_kind.value == "COMPLETION"
@@ -585,11 +587,11 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        session_id = "session:monitor-tool"
+        session_id = 'session:mrypghgj5rp3itbezpgr3qqoru'
         live_bus = LiveAgentEventBus()
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:monitor-tool",
+            host_owner_id='host:zwkyqhfmjvf5idqiykvxlsqeeq',
             session_id=session_id,
             live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -603,9 +605,9 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
             tool_name="terminal",
             arguments={"command": "sleep 30", "yield_time_ms": 0},
             tool_call_id="call:start-monitor-tool",
-            attempt_id="attempt:start-monitor-tool",
-            turn_id="turn:start-monitor-tool",
-            assistant_entry_id="entry:start-monitor-tool",
+            attempt_id='attempt:g4r6guogbojouzzzss6dh5ipxm',
+            turn_id='turn:via4gs2quwbuwtie6oncitgyhe',
+            assistant_entry_id='entry:z55igztunmp7kmov6htjk6vw2y',
         )
         process_id = json.loads(started.content)["process_id"]
 
@@ -613,24 +615,24 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
             return await invoke_direct_tool(
                 port,
                 session_id=session_id,
-                workspace_id="workspace:monitor-tool",
+                workspace_id='workspace:n6yg6xfimeb4eiul4gaa43wgmu',
                 tool_name=tool_name,
                 arguments=arguments,
                 tool_call_id=f"call:{label}",
-                attempt_id=f"attempt:{label}",
-                turn_id=f"turn:{label}",
-                assistant_entry_id=f"entry:{label}",
+                attempt_id=derive_id("attempt", "test-fixture", f"attempt:{label}"),
+                turn_id=derive_id("turn", "test-fixture", f"turn:{label}"),
+                assistant_entry_id=derive_id("entry", "test-fixture", f"entry:{label}"),
             )
 
         mismatch_borrow, mismatch_context = direct_tool_invocation_context(
             port,
             session_id=session_id,
-            workspace_id="workspace:monitor-tool",
+            workspace_id='workspace:n6yg6xfimeb4eiul4gaa43wgmu',
             tool_name="terminal_monitor",
             tool_call_id="call:different",
-            attempt_id="attempt:different",
-            turn_id="turn:different",
-            assistant_entry_id="entry:different",
+            attempt_id='attempt:a4vormydvcekppxzkllhhenat4',
+            turn_id='turn:pbibxkwjanwckkd7eyjqxpwfhq',
+            assistant_entry_id='entry:xsgvyzr547ysitrg3t2aih4ake',
         )
         with pytest.raises(RuntimeError, match="exact-join"):
             try:
@@ -638,9 +640,9 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
                     tool_name="terminal_monitor",
                     arguments={"action": "register", "process_id": process_id},
                     tool_call_id="call:mismatch",
-                    attempt_id="attempt:mismatch",
-                    turn_id="turn:mismatch",
-                    assistant_entry_id="entry:mismatch",
+                    attempt_id='attempt:fk2b4bgdvgqqfszf3rakbgz6tm',
+                    turn_id='turn:ygjjkr3ma6p3qedf4csngaglcu',
+                    assistant_entry_id='entry:kzjvt467ssozzajgmswdrummim',
                     invocation_context=mismatch_context,
                 )
             finally:
@@ -650,7 +652,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         child_surface = prepare_test_direct_tool_surface(
             port,
             conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id="task:child",
+            scope_subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
         )
         assert "terminal_monitor" not in {
             spec.name for spec in child_surface.model_surface.tool_specs
@@ -659,15 +661,15 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
             await invoke_direct_tool(
                 port,
                 session_id=session_id,
-                workspace_id="workspace:monitor-tool",
+                workspace_id='workspace:n6yg6xfimeb4eiul4gaa43wgmu',
                 tool_name="terminal_monitor",
                 arguments={"action": "register", "process_id": process_id},
                 tool_call_id="call:SUBAGENT_TASK",
-                attempt_id="attempt:SUBAGENT_TASK",
-                turn_id="turn:SUBAGENT_TASK",
-                assistant_entry_id="entry:SUBAGENT_TASK",
+                attempt_id='attempt:scc6tomtfah2vnphmqnf4npzjy',
+                turn_id='turn:evue3iiyois6caa2g3in2f7rnu',
+                assistant_entry_id='entry:magflyy6cksxnaojtolyvzzpcu',
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id="task:child",
+                scope_subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
             )
 
         registered = await invoke_root(
@@ -698,7 +700,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         unknown = await invoke_root(
             "missing",
             "terminal_monitor",
-            {"action": "register", "process_id": "process:missing"},
+            {"action": "register", "process_id": 'process:vxwpzdmzto7uhw6jrpqmtojroy'},
         )
         assert json.loads(unknown.content) == {
             "reason": "PROCESS_NOT_FOUND",
@@ -749,8 +751,13 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("arguments, expected_detail", [
+    ({"action": "malformed"}, "invalid tool arguments"),
+    ({"action": "cancel", "monitor_id": "terminal-monitor:" + "0" * 32}, "INVALID_ID"),
+    ({"action": "cancel", "monitor_id": "process:" + "a" * 26}, "INVALID_ID"),
+])
 def test_round2_malformed_monitor_input_uses_common_invalid_arguments_contract(
-    tmp_path: Path,
+    tmp_path: Path, arguments, expected_detail,
 ) -> None:
     async def scenario() -> None:
         session_id = _name("session")
@@ -766,13 +773,13 @@ def test_round2_malformed_monitor_input_uses_common_invalid_arguments_contract(
                 port,
                 session_id=session_id,
                 tool_name="terminal_monitor",
-                arguments={"action": "malformed"},
+                arguments=arguments,
                 tool_call_id=_name("call"),
                 turn_id=_name("turn"),
                 assistant_entry_id=_name("entry"),
             )
             assert decision.kind is KernelToolAuthorizationKind.INVALID_ARGUMENTS
-            assert "invalid tool arguments" in decision.public_message
+            assert expected_detail in decision.public_message
         finally:
             await port.aclose(timeout_seconds=3)
 
@@ -787,8 +794,8 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
         observer, _generation, revision = live_bus.subscribe()
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:subagent-terminal-origin",
-            session_id="session:subagent-terminal-origin",
+            host_owner_id='host:ivbbigu37u2kewe4z64qwvbhx4',
+            session_id='session:p4dfhpwhrtwwusdq4xpm5xludi',
             live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -797,16 +804,16 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
         )
         started = await invoke_direct_tool(
             port,
-            session_id="session:subagent-terminal-origin",
-            workspace_id="workspace:subagent-terminal-origin",
+            session_id='session:p4dfhpwhrtwwusdq4xpm5xludi',
+            workspace_id='workspace:nwvy5eoruiyt7xwudvbidfgonu',
             tool_name="terminal",
             arguments={"command": "sleep 0.15", "yield_time_ms": 0},
             tool_call_id="call:child-origin",
-            attempt_id="attempt:child-origin",
-            turn_id="turn:child-origin",
-            assistant_entry_id="entry:child-origin",
+            attempt_id='attempt:bvznwpxsjqpdc7yav4lgfvvbkq',
+            turn_id='turn:yndpt43qq5exwddahqtsuhjxd4',
+            assistant_entry_id='entry:cbgpjjjc35xgohf2jvhwqnrvoa',
             conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id="task:child-origin",
+            scope_subagent_task_id='task:twul7hv3qpuxipu3qslwr755ci',
         )
         assert json.loads(started.content)["status"] == "running"
 
@@ -829,9 +836,9 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
                 assert monotonic() < deadline
                 await asyncio.sleep(0.01)
 
-        assert completion.turn_id == "turn:child-origin"
+        assert completion.turn_id == 'turn:yndpt43qq5exwddahqtsuhjxd4'
         assert completion.scope_kind == "SUBAGENT_TASK"
-        assert completion.scope_subagent_task_id == "task:child-origin"
+        assert completion.scope_subagent_task_id == 'task:twul7hv3qpuxipu3qslwr755ci'
         await port.aclose(timeout_seconds=3)
 
     asyncio.run(scenario())
@@ -840,7 +847,7 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
 def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
     tmp_path: Path,
 ) -> None:
-    owner = "host:dormant-monitor"
+    owner = 'host:d6bqlydirt6gy7dbhqnnfyiymy'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     committed_process = _spawn_sleeping_process(registry, owner, tmp_path)
@@ -852,7 +859,7 @@ def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
         wake_count += 1
 
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:dormant-monitor",
+        session_id='session:ctgwah63ij24i3we2zwe7rikvi',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -865,9 +872,9 @@ def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
     )
     committed = coordinator.prepare_registration(
         process_id=committed_process.process_id,
-        origin_turn_id="turn:dormant-commit",
-        origin_attempt_id="attempt:dormant-commit",
-        origin_result_entry_id="entry:dormant-commit",
+        origin_turn_id='turn:7ema7xndzglosw36knwdly6ibq',
+        origin_attempt_id='attempt:fprwlchdox7w2s7gpmq2pwi7g4',
+        origin_result_entry_id='entry:6kcvbcimcpstleycvftyjojw5e',
         writer_generation=1,
         authorization_reference="policy:dormant-commit",
         policy=policy,
@@ -887,9 +894,9 @@ def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
 
     discarded = coordinator.prepare_registration(
         process_id=discarded_process.process_id,
-        origin_turn_id="turn:dormant-discard",
-        origin_attempt_id="attempt:dormant-discard",
-        origin_result_entry_id="entry:dormant-discard",
+        origin_turn_id='turn:epvrwrjidzvbqtrcpyjyv5kmqa',
+        origin_attempt_id='attempt:mqspbxmc6idx45bx42dytvhsoi',
+        origin_result_entry_id='entry:4iw44wl6ys5zfrcqrhegx6c72q',
         writer_generation=1,
         authorization_reference="policy:dormant-discard",
         policy=policy,
@@ -908,12 +915,12 @@ def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
 def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retries_first(
     tmp_path: Path,
 ) -> None:
-    owner = "host:successor-monitor"
+    owner = 'host:cb6ht25cdbugx4bfda52nmnc5e'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     state = _spawn_sleeping_process(registry, owner, tmp_path)
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:successor-monitor",
+        session_id='session:q6hr3drvgcvgbrg6beh653ji4i',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -921,9 +928,9 @@ def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retrie
     )
     prepared = coordinator.prepare_registration(
         process_id=state.process_id,
-        origin_turn_id="turn:successor",
-        origin_attempt_id="attempt:successor",
-        origin_result_entry_id="entry:successor",
+        origin_turn_id='turn:ip4gd6wolprut4h3uvxxn7kmhu',
+        origin_attempt_id='attempt:ddiikzp7clpi4fyk64qppcpnou',
+        origin_result_entry_id='entry:xv6rdvfkakwi6kuhvgmwnlhewy',
         writer_generation=1,
         authorization_reference="policy:successor",
         policy=TerminalMonitorPolicy(
@@ -934,16 +941,16 @@ def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retrie
     )
     coordinator.settle_registration(prepared, committed=True)
     target = NewTurnInstallation(
-        "turn:successor-wake", "revision:successor-wake", "entry:successor-wake"
+        'turn:rjqkuhuyeu2wmtozb24wkcx3gm', "revision:successor-wake", 'entry:x4oaahruysarkhbq5xhdm6wwxa'
     )
     state.output.append_raw(b"first-range ")
     coordinator._evaluate(prepared.monitor_id, monotonic() + 10)  # noqa: SLF001
     first = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=target,
-        workspace_id="workspace:successor",
+        workspace_id='workspace:yy5txz6mcdyrpc6oakif3eqhfq',
         writer_generation=1,
-        actor_id="host:successor",
+        actor_id='host:gqf32vb3ovziao6wjcguav5rhe',
     )
     assert first is not None and first.content.output == "first-range "
 
@@ -960,9 +967,9 @@ def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retrie
     retried = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=target,
-        workspace_id="workspace:successor",
+        workspace_id='workspace:yy5txz6mcdyrpc6oakif3eqhfq',
         writer_generation=1,
-        actor_id="host:successor",
+        actor_id='host:gqf32vb3ovziao6wjcguav5rhe',
     )
     assert retried is not None
     assert retried.content == first.content
@@ -975,9 +982,9 @@ def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retrie
     second = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=target,
-        workspace_id="workspace:successor",
+        workspace_id='workspace:yy5txz6mcdyrpc6oakif3eqhfq',
         writer_generation=1,
-        actor_id="host:successor",
+        actor_id='host:gqf32vb3ovziao6wjcguav5rhe',
     )
     assert second is not None
     assert second.content.output == "second-range "
@@ -991,12 +998,12 @@ def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retrie
 def test_round2_monitor_discards_stale_lock_free_read_after_draft_freeze(
     tmp_path: Path,
 ) -> None:
-    owner = "host:successor-race"
+    owner = 'host:4p73ncvy7wp3g5zfpr762xhwvm'
     registry = ProcessRegistry()
     registry.activate_owner(owner)
     state = _spawn_sleeping_process(registry, owner, tmp_path)
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:successor-race",
+        session_id='session:4xyc6yp7z74tq4fnxtejc4r34m',
         owner_epoch=owner,
         registry=registry,
         live_bus=LiveAgentEventBus(),
@@ -1004,9 +1011,9 @@ def test_round2_monitor_discards_stale_lock_free_read_after_draft_freeze(
     )
     prepared = coordinator.prepare_registration(
         process_id=state.process_id,
-        origin_turn_id="turn:successor-race",
-        origin_attempt_id="attempt:successor-race",
-        origin_result_entry_id="entry:successor-race",
+        origin_turn_id='turn:yk4w7yxiz3hlzzdiyqsp4z6v3e',
+        origin_attempt_id='attempt:c723flspisov2t5lx7id6rho2y',
+        origin_result_entry_id='entry:4t35k5hamvwn4p4zvwa4icbhz4',
         writer_generation=1,
         authorization_reference="policy:successor-race",
         policy=TerminalMonitorPolicy(
@@ -1017,9 +1024,9 @@ def test_round2_monitor_discards_stale_lock_free_read_after_draft_freeze(
     )
     coordinator.settle_registration(prepared, committed=True)
     target = NewTurnInstallation(
-        "turn:successor-race-wake",
+        'turn:2tzdh5ejoqyvmtoe3mvohg2nbq',
         "revision:successor-race-wake",
-        "entry:successor-race-wake",
+        'entry:j3bjjy27qb3tqh5fkftxdkucgu',
     )
     state.output.append_raw(b"first-range ")
     coordinator._evaluate(prepared.monitor_id, monotonic() + 2_000)  # noqa: SLF001
@@ -1044,9 +1051,9 @@ def test_round2_monitor_discards_stale_lock_free_read_after_draft_freeze(
     first = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=target,
-        workspace_id="workspace:successor-race",
+        workspace_id='workspace:vwkqufrluqzfdxqjobht5yozum',
         writer_generation=1,
-        actor_id="host:successor-race",
+        actor_id='host:4p73ncvy7wp3g5zfpr762xhwvm',
     )
     assert first is not None and first.content.output == "first-range "
     release_read.set()
@@ -1067,9 +1074,9 @@ def test_round2_monitor_discards_stale_lock_free_read_after_draft_freeze(
     second = coordinator.freeze(
         monitor_id=prepared.monitor_id,
         target=target,
-        workspace_id="workspace:successor-race",
+        workspace_id='workspace:vwkqufrluqzfdxqjobht5yozum',
         writer_generation=1,
-        actor_id="host:successor-race",
+        actor_id='host:4p73ncvy7wp3g5zfpr762xhwvm',
     )
     assert second is not None and second.content.output == "second-range "
     coordinator.settle_installation(second, accepted=True)
@@ -1081,7 +1088,7 @@ def test_round2_monitor_discards_stale_lock_free_read_after_draft_freeze(
 def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_nonblocking(
     tmp_path: Path,
 ) -> None:
-    owner = "host:monitor-bounds"
+    owner = 'host:nyj47kkcs43wnpg36mh7g7culu'
     registry = ProcessRegistry(max_live_processes=MAXIMUM_ACTIVE_MONITORS + 1)
     registry.activate_owner(owner)
     processes = [
@@ -1091,7 +1098,7 @@ def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_no
     live_bus = LiveAgentEventBus()
     live_bus.subscribe()
     coordinator = TerminalMonitorCoordinator(
-        session_id="session:monitor-bounds",
+        session_id='session:7z3gmps6ggs7fhot2tnauzbaxu',
         owner_epoch=owner,
         registry=registry,
         live_bus=live_bus,
@@ -1106,9 +1113,9 @@ def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_no
     for index, process in enumerate(processes[:MAXIMUM_ACTIVE_MONITORS]):
         prepared = coordinator.prepare_registration(
             process_id=process.process_id,
-            origin_turn_id=f"turn:bound:{index}",
-            origin_attempt_id=f"attempt:bound:{index}",
-            origin_result_entry_id=f"entry:bound:{index}",
+            origin_turn_id=derive_id("turn", "test-fixture", f"turn:bound:{index}"),
+            origin_attempt_id=derive_id("attempt", "test-fixture", f"attempt:bound:{index}"),
+            origin_result_entry_id=derive_id("entry", "test-fixture", f"entry:bound:{index}"),
             writer_generation=1,
             authorization_reference=f"policy:bound:{index}",
             policy=policy,
@@ -1118,9 +1125,9 @@ def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_no
     with pytest.raises(TerminalMonitorRejected) as rejection:
         coordinator.prepare_registration(
             process_id=processes[-1].process_id,
-            origin_turn_id="turn:over-capacity",
-            origin_attempt_id="attempt:over-capacity",
-            origin_result_entry_id="entry:over-capacity",
+            origin_turn_id='turn:zrshqszzjr6rp3oyitw2ji65ta',
+            origin_attempt_id='attempt:yovppsmvbuifwy7mbdmgq5crzy',
+            origin_result_entry_id='entry:yi3s67dplsbzka6rmsztqztska',
             writer_generation=1,
             authorization_reference="policy:over-capacity",
             policy=policy,
@@ -1129,7 +1136,7 @@ def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_no
 
     chosen = registrations[0]
     chosen_process = processes[0]
-    target = NewTurnInstallation("turn:autonomy", "revision:autonomy", "entry:autonomy")
+    target = NewTurnInstallation('turn:uw3p7nnjmja4zacdnbh3dsui4e', "revision:autonomy", 'entry:b3az3zpbdeibmxo6j3jdw532iu')
     started = monotonic()
     for index in range(MAXIMUM_AUTONOMOUS_CONTINUATIONS):
         chosen_process.output.append_raw(f"progress-{index} ".encode())
@@ -1137,9 +1144,9 @@ def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_no
         attempt = coordinator.freeze(
             monitor_id=chosen.monitor_id,
             target=target,
-            workspace_id="workspace:autonomy",
+            workspace_id='workspace:wtvuka2vhd5qwvkv2zu2rlr6ma',
             writer_generation=1,
-            actor_id="host:autonomy",
+            actor_id='host:7o3cxf3c7bxdczzkmcrbmhmbcm',
         )
         assert attempt is not None
         coordinator.settle_installation(attempt, accepted=True)

@@ -24,9 +24,9 @@ def test_embedding_overlaps_sparse_and_history_and_cancellation_drains_all(tmp_p
     async def scenario():
         io = KernelSessionIO()
         port = KernelMemoryToolPort(
-            repository=SimpleNamespace(connection_provider=None), session_id="session:parallel",
+            repository=SimpleNamespace(connection_provider=None), session_id='session:dff7c3a6mm2a62dhz64vsis7u4',
             read_binding=freeze_memory_read_context_binding(
-                domain=MemoryDomainContext("u_local", "transient"), host_workspace_id="workspace:parallel",
+                domain=MemoryDomainContext("u_local", "transient"), host_workspace_id='workspace:3yjy5wqzn4db25trsruald6dbi',
             ), embedding_config=EmbeddingBackendConfig(), io_owner=io,
             settings=LocalSettingsStore(tmp_path / "settings.yaml"),
         )

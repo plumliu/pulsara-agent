@@ -7,6 +7,7 @@ credential values are scrubbed from the report.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.llm.input import PromptContent
 import argparse
@@ -254,14 +255,14 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
     repository = session.repository
     for index in range(segments):
         suffix = uuid4().hex
-        turn_id = f"turn:round10-seed:{suffix}"
+        turn_id = derive_id("turn", "test-fixture", f"turn:round10-seed:{suffix}")
         intent = build_prepared_root_turn_intent(
             session_id=session.session_id,
-            command_id=f"command:round10-seed:{suffix}",
+            command_id=derive_id("command", "test-fixture", f"command:round10-seed:{suffix}"),
             turn_id=turn_id,
-            entry_id=f"entry:round10-seed-user:{suffix}",
-            context_binding_revision_id=f"revision:round10-seed:{suffix}",
-            permission_snapshot_id=f"permission:round10-seed:{suffix}",
+            entry_id=derive_id("entry", "test-fixture", f"entry:round10-seed-user:{suffix}"),
+            context_binding_revision_id=derive_id("binding", "test-fixture", f"revision:round10-seed:{suffix}"),
+            permission_snapshot_id=derive_id("permission", "test-fixture", f"permission:round10-seed:{suffix}"),
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             canonical_prompt=freeze_canonical_prompt(
                 FrozenPromptContent.text(
@@ -284,7 +285,7 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
             turn_id=turn_id,
             deadline_monotonic=monotonic() + 60,
         )
-        assistant_id = f"entry:round10-seed-assistant:{suffix}"
+        assistant_id = derive_id("entry", "test-fixture", f"entry:round10-seed-assistant:{suffix}")
         repository.commit_assistant_message(
             guard,
             cut=cut,
@@ -292,7 +293,7 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
             parent_content=InlineContent.from_bytes(b"seed complete"),
             blocks=(
                 AssistantTextBlock(
-                    block_id=f"block:round10-seed:{suffix}",
+                    block_id=derive_id("block", "test-fixture", f"block:round10-seed:{suffix}"),
                     text=InlineContent.from_bytes(b"seed complete"),
                 ),
             ),
@@ -512,7 +513,7 @@ Fork/join:
 Use the general_worker profile. Briefly state the graph outcome currently visible to you and the independently observed project version; do not claim unfinished work is complete."""
     result = await session.run_turn(
         PromptContent.text(prompt),
-        command_id="command:round10:graph",
+        command_id='command:lekhc23ri3ss7tb5nzmlttfwgm',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     root_return_rows = await _task_rows(session)
@@ -577,7 +578,7 @@ async def _run_enhanced(session, *, connection_id: str) -> dict[str, object]:
             "Do not call any other tools, delegate, read workspace files, or add other data fields. "
             "The worker objective ends at this sentence. After create_agent_tasks returns, finish your ROOT turn."
         ),
-        command_id="command:subagent-enhanced:source",
+        command_id='command:y7tf3b2xehqvjthlttpqnfhmca',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     source = await _wait_for_task_key(
@@ -604,7 +605,7 @@ async def _run_enhanced(session, *, connection_id: str) -> dict[str, object]:
             "Never resume or edit the old task. The worker objective ends at this sentence. "
             "After create_agent_tasks returns, finish your ROOT turn."
         ),
-        command_id="command:subagent-enhanced:revision",
+        command_id='command:oreqnn4qd2gukcfwgdke3fdofm',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     revision = await _wait_for_task_key(
@@ -695,18 +696,18 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
     run = asyncio.create_task(
         session.run_turn(
             PromptContent.text(initial_prompt),
-            command_id="command:round10:last-n-spawn",
+            command_id='command:rl6vdp74wn6i44vyeaigf5sjyi',
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
     )
     turn_id = await _active_root_turn_id(session, timeout_seconds=10)
     steer_one = await session.steer_active_turn(
-        command_id="command:round10:last-n-steer-one",
+        command_id='command:gd74iuxmtgo73kprc2st5u6uha',
         content=PromptContent.text("ROOT_CONTEXT_MARKER_ONE_7C1A"),
         target_turn_id=turn_id,
     )
     steer_two = await session.steer_active_turn(
-        command_id="command:round10:last-n-steer-two",
+        command_id='command:5ne4aghzqizdzvzisjruqdh7ee',
         content=PromptContent.text("ROOT_CONTEXT_MARKER_TWO_9B4E"),
         target_turn_id=turn_id,
     )
@@ -728,7 +729,7 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
             f"{task_id!r} with message {message_text!r}. Return immediately after "
             "the tool reports queued; do not wait for the worker.")
         ),
-        command_id="command:round10:message",
+        command_id='command:g24ewl4bdkystk4eni4yqesq24',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     # The child remains in a real physical tool call until the ROOT tool has
@@ -741,7 +742,7 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
             f"{task_id!r} with timeout_seconds 120. After it settles, quote its "
             "result summary exactly and stop.")
         ),
-        command_id="command:round10:last-n-wait",
+        command_id='command:qytbby7c5jubtg77cwqiqzg7bm',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     final = await _wait_for_task_status(
@@ -801,7 +802,7 @@ async def _run_wait_input_matrix(session, workspace: Path) -> dict[str, object]:
     root_run = asyncio.create_task(
         session.run_turn(
             PromptContent.text(prompt),
-            command_id="command:round10:wait-input-root",
+            command_id='command:xbplpur36cybpjicowtdljwo4y',
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
     )
@@ -816,14 +817,14 @@ async def _run_wait_input_matrix(session, workspace: Path) -> dict[str, object]:
         timeout_seconds=60,
     )
     queued = await session.submit_prompt(
-        command_id="command:round10:wait-input-next-turn",
+        command_id='command:enufsjeevvqtpqvvnozlh6l7p4',
         content=PromptContent.text("NEXT_TURN_WAIT_SENTINEL: reply only NEXT_TURN_WAIT_PROCESSED."),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     await asyncio.sleep(0.75)
     queued_left_wait_suspended = not root_run.done()
     steer = await session.steer_active_turn(
-        command_id="command:round10:wait-input-steer",
+        command_id='command:7lnqy44izo4yzpbmsc6z6xasg4',
         content=PromptContent.text("EXACT_WAIT_STEER_SENTINEL: acknowledge this exact marker, do not call "
             "wait_agent again, and finish the current ROOT."),
         target_turn_id=turn_id,
@@ -915,7 +916,7 @@ async def _run_untargeted_completion_wait(
     )
     spawn_result = await session.run_turn(
         PromptContent.text(f"""Use create_agent_tasks exactly once to create five independent general_worker tasks in this exact order. Task untargeted_waker must call terminal once with command {waker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_WAKER_DONE. Tasks untargeted_blocker1, untargeted_blocker2, untargeted_blocker3, and untargeted_blocker4 must each call terminal once with command {blocker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_BLOCKER_DONE. Return immediately after creation. Do not call wait_agent or list_agents."""),
-        command_id="command:round10:untargeted-spawn",
+        command_id='command:toihwis77b6n6zez2aq4ekglaq',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     waker = await _wait_for_task_key(
@@ -948,7 +949,7 @@ async def _run_untargeted_completion_wait(
             PromptContent.text("Call wait_agent exactly once with no task_ids and timeout_seconds=120. "
             "After it returns, use only the completion message delivered after the "
             "tool closes and quote the exact child summary. Do not call list_agents."),
-            command_id="command:round10:untargeted-wait",
+            command_id='command:cerc2n654u4z6gi3uva4q4a76q',
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
     )
@@ -1049,7 +1050,7 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
     root_run = asyncio.create_task(
         session.run_turn(
             PromptContent.text(prompt),
-            command_id="command:round10:capacity-spawn",
+            command_id='command:ifb62klfvt2cd3svil4gid424q',
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
     )
@@ -1062,7 +1063,7 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
     try:
         compaction_task = asyncio.create_task(
             session.compact_context(
-                command_id="command:round10:active-task-board-compaction",
+                command_id='command:muksumlzty7a3h4x2y2y7a2z2i',
                 force=True,
                 expected_active_turn_id=active_turn_id,
             )
@@ -1101,7 +1102,7 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
             "outcome; summarize the task outcomes from the completion messages "
             "that Pulsara delivers after the tool closes: " + json.dumps(task_ids))
         ),
-        command_id="command:round10:capacity-wait",
+        command_id='command:wfpdboh2akdqykp5jb76vp6y3u',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     final_rows = await _task_rows(session)

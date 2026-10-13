@@ -6,6 +6,8 @@ credentials and does not alter the user's existing Pulsara database.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import argparse
 import asyncio
 from dataclasses import replace
@@ -121,7 +123,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                         f"用你自己的自然语言概括项目 {marker} 的办公地点和记录日期；"
                         "不要把整个文件原样存储，也不要另建同义记忆。最后简短报告状态。"
                     ),
-                    command_id=f"command:direct-memory:observed:{uuid4().hex}",
+                    command_id=random_id("command"),
                     requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                 )
                 finals.append(observed.final_text)
@@ -170,7 +172,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                         "调用 remember 时将该精确 ID 放进 based_on_memory_ids。"
                         "不要再保存一条同义的地点 FACT。最后简短报告状态。"
                     ),
-                    command_id=f"command:direct-memory:derived:{uuid4().hex}",
+                    command_id=random_id("command"),
                     requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                 )
                 finals.append(derived.final_text)
@@ -189,7 +191,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                 for prompt in prompts:
                     result = await session.run_turn(
                         PromptContent.text(prompt),
-                        command_id=f"command:direct-memory:{uuid4().hex}",
+                        command_id=random_id("command"),
                         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                     )
                     finals.append(result.final_text)
@@ -263,7 +265,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                         f"请用 memory_get 读取 memory_id={replacement_id}，"
                         "并简短告诉我保存的地点。"
                     ),
-                    command_id=f"command:direct-memory:resume:{uuid4().hex}",
+                    command_id=random_id("command"),
                     requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                 )
                 finals.append(result.final_text)

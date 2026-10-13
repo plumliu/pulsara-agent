@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
 
 from datetime import datetime
@@ -49,7 +51,6 @@ from .contracts import (
     ConversationKernelConflict,
     StaleHostWriter,
     _content_columns,
-    _id,
     _utcnow,
 )
 
@@ -306,7 +307,7 @@ class _RepositoryKernel:
                         CommittedEventType.TURN_INTERRUPTED,
                         SubjectSlot.TURN,
                         turn_id,
-                        occurred_at=occurred_at,
+                        session_id=session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id=guard.writer_owner_id,
                         payload=interruption_payload("HOST_TAKEOVER"),
@@ -318,7 +319,7 @@ class _RepositoryKernel:
                         CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
                         SubjectSlot.SUBAGENT_TASK,
                         task_id,
-                        occurred_at=occurred_at,
+                        session_id=session_id, occurrence_key="status:" + 'INTERRUPTED', occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id=guard.writer_owner_id,
                         payload={"status": "INTERRUPTED", "reason": "HOST_TAKEOVER"},
@@ -330,7 +331,7 @@ class _RepositoryKernel:
                         CommittedEventType.PROMPT_REJECTED,
                         SubjectSlot.QUEUE_ITEM,
                         queue_item_id,
-                        occurred_at=occurred_at,
+                        session_id=session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id=guard.writer_owner_id,
                         payload={"reason": "TARGET_TURN_INTERRUPTED"},
@@ -856,13 +857,15 @@ class _RepositoryKernel:
         slot: SubjectSlot,
         subject_id: str,
         *,
+        session_id: str,
+        occurrence_key: str,
         occurred_at: datetime,
         actor_kind: str,
         actor_id: str,
         payload: Mapping[str, object],
     ) -> CommittedEventDraft:
         return CommittedEventDraft(
-            event_id=_id("event"),
+            event_id=derive_id("event", "accepted", session_id, event_type.name, slot.name, subject_id, occurrence_key),
             event_type=event_type,
             subject=CommittedEventSubject(slot=slot, subject_id=subject_id),
             actor_kind=actor_kind,

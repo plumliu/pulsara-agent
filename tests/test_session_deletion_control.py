@@ -16,7 +16,7 @@ from tests.test_local_web_browser_bridge import (
 
 
 def control(tmp_path, *, close_fails=False, connection_fails=False):
-    old = _RuntimeReopenHost("session:delete", "host:delete")
+    old = _RuntimeReopenHost('session:xebqi4u7daptmer2vee5wfjfxe', 'host:ut26hrctidbjczdrnrocppmdka')
     controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
     controller._fork_sessions = {}
     operation = SimpleNamespace(physical_full=False)
@@ -151,12 +151,12 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
     async def run():
         sessions = SimpleNamespace(
             delete_session=AsyncMock(
-                return_value={"status": "DELETED", "session_id": "target"}
+                return_value={"status": "DELETED", "session_id": 'session:zj56xaiwutqcu36hnvrihidlzq'}
             ),
             prepare_raw_close=AsyncMock(return_value=None),
-            archive_session=AsyncMock(return_value={"status": "ARCHIVED", "session_id": "target"}),
-            unarchive_session=AsyncMock(return_value={"status": "OPEN", "session_id": "target"}),
-            list_archived_sessions=AsyncMock(return_value=[{"session_id": "target", "lifecycle": "ARCHIVED"}]),
+            archive_session=AsyncMock(return_value={"status": "ARCHIVED", "session_id": 'session:zj56xaiwutqcu36hnvrihidlzq'}),
+            unarchive_session=AsyncMock(return_value={"status": "OPEN", "session_id": 'session:zj56xaiwutqcu36hnvrihidlzq'}),
+            list_archived_sessions=AsyncMock(return_value=[{"session_id": 'session:zj56xaiwutqcu36hnvrihidlzq', "lifecycle": "ARCHIVED"}]),
         )
         bridge = _Bridge()
         server = LocalHttpServer(

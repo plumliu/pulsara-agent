@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from tests.support.model_config import frozen_test_prompt
 import asyncio
 from dataclasses import dataclass, replace
@@ -109,9 +111,7 @@ pytestmark = pytest.mark.postgres
 
 
 def _id(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _now() -> datetime:
@@ -149,8 +149,8 @@ def _start_root(
         command_id=_id("command"),
         turn_id=turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("context-revision"),
-        permission_snapshot_id=_id("permission-snapshot"),
+        context_binding_revision_id=_id("binding"),
+        permission_snapshot_id=_id("permission"),
         requested_permission_mode=mode,
         model_call_binding=test_model_binding(test_model_runtime()),
         content=FrozenPromptContent.text(text.decode("utf-8")),
@@ -201,10 +201,10 @@ def _commit_plan_batch(
     expected_workflow_revision: int | None,
     sibling_before: bool = False,
 ) -> _AcceptedAssistantBatch:
-    selected_call_id = _id("tool-call")
+    selected_call_id = f"tool-call:{uuid4().hex}"
     selected_block_id = _id("block")
     blocks: list[AssistantToolCallBlock] = []
-    sibling_call_id = _id("tool-call")
+    sibling_call_id = f"tool-call:{uuid4().hex}"
     sibling_block_id = _id("block")
     sibling = AssistantToolCallBlock(
         sibling_block_id,
@@ -257,9 +257,9 @@ def _commit_plan_batch(
                 tool_call_id=block.tool_call_id,
                 tool_name=block.tool_name,
                 arguments=block.arguments,
-                result_id=(None if is_selected_question else _id("tool-result")),
+                result_id=(None if is_selected_question else _id("result")),
                 result_entry_id=(
-                    None if is_selected_question else _id("tool-result-entry")
+                    None if is_selected_question else _id("entry")
                 ),
             )
         )
@@ -268,7 +268,7 @@ def _commit_plan_batch(
     interaction_id = None if fresh_enter else _id("plan-interaction")
     continuation_turn_id = _id("turn") if fresh_enter else None
     continuation_entry_id = _id("entry") if fresh_enter else None
-    continuation_revision_id = _id("context-revision") if fresh_enter else None
+    continuation_revision_id = _id("binding") if fresh_enter else None
     candidate = PreparedPlanToolBatch(
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
@@ -333,7 +333,7 @@ def _root_provider_input_admission(
 
 
 def _open_user_plan(repository, lease, *, resume=PermissionMode.ACCEPT_EDITS):
-    workflow_id = _id("plan-workflow")
+    workflow_id = _id("plan")
     accepted = repository.enter_plan_by_user(
         lease.guard,
         command_id=_id("command"),
@@ -524,7 +524,7 @@ def test_round4_user_plan_freezes_permission_and_cancel_handoff_once(
         workspace_id=repository.read_session_workspace_id(
             lease.guard, deadline_monotonic=monotonic() + 30
         ),
-        writer_owner_id=_id("replacement-host"),
+        writer_owner_id=_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
@@ -577,7 +577,7 @@ def test_round4_database_rejects_permission_mutation_and_wrong_initial_entry(
         lease.guard,
         command_id=_id("command"),
         queue_item_id=queue_item_id,
-        client_submission_id=_id("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),
@@ -629,7 +629,7 @@ def test_round4_agent_enter_batch_cancels_every_sibling_before_dispatch(
         lease.guard, deadline_monotonic=monotonic() + 30
     )
     origin_turn_id, _ = _start_root(repository, lease)
-    workflow_id = _id("plan-workflow")
+    workflow_id = _id("plan")
     prepared = _commit_plan_batch(
         repository,
         lease,
@@ -698,7 +698,7 @@ def test_k3_fresh_plan_result_and_continuation_exactly_match_prospective_read(
         turn_id=origin_turn_id,
         selected_tool_name="enter_plan",
         selected_arguments={"reason": "quote result and continuation together"},
-        workflow_id=_id("plan-workflow"),
+        workflow_id=_id("plan"),
         expected_workflow_revision=None,
         sibling_before=True,
     )
@@ -771,7 +771,7 @@ def test_round4_plan_batch_confirmation_rejects_every_exact_identity_drift(
         turn_id=origin_turn_id,
         selected_tool_name="enter_plan",
         selected_arguments={"reason": "exact ACK confirmation"},
-        workflow_id=_id("plan-workflow"),
+        workflow_id=_id("plan"),
         expected_workflow_revision=None,
     )
     repository.accept_plan_tool_batch(
@@ -1154,14 +1154,14 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
             expected_workflow_revision=2,
             interaction_id=str(opened_question.interaction_id),
             answer=invalid_answer,
-            result_id=_id("tool-result"),
+            result_id=_id("result"),
             result_entry_id=_id("entry"),
             occurred_at=_now(),
             deadline_monotonic=monotonic() + 30,
         )
     answer_command = _id("command")
     answer = PlanQuestionAnswer(PlanQuestionAnswerKind.OPTION, option_ordinal=0)
-    answer_result_id = _id("tool-result")
+    answer_result_id = _id("result")
     answer_entry_id = _id("entry")
     answered_at = _now()
     answer_candidate = (
@@ -1268,7 +1268,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     revise_command = _id("command")
     revise_turn = _id("turn")
     revise_entry = _id("entry")
-    revise_revision = _id("context-revision")
+    revise_revision = _id("binding")
     revise_candidate = repository.prepare_plan_draft_review_provider_input_candidate(
         lease.guard,
         workflow_id=workflow_id,
@@ -1327,7 +1327,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     )
     implementation_turn = _id("turn")
     implementation_entry = _id("entry")
-    implementation_revision = _id("context-revision")
+    implementation_revision = _id("binding")
     approve_command = _id("command")
     approve_candidate = repository.prepare_plan_draft_review_provider_input_candidate(
         lease.guard,
@@ -1514,9 +1514,9 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
                     compaction_read.lineage_base.persisted_revision_genesis_marker
                 ),
             ),
-            snapshot_id=_id("context-snapshot"),
-            binding_revision_id=_id("context-revision"),
-            event_id=_id("compaction-event"),
+            snapshot_id=_id("snapshot"),
+            binding_revision_id=_id("binding"),
+            event_id=_id("event"),
             source_through_sequence=source_through_sequence,
             source_digest=canonical_compaction_range_digest(
                 compaction_read.lineage_base,
@@ -1576,7 +1576,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         intent="EXISTING",
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
-        writer_owner_id=_id("replacement-host"),
+        writer_owner_id=_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
@@ -1680,7 +1680,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         lease.guard,
         command_id=_id("command"),
         queue_item_id=first_queue_id,
-        client_submission_id=_id("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),
@@ -1763,7 +1763,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         lease.guard,
         command_id=_id("command"),
         queue_item_id=second_queue_id,
-        client_submission_id=_id("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),

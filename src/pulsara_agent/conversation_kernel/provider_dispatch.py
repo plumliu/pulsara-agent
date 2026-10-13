@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, random_id
+
+
 import asyncio
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
-from hashlib import sha256
 from threading import Lock
 from time import monotonic
 from typing import Literal, Protocol
-from uuid import uuid4
 
 
 from pulsara_agent.conversation_kernel.blob import (
@@ -172,8 +173,6 @@ from pulsara_agent.conversation_kernel.steer import (
     build_steer_consumption_candidate,
     build_steer_resource_rejection,
     build_steer_suffix_quote,
-    prepared_steer_suffix_plan_identity_fingerprint,
-    steer_consumption_candidate_identity_fingerprint,
 )
 from pulsara_agent.conversation_kernel.steer_consumption import (
     PreparedSteerPlanStale,
@@ -3411,15 +3410,7 @@ class ProviderDispatchCoordinator:
                         ),
                     )
                     compile_request = StructuredModelInputCompileRequest(
-                        context_id=_stable_id(
-                            "model-context",
-                            identity.session_id,
-                            turn_id,
-                            str(model_call_index),
-                            steer_consumption_candidate_identity_fingerprint(
-                                candidates[-1]
-                            ),
-                        ),
+                        context_id=random_id("context"),
                         model_call_index=model_call_index,
                         canonical_input=prospective_input,
                         canonical_facts=prospective,
@@ -3553,13 +3544,7 @@ class ProviderDispatchCoordinator:
                         memory_use_policy=memory_use_policy,
                     )
                     final_request = StructuredModelInputCompileRequest(
-                        context_id=_stable_id(
-                            "model-context-final-steer",
-                            identity.session_id,
-                            turn_id,
-                            str(model_call_index),
-                            prepared_steer_suffix_plan_identity_fingerprint(trial_plan),
-                        ),
+                        context_id=random_id("context"),
                         model_call_index=model_call_index,
                         canonical_input=prospective_input,
                         canonical_facts=prospective,
@@ -3937,7 +3922,7 @@ class ProviderDispatchCoordinator:
                     _hook_context_reservation=hook_context_reservation,
                 )
             compile_request = StructuredModelInputCompileRequest(
-                context_id=f"model-context:{uuid4().hex}",
+                context_id=random_id("context"),
                 model_call_index=model_call_index,
                 canonical_input=base_input,
                 canonical_facts=base_facts,
@@ -4380,7 +4365,7 @@ class ProviderDispatchCoordinator:
             )
         )
         compile_request = StructuredModelInputCompileRequest(
-            context_id=f"model-context-prospective-root:{uuid4().hex}",
+            context_id=random_id("context"),
             model_call_index=1,
             canonical_input=canonical_input,
             canonical_facts=facts,
@@ -4661,7 +4646,7 @@ class ProviderDispatchCoordinator:
             memory_use_policy=family.memory_use_policy,
         )
         compile_request = StructuredModelInputCompileRequest(
-            context_id=f"model-context-compaction-variant:{uuid4().hex}",
+            context_id=random_id("context"),
             model_call_index=family.model_call_index,
             canonical_input=canonical_input,
             canonical_facts=facts,
@@ -4918,7 +4903,7 @@ class ProviderDispatchCoordinator:
             hook_sources = replace_hook_context_source(base.sources, replacement)
             anchor = base.planning.dispatch_anchor
             compile_request = StructuredModelInputCompileRequest(
-                context_id=f"model-context-hook-sibling:{uuid4().hex}",
+                context_id=random_id("context"),
                 model_call_index=model_call_index,
                 canonical_input=canonical_facts.canonical_input,
                 canonical_facts=canonical_facts,
@@ -5686,8 +5671,6 @@ class ProviderDispatchCoordinator:
         )
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
 
 def _activation_subject_for_anchor(
@@ -6154,9 +6137,7 @@ def _prospective_steer_compile_snapshot(
         appended.append(
             FrozenProviderInputItem(
                 item_kind=FrozenProviderInputItemKind.USER,
-                source_entry_id=_stable_id(
-                    "steer-entry", fact.session_id, fact.queue_item_id
-                ),
+                source_entry_id=derive_id('entry', 'steer', fact.session_id, fact.queue_item_id),
                 source_entry_sequence=start_sequence + index,
                 source_turn_id=identity.turn_id,
                 content=prompt.content.parts,
@@ -6501,7 +6482,7 @@ def prepared_append_candidate(
     epoch_nonce = (
         predecessor.epoch_nonce
         if isinstance(transition, InstalledEpochAppend)
-        else f"provider-input-epoch:{uuid4().hex}"
+        else random_id("epoch")
     )
     expected_revision = 0 if predecessor is None else predecessor.epoch_revision
     return PreparedProviderInputAppendCandidate(

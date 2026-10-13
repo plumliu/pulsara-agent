@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import is_valid_id
+
+from pulsara_agent.identity import random_id
+
 import base64
 import json
 from dataclasses import dataclass
 from time import monotonic
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
 from pulsara_agent.conversation_kernel.prompt_storage import (
@@ -76,7 +79,7 @@ def _decode(cursor, operation):
             operation
             if operation == "search_sessions"
             else operation
-            + (".bm25.v2" if operation == "search_session_content" else ".v3")
+            + (".bm25.v3" if operation == "search_session_content" else ".v4")
         )
         if not isinstance(value, dict) or value.get("operation") != expected:
             raise ValueError()
@@ -98,6 +101,9 @@ def _integer(value, name, *, minimum=0, maximum=None):
 
 
 def _string(value, name):
+    if name in {"session_id", "entry_id", "task_id", "page_id"}:
+        if not is_valid_id(value, {"session_id": "session", "entry_id": "entry", "task_id": "task", "page_id": "page"}[name]):
+            raise SessionQueryError("INVALID_ID", f"Invalid {name}.")
     if not isinstance(value, str) or not value:
         raise SessionQueryError("INVALID_REQUEST", f"Invalid {name}.")
     return value
@@ -268,7 +274,7 @@ class SessionContentQuery:
     def _check_range(self, connection, end, excluded, actual):
         _integer(end, "cursor range")
         if excluded is not None:
-            _string(excluded, "cursor exclusion")
+            _string(excluded, "entry_id")
         if end > actual.through_sequence:
             raise SessionQueryError(
                 "CURSOR_RANGE_CHANGED",
@@ -511,7 +517,7 @@ class SessionContentQuery:
         def token(sequence, start):
             return _encode(
                 {
-                    "operation": operation + ".v3",
+                    "operation": operation + ".v4",
                     "session_id": target,
                     "cut": cut,
                     "event_cut": event_cut,
@@ -731,7 +737,7 @@ class SessionContentQuery:
             end, excluded = cursor["range_end"], cursor["excluded"]
             self._check_range(connection, end, excluded, actual)
             previous = self._history_consumed_pages.get(
-                _string(cursor["consumed_page"], "consumed page")
+                _string(cursor["consumed_page"], "page_id")
             )
             if previous is None:
                 raise SessionQueryError(
@@ -754,9 +760,11 @@ class SessionContentQuery:
             raise SessionQueryError("CURSOR_INVALID", "Search continuation parameters changed.")
         seen = set() if previous is None else previous.consumed_ids()
         consumed = []
-        page_id = uuid4().hex
+        page_id = random_id("page")
+        while page_id in self._history_consumed_pages:
+            page_id = random_id("page")
         next_cursor = _encode({
-            "operation": "search_session_content.bm25.v2",
+            "operation": "search_session_content.bm25.v3",
             "query": query,
             "session_id": target,
             "include_tools": tools,

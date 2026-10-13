@@ -8,11 +8,12 @@ cuts and adoption winners remain repository/reader facts.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Awaitable, Callable, TypeVar
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionAttemptPhase,
@@ -223,7 +224,7 @@ class HostCompactionRuntimeOwner:
     ) -> tuple[ManualCompactionRequest, asyncio.Future[CompactionOutcome]]:
         key = self.scope_key(scope_kind, scope_subagent_task_id)
         request = ManualCompactionRequest(
-            request_id=f"compaction-request:{uuid4().hex}",
+            request_id=random_id("request"),
             command_id=command_id,
             scope_kind=scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,

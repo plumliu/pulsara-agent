@@ -5,6 +5,7 @@ no continuity or replay object is serialized between invocations.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import random_id
 
 from tests.support.model_config import frozen_test_prompt
 import argparse
@@ -60,7 +61,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         intent="NEW" if args.mode == "create" else "EXISTING",
         session_id=args.session_id,
         workspace_id=args.workspace_id,
-        writer_owner_id=f"round5a2:{args.mode}:{os.getpid()}",
+        writer_owner_id=random_id("host"),
         lease_seconds=30,
         deadline_monotonic=asyncio.get_running_loop().time() + 30,
     )

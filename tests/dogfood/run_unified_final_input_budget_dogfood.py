@@ -5,6 +5,7 @@ settings read-only, isolated home/workspace, and a verified disposable local DB.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import asdict, replace
@@ -164,7 +165,7 @@ async def run(destination: Path) -> None:
                         print(f"{wire}: {label}", flush=True)
                         try:
                             async with asyncio.timeout(600):
-                                command_id = "command:budget:" + uuid4().hex
+                                command_id = derive_id("command", "test-fixture", "command:budget:" + uuid4().hex)
                                 pending = asyncio.create_task(
                                     session.run_turn(
                                         PromptContent.text(prompt),
@@ -193,8 +194,8 @@ async def run(destination: Path) -> None:
                                                 raise AssertionError("turn ended before steer injection")
                                             await asyncio.sleep(0.01)
                                     outcome = await session.steer_active_turn(
-                                        command_id="command:budget-steer:"
-                                        + uuid4().hex,
+                                        command_id=derive_id("command", "test-fixture", "command:budget-steer:"
+                                        + uuid4().hex),
                                         content=PromptContent.text(
                                             "Also include the literal marker BUDGET_STEER_OK in this reply."
                                         ),
@@ -261,7 +262,7 @@ async def run(destination: Path) -> None:
                     await preview("before_compaction")
                     summary_start = len(report["calls"])
                     compaction = await session.compact_context(
-                        command_id="command:budget-compact:" + uuid4().hex, force=True
+                        command_id=derive_id("command", "test-fixture", "command:budget-compact:" + uuid4().hex), force=True
                     )
                     report["results"][-1]["compaction"] = str(compaction)
                     save()

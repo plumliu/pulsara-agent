@@ -9,6 +9,7 @@ and local final-wire measurements; configured API-key values are scrubbed.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.llm.input import PromptContent
 import argparse
@@ -405,7 +406,7 @@ async def _seed_completed_history(
     total_bytes = 0
     for index in range(segments):
         suffix = uuid4().hex
-        turn_id = f"turn:model-switch-dogfood:{suffix}"
+        turn_id = derive_id("turn", "test-fixture", f"turn:model-switch-dogfood:{suffix}")
         body = (
             f"Historical user request {index}: preserve this exact advisory "
             + (
@@ -417,11 +418,11 @@ async def _seed_completed_history(
         total_bytes += len(body.encode("utf-8"))
         intent = build_prepared_root_turn_intent(
             session_id=session.session_id,
-            command_id=f"command:model-switch-dogfood:{suffix}",
+            command_id=derive_id("command", "test-fixture", f"command:model-switch-dogfood:{suffix}"),
             turn_id=turn_id,
-            entry_id=f"entry:model-switch-dogfood:user:{suffix}",
-            context_binding_revision_id=f"revision:model-switch-dogfood:{suffix}",
-            permission_snapshot_id=f"permission:model-switch-dogfood:{suffix}",
+            entry_id=derive_id("entry", "test-fixture", f"entry:model-switch-dogfood:user:{suffix}"),
+            context_binding_revision_id=derive_id("binding", "test-fixture", f"revision:model-switch-dogfood:{suffix}"),
+            permission_snapshot_id=derive_id("permission", "test-fixture", f"permission:model-switch-dogfood:{suffix}"),
             requested_permission_mode=DEFAULT_PERMISSION_MODE,
             canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text(body)),
             occurred_at=datetime.now(timezone.utc),
@@ -458,11 +459,11 @@ async def _seed_completed_history(
         repository.commit_assistant_message(
             guard,
             cut=cut,
-            entry_id=f"entry:model-switch-dogfood:assistant:{suffix}",
+            entry_id=derive_id("entry", "test-fixture", f"entry:model-switch-dogfood:assistant:{suffix}"),
             parent_content=InlineContent.from_bytes(assistant_text.encode("utf-8")),
             blocks=(
                 AssistantTextBlock(
-                    block_id=f"block:model-switch-dogfood:{suffix}",
+                    block_id=derive_id("block", "test-fixture", f"block:model-switch-dogfood:{suffix}"),
                     text=InlineContent.from_bytes(assistant_text.encode("utf-8")),
                 ),
             ),
@@ -637,7 +638,7 @@ async def _run(
                     PromptContent.text("Call read_file exactly once on marker.txt with offset 1 and "
                     "limit 200. After its result, reply briefly and include the "
                     "exact marker MODEL_SWITCH_REAL_TOOL_OK."),
-                    command_id="command:model-switch-dogfood:source",
+                    command_id='command:47msqipdjde2ifg7gpur3nusv4',
                 )
                 seeded_bytes = await _seed_completed_history(
                     session,
@@ -651,7 +652,7 @@ async def _run(
                     "marker.txt with offset 1 and limit 20. After its result, answer "
                     "exactly MODEL_SWITCH_DESTINATION_OK followed by one short sentence "
                     "explaining what marker.txt contained."),
-                    command_id="command:model-switch-dogfood:destination",
+                    command_id='command:azorlaqe35cirmg3ejllba4hny',
                 )
                 presentation_notices = session.take_presentation_notices(controller_id)
                 evidence = _database_evidence(session)

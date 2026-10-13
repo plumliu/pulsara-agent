@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+from pulsara_agent.llm.input import LLMImagePart
+
 from dataclasses import dataclass
 from hashlib import sha256
 
@@ -27,11 +30,8 @@ MAXIMUM_BLOB_BYTES = STAGE2_LIMITS.canonical_blob_hard_bytes
 MAXIMUM_CONTENT_CHUNK_BYTES = STAGE2_LIMITS.content_chunk_hard_bytes
 
 
-def _blob_id(workspace_id: str, digest: str, media_type: str, codec: str) -> str:
-    identity = sha256(
-        f"{workspace_id}\0{media_type}\0{codec}\0{digest}".encode()
-    ).hexdigest()
-    return f"blob:{identity}"
+def _blob_id(workspace_id: str, digest: str, media_type: str, codec: str, *, image: bool = False) -> str:
+    return derive_id("image" if image else "blob", "content", workspace_id, media_type, codec, digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +80,7 @@ class PostgresCanonicalBlobStore:
         content: bytes,
         media_type: str,
         codec: str,
+        validated_image: LLMImagePart | None = None,
     ) -> BlobContent:
         """Publish or exact-reuse a blob on the caller-owned transaction."""
 
@@ -89,7 +90,13 @@ class PostgresCanonicalBlobStore:
         if len(value) > MAXIMUM_BLOB_BYTES:
             raise ValueError("blob exceeds the Stage 2 physical bound")
         digest = "sha256:" + sha256(value).hexdigest()
-        blob_id = _blob_id(workspace_id, digest, media_type, codec)
+        if validated_image is not None:
+            if (validated_image.immutable_bytes != value or validated_image.media_type != media_type
+                    or codec != "binary"):
+                raise ValueError("validated image publication differs from content")
+        blob_id = _blob_id(workspace_id, digest, media_type, codec, image=validated_image is not None)
+        if validated_image is not None and validated_image.image_ref != blob_id:
+            raise ValueError("image publication was not bound before freezing")
         storage_identity = f"postgres:pulsara_v3.blobs/{blob_id}"
         connection.execute(
             """
@@ -127,7 +134,7 @@ class PostgresCanonicalBlobStore:
             or row["codec"] != codec
             or bytes(row["body"]) != value
         ):
-            raise ConversationKernelConflict("blob identity conflict")
+            raise ConversationKernelConflict("IDENTITY_CONFLICT: blob content or owner differs")
         return BlobContent(blob_id, digest, len(value), media_type, codec)
 
     def read_exact(

@@ -1,6 +1,8 @@
 """Focused K3 image wire and v2-estimator contract tests."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
+from pulsara_agent.identity import derive_id
 
 import asyncio
 import base64
@@ -132,7 +134,7 @@ def _image(
         output = BytesIO()
         Image.new("RGB", (width, height), (11, 23, 41)).save(output, "PNG")
         payload = output.getvalue()
-    return LLMImagePart(media_type, payload, width, height)
+    return bound_test_image(media_type, payload, width, height)
 
 
 def _message(*parts: LLMTextPart | LLMImagePart) -> LLMMessage:
@@ -292,7 +294,7 @@ def test_hook_upper_bounds_actual_accepted_context_and_continuation(
         if stop:
             owner.accept_continuation(
                 scope=scope,
-                causal_ref=StopRef("turn:1", "entry:1", object()),
+                causal_ref=StopRef('turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:jfasfwsw2puygc3hrueckpvgba', object()),
                 source_entry=entry,
                 reason=body,
             )
@@ -300,10 +302,10 @@ def test_hook_upper_bounds_actual_accepted_context_and_continuation(
             owner.accept_sync(
                 scope=scope,
                 causal_ref=PostToolRef(
-                    "turn:1",
+                    'turn:nzc36cttgo7xxki7bcjc7ops7a',
                     f"call:{ordinal}",
-                    f"result:{ordinal}",
-                    f"entry:{ordinal}",
+                    derive_id("result", "test-fixture", f"result:{ordinal}"),
+                    derive_id("entry", "test-fixture", f"entry:{ordinal}"),
                     "SUCCESS",
                     object(),
                 ),
@@ -368,9 +370,9 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
         _snapshot(
             FrozenProviderInputItem(
                 FrozenProviderInputItemKind.PLAN_CONTINUATION,
-                "entry:1",
+                'entry:jfasfwsw2puygc3hrueckpvgba',
                 1,
-                "turn:test",
+                'turn:klmmazz67vfgsfsvg6ceqgdsfu',
                 (
                     LLMTextPart(
                         '{"pulsara_plan_continuation":{"status":"ACTIVE","transition":"ENTERED_PLAN"}}'
@@ -383,7 +385,7 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
     identity = base.canonical_input.identity
     for requested_mode in PermissionMode:
         original_permission = build_run_permission_snapshot(
-            snapshot_id="permission:before-plan",
+            snapshot_id='permission:vuoih2x5apxuhi5gy7udc2nexu',
             requested_mode=requested_mode,
             effective_mode=requested_mode,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -395,20 +397,20 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
             )
         }
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:plan",
+            snapshot_id='permission:jkftzyuw2e3gxuxnkrx7kfmabi',
             requested_mode=requested_mode,
             effective_mode=PermissionMode.READ_ONLY,
             admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
             overlay=RunPermissionOverlay.PLAN_READ_ONLY,
             plan_context_ordinal_at_admission=1,
-            plan_workflow_id="workflow:plan",
+            plan_workflow_id='plan:ximdv6p6grb5aj3iu6nav3ektq',
             plan_workflow_revision_at_admission=1,
             inherited_from_turn_id=identity.turn_id,
         )
         common = dict(
             session_id=identity.session_id,
-            workspace_id="workspace:test",
-            workflow_id="workflow:plan",
+            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            workflow_id='plan:ximdv6p6grb5aj3iu6nav3ektq',
             workflow_ordinal=1,
             workflow_status=PlanWorkflowStatus.ACTIVE,
             resume_permission_mode=requested_mode,
@@ -456,12 +458,12 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
             plan_handoff_fact=handoff,
             tool_observation_freshness_fact=build_tool_observation_freshness_fact(
                 session_id=identity.session_id,
-                workspace_id="workspace:test",
+                workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
                 current_turn_id=identity.turn_id,
                 current_scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
                 current_initial_entry_sequence=1,
-                immediate_predecessor_turn_id="turn:before-plan",
+                immediate_predecessor_turn_id='turn:pn7ukdmpjtk6dicxnp2wg32nkq',
             ),
         )
         facts = FrozenCanonicalCompileSnapshot(
@@ -511,9 +513,9 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
             )
         foreign = CompactionWriteReservation(ModelInputScopeKind.ROOT, None)
         scope = CompactionScope(
-            session_id="session:one",
-            workspace_id="workspace:one",
-            turn_id="turn:one",
+            session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
+            workspace_id='workspace:scvzq3m6ilgcdfi5qvvqwjwvla',
+            turn_id='turn:xayicncb3vcols33532v4oov6a',
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )
@@ -524,47 +526,47 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
             await host._install_compaction_fence(
                 scope,
                 CompactionTrigger.AUTO_ACTIVE_CONTEXT,
-                "attempt:foreign",
+                'attempt:mugciis47zjypnfgrl2sal7gpi',
                 owner_task,
                 foreign,
-                "turn:new",
+                'turn:tgnq76so2tupmonbxpxhivfuya',
             )
         with pytest.raises(RuntimeError, match="admitted writer"):
             await host._install_compaction_fence(
                 scope,
                 CompactionTrigger.AUTO_ACTIVE_CONTEXT,
-                "attempt:none",
+                'attempt:gnqzrpqgvczqquxswffamywiry',
                 owner_task,
                 None,
-                "turn:new",
+                'turn:tgnq76so2tupmonbxpxhivfuya',
             )
 
         await host._install_compaction_fence(
             scope,
             CompactionTrigger.AUTO_ACTIVE_CONTEXT,
-            "attempt:exact",
+            'attempt:oh4vvsmff4tb6jdshwwn5zqms4',
             owner_task,
             exact,
-            "turn:new",
+            'turn:tgnq76so2tupmonbxpxhivfuya',
         )
         assert host._compaction.is_fenced(
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )
-        await host._remove_compaction_fence(scope, "attempt:exact", owner_task)
+        await host._remove_compaction_fence(scope, 'attempt:oh4vvsmff4tb6jdshwwn5zqms4', owner_task)
         await host._release_compaction_write_reservation(exact)
 
         host._external_new_turn_accepting = False
         host._active_task = owner_task
-        host._active_turn_id = "turn:new"
+        host._active_turn_id = 'turn:tgnq76so2tupmonbxpxhivfuya'
         with pytest.raises(RuntimeError, match="does not exact-join"):
             await host._install_compaction_fence(
                 scope,
                 CompactionTrigger.AUTO_ACTIVE_CONTEXT,
-                "attempt:wrong-pending",
+                'attempt:6rcxsrhn2han2cskeg5wb63sym',
                 owner_task,
                 None,
-                "turn:wrong",
+                'turn:c3fxjnnljiejzzrzacfi4f3jkq',
             )
 
         not_owner = asyncio.create_task(asyncio.sleep(0))
@@ -573,10 +575,10 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
             await host._install_compaction_fence(
                 scope,
                 CompactionTrigger.AUTO_ACTIVE_CONTEXT,
-                "attempt:not-owner",
+                'attempt:rrsveftdohjcpbj432s43cknma',
                 owner_task,
                 None,
-                "turn:new",
+                'turn:tgnq76so2tupmonbxpxhivfuya',
             )
         await not_owner
 
@@ -584,13 +586,13 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
         await host._install_compaction_fence(
             scope,
             CompactionTrigger.AUTO_ACTIVE_CONTEXT,
-            "attempt:pending-exact",
+            'attempt:jjqdmoccleuuxdthym5doct3f4',
             owner_task,
             None,
-            "turn:new",
+            'turn:tgnq76so2tupmonbxpxhivfuya',
         )
         await host._remove_compaction_fence(
-            scope, "attempt:pending-exact", owner_task
+            scope, 'attempt:jjqdmoccleuuxdthym5doct3f4', owner_task
         )
 
     asyncio.run(scenario())
@@ -803,9 +805,9 @@ def _recent(entry_id: str, sequence: int, *parts: LLMTextPart | LLMImagePart):
 
 def test_ordinary_compaction_reuses_one_recent_window_then_drops_oldest() -> None:
     recent = (
-        _recent("entry:a", 1, LLMTextPart("a")),
-        _recent("entry:b", 2, LLMTextPart("b")),
-        _recent("entry:c", 3, LLMTextPart("c")),
+        _recent('entry:2sznqhykjyk6in3xlwrxfuvbze', 1, LLMTextPart("a")),
+        _recent('entry:gkqbzsdabfbxmmujdwcmsrokou', 2, LLMTextPart("b")),
+        _recent('entry:2mvrqznhagxvqzu6l5f5no4ndm', 3, LLMTextPart("c")),
     )
 
     assert _ordinary_recent_suffixes(recent) == (
@@ -846,11 +848,11 @@ def test_dry_wire_measurement_closes_text_only_target_before_adoption() -> None:
     call = SimpleNamespace(target=SimpleNamespace(fact=target_fact))
     binding = SimpleNamespace(
         target_fact=target_fact,
-        binding_fingerprint="binding:test",
+        binding_fingerprint='binding:2vbfj7ycdmvjuwmj3feeoqytyi',
         tool_surface=SimpleNamespace(tool_specs=()),
     )
     semantic_input = SimpleNamespace(
-        compile_binding_fingerprint="binding:test",
+        compile_binding_fingerprint='binding:2vbfj7ycdmvjuwmj3feeoqytyi',
         tools=(),
         messages=(_message(_image()),),
     )
@@ -881,11 +883,11 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
     )
     payload = output.getvalue()
     assert len(payload) > 2 << 20
-    image = LLMImagePart("image/png", payload, 1024, 1024)
+    image = bound_test_image("image/png", payload, 1024, 1024)
     scope = CompactionScope(
-        "session:i36",
-        "workspace:i36",
-        "turn:i36",
+        'session:lx6ipiiqg2ltlxyfpzwtn7fbla',
+        'workspace:5dnu2gwcmqvakometislaf54zy',
+        'turn:puzavdnlu2fqm3ofrkorfnmlqy',
         ModelInputScopeKind.ROOT,
         None,
     )
@@ -893,9 +895,9 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
     def item_with_occurrences(count: int) -> FrozenProviderInputItem:
         return FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
-            f"entry:i36:{count}",
+            derive_id("entry", "test-fixture", f"entry:i36:{count}"),
             1,
-            "turn:i36",
+            'turn:puzavdnlu2fqm3ofrkorfnmlqy',
             (image,) * count,
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         )
@@ -965,13 +967,13 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
         LLMTextPart("before"),
         LLMTextPart(
             "[历史图片引用；此处未包含图像内容]\n"
-            f"image_ref: {_image(b'same').content_digest}\n"
+            f"image_ref: {_image(b'same').image_ref}\n"
             "media_type: image/png; width: 512; height: 512"
         ),
         LLMTextPart("between"),
         LLMTextPart(
             "[历史图片引用；此处未包含图像内容]\n"
-            f"image_ref: {_image(b'same').content_digest}\n"
+            f"image_ref: {_image(b'same').image_ref}\n"
             "media_type: image/png; width: 512; height: 512"
         ),
     )
@@ -983,24 +985,24 @@ def test_history_and_recent_image_checks_exclude_only_the_exact_active_request()
 ):
     old_image = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:old",
+        source_entry_id='entry:hsbhejqlvgm3oe42nqmhybryyu',
         source_entry_sequence=1,
-        source_turn_id="turn:old",
+        source_turn_id='turn:uyenyjpuysm57ziiygjzxjhcum',
         content=(_image(b"old"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
     active_image = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:active",
+        source_entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
         source_entry_sequence=2,
-        source_turn_id="turn:active",
+        source_turn_id='turn:kezb35l4prynpikloa5x3helji',
         content=(_image(b"active"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
 
     def canonical_read(*items: FrozenProviderInputItem) -> SimpleNamespace:
         canonical = SimpleNamespace(
-            identity=SimpleNamespace(initial_entry_id="entry:active"),
+            identity=SimpleNamespace(initial_entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a'),
             items=items,
         )
         return SimpleNamespace(
@@ -1015,10 +1017,10 @@ def test_history_and_recent_image_checks_exclude_only_the_exact_active_request()
         is True
     )
     assert recent_human_window_has_image(
-        (_recent("entry:recent", 3, LLMTextPart("text"), _image()),)
+        (_recent('entry:wfczofkrpmbtqknslywdqqqeri', 3, LLMTextPart("text"), _image()),)
     )
     assert not recent_human_window_has_image(
-        (_recent("entry:recent", 3, LLMTextPart("text")),)
+        (_recent('entry:wfczofkrpmbtqknslywdqqqeri', 3, LLMTextPart("text")),)
     )
 
 
@@ -1045,11 +1047,11 @@ def test_text_only_handover_requires_known_text_without_image(
 def test_post_response_charge_includes_assistant_arguments_and_result_uppers() -> None:
     arguments = freeze_json({"path": "\\\\quoted", "line": 7})
     completed = CompletedAssistantMessage(
-        draft_identity="entry:assistant",
+        draft_identity='entry:5qidalqvkujk5ykzzzfpwie2qy',
         blocks=(
-            CompletedTextBlock("block:text", "answer"),
+            CompletedTextBlock('block:7oequpu7eqto5oci7j4q6msbje', "answer"),
             CompletedToolCallBlock(
-                "block:call",
+                'block:eahusw3qjz45fyozavqv6xlbxa',
                 "call:1",
                 "read_file",
                 arguments,
@@ -1059,9 +1061,9 @@ def test_post_response_charge_includes_assistant_arguments_and_result_uppers() -
     )
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        source_entry_id="entry:assistant",
+        source_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         source_entry_sequence=4,
-        source_turn_id="turn:active",
+        source_turn_id='turn:kezb35l4prynpikloa5x3helji',
         content=(LLMTextPart("answer"),),
         tool_calls=(ProviderToolCall("call:1", "read_file", arguments),),
     )
@@ -1126,7 +1128,7 @@ def test_disabled_plugin_install_reserves_only_catalogs_it_can_change(
     arguments = {"action": "INSTALL_PLUGIN", "scope": "WORKSPACE", "source_path": "/test/source"}
     if replace_existing is not None:
         arguments["replace"] = replace_existing
-    call = CompletedToolCallBlock("block:install", "call:install", "manage_capability", freeze_json(arguments))
+    call = CompletedToolCallBlock('block:ha7yvztds33p37mr7ouhlk3kcu', "call:install", "manage_capability", freeze_json(arguments))
     expected = (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG) if replace_existing else ()
     assert _capability_catalog_source_kinds(call) == expected
     for action in ("SET_PLUGIN_ENABLED", "REMOVE_PLUGIN"):
@@ -1140,7 +1142,7 @@ def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes
     image = _image(b"typed-image-bytes", width=12, height=8)
     content = FrozenPromptContent((LLMTextPart("attached"), image))
     item = replace(
-        _tool_result("plain", sequence=7, turn_id="turn:image", artifact=False),
+        _tool_result("plain", sequence=7, turn_id='turn:hei4tpo3ncy7wcxg6s4x3caeae', artifact=False),
         content=content.parts,
         tool_result_body_text=frozen_tool_result_public_text(content),
         tool_call_ordinal=0,
@@ -1182,8 +1184,8 @@ def test_tool_result_full_upper_bounds_escaping_body_wire_and_d1(
 ) -> None:
     tool_call_id = "call:1"
     timing = freeze_tool_observation_timing_fact(
-        session_id="session:1",
-        turn_id="turn:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+        turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
         observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         observation_duration_microseconds=0,
         tool_reported_duration_microseconds=0,
@@ -1423,7 +1425,7 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
         items = tuple(chat_semantic_wire_group(message)[0] for message in messages)
         return ProviderFollowupWireResourceQuote(sum(len(canonical_json_bytes(item)) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), len(items))
     monkeypatch.setattr(module, 'quote_provider_followup_wire_resources', quote_wire)
-    completed = CompletedAssistantMessage('draft:test', (CompletedToolCallBlock('block:test', 'call:test', 'manage_capability', freeze_json({'action':'SET_PLUGIN_ENABLED','scope':'USER','plugin_id':'ponytail','enabled':True})),), '')
+    completed = CompletedAssistantMessage('draft:test', (CompletedToolCallBlock('block:dweyobrw6nyayfeqqkfqzbmtgu', 'call:test', 'manage_capability', freeze_json({'action':'SET_PLUGIN_ENABLED','scope':'USER','plugin_id':'ponytail','enabled':True})),), '')
     quote = runner._quote_post_response_resources(
         request=SimpleNamespace(wire_input_plan=wire_plan, compiled_input=SimpleNamespace(canonical_input_identity=identity)),
         permit=SimpleNamespace(scope=None, epoch_nonce='epoch', epoch_revision=1),

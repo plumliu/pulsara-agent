@@ -18,7 +18,6 @@ import warnings
 
 from pulsara_agent.conversation_kernel.prompt_content import (
     MAXIMUM_PROMPT_MULTIPART_BYTES,
-    freeze_canonical_prompt,
 )
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
@@ -231,7 +230,7 @@ class HostPromptImageValidator:
             frozen = FrozenPromptContent(
                 tuple(part for part in content.parts if not isinstance(part, PromptImagePart))
             )
-            freeze_canonical_prompt(frozen)
+            _validate_unbound_prompt_size(frozen)
             return frozen
 
         facts = await self._validate_images(
@@ -255,7 +254,7 @@ class HostPromptImageValidator:
                 )
             )
         frozen = FrozenPromptContent(tuple(parts))
-        freeze_canonical_prompt(frozen)
+        _validate_unbound_prompt_size(frozen)
         return frozen
 
     async def freeze_local_image(
@@ -280,7 +279,7 @@ class HostPromptImageValidator:
             width=width,
             height=height,
         )
-        freeze_canonical_prompt(
+        _validate_unbound_prompt_size(
             FrozenPromptContent((LLMTextPart("Image loaded."), image))
         )
         return image
@@ -476,3 +475,13 @@ __all__ = [
     "PNG_TEXT_MEMORY_LIMIT",
     "PromptImageValidationError",
 ]
+
+
+def _validate_unbound_prompt_size(content: FrozenPromptContent) -> None:
+    """Physical preliminary bound, not a final canonical resource quote."""
+    from pulsara_agent.llm.input import frozen_prompt_content_canonical_value
+    from pulsara_agent.primitives.context import canonical_json_bytes
+    size = len(canonical_json_bytes(frozen_prompt_content_canonical_value(content)))
+    size += sum(len(part.immutable_bytes) for part in content.parts if isinstance(part, LLMImagePart))
+    if size > MAXIMUM_PROMPT_MULTIPART_BYTES:
+        raise PromptImageValidationError("prompt exceeds its preliminary multipart bound")

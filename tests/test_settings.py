@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 import asyncio
 import os
 from dataclasses import replace
@@ -39,7 +41,7 @@ from pulsara_agent.settings import (
 
 def _connection(suffix: str, *, model: str = "glm-5.3") -> ModelConnectionConfig:
     return ModelConnectionConfig(
-        ModelConnectionId(f"model-connection:{suffix * 32}"),
+        ModelConnectionId(derive_id("connection", "test-fixture", suffix * 32)),
         ModelTargetKey("zhipuai", WireApi.OPENAI_CHAT_COMPLETIONS, model),
         "https://open.bigmodel.cn/api/paas/v4",
         ReasoningWireProfile.CATALOG_STANDARD,
@@ -219,7 +221,7 @@ def test_store_publishes_no_auth_connection_without_a_key(
     async def scenario() -> None:
         store = LocalSettingsStore(tmp_path / "local-settings.yaml")
         connection = ModelConnectionConfig(
-            ModelConnectionId("model-connection:" + "c" * 32),
+            ModelConnectionId('connection:tsjr6n6baxe2etbc5xzt5letd4'),
             ModelTargetKey("user_declared", WireApi.OPENAI_RESPONSES, "local-model"),
             "http://127.0.0.1:11434/v1",
             ReasoningWireProfile.PROVIDER_DEFAULT,
@@ -545,7 +547,7 @@ def test_retrieval_connections_replace_and_clear_independently(tmp_path: Path) -
 def test_missing_secret_has_a_narrow_typed_failure() -> None:
     with pytest.raises(LocalSettingsSecretMissing, match="model"):
         LocalSettings().require_model_api_key(
-            ModelConnectionId("model-connection:" + "a" * 32)
+            ModelConnectionId('connection:gwnwgrwm3jzh55p233rw3lciq4')
         )
 
 

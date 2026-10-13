@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -33,23 +34,23 @@ def _task_row(
         "BLOCKED_DEPENDENCY_FAILED",
     }
     return {
-        "id": f"task-{ordinal}",
-        "batch_id": "batch-a",
+        "id": derive_id("task", "test-fixture", f"task-{ordinal}"),
+        "batch_id": 'batch:dtqczbyggn4iq7dpy7bzkdbhr4',
         "task_key": f"part-{ordinal}",
         "label": f"分工 {ordinal}",
         "profile_kind": "general_worker",
         "display_role": "协作者",
         "context_mode": "LAST_N" if ordinal == 2 else "NONE",
         "context_last_n_turns": 3 if ordinal == 2 else None,
-        "parent_turn_id": "turn-root",
+        "parent_turn_id": 'turn:snq46ciuhblilwi64hpqayunfe',
         "objective": f"完成第 {ordinal} 部分",
         "status": status,
         "pending_reason": "WAITING_DEPENDENCY" if status == "WAITING_DEPENDENCY" else None,
         "terminal_reason": "DONE" if completed else None,
         "accepted_at": accepted_at,
         "terminal_at": accepted_at + timedelta(seconds=1) if completed else None,
-        "result_id": f"result-{ordinal}" if status == "COMPLETED" else None,
-        "result_entry_id": f"entry-{ordinal}" if status == "COMPLETED" else None,
+        "result_id": derive_id("agent-result", "test-fixture", f"result-{ordinal}") if status == "COMPLETED" else None,
+        "result_entry_id": derive_id("entry", "test-fixture", f"entry-{ordinal}") if status == "COMPLETED" else None,
         "result_source": "EXPLICIT" if status == "COMPLETED" else None,
         "result_summary": f"第 {ordinal} 部分完成" if status == "COMPLETED" else None,
         "result_data": None,
@@ -83,7 +84,7 @@ class _TaskCore:
         after_task_id: str | None,
         batch_id: str | None,
     ):
-        assert session_id == "session-1"
+        assert session_id == 'session:bwpogagzox7onyn52iumyctnkq'
         assert maximum_items == 2
         assert batch_id is None
         self.calls.append((after_accepted_at, after_task_id))
@@ -99,12 +100,12 @@ class _TaskCore:
         if start == 0:
             dependencies = (
                 {
-                    "task_id": "task-2",
-                    "dependency_task_id": "task-1",
+                    "task_id": 'task:lcjtxurynmjggtxqiynmucd4ui',
+                    "dependency_task_id": 'task:6phuh7uul5lupupe2uchel4ada',
                     "task_key": "part-1",
                     "label": "分工 1",
                     "status": "COMPLETED",
-                    "result_id": "result-1",
+                    "result_id": 'agent-result:um7paizmvsp3b5ehscykddkfaq',
                     "result_source": "EXPLICIT",
                     "summary": "第 1 部分完成",
                 },
@@ -156,7 +157,7 @@ def test_session_task_inventory_pages_every_durable_status_and_dependency(
         controller = _controller(tmp_path, core)
 
         first = await controller.list_session_tasks(
-            "session-1", maximum_items=2
+            'session:bwpogagzox7onyn52iumyctnkq', maximum_items=2
         )
         assert first["total_count"] == 3
         assert first["remaining_count"] == 1
@@ -167,18 +168,18 @@ def test_session_task_inventory_pages_every_durable_status_and_dependency(
         ]
         assert first["tasks"][1]["dependencies"] == [
             {
-                "task_id": "task-1",
+                "task_id": 'task:6phuh7uul5lupupe2uchel4ada',
                 "task_key": "part-1",
                 "label": "分工 1",
                 "status": "COMPLETED",
-                "result_id": "result-1",
+                "result_id": 'agent-result:um7paizmvsp3b5ehscykddkfaq',
                 "result_source": "EXPLICIT",
                 "result_summary": "第 1 部分完成",
             }
         ]
         assert first["tasks"][0]["result"] == {
-            "id": "result-1",
-            "entry_id": "entry-1",
+            "id": 'agent-result:um7paizmvsp3b5ehscykddkfaq',
+            "entry_id": 'entry:6rum4lasmqmnlggdfdlshjuzue',
             "source": "EXPLICIT",
             "summary": "第 1 部分完成",
             "data": None,
@@ -188,7 +189,7 @@ def test_session_task_inventory_pages_every_durable_status_and_dependency(
         }
 
         second = await controller.list_session_tasks(
-            "session-1",
+            'session:bwpogagzox7onyn52iumyctnkq',
             maximum_items=2,
             cursor=cast(str, first["next_cursor"]),
         )
@@ -197,7 +198,7 @@ def test_session_task_inventory_pages_every_durable_status_and_dependency(
         assert [task["status"] for task in second["tasks"]] == [
             "BLOCKED_DEPENDENCY_FAILED"
         ]
-        assert core.calls[1][1] == "task-2"
+        assert core.calls[1][1] == 'task:lcjtxurynmjggtxqiynmucd4ui'
 
     asyncio.run(exercise())
 
@@ -208,11 +209,11 @@ def test_session_task_cursor_cannot_be_reused_for_another_session(
     async def exercise() -> None:
         controller = _controller(tmp_path, _TaskCore())
         first = await controller.list_session_tasks(
-            "session-1", maximum_items=2
+            'session:bwpogagzox7onyn52iumyctnkq', maximum_items=2
         )
         with pytest.raises(ValueError, match="cursor"):
             await controller.list_session_tasks(
-                "session-2",
+                'session:hrluejkx3v2ajzf4ec6bb3ierm',
                 maximum_items=2,
                 cursor=cast(str, first["next_cursor"]),
             )

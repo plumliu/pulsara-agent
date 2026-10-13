@@ -55,7 +55,7 @@ def submit(repo, guard, content):
         permission_snapshot_id=identity("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=identity("entry"),
-        context_binding_revision_id=identity("revision"),
+        context_binding_revision_id=identity("binding"),
         content=content,
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -93,7 +93,7 @@ def test_source_validation_and_two_forks_keep_child_owned_anchors(repo, large):
     for invalid in (
         replace(a, quote="不同"),
         replace(a, source=PromptAnnotationSource(source, 1, 2)),
-        replace(a, source=PromptAnnotationSource("entry:missing", 0, 2)),
+        replace(a, source=PromptAnnotationSource('entry:6xld357etnzc7fwdh6gduxrd4y', 0, 2)),
     ):
         with pytest.raises(AnnotationSourceInvalid):
             submit(repo, guard, FrozenPromptContent((invalid,)))
@@ -225,7 +225,7 @@ def test_multiblock_source_and_queued_annotation_roundtrip(repo, mode):
             session_id=guard.session_id,
             command_id=identity("command"),
             queue_item_id=identity("queue"),
-            client_submission_id=identity("submission"),
+            client_submission_id=identity("command"),
             delivery_mode=PromptDeliveryMode.NEW_TURN
             if mode == "NEW_TURN"
             else PromptDeliveryMode.STEER_ACTIVE_TURN,

@@ -48,7 +48,7 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
     async def exercise():
         session = _id("session")
         attempts = [_id("attempt") for _ in range(4)]
-        ids = [_round10_id("subagent-task", a, "0") for a in attempts]
+        ids = [_round10_id("task", a, "0") for a in attempts]
         args = [
             dict(task="objective-A", task_name="branch-context-A"),
             dict(
@@ -77,7 +77,7 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
             host_owner_id=_id("host"),
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
-            todo_owner=TodoRunStateOwner(session_id=session, owner_epoch=_id("todo")),
+            todo_owner=TodoRunStateOwner(session_id=session, owner_epoch=_id("todo-run")),
         )
         sources, started = {}, []
 
@@ -299,7 +299,7 @@ def test_accepted_branch_cut_ignores_source_tool_result_committed_later(
     async def exercise():
         session, workspace = _id("session"), _id("workspace")
         attempts = [_id("attempt") for _ in range(3)]
-        ids = [_round10_id("subagent-task", a, "0") for a in attempts]
+        ids = [_round10_id("task", a, "0") for a in attempts]
         args = [
             dict(task="tool-source-A"),
             dict(
@@ -329,7 +329,7 @@ def test_accepted_branch_cut_ignores_source_tool_result_committed_later(
             host_owner_id=_id("host"),
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
-            todo_owner=TodoRunStateOwner(session_id=session, owner_epoch=_id("todo")),
+            todo_owner=TodoRunStateOwner(session_id=session, owner_epoch=_id("todo-run")),
         )
         sources, started, pending = {}, [], {}
 
@@ -638,7 +638,7 @@ def test_real_child_cold_dispatch_accepts_shared_material_objective_anchor(
     async def exercise():
         session = _id("session")
         attempts = [_id("attempt"), _id("attempt")]
-        ids = [_round10_id("subagent-task", a, "0") for a in attempts]
+        ids = [_round10_id("task", a, "0") for a in attempts]
         args = [
             dict(task="cold-source-A"),
             dict(
@@ -674,7 +674,7 @@ def test_real_child_cold_dispatch_accepts_shared_material_objective_anchor(
             host_owner_id=_id("host"),
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
-            todo_owner=TodoRunStateOwner(session_id=session, owner_epoch=_id("todo")),
+            todo_owner=TodoRunStateOwner(session_id=session, owner_epoch=_id("todo-run")),
         )
         models = []
 

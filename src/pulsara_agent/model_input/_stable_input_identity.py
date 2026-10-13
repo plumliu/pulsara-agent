@@ -1,9 +1,4 @@
-"""Historical encoding at existing canonical ID boundaries, never a budget API.
-
-Subagent acceptance and steer interruption IDs include this old preimage. Only
-identity builders may use these private scalars; callers receive a digest, not
-a token quote. See the unified final-input budget specification, section 6.4.
-"""
+"""Full compiled-input commitment at the provider/source boundary."""
 
 from dataclasses import fields
 
@@ -90,7 +85,7 @@ def compiled_input_identity(
     context_messages=None,
     checkpoint=lambda: None,
 ):
-    """Preserve the existing compiled digest used by canonical acceptance IDs."""
+    """Commit the complete compiled provider input and its source decisions."""
     from pulsara_agent.model_input.contracts import _llm_message_value
 
     encoded = _input_code(system_prompt, messages, tools, checkpoint)
@@ -179,83 +174,5 @@ def compiled_input_identity(
             ),
             "budget_report": report,
             "diagnostics": tuple(item.value for item in diagnostic_codes),
-        },
-    )
-
-
-def memory_reservation_identity(
-    *,
-    source_kind,
-    prior,
-    desired_presence,
-    desired_fingerprint,
-    contract,
-    invalidations,
-    full_message,
-    epoch_bytes,
-    estimator_fingerprint,
-):
-    """Return only the existing reservation digest needed by a stable steer ID."""
-    from pulsara_agent.model_input.continuity import provider_input_logical_bytes
-
-    return context_fingerprint(
-        "pulsara:memory-source-invalidation-reservation:v1",
-        {
-            "source": source_kind.value,
-            "prior": (prior.presence.value, prior.semantic_fingerprint),
-            "desired": (desired_presence.value, desired_fingerprint),
-            "contract": contract,
-            "invalidation": (
-                1,
-                epoch_bytes,
-                max(_message_code(m) for m in invalidations),
-                epoch_bytes,
-            ),
-            "full": (
-                0
-                if full_message is None
-                else provider_input_logical_bytes(
-                    system_prompt="", tools=(), messages=(full_message,)
-                ),
-                0 if full_message is None else _message_code(full_message),
-            ),
-            "estimator": estimator_fingerprint,
-        },
-    )
-
-
-def steer_quote_identity(*, candidate_ids, quote, compiled):
-    """Encode the historical quote only while deriving its canonical plan ID."""
-    encoded = _input_code(compiled.system_prompt, compiled.messages, compiled.tools)
-    historical = {
-        key: encoded[value]
-        for key, value in {
-            "system": "system_tokens",
-            "messages": "message_tokens",
-            "message_by_index": "message_tokens_by_index",
-            "tools": "tool_tokens",
-            "envelope": "envelope_tokens",
-            "visual_image": "visual_image_tokens",
-            "total": "total_input_tokens",
-        }.items()
-    }
-    return context_fingerprint(
-        "pulsara:steer-suffix-admission-quote:v1",
-        {
-            "candidates": candidate_ids,
-            "selected_items": quote.selected_item_count,
-            "selected_canonical_bytes": quote.selected_canonical_expanded_bytes,
-            "snapshot_bytes": quote.prospective_snapshot_hydrated_bytes,
-            "epoch_bytes": quote.resulting_epoch_logical_bytes,
-            "estimate": historical,
-            "effective_budget": quote.effective_target_budget,
-            "estimator": quote.estimator_fingerprint,
-            "predecessor_prefix": quote.predecessor_prefix_fingerprint,
-            "memory_recall_reservation": None
-            if quote.memory_recall_reservation is None
-            else quote.memory_recall_reservation.stable_identity,
-            "memory_response_preference_reservation": None
-            if quote.memory_response_preference_reservation is None
-            else quote.memory_response_preference_reservation.stable_identity,
         },
     )

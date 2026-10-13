@@ -6,6 +6,8 @@ is immutable and finite before the compiler is invoked.
 """
 
 from __future__ import annotations
+
+from pulsara_agent.identity import require_id
 from pulsara_agent.scheduling.contracts import ScheduledProvenance
 
 from dataclasses import dataclass, field
@@ -1653,13 +1655,14 @@ class FrozenToolObservationFreshnessCompileFact:
             self.immediate_predecessor_turn_ref is None
         ):
             raise ValueError("tool freshness predecessor union is invalid")
-        for value in (self.current_turn_ref, self.immediate_predecessor_turn_ref):
-            if value is not None and (
-                len(value) != 71
-                or not value.startswith(SHA256_PREFIX)
-                or any(character not in "0123456789abcdef" for character in value[7:])
-            ):
-                raise ValueError("tool freshness turn reference is invalid")
+        for identity, ref in (
+            (self.current_turn_id, self.current_turn_ref),
+            (self.immediate_predecessor_turn_id, self.immediate_predecessor_turn_ref),
+        ):
+            if ref is not None:
+                require_id(ref, "turn")
+            if identity != ref:
+                raise ValueError("tool freshness reference differs from its turn")
         if self.classification_contract != "pulsara.tool-observation-freshness.v1":
             raise ValueError("tool freshness classification contract is invalid")
         if self.fact_fingerprint != tool_observation_freshness_fingerprint(self):
@@ -1702,23 +1705,10 @@ def build_tool_observation_freshness_fact(
         "current_turn_id": current_turn_id,
         "current_scope_kind": current_scope_kind,
         "scope_subagent_task_id": scope_subagent_task_id,
-        "current_turn_ref": context_fingerprint(
-            "pulsara:provider-visible-turn-ref:v1",
-            {"session_id": session_id, "turn_id": current_turn_id},
-        ),
+        "current_turn_ref": current_turn_id,
         "current_initial_entry_sequence": current_initial_entry_sequence,
         "immediate_predecessor_turn_id": immediate_predecessor_turn_id,
-        "immediate_predecessor_turn_ref": (
-            None
-            if immediate_predecessor_turn_id is None
-            else context_fingerprint(
-                "pulsara:provider-visible-turn-ref:v1",
-                {
-                    "session_id": session_id,
-                    "turn_id": immediate_predecessor_turn_id,
-                },
-            )
-        ),
+        "immediate_predecessor_turn_ref": immediate_predecessor_turn_id,
         "classification_contract": "pulsara.tool-observation-freshness.v1",
     }
     provisional = FrozenToolObservationFreshnessCompileFact.__new__(

@@ -1,4 +1,4 @@
-"""Deterministic frozen inputs for pre-hard-cut stable identity goldens."""
+"""Deterministic frozen inputs for unified identity goldens."""
 
 from dataclasses import replace
 from pulsara_agent.model_input.contracts import model_input_compile_binding_fingerprint
@@ -22,7 +22,7 @@ def identity_request():
     )
     binding = request.compile_binding
     call = binding.call_fact.model_copy(
-        update={"resolved_model_call_id": "model_call:unified-budget-golden"}
+        update={"resolved_model_call_id": 'call:cquguvm6hdaoi3lpkjs7sdlglm'}
     )
     return replace(
         request,
@@ -42,7 +42,6 @@ def identity_request():
 
 
 def append_identity_digests():
-    from uuid import UUID
     from unittest.mock import patch
     from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
     from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
@@ -55,7 +54,7 @@ def append_identity_digests():
     )
 
     with patch(
-        "pulsara_agent.conversation_kernel.direct_model.uuid4", return_value=UUID(int=1)
+        "pulsara_agent.conversation_kernel.direct_model.random_id", return_value="call:" + "a" * 26
     ):
         compiler = StructuredModelInputCompiler()
         owner = new_test_provider_input_continuity_owner()
@@ -72,12 +71,12 @@ def append_identity_digests():
                 _snapshot(first, _user("next", sequence=2)),
                 _sources(_candidate(ContextSourceKind.RUNTIME_CLOCK, ("clock=B", "B"))),
             ),
-            context_id="context:next",
+            context_id='context:oez4nlakpxxe54xahgewiehe2e',
             model_call_index=2,
         )
         planning = owner.freeze_planning_input(
             scope=ProviderInputContinuityScope(
-                "session:test", ModelInputScopeKind.ROOT, None
+                'session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.ROOT, None
             ),
             canonical_frontier=_append_frontier(next_request),
             dispatch_anchor=_append_anchor(next_request),

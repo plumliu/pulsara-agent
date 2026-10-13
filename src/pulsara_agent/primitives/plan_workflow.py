@@ -218,12 +218,10 @@ def plan_draft_utf8_digest(body: bytes) -> str:
     ).hexdigest()
 
 
-def extract_plan_question(
-    *,
-    interaction_id: str,
-    binding: PlanInteractionBinding,
-    arguments: FrozenJsonObjectFact,
-) -> PlanQuestionContent:
+def parse_plan_question_arguments(
+    *, binding: PlanInteractionBinding, arguments: FrozenJsonObjectFact,
+) -> tuple[str, tuple[PlanQuestionOption, ...], bool]:
+    """Validate content before a workflow or interaction exists."""
     require_plan_interaction_contract(
         binding, expected_tool_name="ask_plan_question"
     )
@@ -276,6 +274,18 @@ def extract_plan_question(
         raise ValueError("Plan question free-text flag must be boolean")
     if not options and not allow_free_text:
         raise ValueError("optionless Plan question must allow free text")
+    return question, tuple(options), allow_free_text
+
+
+def extract_plan_question(
+    *,
+    interaction_id: str,
+    binding: PlanInteractionBinding,
+    arguments: FrozenJsonObjectFact,
+) -> PlanQuestionContent:
+    question, options, allow_free_text = parse_plan_question_arguments(
+        binding=binding, arguments=arguments
+    )
     payload = {
         "interaction_id": interaction_id,
         "request_contract_id": binding.contract_id,
@@ -307,15 +317,10 @@ def extract_plan_question(
     )
 
 
-def extract_plan_draft(
-    *,
-    interaction_id: str,
-    assistant_entry_id: str,
-    tool_call_id: str,
-    binding: PlanInteractionBinding,
-    request_semantic_digest: str,
-    arguments: FrozenJsonObjectFact,
-) -> ExtractedPlanDraft:
+def parse_plan_draft_arguments(
+    *, binding: PlanInteractionBinding, arguments: FrozenJsonObjectFact,
+) -> tuple[bytes, str | None]:
+    """Validate content without manufacturing a draft identity."""
     require_plan_interaction_contract(binding, expected_tool_name="exit_plan")
     raw = thaw_json(arguments)
     if not isinstance(raw, dict) or set(raw) - {"plan", "summary"}:
@@ -337,6 +342,19 @@ def extract_plan_draft(
         )
     )
     body = plan.encode("utf-8")
+    return body, summary
+
+
+def extract_plan_draft(
+    *,
+    interaction_id: str,
+    assistant_entry_id: str,
+    tool_call_id: str,
+    binding: PlanInteractionBinding,
+    request_semantic_digest: str,
+    arguments: FrozenJsonObjectFact,
+) -> ExtractedPlanDraft:
+    body, summary = parse_plan_draft_arguments(binding=binding, arguments=arguments)
     identity = PlanDraftContentIdentity(
         interaction_id=interaction_id,
         assistant_entry_id=assistant_entry_id,

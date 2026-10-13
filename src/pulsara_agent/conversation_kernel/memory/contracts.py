@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -127,19 +129,12 @@ def memory_relation_id(
             source_context_id, target_context_id, source_fact_id, target_fact_id = (
                 target_context_id, source_context_id, target_fact_id, source_fact_id
             )
-    identity = canonical_json_bytes(
-        (
-            "pulsara.memory-relation.v2-context-hard-cut",
-            memory_domain_id,
-            source_context_id,
-            source_fact_id,
-            relation_kind.value,
-            target_context_id,
-            target_fact_id,
-            None if supersede_mode is None else supersede_mode.value,
-        )
+    return derive_id(
+        "relation", "memory", memory_domain_id, source_context_id,
+        target_context_id, relation_kind.value,
+        "" if supersede_mode is None else supersede_mode.value,
+        source_fact_id, target_fact_id,
     )
-    return "memory-relation:" + sha256(identity).hexdigest()
 
 
 def memory_fact_semantic_digest(*, kind: MemoryFactKind, statement: str) -> str:

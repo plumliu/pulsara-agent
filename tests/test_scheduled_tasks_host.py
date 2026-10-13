@@ -1,10 +1,10 @@
 """Scheduler composes with the real Host/controller and ordinary ROOT queue."""
 
 from __future__ import annotations
+from pulsara_agent.identity import random_id
 import asyncio
 from datetime import datetime, timedelta, timezone
 from time import monotonic
-from uuid import uuid4
 import shutil
 import pytest
 from psycopg.rows import dict_row
@@ -58,14 +58,14 @@ async def setup(tmp_path, db, monkeypatch, port):
 
 async def create(service, session, prompt="Scheduled report", once=False):
     schedule = {
-        "contract": "scheduled-rule:v1",
+        "contract": 'scheduled-rule:v1',
         "kind": "interval",
         "anchor_at_utc": "2020-01-01T00:00:00+00:00",
         "seconds": 60,
     }
     if once:
         schedule = {
-            "contract": "scheduled-rule:v1",
+            "contract": 'scheduled-rule:v1',
             "kind": "once",
             "run_at_utc": (datetime.now(timezone.utc) + timedelta(hours=1))
             .replace(microsecond=0)
@@ -99,7 +99,7 @@ def test_quick_session_initial_model_is_ready_for_a_scheduled_task(
                 await sessions.create_session(
                     workspace_kind="quick",
                     model_call_binding=ModelCallBinding(
-                        ModelConnectionId("model-connection:" + "f" * 32), None
+                        ModelConnectionId('connection:eqav4ryyuefvvlc4wstluyas4e'), None
                     ),
                 )
             assert failure.value.public_code == "MODEL_BINDING_INVALID"
@@ -117,7 +117,7 @@ def test_quick_session_initial_model_is_ready_for_a_scheduled_task(
                     name="Quick scheduled report",
                     prompt="Inspect progress",
                     schedule={
-                        "contract": "scheduled-rule:v1",
+                        "contract": 'scheduled-rule:v1',
                         "kind": "daily",
                         "start_date": "2026-10-05",
                         "time": "08:00",
@@ -183,14 +183,14 @@ def test_busy_fifo_coalescing_pause_and_source(
         )
         try:
             await h.session.submit_prompt(
-                command_id="human:first", content=PromptContent.text("Human first")
+                command_id='command:36hwiobu4cenlsvnsd33wfvsyi', content=PromptContent.text("Human first")
             )
             await asyncio.wait_for(port.started.wait(), 15)
             task = await create(service, h.session)
             await due(service, h.session, task)
             await service.tick()
             await h.session.submit_prompt(
-                command_id="human:second", content=PromptContent.text("Human second")
+                command_id='command:ag24n2g2ztjbupgbndkdb34zne', content=PromptContent.text("Human second")
             )
             await due(service, h.session, task)
             await service.tick()
@@ -218,7 +218,7 @@ def test_busy_fifo_coalescing_pause_and_source(
             assert len(port.requests) == 2
             # Explicit run uses the same paused task, without changing its plan.
             req = dict(
-                client_command_id=uuid4().hex,
+                client_command_id=random_id("command"),
                 session_id=h.session_id,
                 task_id=task["id"],
                 expected_revision=paused["revision"],
@@ -299,7 +299,7 @@ def test_missing_workspace_auto_pauses_without_mkdir_manual_keeps_plan(
             paused = await service.get(task["id"])
             assert paused["status"] == "PAUSED" and not root.exists()
             req = dict(
-                client_command_id=uuid4().hex,
+                client_command_id=random_id("command"),
                 session_id=h.session_id,
                 task_id=task["id"],
                 expected_revision=paused["revision"],
@@ -336,7 +336,7 @@ def test_restart_wakes_removed_once_pending_from_timer_or_user(
         runtime = core._model_runtime
         try:
             await h.session.submit_prompt(
-                command_id="busy", content=PromptContent.text("Busy human")
+                command_id='command:uddu4kdmbvxndouvefup5xkrsy', content=PromptContent.text("Busy human")
             )
             await asyncio.wait_for(port.started.wait(), 15)
             task = await create(service, h.session, once=True)
@@ -348,7 +348,7 @@ def test_restart_wakes_removed_once_pending_from_timer_or_user(
                 )
                 await service.run_now(
                     dict(
-                        client_command_id=uuid4().hex,
+                        client_command_id=random_id("command"),
                         session_id=h.session_id,
                         task_id=task["id"],
                         expected_revision=task["revision"],
@@ -426,7 +426,7 @@ def test_manual_enqueue_unknown_commit_ack_and_exact_confirmation(
 
             monkeypatch.setattr(h.session.repository, "enqueue_prompt", unknown)
             request = dict(
-                client_command_id=uuid4().hex,
+                client_command_id=random_id("command"),
                 session_id=h.session_id,
                 task_id=task["id"],
                 expected_revision=task["revision"],
@@ -607,7 +607,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             for _ in range(4):
                 await service.run_now(
                     dict(
-                        client_command_id=uuid4().hex,
+                        client_command_id=random_id("command"),
                         session_id=h.session_id,
                         task_id=task["id"],
                         expected_revision=task["revision"],
@@ -659,7 +659,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             }
             await service.run_now(
                 dict(
-                    client_command_id=uuid4().hex,
+                    client_command_id=random_id("command"),
                     session_id=h.session_id,
                     task_id=task["id"],
                     expected_revision=task["revision"],
@@ -670,7 +670,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             )
             await asyncio.wait_for(port.started.wait(), 15)
             compact = asyncio.create_task(
-                h.session.compact_context(command_id="scheduled:compact", force=True)
+                h.session.compact_context(command_id='command:d5eueadedp3fbgc446jlz5lefa', force=True)
             )
 
             async def registered():
@@ -799,7 +799,7 @@ def test_saved_task_sources_do_not_trigger_automatic_memory_recall(
             else:
                 await service.run_now(
                     dict(
-                        client_command_id=uuid4().hex,
+                        client_command_id=random_id("command"),
                         session_id=h.session_id,
                         task_id=task["id"],
                         expected_revision=task["revision"],

@@ -21,7 +21,7 @@ def test_same_turn_preference_refresh_detects_change_empty_and_cold_epoch() -> N
         deadline_factory=None,  # type: ignore[arg-type]
     )
     scope = ProviderInputContinuityScope(
-        session_id="session:memory-refresh",
+        session_id='session:awdeh7sbcwwn6qhvkkvcdbilnq',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
@@ -34,13 +34,13 @@ def test_same_turn_preference_refresh_detects_change_empty_and_cold_epoch() -> N
         kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
         texts=('{"items":["concise"]}',),
     )
-    first = SimpleNamespace(predecessor_view=SimpleNamespace(epoch_nonce="epoch:1"))
+    first = SimpleNamespace(predecessor_view=SimpleNamespace(epoch_nonce='epoch:3pechujssxttscv4kt3epmpkd4'))
     assert support.preference_changed_since_installed(
         scope=scope, planning=first, desired=empty
     )
     support.note_installed_preference(
         scope=scope,
-        epoch_nonce="epoch:1",
+        epoch_nonce='epoch:3pechujssxttscv4kt3epmpkd4',
         sources=SimpleNamespace(candidates=(), absent_facts=(empty,)),  # type: ignore[arg-type]
     )
     assert not support.preference_changed_since_installed(
@@ -51,14 +51,14 @@ def test_same_turn_preference_refresh_detects_change_empty_and_cold_epoch() -> N
     )
     support.note_installed_preference(
         scope=scope,
-        epoch_nonce="epoch:1",
+        epoch_nonce='epoch:3pechujssxttscv4kt3epmpkd4',
         sources=SimpleNamespace(candidates=(present,), absent_facts=()),  # type: ignore[arg-type]
     )
     assert support.preference_changed_since_installed(
         scope=scope, planning=first, desired=empty
     )
     next_epoch = SimpleNamespace(
-        predecessor_view=SimpleNamespace(epoch_nonce="epoch:2")
+        predecessor_view=SimpleNamespace(epoch_nonce='epoch:7tckvaj5jl5cmxfqclnbapnxqq')
     )
     assert support.preference_changed_since_installed(
         scope=scope, planning=next_epoch, desired=present

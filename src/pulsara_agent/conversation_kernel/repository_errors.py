@@ -7,6 +7,10 @@ class ConversationKernelConflict(RuntimeError):
     """A stable identity already names a different semantic fact."""
 
 
+class UnpublishedIdentityCollision(ConversationKernelConflict):
+    """An allocation owner may retry before freezing or exposing its new ID."""
+
+
 class PreparedCompletionSuffixStale(ConversationKernelConflict):
     """A speculative ROOT completion batch lost its exact canonical cut."""
 

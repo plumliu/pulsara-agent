@@ -8,8 +8,8 @@ from pulsara_agent.web_app.session_controller import LocalSessionController
 
 def test_session_summary_keeps_live_state_out_of_display_copy() -> None:
     summary = KernelSessionSummary(
-        session_id="session:1234567890",
-        workspace_id="workspace:1",
+        session_id='session:ieymc5yb2mysjmkepfxgiqst3i',
+        workspace_id='workspace:tx722zsrfsrhp7m363cs7ve6ii',
         workspace_kind="project",
         workspace_root="/tmp/project",
         workspace_label="project",

@@ -1,6 +1,7 @@
 """Observable hard-cut contract for independent commands and process follow-up."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import json
 import asyncio
@@ -47,26 +48,26 @@ from pulsara_agent.terminal_process.models import TerminalProcessOrigin
 @pytest.fixture
 def terminal(tmp_path):
     manager = TerminalManager(tmp_path)
-    manager.activate_owner("host:cognitive")
+    manager.activate_owner('host:45aj6sixiaarr5ta455q3trmwi')
     manager.environment_owner.config = TerminalEnvConfig(enable_shell_snapshot=False)
     try:
         yield manager
     finally:
-        manager.release_owner("host:cognitive", timeout_seconds=5)
+        manager.release_owner('host:45aj6sixiaarr5ta455q3trmwi', timeout_seconds=5)
 
 
 def start(manager, command, **kwargs):
-    return _DirectTerminalTool(manager, "host:cognitive").execute(
+    return _DirectTerminalTool(manager, 'host:45aj6sixiaarr5ta455q3trmwi').execute(
         ToolCall("call:start", "terminal", {"command": command, **kwargs}),
-        origin=TerminalProcessOrigin("turn:cognitive", "ROOT"),
-        decision_attempt_id=f"decision:{monotonic()}",
+        origin=TerminalProcessOrigin('turn:gc7de6qlnst5d77yis7utsj2xu', "ROOT"),
+        decision_attempt_id=derive_id("decision", "test-fixture", f"decision:{monotonic()}"),
         decision_deadline_monotonic=monotonic() + 5,
         effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
 
 
 def follow(manager, action, process_id, **kwargs):
-    return _DirectTerminalProcessTool(manager, "host:cognitive").execute(
+    return _DirectTerminalProcessTool(manager, 'host:45aj6sixiaarr5ta455q3trmwi').execute(
         ToolCall(
             "call:follow",
             "terminal_process",
@@ -254,8 +255,8 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
     async def scenario():
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:cognitive",
-            session_id="session:cognitive",
+            host_owner_id='host:45aj6sixiaarr5ta455q3trmwi',
+            session_id='session:liqqsnm2qenssqznkop23s5kji',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -296,9 +297,9 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
             coordinator = port.terminal_monitor_coordinator
             registration = coordinator.prepare_registration(
                 process_id=pid,
-                origin_turn_id="turn:cognitive",
-                origin_attempt_id="attempt:monitor",
-                origin_result_entry_id="entry:monitor",
+                origin_turn_id='turn:gc7de6qlnst5d77yis7utsj2xu',
+                origin_attempt_id='attempt:rywnac27lbxzzu5jos2emnc4l4',
+                origin_result_entry_id='entry:7q3f3aefu65zldthqrf5igswka',
                 writer_generation=1,
                 authorization_reference="policy:cognitive",
                 policy=TerminalMonitorPolicy(),

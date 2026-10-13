@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from pathlib import Path
@@ -84,7 +85,7 @@ def _create_project_mcp(*, workspace_root, server_id, entry):
 class _Session:
     def __init__(self, session_id: str, workspace_root: Path) -> None:
         self.session_id = session_id
-        self.host_session_id = f"host:{session_id}"
+        self.host_session_id = derive_id("host", "test-fixture", f"host:{session_id}")
         self.workspace = SimpleNamespace(
             workspace_root=workspace_root,
             workspace_kind="project",
@@ -114,9 +115,9 @@ def _refresh_core(sessions=()):
 def _controller_with_sessions(
     workspace_root: Path, other_workspace: Path
 ) -> tuple[LocalSessionController, HostSessionHandle, _Session, _Session, _Session]:
-    primary = _Session("session:primary", workspace_root)
-    sibling = _Session("session:sibling", workspace_root)
-    other = _Session("session:other", other_workspace)
+    primary = _Session('session:cuaeggflg6mdyxkronanx37vqu', workspace_root)
+    sibling = _Session('session:m2ub6wm5aj624i62qoe2ap64le', workspace_root)
+    other = _Session('session:sjiboxs4asbh5n6mg6cpdgcsqu', other_workspace)
     handles = [
         HostSessionHandle(primary, SimpleNamespace()),
         HostSessionHandle(sibling, SimpleNamespace()),
@@ -663,7 +664,7 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
         workspace.mkdir()
         entered = asyncio.Event()
         release = asyncio.Event()
-        session = _Session("session:new", workspace)
+        session = _Session('session:b4dko33eo7mh6y6kakzkdqeqd4', workspace)
         session.workspace = SimpleNamespace(
             workspace_root=workspace.resolve(),
             workspace_kind="project",
@@ -717,7 +718,7 @@ def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
         workspace.mkdir()
         entered = asyncio.Event()
         release = asyncio.Event()
-        session = _Session("session:resumed", workspace.resolve())
+        session = _Session('session:hak2ydymrbusup5kc5jykgxy5m', workspace.resolve())
 
         async def read_resumable_session(*_args, **_kwargs):
             return SimpleNamespace(
@@ -752,12 +753,12 @@ def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
         controller._closing = False
         controller._close_task = None
 
-        resuming = asyncio.create_task(controller.resume_session("session:resumed"))
+        resuming = asyncio.create_task(controller.resume_session('session:hak2ydymrbusup5kc5jykgxy5m'))
         await entered.wait()
         assert await controller._mark_capability_refresh(workspace if scope == "workspace" else None) == 0
         release.set()
         handle = await resuming
-        assert handle.session_id == "session:resumed"
+        assert handle.session_id == 'session:hak2ydymrbusup5kc5jykgxy5m'
         assert session.refresh_requests == 1
 
     asyncio.run(exercise())
@@ -771,7 +772,7 @@ def test_project_refresh_ignores_a_session_that_closes_during_marking(
         workspace.mkdir()
         entered = asyncio.Event()
         release = asyncio.Event()
-        session = _Session("session:closing", workspace)
+        session = _Session('session:s4pxuqzriha7rb2rhmatcb6neu', workspace)
 
         async def close_during_refresh() -> int:
             entered.set()
@@ -923,7 +924,7 @@ def test_project_mcp_transition_keeps_one_editable_row(tmp_path: Path) -> None:
     )
 
     payload = _capability_payload(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         workspace_root=workspace,
         workspace_kind="project",
         workspace_skills={"items": []},
@@ -999,7 +1000,7 @@ def test_disabled_workspace_mcp_does_not_hide_the_effective_user_server(
     )
 
     payload = _capability_payload(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         workspace_root=workspace,
         workspace_kind="project",
         workspace_skills={"items": []},

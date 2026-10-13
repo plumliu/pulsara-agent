@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import FrozenInstanceError
@@ -87,17 +88,17 @@ def _binding(tool_name: str) -> PlanInteractionBinding:
 
 def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
     settlement = build_accepted_canonical_tool_result_settlement(
-        session_id="session:one",
+        session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        turn_id="turn:origin",
-        assistant_entry_id="entry:assistant",
+        turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
+        assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         call_ordinal=0,
         tool_name="ask_plan_question",
         tool_call_id="call:question",
         public_arguments=freeze_json({"question": "continue?"}),
-        result_id="result:answer",
-        result_entry_id="entry:answer",
+        result_id='result:u7k6t7ochy3esuwmrmpwweg6he',
+        result_entry_id='entry:6roaferm4dcrranslov7yn2ze4',
         accepted_entry_sequence=3,
         result_state="SUCCESS",
         result_origin_kind="PLAN_CONTROL",
@@ -106,8 +107,8 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
         observation_origin=ToolObservationOrigin.PLAN_CONTROL,
     )
     return AcceptedPlanResolution(
-        command_id="command:answer",
-        workflow_id="workflow:one",
+        command_id='command:nwezcsdi6y234anllgvrrcd66q',
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         workflow_status=PlanWorkflowStatus.ACTIVE,
         interaction_id=interaction_id,
         interaction_status="ANSWERED",
@@ -116,7 +117,7 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
         continuation_entry_id=None,
         handoff_created_at_commit=False,
         workflow_revision=3,
-        question_result_entry_id="entry:answer",
+        question_result_entry_id='entry:6roaferm4dcrranslov7yn2ze4',
         tool_result_settlement=settlement,
     )
 
@@ -184,10 +185,10 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
     async def scenario() -> None:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        session_id = "session:permission-matrix"
+        session_id = 'session:2cjeau7nnodslaadjktq7cybp4'
         port = DirectKernelToolPort(
             workspace_root=workspace,
-            host_owner_id="host:permission-matrix",
+            host_owner_id='host:stnketegsrtgmc2jewrtonbxxy',
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -217,7 +218,7 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
         try:
             for ordinal, (mode, outcomes) in enumerate(expected.items()):
                 permission = build_run_permission_snapshot(
-                    snapshot_id=f"permission:matrix:{ordinal}",
+                    snapshot_id=derive_id("permission", "test-fixture", f"permission:matrix:{ordinal}"),
                     requested_mode=mode,
                     effective_mode=mode,
                     admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -232,8 +233,8 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
                         tool_name="write_file",
                         arguments={"path": str(path), "content": "value"},
                         tool_call_id=f"call:{ordinal}:{path_ordinal}",
-                        turn_id=f"turn:{ordinal}:{path_ordinal}",
-                        assistant_entry_id=f"entry:{ordinal}:{path_ordinal}",
+                        turn_id=derive_id("turn", "test-fixture", f"turn:{ordinal}:{path_ordinal}"),
+                        assistant_entry_id=derive_id("entry", "test-fixture", f"entry:{ordinal}:{path_ordinal}"),
                         permission_snapshot=permission,
                     )
                     observed.append(authorization.kind)
@@ -243,8 +244,8 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
                     tool_name="terminal",
                     arguments={"command": "pwd", "workdir": str(tmp_path)},
                     tool_call_id=f"call:{ordinal}:terminal",
-                    turn_id=f"turn:{ordinal}:terminal",
-                    assistant_entry_id=f"entry:{ordinal}:terminal",
+                    turn_id=derive_id("turn", "test-fixture", f"turn:{ordinal}:terminal"),
+                    assistant_entry_id=derive_id("entry", "test-fixture", f"entry:{ordinal}:terminal"),
                     permission_snapshot=permission,
                 )
                 observed.append(terminal_authorization.kind)
@@ -257,13 +258,13 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
 
 def test_round4_permission_snapshot_is_immutable_and_plan_only_narrows() -> None:
     snapshot = build_run_permission_snapshot(
-        snapshot_id="permission:plan",
+        snapshot_id='permission:jkftzyuw2e3gxuxnkrx7kfmabi',
         requested_mode=PermissionMode.BYPASS_PERMISSIONS,
         effective_mode=PermissionMode.READ_ONLY,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         overlay=RunPermissionOverlay.PLAN_READ_ONLY,
         plan_context_ordinal_at_admission=2,
-        plan_workflow_id="workflow:two",
+        plan_workflow_id='plan:jqwnupd2gribdbatnmdxqipm4e',
         plan_workflow_revision_at_admission=5,
     )
     assert snapshot.requested_mode is PermissionMode.BYPASS_PERMISSIONS
@@ -278,12 +279,12 @@ def test_round4_permission_snapshot_is_immutable_and_plan_only_narrows() -> None
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
             overlay=RunPermissionOverlay.PLAN_READ_ONLY,
             plan_context_ordinal_at_admission=2,
-            plan_workflow_id="workflow:two",
+            plan_workflow_id='plan:jqwnupd2gribdbatnmdxqipm4e',
             plan_workflow_revision_at_admission=5,
         )
     with pytest.raises(ValueError, match="without an overlay"):
         build_run_permission_snapshot(
-            snapshot_id="permission:amplified",
+            snapshot_id='permission:uaknn6djaf4m7nsxnhosr56j7u',
             requested_mode=PermissionMode.READ_ONLY,
             effective_mode=PermissionMode.BYPASS_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -322,7 +323,7 @@ def test_round4_central_question_and_draft_extractor_owns_utf8_identity() -> Non
     body = "第一行🙂\n第二行\\n不是转义\n第三行"
     draft = extract_plan_draft(
         interaction_id="interaction:draft",
-        assistant_entry_id="entry:assistant",
+        assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         tool_call_id="call:exit",
         binding=_binding("exit_plan"),
         request_semantic_digest="sha256:" + "1" * 64,
@@ -369,7 +370,7 @@ def test_round4_question_waiter_accepts_resolution_before_publish_and_await() ->
     async def scenario() -> None:
         coordinator = KernelPlanInteractionCoordinator()
         waiter = await coordinator.prepare_question(
-            interaction_id="interaction:question", origin_turn_id="turn:origin"
+            interaction_id="interaction:question", origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u'
         )
         resolution = _accepted_resolution(waiter.interaction_id)
         assert await coordinator.settle(
@@ -394,7 +395,7 @@ def test_round4_question_waiter_caller_cancel_only_detaches() -> None:
     async def scenario() -> None:
         coordinator = KernelPlanInteractionCoordinator()
         waiter = await coordinator.prepare_question(
-            interaction_id="interaction:question", origin_turn_id="turn:origin"
+            interaction_id="interaction:question", origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u'
         )
         waiting = asyncio.create_task(coordinator.wait(waiter))
         await asyncio.sleep(0)
@@ -423,8 +424,8 @@ def test_round4_continuation_owner_survives_waiter_cancel_and_close_drains() -> 
             return "FULL"
 
         attempt = owner.start(
-            attempt_id="attempt:one",
-            turn_id="turn:successor",
+            attempt_id='attempt:cbfw55hsxcz2i5ii546b3afgd4',
+            turn_id='turn:ip4gd6wolprut4h3uvxxn7kmhu',
             semantic_candidate_fingerprint="sha256:" + "1" * 64,
             run=admit,
         )
@@ -446,63 +447,63 @@ def test_round4_continuation_owner_survives_waiter_cancel_and_close_drains() -> 
 
 def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
     question_first = plan_question_resolution_semantic_fingerprint(
-        workflow_id="workflow:one",
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         expected_workflow_revision=3,
         interaction_id="interaction:question",
         answer=PlanQuestionAnswer(
             PlanQuestionAnswerKind.OPTION, option_ordinal=0
         ),
-        result_id="result:question",
-        result_entry_id="entry:question",
+        result_id='result:w4a5j64xbjn42iu6nmkm6uuoiu',
+        result_entry_id='entry:ndzeeqda2txankzel7v3yuhita',
     )
     question_conflict = plan_question_resolution_semantic_fingerprint(
-        workflow_id="workflow:one",
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         expected_workflow_revision=3,
         interaction_id="interaction:question",
         answer=PlanQuestionAnswer(
             PlanQuestionAnswerKind.OPTION, option_ordinal=1
         ),
-        result_id="result:question",
-        result_entry_id="entry:question",
+        result_id='result:w4a5j64xbjn42iu6nmkm6uuoiu',
+        result_entry_id='entry:ndzeeqda2txankzel7v3yuhita',
     )
     _, _, decision_first = plan_draft_review_semantic_candidate(
-        workflow_id="workflow:one",
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.APPROVE,
         feedback=None,
-        continuation_turn_id="turn:review",
-        continuation_entry_id="entry:review",
+        continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
+        continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
     )
     _, _, decision_conflict = plan_draft_review_semantic_candidate(
-        workflow_id="workflow:one",
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
         feedback=None,
-        continuation_turn_id="turn:review",
-        continuation_entry_id="entry:review",
+        continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
+        continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
     )
     _, _, feedback_first = plan_draft_review_semantic_candidate(
-        workflow_id="workflow:one",
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
         feedback="first",
-        continuation_turn_id="turn:review",
-        continuation_entry_id="entry:review",
+        continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
+        continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
     )
     _, _, feedback_conflict = plan_draft_review_semantic_candidate(
-        workflow_id="workflow:one",
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
         feedback="second",
-        continuation_turn_id="turn:review",
-        continuation_entry_id="entry:review",
+        continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
+        continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
     )
 
@@ -515,15 +516,15 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
             return "FULL"
 
         attempt = owner.start(
-            attempt_id="attempt:shared-command",
-            turn_id="turn:target",
+            attempt_id='attempt:ztikkk43pykzqoqbumuoeqd34y',
+            turn_id='turn:pt4zsuyxvb527qliae4ba7inwi',
             semantic_candidate_fingerprint=first,
             run=admit,
         )
         with pytest.raises(ConversationKernelConflict, match="semantic identity"):
             owner.start(
-                attempt_id="attempt:shared-command",
-                turn_id="turn:target",
+                attempt_id='attempt:ztikkk43pykzqoqbumuoeqd34y',
+                turn_id='turn:pt4zsuyxvb527qliae4ba7inwi',
                 semantic_candidate_fingerprint=conflict,
                 run=admit,
             )
@@ -548,8 +549,8 @@ def test_round4_root_plan_tools_are_absent_from_subagent_surface(tmp_path: Path)
     async def scenario() -> None:
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:round4",
-            session_id="session:round4",
+            host_owner_id='host:67t6d6rn367knw34uofudcef2m',
+            session_id='session:q4ekby5llymjxbkqle4ou2k3ce',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -562,7 +563,7 @@ def test_round4_root_plan_tools_are_absent_from_subagent_surface(tmp_path: Path)
             child = prepare_test_direct_tool_surface(
                 port,
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id="task:child",
+                scope_subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
             )
             plan_names = {"enter_plan", "ask_plan_question", "exit_plan"}
             assert plan_names <= {item.name for item in root.model_surface.tool_specs}
@@ -607,7 +608,7 @@ class _PlanProtocolHost:
         self._draft_winners: dict[
             str, tuple[tuple[PlanDraftDecision, str | None], AcceptedPlanResolution]
         ] = {}
-        self.controller_attachment_id = "attachment:controller"
+        self.controller_attachment_id = 'attachment:5l6o6wokl63aqnv5llnyf34m6i'
 
     def has_controller_attachment(self, attachment_id: str) -> bool:
         return attachment_id == self.controller_attachment_id
@@ -651,8 +652,8 @@ class _PlanProtocolHost:
             interaction_id=str(kwargs["interaction_id"]),
             interaction_status="REVISION_REQUESTED",
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
-            continuation_turn_id="turn:revision",
-            continuation_entry_id="entry:revision",
+            continuation_turn_id='turn:cwreltr7rhjexfkabu36w36ntq',
+            continuation_entry_id='entry:z5syrvyrbobpni5pree77ewau4',
             handoff_created_at_commit=False,
             workflow_revision=4,
             draft_decision=PlanDraftDecision.REVISE,
@@ -669,7 +670,7 @@ def _plan_protocol_state() -> tuple[TerminalKernelProtocolServer, _Connection]:
             session_provider=lambda _: host,  # type: ignore[arg-type]
         ),
         _Connection(
-            attachment_id="attachment:controller",
+            attachment_id='attachment:5l6o6wokl63aqnv5llnyf34m6i',
             attachment_generation=1,
             host_session=host,  # type: ignore[arg-type]
             granted_role=wire.ATTACHMENT_ROLE_CONTROLLER,
@@ -684,11 +685,11 @@ def _plan_resolution_request(
     writer_generation: int = 7,
 ) -> wire.ResolvePlanInteractionRequest:
     request = wire.ResolvePlanInteractionRequest(
-        request_id="request:plan",
-        command_id="command:plan",
+        request_id='request:a6epls275oqccf5bze5jg2sofu',
+        command_id='command:bfhvly44ffuw26kd4p5q5lrehq',
         attempt_expected_writer_generation=writer_generation,
         interaction_id="interaction:plan",
-        workflow_id="workflow:one",
+        workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
         expected_workflow_revision=3,
     )
     if isinstance(resolution, wire.PlanQuestionAnswer):
@@ -729,7 +730,7 @@ def test_round4_plan_resolution_requires_exact_current_controller_capability() -
     server, state = _plan_protocol_state()
     host = state.host_session
     assert isinstance(host, _PlanProtocolHost)
-    host.controller_attachment_id = "attachment:replacement"
+    host.controller_attachment_id = 'attachment:uwzuz6lym7rdkwiyxdh6riocgq'
 
     rejected = asyncio.run(
         server._resolve_plan_interaction(
@@ -799,35 +800,35 @@ def test_round4_ack_unknown_query_preserves_typed_plan_winner() -> None:
                 "interaction_workflow_status": "ACTIVE",
                 "interaction_resume_permission_mode": "accept-edits",
                 "interaction_workflow_revision": 9,
-                "plan_continuation_turn_id": "turn:revision",
+                "plan_continuation_turn_id": 'turn:cwreltr7rhjexfkabu36w36ntq',
             }
 
         host._query_command_row = query  # type: ignore[method-assign]
-        outcome = await KernelHostSession.query_command(host, "command:revision")
+        outcome = await KernelHostSession.query_command(host, 'command:vdd3jhvx2te2k5oxzjow2i5mqa')
         assert outcome is not None
         return outcome
 
     outcome = asyncio.run(scenario())
     assert outcome.plan_draft_decision is PlanDraftDecision.REVISE
-    assert outcome.plan_continuation_turn_id == "turn:revision"
+    assert outcome.plan_continuation_turn_id == 'turn:cwreltr7rhjexfkabu36w36ntq'
     assert not outcome.handoff_created_at_commit
-    response = _outcome_to_wire("request:query", outcome)
+    response = _outcome_to_wire('request:t76itpm4ijziuxibag4c6pfp24', outcome)
     assert response.plan_draft_decision == wire.PLAN_DRAFT_REVISE
-    assert response.plan_continuation_turn_id == "turn:revision"
+    assert response.plan_continuation_turn_id == 'turn:cwreltr7rhjexfkabu36w36ntq'
     assert response.plan_workflow_revision == 9
 
 
 def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
     async def scenario() -> None:
         winner = AcceptedPlanResolution(
-            command_id="command:approve",
-            workflow_id="workflow:one",
+            command_id='command:ike45k6afq42xyytidop3ntb3u',
+            workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
             workflow_status=PlanWorkflowStatus.APPROVED,
             interaction_id="interaction:draft",
             interaction_status="APPROVED",
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
-            continuation_turn_id="turn:implementation",
-            continuation_entry_id="entry:implementation",
+            continuation_turn_id='turn:kd5kt7ezlfyprg4wjsc7fmkvem',
+            continuation_entry_id='entry:3jg72mzyicewyppfnf4lf4yj6m',
             handoff_created_at_commit=False,
             workflow_revision=4,
             draft_decision=PlanDraftDecision.APPROVE,
@@ -854,7 +855,7 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
         host._closing = False  # type: ignore[attr-defined]
         host._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         host._plan_exit_fence = True  # type: ignore[attr-defined]
-        host.session_id = "session:one"  # type: ignore[attr-defined]
+        host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'  # type: ignore[attr-defined]
         host._lease = Lease()  # type: ignore[attr-defined]
         host.repository = Repository()  # type: ignore[attr-defined]
         host._io = IO()  # type: ignore[attr-defined]
@@ -864,8 +865,8 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
         try:
             observed = await KernelHostSession.resolve_plan_draft_review(
                 host,
-                command_id="command:approve",
-                workflow_id="workflow:one",
+                command_id='command:ike45k6afq42xyytidop3ntb3u',
+                workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
                 expected_workflow_revision=3,
                 interaction_id="interaction:draft",
                 decision=PlanDraftDecision.APPROVE,
@@ -921,7 +922,7 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
         host._plan_continuations = ContinuationAdmissionOwner()  # type: ignore[attr-defined]
         host._io = IO()  # type: ignore[attr-defined]
         host.repository = Repository()  # type: ignore[attr-defined]
-        host.session_id = "session:one"  # type: ignore[attr-defined]
+        host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'  # type: ignore[attr-defined]
         return host
 
     async def scenario() -> None:
@@ -929,8 +930,8 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
         with pytest.raises(ConversationKernelConflict, match="force exit"):
             await KernelHostSession.resolve_plan_question(
                 host,
-                command_id="command:question",
-                workflow_id="workflow:one",
+                command_id='command:m3tjhoqiqvo5eecdqny6xfkbby',
+                workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
                 expected_workflow_revision=3,
                 interaction_id="interaction:question",
                 answer=PlanQuestionAnswer(
@@ -948,8 +949,8 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
             with pytest.raises(ConversationKernelConflict, match="force exit"):
                 await KernelHostSession.resolve_plan_draft_review(
                     host,
-                    command_id=f"command:{decision.value}",
-                    workflow_id="workflow:one",
+                    command_id=derive_id("command", "test-fixture", f"command:{decision.value}"),
+                    workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
                     expected_workflow_revision=4,
                     interaction_id="interaction:draft",
                     decision=decision,

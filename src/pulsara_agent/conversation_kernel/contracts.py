@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import require_id
+
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -84,8 +86,8 @@ class HostWriterGuard:
     writer_owner_id: str
 
     def __post_init__(self) -> None:
-        _required(self.session_id, "session_id")
-        _required(self.writer_owner_id, "writer_owner_id")
+        require_id(self.session_id, "session")
+        require_id(self.writer_owner_id, "host")
         if self.writer_generation < 1:
             raise ValueError("writer_generation must be positive")
 
@@ -190,7 +192,7 @@ class BlobContent:
     codec: str
 
     def __post_init__(self) -> None:
-        _required(self.blob_id, "blob_id")
+        require_id(self.blob_id, "blob", "image")
         if self.size < 0:
             raise ValueError("blob size must be non-negative")
 

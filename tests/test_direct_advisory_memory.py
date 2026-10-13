@@ -1,6 +1,7 @@
 """Clean-v0 direct memory writes through canonical ToolResult settlement."""
 
 from __future__ import annotations
+from uuid import uuid4
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -88,7 +89,7 @@ def _open_direct_memory_session(repository, *, workspace_root: str | None = None
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text("Remember and relate these observations."),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -294,7 +295,7 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
     assert row[3] is None
     binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext("u_local", "transient"),
-        host_workspace_id="workspace:foreign",
+        host_workspace_id='workspace:oktyd2yb2hmhohnpgzxtd56ada',
     )
     query_row = PostgresMemoryQuery(repository.connection_provider).get(
         read_binding=binding, fact_id=current["memory_id"],
@@ -385,7 +386,7 @@ def test_user_text_edit_obeys_original_scope_and_kind_limits(direct_memory_sessi
         repository.memory_management_edit_statement(statement="x" * 2049, **edit_args)
     with pytest.raises(MemoryManagementError) as wrong_scope:
         repository.memory_management_edit_statement(
-            **{**edit_args, "selection": MemoryManagementSelection("project", "ctx:workspace/not-a-project")},
+            **{**edit_args, "selection": MemoryManagementSelection("project", 'workspace:m6ffh3wsi4upizujem6xsorgsm')},
             statement="Please answer at length.",
         )
     assert wrong_scope.value.status == 404
@@ -515,7 +516,7 @@ def test_project_memory_directory_survives_zero_sessions_and_pages_stably(
     repository = _repository(stage2_migrated_postgres_database)
     created: list[tuple[str, str, str]] = []
     for ordinal in range(2):
-        workspace_root = _name(f"remembered-project-{ordinal}")
+        workspace_root = f"remembered-project-{ordinal}-{uuid4().hex}"
         lease, _invoke, remember = _open_direct_memory_session(
             repository, workspace_root=workspace_root
         )
@@ -883,7 +884,7 @@ def test_contradiction_owner_requires_non_null_exact_endpoints(
                 "VALUES (%s,'u_local',%s,'ctx:global',%s,'FACT','CONTRADICTS',"
                 "'ctx:global',%s,'FACT')",
                 (
-                    _name("bad-contradiction"),
+                    _name("relation"),
                     candidate.result_id,
                     third["memory_id"],
                     fourth["memory_id"],
@@ -1074,7 +1075,7 @@ def test_memory_deletion_replans_when_the_locked_graph_grows(
 
             def grow_graph():
                 _lease_b, _invoke_b, remember_b = _open_direct_memory_session(
-                    repository, workspace_root=_name("concurrent-project-b")
+                    repository, workspace_root=uuid4().hex
                 )
                 return remember_b(
                     "Project B concurrently depends on the global concurrency root.",
@@ -1156,7 +1157,7 @@ def test_orphan_workspace_cleanup_serializes_with_new_session_creation(
     monkeypatch: pytest.MonkeyPatch,
 ):
     repository = _repository(stage2_migrated_postgres_database)
-    workspace_root = _name("orphan-workspace-root")
+    workspace_root = uuid4().hex
     workspace_id = workspace_context_id(workspace_root)
     workspace_label = Path(workspace_root).name
     runtime_dsn = stage2_migrated_postgres_database.runtime_dsn
@@ -1213,7 +1214,7 @@ def test_orphan_workspace_cleanup_serializes_with_new_session_creation(
     def create_session():
         return repository.acquire_host_writer(
             intent="NEW",
-            session_id=_name("session-after-orphan-cleanup"),
+            session_id=_name("session"),
             workspace_id=workspace_id,
             workspace_root=workspace_root,
             writer_owner_id=_name("host"),
@@ -1248,7 +1249,7 @@ def test_new_session_commit_prevents_stale_orphan_workspace_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ):
     repository = _repository(stage2_migrated_postgres_database)
-    workspace_root = _name("workspace-survives-cleanup")
+    workspace_root = uuid4().hex
     workspace_id = workspace_context_id(workspace_root)
     workspace_label = Path(workspace_root).name
     runtime_dsn = stage2_migrated_postgres_database.runtime_dsn
@@ -1318,7 +1319,7 @@ def test_new_session_commit_prevents_stale_orphan_workspace_cleanup(
     def create_session():
         return repository.acquire_host_writer(
             intent="NEW",
-            session_id=_name("session-before-orphan-cleanup"),
+            session_id=_name("session"),
             workspace_id=workspace_id,
             workspace_root=workspace_root,
             writer_owner_id=_name("host"),
@@ -1389,8 +1390,8 @@ def test_memory_insert_cannot_commit_without_its_final_tool_result(
     direct_memory_session,
 ):
     repository, _lease, _invoke, _remember = direct_memory_session
-    fact_id = _name("memory-without-result")
-    missing_result_id = _name("missing-result")
+    fact_id = _name("memory")
+    missing_result_id = _name("result")
     with pytest.raises((CheckViolation, ForeignKeyViolation)):
         with repository.connection_provider.connection(
             lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
@@ -1489,7 +1490,7 @@ def test_preferences_remain_storable_beyond_projection_head_and_conflicts_are_ex
     )
     binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext("u_local", "transient"),
-        host_workspace_id="workspace:preference-test",
+        host_workspace_id='workspace:y4dowbhjj6nthcfm7i76sqwfjy',
     )
     snapshot = PostgresMemoryQuery(
         repository.connection_provider
@@ -1527,7 +1528,7 @@ def test_remember_related_preview_returns_three_exact_context_facts(
     )
     binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext("u_local", "transient"),
-        host_workspace_id="workspace:related-preview-test",
+        host_workspace_id='workspace:fcjhfy6hfwdodbzzk2dceri6aa',
     )
 
     async def exercise():
@@ -1588,7 +1589,7 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
             await io.aclose(deadline_monotonic=monotonic() + 10)
 
     same = asyncio.run(read_memory(workspace_id))
-    foreign = asyncio.run(read_memory("workspace:foreign"))
+    foreign = asyncio.run(read_memory('workspace:oktyd2yb2hmhohnpgzxtd56ada'))
     assert same == foreign
     assert same["statement"] == "The design review is on Tuesday."
     assert set(same) == {
@@ -1639,7 +1640,7 @@ def test_memory_page_rejects_fact_and_relation_owners_from_another_domain(
     _, left, _ = remember("The support window starts on Monday.")
     _, right, _ = remember("The support window starts on Tuesday.")
 
-    other_workspace_root = _name("other-workspace")
+    other_workspace_root = uuid4().hex
     other_workspace_id = workspace_context_id(other_workspace_root)
     other_lease, other_invoke, other_remember = _open_direct_memory_session(
         repository,
@@ -1703,7 +1704,7 @@ def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(
             "statement": statement,
             "kind": "FACT",
             "context_target": "GLOBAL",
-            "based_on_memory_ids": ["memory:absent"],
+            "based_on_memory_ids": ['memory:f4ekao4ik3kbehvawlzrh6b7ke'],
         },
         PreparedRememberWrite(
             memory_domain_id="u_local",
@@ -1711,7 +1712,7 @@ def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(
             kind=MemoryFactKind.FACT,
             statement=statement,
             basis_refs=(
-                PreparedMemoryBasisReference("memory:absent", CTX_GLOBAL, 0),
+                PreparedMemoryBasisReference('memory:f4ekao4ik3kbehvawlzrh6b7ke', CTX_GLOBAL, 0),
             ),
             related=(),
             retrieval_summary=freeze_json({"status": "COMPLETE"}),
@@ -1764,7 +1765,7 @@ def test_embedding_contract_overwrite_scan_and_dense_query_use_actual_binding(di
     repository, _lease, _invoke, remember = direct_memory_session
     _, saved, _ = remember('Project Vermilion uses PostgreSQL for storage.')
     fact_id = saved['memory_id']
-    binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:embedding-test')
+    binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:j5tgmxkn2ghgc3kb5sjppgjte4')
     old = fixture_connection('embedding', 'key', model='first').embedding_contract
     new = fixture_connection('embedding', 'key', model='second').embedding_contract
     assert old.contract_id != new.contract_id
@@ -1802,7 +1803,7 @@ def test_embedding_maintainer_discards_old_binding_and_resumes_partial_overwrite
     from tests.retrieval_fixtures import save_model
     repository, lease, _, remember = direct_memory_session
     fact_ids = {remember(f'Project Cobalt storage fact {i} uses PostgreSQL.')[1]['memory_id'] for i in range(3)}
-    binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:maintainer-test')
+    binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:dub6upjnxhf4bj6mjtxuemx7gi')
     async def exercise():
         settings = LocalSettingsStore(tmp_path / 'local-settings.yaml')
         await save_model(settings, 'embedding', 'fixture-key', model='first', activate=True)

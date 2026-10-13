@@ -8,6 +8,8 @@ belongs under ignored output/scratch. No provider name changes production logic.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import argparse
 import asyncio
 import base64
@@ -20,7 +22,6 @@ import random
 from tempfile import TemporaryDirectory
 from time import monotonic
 import traceback
-from uuid import uuid4
 
 import httpx2
 from PIL import Image, ImageDraw, ImageFont
@@ -166,8 +167,8 @@ class ObservedRuntime(_RecordingModelRuntime):
         super().__init__(delegate, [], None)
         self.report = report
 
-    def resolve_target(self, binding, *, timeout_policy):
-        target = self._delegate.resolve_target(binding, timeout_policy=timeout_policy)
+    def resolve_target(self, binding, *, timeout_policy, frozen_target_fact=None):
+        target = self._delegate.resolve_target(binding, timeout_policy=timeout_policy, frozen_target_fact=frozen_target_fact)
         return replace(
             target, transport=ObservedTransport(target.transport, self.report)
         )
@@ -388,7 +389,7 @@ async def run(args, report, saved):
                 report["phase"] = label
                 print(f"K4 {args.model}: {label}", flush=True)
                 result = await target.run_turn(
-                    prompt, command_id=f"command:k4:{uuid4().hex}"
+                    prompt, command_id=random_id("command")
                 )
                 report["outcomes"].append({"phase": label, "text": result.final_text})
                 return result.final_text
@@ -621,7 +622,7 @@ async def run(args, report, saved):
             )
             assert cold_reply.strip() == fixtures[1]["number"], cold_reply
             fork_anchor = await asyncio.to_thread(anchor, session)
-            child_id = f"session:{uuid4().hex}"
+            child_id = random_id("session")
             creation = await core.fork_conversation(
                 source_session_id=session.session_id,
                 anchor_entry_id=fork_anchor,
@@ -658,7 +659,7 @@ async def run(args, report, saved):
             report["phase"] = "manual_compaction"
             print(f"K4 {args.model}: manual_compaction", flush=True)
             compacted = await session.compact_context(
-                command_id=f"command:k4:{uuid4().hex}", force=True
+                command_id=random_id("command"), force=True
             )
             report["compaction"] = {
                 "disposition": compacted.disposition.value,

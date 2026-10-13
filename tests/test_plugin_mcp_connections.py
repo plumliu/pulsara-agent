@@ -520,7 +520,7 @@ async def test_plugin_destination_change_and_stale_package_never_reuse_secret_si
         )
     with pytest.raises(McpManagementConflict):
         await service.replace_plugin_mcp_connection_overlay(
-            replace(updated, expected_package_install_id="pkg_" + "0" * 32),
+            replace(updated, expected_package_install_id='package:wnlip5pcf7g2nnvxf2tditv6k4'),
             connections=connections,
         )
     result = await service.replace_plugin_mcp_connection_overlay(
@@ -560,7 +560,7 @@ async def test_plugin_delete_cleans_private_values_but_not_data_and_stale_delete
     layout.data_root.mkdir(parents=True)
     (layout.data_root / "user-data.txt").write_text("keep data")
     removal = RemoveLocalPluginRequest(
-        PluginScopeKind.USER, "example", monotonic() + 30, "pkg_" + "0" * 32
+        PluginScopeKind.USER, "example", monotonic() + 30, 'package:wnlip5pcf7g2nnvxf2tditv6k4'
     )
     outcome = await service.remove_local_plugin(removal, connections=connections)
     assert outcome.disposition.value == "STALE"

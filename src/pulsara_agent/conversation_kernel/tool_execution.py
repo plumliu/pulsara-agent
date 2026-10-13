@@ -1,6 +1,9 @@
 """Physical Tool batch execution and exact canonical result settlement."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 
@@ -10,7 +13,6 @@ from dataclasses import dataclass, replace
 
 from datetime import datetime, timezone
 
-from hashlib import sha256
 import json
 
 
@@ -18,7 +20,6 @@ from threading import Lock
 
 from typing import Callable, Mapping
 
-from uuid import uuid4
 
 from psycopg import Error as PostgresError, InterfaceError, OperationalError
 
@@ -785,6 +786,7 @@ class ToolBatchExecutor:
                         call.tool_name,
                         call.arguments,
                     )
+                    rejected_result_id = random_id("result")
                     rejected = await self._settle_known_tool_result(
                         session_id=request.session_id,
                         turn_id=turn_id,
@@ -797,8 +799,8 @@ class ToolBatchExecutor:
                         scope_subagent_task_id=(
                             canonical_identity.scope_subagent_task_id
                         ),
-                        result_id=_id("tool-result"),
-                        result_entry_id=_id("entry"),
+                        result_id=rejected_result_id,
+                        result_entry_id=derive_id('entry', 'tool-result', rejected_result_id),
                         attempt_id=None,
                         workspace_id=workspace_id,
                         result=KernelToolResult(
@@ -872,8 +874,8 @@ class ToolBatchExecutor:
                     raise RuntimeError(
                         "canonical tool-call arguments did not thaw as an object"
                     )
-                result_entry_id = _id("entry")
-                result_id = _id("tool-result")
+                result_id = random_id('result')
+                result_entry_id = derive_id('entry', 'tool-result', result_id)
                 if surface_borrow is None:
                     raise RuntimeError("model response lost its tool surface borrow")
                 binding = surface_borrow.execution_binding(call.tool_name)
@@ -997,9 +999,7 @@ class ToolBatchExecutor:
                     # PreTool BLOCK owns a no-attempt ToolResult, not a
                     # machine permission-decision row.
                     machine_policy_kind = KernelToolAuthorizationKind.INVALID_ARGUMENTS
-                capability_decision_id = _stable_id(
-                    "capability-decision", assistant_entry_id, call.tool_call_id
-                )
+                capability_decision_id = derive_id("decision", "tool-policy", self._writer_lease.guard.session_id, assistant_entry_id, call.tool_call_id)
                 if authorization.kind is KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED:
                     management = authorization.capability_call
                     assert management is not None
@@ -1288,9 +1288,7 @@ class ToolBatchExecutor:
                         continue
                 else:
                     assert binding_fingerprint is not None
-                    attempt_id = authorization.accepted_attempt_id or _id(
-                        "tool-attempt"
-                    )
+                    attempt_id = authorization.accepted_attempt_id or random_id('attempt')
                     if authorization.capability_user_submission:
                         if authorization.capability_call is None:
                             raise RuntimeError("user capability admission lost its call owner")
@@ -1352,9 +1350,9 @@ class ToolBatchExecutor:
                         raise RuntimeError(
                             "accepted tool attempt permission drifted before invoke"
                         )
-                    tool_result_generation = f"tool-result:{result_entry_id}"
-                    tool_result_block_id = _stable_id(
-                        "tool-result-block", result_entry_id, call.tool_call_id
+                    tool_result_generation = derive_id("generation", "channel", "tool-result", result_entry_id)
+                    tool_result_block_id = derive_id(
+                        "block", "message", result_entry_id, "tool", call.tool_call_id
                     )
                     live_attribution = {
                         "scope_kind": canonical_identity.conversation_scope_kind.value,
@@ -2049,6 +2047,7 @@ class ToolBatchExecutor:
 
         prepared_output = await self._io.run(
             self._tool_output_processor.prepare,
+                session_id=session_id,
             workspace_id=workspace_id,
             result_entry_id=result_entry_id,
             public_output=acknowledgement.content.decode("utf-8"),
@@ -2230,7 +2229,7 @@ class ToolBatchExecutor:
         elif isinstance(result.content, FrozenPromptContent):
             if result.output_artifact_candidate is not None or result.artifact_inline_result:
                 raise ValueError("image ToolResult cannot enter text artifact handling")
-            canonical_prompt = freeze_canonical_prompt(result.content)
+            canonical_prompt = freeze_canonical_prompt(result.content, workspace_id=workspace_id)
             canonical_preview = InlineContent.from_bytes(
                 canonical_prompt.body,
                 media_type=PROMPT_BODY_MEDIA_TYPE,
@@ -2243,10 +2242,11 @@ class ToolBatchExecutor:
             display_kind = ToolResultDisplayKind.COMPLETE
             source_coverage_reason = None
             artifact_unavailability_reason = None
-            result_text = frozen_tool_result_public_text(result.content)
+            result_text = frozen_tool_result_public_text(canonical_prompt.content)
         else:
             prepared_output = await self._io.run(
                 self._tool_output_processor.prepare,
+                session_id=session_id,
                 workspace_id=workspace_id,
                 result_entry_id=result_entry_id,
                 public_output=result.content.decode("utf-8"),
@@ -2577,12 +2577,8 @@ class ToolBatchExecutor:
             return winner
 
 
-def _id(prefix: str) -> str:
-    return f"{prefix}:{uuid4().hex}"
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
 
 def _tool_invocation_failure(error: Exception, effect_class: str) -> KernelToolResult:

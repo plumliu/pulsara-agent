@@ -1,6 +1,7 @@
 """Real saved-provider stop, canonical history, continuation and prefix evidence."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -91,11 +92,11 @@ async def run():
                 print("real tool finished; installing user stop", flush=True)
                 target = session._active_turn_id
                 outcome = await session.request_stop_turn(
-                    command_id=f"command:control:{int(session._control_monotonic() * 1000) + 60000}:dogfood-stop",
+                    command_id=derive_id("command", "test-fixture", f"command:control:{int(session._control_monotonic() * 1000) + 60000}:dogfood-stop"),
                     expected_session_id=session.session_id,
                     expected_host_session_id=session.host_session_id,
                     target_turn_id=target,
-                )
+                 admission_deadline_ms=session.control_admission_deadline_ms())
                 assert (
                     outcome.user_control is not None and outcome.user_control.accepted
                 ), outcome.public_code

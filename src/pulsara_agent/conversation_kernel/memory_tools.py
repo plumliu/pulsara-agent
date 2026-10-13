@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import require_id
+
 from pulsara_agent.conversation_kernel.history_search import (
     PostgresHistoryQuery,
     FrozenHistoryReadScope,
@@ -11,7 +13,6 @@ from pulsara_agent.ports.session_content import session_content_range
 
 import asyncio
 from dataclasses import dataclass, replace
-from hashlib import sha256
 import json
 import math
 from time import monotonic
@@ -302,7 +303,7 @@ class KernelMemoryToolPort:
                 )
         else:
             raise ValueError("context_target must be GLOBAL or CURRENT_PROJECT")
-        basis_ids = _string_sequence(arguments.get("based_on_memory_ids"))
+        basis_ids = tuple(require_id(value, "memory") for value in _string_sequence(arguments.get("based_on_memory_ids")))
         kind = MemoryFactKind(str(arguments["kind"]))
         statement = str(arguments.get("statement") or "")
         basis_refs = await self._resolve_basis(basis_ids, source_context_id=context_id)
@@ -334,8 +335,8 @@ class KernelMemoryToolPort:
             raise ValueError("only the root Agent may mark memory relations")
         mutation = PreparedMemoryRelationWrite(
             memory_domain_id=self._read_binding.memory_domain_id,
-            source_memory_id=str(arguments.get("source_memory_id") or ""),
-            target_memory_id=str(arguments.get("target_memory_id") or ""),
+            source_memory_id=require_id(arguments.get("source_memory_id"), "memory"),
+            target_memory_id=require_id(arguments.get("target_memory_id"), "memory"),
             relation_kind=MemoryRelationKind(str(arguments.get("relation_kind") or "")),
         )
         return KernelToolResult(
@@ -575,7 +576,7 @@ class KernelMemoryToolPort:
         )
 
     async def _get(self, arguments: Mapping[str, object]) -> KernelToolResult:
-        memory_id = str(arguments.get("memory_id") or "")
+        memory_id = require_id(arguments.get("memory_id"), "memory")
         if not memory_id:
             raise ValueError("memory_id is required")
         item = await self._io.run(
@@ -1393,9 +1394,6 @@ def _string_sequence(value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    encoded = "\x00".join(parts).encode("utf-8")
-    return f"{prefix}:" + sha256(prefix.encode("utf-8") + b"\x00" + encoded).hexdigest()
 
 
 def _filter_match(tier: int) -> str:

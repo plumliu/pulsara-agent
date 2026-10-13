@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 import tempfile
 import os
 import stat
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -137,8 +138,7 @@ def resolve_workspace(
         # directory can still back a durable, resumable conversation.  The
         # canonical identity therefore follows that exact normalized root.
         workspace_key=(
-            "transient:"
-            + sha256(root.as_posix().encode("utf-8")).hexdigest()
+            derive_id("workspace", "transient", root.as_posix())
         ),
         cleanup_workspace_root_on_close=host_created_root
         and workspace.cleanup_workspace_root_on_close,

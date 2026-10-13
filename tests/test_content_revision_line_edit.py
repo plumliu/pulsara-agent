@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import errno
-from hashlib import sha256
+from pulsara_agent.identity import content_revision
 import json
 import os
 from pathlib import Path
@@ -90,7 +90,7 @@ def test_read_file_revision_covers_exact_raw_bytes(tmp_path: Path, raw: bytes) -
 
     revision, payload = _read(tmp_path, "sample.txt")
 
-    assert revision == f"sha256:{sha256(raw).hexdigest()}"
+    assert revision == content_revision(raw)
     assert payload["file_size"] == len(raw)
 
 
@@ -137,7 +137,7 @@ def test_read_output_too_large_does_not_install_observation(tmp_path: Path) -> N
     edit_result = _edit(
         tmp_path,
         "sample.txt",
-        f"sha256:{sha256(raw).hexdigest()}",
+        content_revision(raw),
         [{"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["y"]}],
     )
     assert _payload(edit_result)["error"] == "READ_OBSERVATION_REQUIRED"
@@ -185,7 +185,7 @@ def test_search_result_does_not_authorize_edit(tmp_path: Path) -> None:
     edit_result = _edit(
         tmp_path,
         "sample.txt",
-        f"sha256:{sha256(raw).hexdigest()}",
+        content_revision(raw),
         [{"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["ONE"]}],
     )
     assert _payload(edit_result)["error"] == "READ_OBSERVATION_REQUIRED"
@@ -284,7 +284,7 @@ def test_edit_requires_process_local_read_observation(tmp_path: Path) -> None:
     target = tmp_path / "sample.txt"
     raw = b"one\ntwo\n"
     target.write_bytes(raw)
-    revision = f"sha256:{sha256(raw).hexdigest()}"
+    revision = content_revision(raw)
 
     result = _edit(
         tmp_path,
@@ -357,7 +357,7 @@ def test_stale_revision_rejects_every_exact_byte_change(
 
     payload = _payload(result)
     assert payload["error"] == "CONTENT_REVISION_MISMATCH"
-    assert payload["current_revision"] == f"sha256:{sha256(changed).hexdigest()}"
+    assert payload["current_revision"] == content_revision(changed)
     assert target.read_bytes() == changed
 
 
@@ -407,7 +407,7 @@ def test_operations_share_original_line_coordinate_system(tmp_path: Path) -> Non
     payload = _payload(result)
     assert payload["operations_applied"] == 3
     assert payload["content_revision"] == (
-        f"sha256:{sha256(target.read_bytes()).hexdigest()}"
+        content_revision(target.read_bytes())
     )
     assert "changed_windows" in payload
     assert "diff" in payload
@@ -437,7 +437,7 @@ def test_identical_replacement_is_skipped_in_changed_batch(
     payload = _payload(result)
     assert payload["operations_applied"] == 2
     assert result.metadata["operations_applied"] == 2
-    assert payload["content_revision"] == f"sha256:{sha256(target.read_bytes()).hexdigest()}"
+    assert payload["content_revision"] == content_revision(target.read_bytes())
     assert "error" not in payload and "_hint" not in payload
 
 
@@ -768,7 +768,7 @@ def test_write_file_is_create_only_and_returns_revision(tmp_path: Path) -> None:
     assert created.status is ToolResultState.SUCCESS
     assert target.read_bytes() == b"hello\n"
     assert payload["content_revision"] == (
-        f"sha256:{sha256(target.read_bytes()).hexdigest()}"
+        content_revision(target.read_bytes())
     )
 
     rejected = _call(tool, {"path": "nested/new.txt", "content": "overwrite"})
@@ -976,7 +976,7 @@ def test_catalog_schema_is_single_closed_line_edit_path() -> None:
     validator = Draft202012Validator(schema)
     valid = {
         "path": "a.txt",
-        "base_revision": "sha256:" + "0" * 64,
+        "base_revision": content_revision(b"fixture"),
         "operations": [
             {"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["x"]}
         ],

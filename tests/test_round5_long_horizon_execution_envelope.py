@@ -156,26 +156,26 @@ def test_round5_deadline_factory_only_accepts_closed_owners_and_issues_fresh() -
 def test_round5_turn_admission_candidates_freeze_complete_event_drafts() -> None:
     occurred_at = datetime.now(timezone.utc)
     root = build_prepared_root_turn_intent(
-        session_id="session:root",
-        command_id="command:root",
-        turn_id="turn:root",
-        entry_id="entry:root",
-        context_binding_revision_id="revision:root:0",
-        permission_snapshot_id="permission:root",
+        session_id='session:f2tf3imnl4wld4vi3y75hcil64',
+        command_id='command:yibgarxigani3ox6wf46ayaqd4',
+        turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
+        entry_id='entry:ahx3cf44vr4kojli5bv43yv3ui',
+        context_binding_revision_id='binding:mxjfcol3x4b3ty375iezyapuli',
+        permission_snapshot_id='permission:6rhl5zdhj3noqpit73ff4p525e',
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text("root")),
         occurred_at=occurred_at,
     )
     child = build_prepared_subagent_turn_admission(
-        session_id="session:child",
-        task_id="task:child",
-        turn_id="turn:child",
-        entry_id="entry:child",
-        context_binding_revision_id="revision:child:0",
-        permission_snapshot_id="permission:child",
-        task_start_event_id="event:task-start:child",
+        session_id='session:lfhug7mgviyz7ubh72yzacffey',
+        task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
+        turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
+        entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve',
+        context_binding_revision_id='binding:nxqcttuom2vwdmzjvatzuuer4a',
+        permission_snapshot_id='permission:6oi34lpfmqrfi4wwfgyjhaj3hu',
+        task_start_event_id='event:zrrfbncvs6td6kot6nscszrx6q',
         expected_parent_permission_snapshot=build_run_permission_snapshot(
-            snapshot_id="permission:parent",
+            snapshot_id='permission:ode2aqcgkfsycipwf4nyc26m5u',
             requested_mode=DEFAULT_PERMISSION_MODE,
             effective_mode=DEFAULT_PERMISSION_MODE,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -649,12 +649,12 @@ def test_round5_terminal_decision_watchdog_during_preparing_kills_only_exact_pro
     sibling, yielded = _exec_sleeping_terminal(
         registry,
         tmp_path,
-        attempt_id="decision:sibling",
+        attempt_id='decision:tptivydudakbgotaa7vuc4oc4u',
         decision_deadline_monotonic=monotonic() + 2,
         yield_time_ms=0,
     )
     assert yielded is True
-    registry.settle_foreground_decision("decision:sibling")
+    registry.settle_foreground_decision('decision:tptivydudakbgotaa7vuc4oc4u')
 
     entered = Event()
     release = Event()
@@ -674,7 +674,7 @@ def test_round5_terminal_decision_watchdog_during_preparing_kills_only_exact_pro
                 _exec_sleeping_terminal(
                     registry,
                     tmp_path,
-                    attempt_id="decision:preparing",
+                    attempt_id='decision:667yja7r4pmueik6yzf3aadgva',
                     decision_deadline_monotonic=monotonic() + 0.03,
                     yield_time_ms=1_000,
                 )
@@ -702,7 +702,7 @@ def test_round5_terminal_decision_watchdog_during_preparing_kills_only_exact_pro
         ).status.value
         == "running"
     )
-    registry.settle_foreground_decision("decision:preparing")
+    registry.settle_foreground_decision('decision:667yja7r4pmueik6yzf3aadgva')
     registry.release_owner("round5:host", timeout_seconds=2)
 
 
@@ -713,15 +713,15 @@ def test_round5_terminal_decision_process_installed_and_result_ready_races(
     timed, yielded = _exec_sleeping_terminal(
         registry,
         tmp_path,
-        attempt_id="decision:installed",
+        attempt_id='decision:ucax73vpkffng6jd46vihylvra',
         decision_deadline_monotonic=monotonic() + 0.03,
         yield_time_ms=1_000,
     )
     assert yielded is False
     assert timed.killed is True
     assert timed.physical_completion.is_set()
-    assert registry.foreground_decision_state("decision:installed") == "RESULT_READY"
-    registry.settle_foreground_decision("decision:installed")
+    assert registry.foreground_decision_state('decision:ucax73vpkffng6jd46vihylvra') == "RESULT_READY"
+    registry.settle_foreground_decision('decision:ucax73vpkffng6jd46vihylvra')
 
     completed, yielded = registry.exec_with_yield(
         command="true",
@@ -732,15 +732,15 @@ def test_round5_terminal_decision_process_installed_and_result_ready_races(
         owner_host_session_id="round5:host",
         shell_argv=(sys.executable, "-c", "pass"),
         env=dict(os.environ),
-        decision_attempt_id="decision:ready",
+        decision_attempt_id='decision:c7hjkxaoxk2lqed3phhmqnx2iu',
         decision_deadline_monotonic=monotonic() + 0.2,
     )
     assert yielded is False
     assert completed.killed is False
     assert completed.physical_completion.is_set()
     sleep(0.25)
-    assert registry.foreground_decision_state("decision:ready") == "RESULT_READY"
-    registry.settle_foreground_decision("decision:ready")
+    assert registry.foreground_decision_state('decision:c7hjkxaoxk2lqed3phhmqnx2iu') == "RESULT_READY"
+    registry.settle_foreground_decision('decision:c7hjkxaoxk2lqed3phhmqnx2iu')
     registry.release_owner("round5:host", timeout_seconds=2)
 
 
@@ -756,7 +756,7 @@ def test_round5_terminal_foreground_decision_can_be_aborted_by_exact_attempt(
                 _exec_sleeping_terminal(
                     registry,
                     tmp_path,
-                    attempt_id="decision:user-stop",
+                    attempt_id='decision:qrbxq4ziphzgjuwbdzydon6beu',
                     decision_deadline_monotonic=monotonic() + 5,
                     yield_time_ms=4_000,
                 )
@@ -767,10 +767,10 @@ def test_round5_terminal_foreground_decision_can_be_aborted_by_exact_attempt(
     worker = Thread(target=invoke)
     worker.start()
     deadline = monotonic() + 2
-    while registry.foreground_decision_state("decision:user-stop") is None:
+    while registry.foreground_decision_state('decision:qrbxq4ziphzgjuwbdzydon6beu') is None:
         assert monotonic() < deadline
         sleep(0.01)
-    assert registry.abort_foreground_decision("decision:user-stop")
+    assert registry.abort_foreground_decision('decision:qrbxq4ziphzgjuwbdzydon6beu')
     worker.join(3)
     assert not worker.is_alive()
     assert len(outcome) == 1 and not isinstance(outcome[0], BaseException)
@@ -778,7 +778,7 @@ def test_round5_terminal_foreground_decision_can_be_aborted_by_exact_attempt(
     assert yielded is False
     assert state.killed is True
     assert state.physical_completion.is_set()
-    registry.settle_foreground_decision("decision:user-stop")
+    registry.settle_foreground_decision('decision:qrbxq4ziphzgjuwbdzydon6beu')
     registry.release_owner("round5:host", timeout_seconds=2)
 
 

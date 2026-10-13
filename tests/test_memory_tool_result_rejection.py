@@ -34,10 +34,10 @@ def test_memory_rejections_after_admission_have_attempted_states(
         io = KernelSessionIO()
         port = KernelMemoryToolPort(
             repository=SimpleNamespace(connection_provider=object()),
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             read_binding=freeze_memory_read_context_binding(
                 domain=MemoryDomainContext("test", "transient"),
-                host_workspace_id="workspace:test",
+                host_workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
             ),
             embedding_config=EmbeddingBackendConfig(),
             io_owner=io,
@@ -45,9 +45,9 @@ def test_memory_rejections_after_admission_have_attempted_states(
         )
         port._query = SimpleNamespace(get=lambda **kwargs: None)
         context = SimpleNamespace(
-            session_id="session:test",
-            workspace_id="workspace:test",
-            assistant_entry_id="entry:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
             tool_call_id="call:test",
             conversation_scope_kind="ROOT",
             memory_context=memory.FrozenModelCallMemoryContext(),
@@ -62,7 +62,7 @@ def test_memory_rejections_after_admission_have_attempted_states(
         if case == "old_kind":
             args["kind_hint"] = "AUTO"
         if case == "missing_basis":
-            args["based_on_memory_ids"] = ["memory:missing"]
+            args["based_on_memory_ids"] = ['memory:b7oykog3jr6iuswihsj3h5x66e']
         try:
             if case == "closed":
                 await port.aclose()

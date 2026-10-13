@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from datetime import datetime, timedelta, timezone
 from time import monotonic
@@ -27,8 +28,8 @@ def test_session_catalog_order_ignores_writer_lease_maintenance(
     )
     suffix = uuid4().hex
     memory_domain_id = f"session-order-{suffix}"
-    older_id = f"session:older-{suffix}"
-    newer_id = f"session:newer-{suffix}"
+    older_id = derive_id("session", "test-fixture", f"session:older-{suffix}")
+    newer_id = derive_id("session", "test-fixture", f"session:newer-{suffix}")
     for session_id in (older_id, newer_id):
         workspace = resolve_workspace(
             HostWorkspaceInput(
@@ -46,7 +47,7 @@ def test_session_catalog_order_ignores_writer_lease_maintenance(
             workspace_root=str(workspace.workspace_root),
             workspace_label=workspace.display_label,
             memory_domain_id=memory_domain_id,
-            writer_owner_id=f"host:{session_id}",
+            writer_owner_id=derive_id("host", "test-fixture", f"host:{session_id}"),
             lease_seconds=60,
             deadline_monotonic=monotonic() + 30,
         )

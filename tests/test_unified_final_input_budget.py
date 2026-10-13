@@ -150,7 +150,7 @@ def test_sdk_open_uses_wire_budget_and_resolves_output(
                     replace(
                         context,
                         provider_wire_input_plan=None,
-                        resolved_model_call_id="wrong",
+                        resolved_model_call_id='call:ebxtqqdu4uvdqy2yfhvm543c7e',
                     )
                 )
             )
@@ -191,7 +191,7 @@ def test_memory_suffix_quote_prices_only_actual_wire_items(api, project):
         SourceObservationPresence.VALUE,
         "sha256:" + "1" * 64,
         "sha256:" + "2" * 64,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         1,
     )
     try:
@@ -270,7 +270,6 @@ def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
         build_memory_context_source,
     )
     from pulsara_agent.conversation_kernel.memory.dispatch import MemoryDispatchSupport
-    from pulsara_agent.conversation_kernel.steer import _legacy_steer_quote_identity
     from pulsara_agent.conversation_kernel.subagents.contracts import (
         build_parent_context_call_subject,
         parent_context_call_subject_identity_digest,
@@ -279,10 +278,10 @@ def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
 
     request = identity_request()
     compiled = StructuredModelInputCompiler().compile(request)
-    # Recorded with the pre-cut source, not regenerated from the implementation.
+    # Unified identity fixture: retained complete semantic proofs remain deterministic.
     assert (
         compiled.compiled_semantic_fingerprint
-        == "sha256:47c25fc3ea48750dfc325b8280a7cce397bfccc12af2f052b25de005106b9d30"
+        == "sha256:8da1339f6700d4547a05633bd0dd6c9e7b0709b6e03f0f8167baee8d12a84aa3"
     )
     port = _port()
     execution, _ = _prepared_execution(port)
@@ -295,7 +294,7 @@ def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
         SourceObservationPresence.VALUE,
         "sha256:" + "1" * 64,
         "sha256:" + "2" * 64,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         1,
     )
     try:
@@ -307,31 +306,15 @@ def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
             ),
             prepared_call=prepared,
         )
-        quote = SimpleNamespace(
-            selected_item_count=1,
-            selected_canonical_expanded_bytes=20,
-            prospective_snapshot_hydrated_bytes=20,
-            resulting_epoch_logical_bytes=200,
-            effective_target_budget=100000,
-            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
-            predecessor_prefix_fingerprint=None,
-            memory_recall_reservation=reservation,
-            memory_response_preference_reservation=None,
-        )
-        plan = SimpleNamespace(
-            quote=quote,
-            selected_consumption_candidates=(),
-            prospective_compiled_input=compiled,
-        )
-        assert (
-            _legacy_steer_quote_identity(plan)
-            == "sha256:4e689be06e4fd1f6be923fe24288e10f6c930ea2e48fc8b127ebade577ea25ac"
-        )
+        assert reservation.prior_semantic_fingerprint == prior.semantic_fingerprint
+        assert reservation.desired_presence is SourceObservationPresence.VALUE
+        assert reservation.invalidation_input_token_ceiling > 0
+        assert reservation.invalidation_epoch_bytes_ceiling > 0
         subject = build_parent_context_call_subject(
-            session_id="session:test",
-            caller_turn_id="turn:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            caller_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
             provider_input_cut_fingerprint="sha256:" + "3" * 64,
-            continuity_epoch_nonce="epoch:golden",
+            continuity_epoch_nonce='epoch:77qvnnqag4wpxnkz63b2qc5s7u',
             continuity_epoch_revision=1,
             compiled_semantic_input_fingerprint=compiled.compiled_semantic_fingerprint,
             compiled_message_placements_fingerprint=compiled_message_placements_fingerprint(
@@ -341,7 +324,7 @@ def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
         )
         assert (
             parent_context_call_subject_identity_digest(subject)
-            == "sha256:ea3ff5301774694d72a9576b7d6fd8300df50fea5b7d5008db896e72db9ab80f"
+            == "sha256:b433f66c6a5c8fe18aba5a0c69e4d8e2a89676bbac0f6ebcbfae8c1b18cb6b5a"
         )
     finally:
         execution.surface_borrow.close()
@@ -351,19 +334,19 @@ def test_cold_and_installed_append_identity_goldens():
     from tests.support.unified_budget_identity_cases import append_identity_digests
 
     assert append_identity_digests() == (
-        "sha256:0530486c918109f2d48a940061a06b3c9731642f0270171115d35578a4c7b695",
-        "sha256:c2906b536feedbc84f0edeb52f794e9497adb1c98bead9d68723a30f1bf5d29b",
+        "sha256:29698143b9310a2366c0e5d183bff1e15dcf3a80d21d6cefc111c0c49faa3844",
+        "sha256:e46cf6d997f7aa3a3a049b7455561d8c29a943ffdafa0a020040b7af6333b1c7",
     )
 
 
 @pytest.mark.parametrize(
     "api,raw,wire_bytes",
     [
-        ("openai_chat_completions", 254, 956),
-        ("openai_responses", 247, 927),
+        ("openai_chat_completions", 244, 916),
+        ("openai_responses", 237, 887),
     ],
 )
-def test_final_wire_quote_and_estimator_identity_are_unchanged(api, raw, wire_bytes):
+def test_final_wire_quote_uses_short_refs_and_preserves_estimator_identity(api, raw, wire_bytes):
     request, _ = _prepared_execution(_port(api=api))
     try:
         quote = request.wire_input_plan.quote

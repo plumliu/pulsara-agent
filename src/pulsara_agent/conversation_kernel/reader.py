@@ -7,6 +7,7 @@ authorize a retry.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import require_id
 from pulsara_agent.scheduling.contracts import ScheduledProvenance
 
 from pulsara_agent.conversation_kernel.interruption import (
@@ -3402,10 +3403,7 @@ def _tool_result_metadata(
         else ToolObservationDurationDisposition.MEASUREMENT_UNAVAILABLE
     )
     timing_values = {
-        "source_turn_ref": provider_visible_turn_ref(
-            session_id=str(row["result_session_id"]),
-            turn_id=str(row["result_turn_id"]),
-        ),
+        "source_turn_ref": require_id(str(row["result_turn_id"]), "turn", "history"),
         "observed_at_utc": canonical_utc_timestamp(row["observed_at"]),
         "observation_duration_microseconds": duration,
         "duration_disposition": disposition,

@@ -1,4 +1,5 @@
 """Session search reads accepted visible content, with no history truncation."""
+from uuid import uuid4
 
 import asyncio
 from datetime import datetime, timezone
@@ -21,7 +22,7 @@ from tests.test_conversation_fork import repo as repo, identity, turn, rows
 
 @pytest.fixture
 def search_context(repo):
-    domain = identity("domain").replace(":", "_")
+    domain = ("domain:" + uuid4().hex).replace(":", "_")
 
     def new():
         return repo.acquire_host_writer(
@@ -152,7 +153,7 @@ def test_search_pages_all_matches_across_workspaces_and_lifecycle(repo, search_c
         search("needle", lifecycle="OPEN", cursor=cursor)
     assert search_session_page(
         repo,
-        memory_domain_id=identity("other-domain"),
+        memory_domain_id=uuid4().hex,
         query="needle",
         cursor=cursor,
         deadline_monotonic=monotonic() + 30,
@@ -345,7 +346,7 @@ def test_annotation_comment_is_searchable_without_duplicating_quoted_sources(
         command_id=identity("command"),
         turn_id=identity("turn"),
         entry_id=identity("entry"),
-        context_binding_revision_id=identity("revision"),
+        context_binding_revision_id=identity("binding"),
         permission_snapshot_id=identity("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=binding(runtime()),

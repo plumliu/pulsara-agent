@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, random_id
+
 import asyncio
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -455,7 +457,7 @@ class PreparedCompactionSummaryCall:
                 self._semantic.canonical_read.compile_snapshot.canonical_input.identity.turn_id
             ),
             live_bus=_NullLiveBus(),  # type: ignore[arg-type]
-            proposed_entry_id=f"compaction-summary:{self.request_fingerprint[7:39]}",
+            proposed_entry_id=derive_id("entry", "compaction-summary", self.request_fingerprint),
             conversation_scope_kind=(
                 self._semantic.canonical_read.compile_snapshot.canonical_input.identity.conversation_scope_kind.value
             ),
@@ -578,14 +580,7 @@ def prepare_compaction_summary_semantic(
         ),
     )
     binding = source_view.normal_compile_binding
-    context_id = context_fingerprint(
-        "pulsara.compaction-summary-context-id.v1",
-        {
-            "call": call.resolved_model_call_id,
-            "source": source_view.source_view_fingerprint,
-            "prefix": prefix_proof.proof_fingerprint,
-        },
-    )
+    context_id = random_id("context")
     values = {
         "context_id": context_id,
         "canonical_input_identity": source_projection.canonical_input_identity,
@@ -815,15 +810,7 @@ def prepare_destination_projection_summary_semantic(
         active_request_message_ordinal=active_ordinal,
         _seal=_COMPACTION_SUMMARY_SOURCE_SEAL,
     )
-    context_id = context_fingerprint(
-        "pulsara.destination-compaction-summary-context-id.v1",
-        {
-            "call": call.resolved_model_call_id,
-            "source": canonical_source.dispatch_read.composite_fingerprint,
-            "source_digest": source_digest,
-            "messages": compaction_summary_message_prefix_fingerprint(messages),
-        },
-    )
+    context_id = random_id("context")
     values = {
         "context_id": context_id,
         "canonical_input_identity": identity,
@@ -982,13 +969,7 @@ def prepare_compaction_summary_repair_semantic(
         )
     frozen_placements = tuple(placements)
     values = {
-        "context_id": context_fingerprint(
-            "pulsara.compaction-summary-repair-context-id.v1",
-            {
-                "initial": initial.semantic_fingerprint,
-                "tool_calls": tool_calls_fingerprint,
-            },
-        ),
+        "context_id": random_id("context"),
         "canonical_input_identity": compiled.canonical_input_identity,
         "system_prompt": compiled.system_prompt,
         "messages": messages,

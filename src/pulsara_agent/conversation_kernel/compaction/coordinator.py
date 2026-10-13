@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, random_id
+
+
 from pulsara_agent.conversation_kernel.interruption import summary_interruption_suffix
 
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
@@ -11,9 +14,7 @@ import asyncio
 from dataclasses import dataclass, field as dataclass_field, replace
 
 from datetime import datetime, timezone
-from hashlib import sha256
 from typing import Literal, Protocol
-from uuid import uuid4
 
 
 from time import monotonic
@@ -60,7 +61,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     ProviderPrefixCutProof,
     RecentHumanMessageProof,
     PreparedCompactionCanonicalAdoption,
-    manual_compaction_stable_suffix,
+    manual_compaction_snapshot_id,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
     freeze_compaction_canonical_range,
@@ -263,8 +264,6 @@ from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
 from pulsara_agent.hooks.matcher import event_matcher_subject
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
 
 def _target_is_known_text_only(target: PreparedKernelModelTarget) -> bool:
@@ -861,7 +860,7 @@ def _new_compaction_attempt_token(
     trigger: CompactionTrigger,
 ) -> CompactionAttemptToken:
     return CompactionAttemptToken(
-        attempt_id=f"compaction-attempt:{uuid4().hex}",
+        attempt_id=random_id("compact-attempt"),
         session_id=session_id,
         turn_id=turn_id,
         scope_kind=scope_kind,
@@ -3051,19 +3050,13 @@ class CompactionCoordinator:
             source_digest = canonical_compaction_range_digest(
                 compaction_read.lineage_base, boundary_range
             )
-            stable_suffix = (
-                manual_compaction_stable_suffix(
+            snapshot_id = (
+                manual_compaction_snapshot_id(
                     session_id=expected_scope.session_id,
                     command_id=stable_command_id,
                 )
                 if stable_command_id is not None
-                else _stable_id(
-                    "compaction",
-                    expected_scope.session_id,
-                    expected_scope.turn_id,
-                    trigger.value,
-                    source_digest,
-                ).rsplit(":", 1)[-1]
+                else derive_id('snapshot', 'compact', expected_scope.session_id, expected_scope.turn_id, trigger.value, source_digest)
             )
             lineage = compaction_read.lineage_base
             preconditions = CompactionCanonicalWritePreconditions(
@@ -3125,9 +3118,9 @@ class CompactionCoordinator:
                                     lineage.persisted_revision_genesis_marker
                                 ),
                             ),
-                            snapshot_id=f"context-snapshot:{stable_suffix}",
-                            binding_revision_id=f"context-binding:{stable_suffix}",
-                            event_id=f"event:{stable_suffix}",
+                            snapshot_id=snapshot_id,
+                            binding_revision_id=derive_id("binding", "revision", expected_scope.turn_id, str(lineage.binding_revision_ordinal + 1)),
+                            event_id=derive_id("event", "accepted", expected_scope.session_id, "COMPACTION_ADOPTED", "CONTEXT_BINDING_REVISION", derive_id("binding", "revision", expected_scope.turn_id, str(lineage.binding_revision_ordinal + 1)), ""),
                             source_through_sequence=prefix.source_through_sequence,
                             source_digest=source_digest,
                             snapshot_content=content,

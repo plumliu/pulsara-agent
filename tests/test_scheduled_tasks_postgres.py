@@ -1,4 +1,5 @@
 from __future__ import annotations
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 import pytest
@@ -49,7 +50,7 @@ def owner(stage2_migrated_postgres_database):
 
 def task(owner, kind="interval"):
     repo, lease, cut = owner
-    schedule = {"contract": "scheduled-rule:v1", "kind": kind}
+    schedule = {"contract": 'scheduled-rule:v1', "kind": kind}
     if kind == "once":
         schedule["run_at_utc"] = (
             (datetime.now(timezone.utc) + timedelta(hours=1))
@@ -59,7 +60,7 @@ def task(owner, kind="interval"):
     else:
         schedule.update(anchor_at_utc="2020-01-01T00:00:00+00:00", seconds=60)
     return repo.create_scheduled_task(
-        task_id=_name("scheduled"),
+
         status="ACTIVE",
         session_id=lease.guard.session_id,
         memory_domain_id="u_local",
@@ -82,7 +83,7 @@ def test_create_paused_alongside_active_does_not_change_existing_plan(owner, sta
     repo, lease, cut = owner
     active = task(owner, kind)
     row = repo.create_scheduled_task(
-        task_id=_name("paused"),
+
         session_id=active["session_id"], memory_domain_id="u_local", guard=lease.guard,
         values={k: active[k] for k in ("name", "prompt", "schedule", "timezone", "permission_mode")},
         model_resolution_snapshot=cut, deadline_monotonic=monotonic() + 30,
@@ -143,7 +144,7 @@ def enqueue(owner, a, command=None):
         session_id=a.session_id,
         command_id=command,
         queue_item_id=_name("queue"),
-        client_submission_id=_name("submission"),
+        client_submission_id=_name("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=permissionid,
@@ -553,7 +554,7 @@ def test_manual_new_queue_confirmation_rejects_changed_frozen_prompt(owner):
     from pulsara_agent.conversation_kernel.steer import PromptIngressConfirmationKind
 
     t = task(owner)
-    a = admission(t, manual=True, command=_name("manual"))
+    a = admission(t, manual=True, command=_name("command"))
     candidate, _ = enqueue(owner, a)
     assert (
         owner[0]
@@ -603,7 +604,7 @@ def test_archive_failure_preserves_plans_success_deletes_every_status(owner):
     repo.apply_queued_prompt_action(
         lease.guard,
         candidate=QueuedPromptAction(
-            active["session_id"], _name("cancel"), pending.queue_item_id
+            active["session_id"], _name("command"), pending.queue_item_id
         ),
         occurred_at=datetime.now(timezone.utc),
         actor_id="test",
@@ -639,7 +640,7 @@ def test_large_task_pages_obey_existing_wire_budget_without_total_task_cap(owner
         }
         values["prompt"] = "x" * (900 << 10)
         row = repo.create_scheduled_task(
-            task_id=_name("large"),
+
             session_id=template["session_id"],
             memory_domain_id="u_local",
             guard=lease.guard,
@@ -730,7 +731,7 @@ def test_concurrent_cold_management_admits_only_one_active_plan(owner, operation
                     )
                 }
                 return repo.create_scheduled_task(
-                    task_id=_name("race"),
+
                     status="ACTIVE",
                     values=values,
                     model_resolution_snapshot=cut,
@@ -784,7 +785,7 @@ def switch(owner, source, target, **kwargs):
         guard=lease.guard,
         expected_revision=source["revision"],
         target=target,
-        new_task_id=_name("replacement"),
+
         model_resolution_snapshot=cut,
         deadline_monotonic=monotonic() + 30,
         **kwargs,
@@ -795,7 +796,7 @@ def switch(owner, source, target, **kwargs):
 def test_atomic_switch_cancels_only_old_pending_and_enables_target(owner, new):
     destination = mutate(owner, task(owner), "pause")
     source = task(owner)
-    original, _ = enqueue(owner, admission(source, True, _name("run")))
+    original, _ = enqueue(owner, admission(source, True, _name("command")))
     target = (
         {
             "kind": "create",
@@ -841,7 +842,7 @@ def test_atomic_switch_cancels_only_old_pending_and_enables_target(owner, new):
 def test_switch_failure_rolls_back_both_plans_and_pending(owner, monkeypatch, failure):
     destination = mutate(owner, task(owner), "pause")
     source = task(owner)
-    original, _ = enqueue(owner, admission(source, True, _name("run")))
+    original, _ = enqueue(owner, admission(source, True, _name("command")))
     before = [read(owner, t["id"]) for t in (source, destination)]
     target = {
         "kind": "existing",
@@ -859,7 +860,7 @@ def test_switch_failure_rolls_back_both_plans_and_pending(owner, monkeypatch, fa
             },
         }
         target["values"]["schedule"] = {
-            "contract": "scheduled-rule:v1",
+            "contract": 'scheduled-rule:v1',
             "kind": "once",
             "run_at_utc": "2020-01-01T00:00:00+00:00",
         }
@@ -897,7 +898,7 @@ def test_manual_once_retirement_confirmation_and_source_conflict(owner):
     from dataclasses import replace
 
     t = mutate(owner, task(owner, "once"), "pause")
-    a = admission(t, True, _name("once"))
+    a = admission(t, True, _name("command"))
     first, _ = enqueue(owner, a)
     assert read(owner, t["id"]) is None
     request = a.action_value()
@@ -913,7 +914,7 @@ def test_manual_once_retirement_confirmation_and_source_conflict(owner):
         )
     assert conflict.value.code == "COMMAND_CONFLICT"
     with pytest.raises(ScheduledTaskError) as removed:
-        enqueue(owner, replace(a, client_command_id=_name("different")))
+        enqueue(owner, replace(a, client_command_id=_name("command")))
     assert removed.value.code == "TASK_NOT_FOUND"
 
 
@@ -926,7 +927,7 @@ def test_coalescing_never_upgrades_original_trigger_source(owner, original_sourc
         admission(
             t,
             original_source is not ScheduledTriggerSource.TIMER,
-            _name("first")
+            _name("command")
             if original_source is not ScheduledTriggerSource.TIMER
             else None,
         ),
@@ -935,7 +936,7 @@ def test_coalescing_never_upgrades_original_trigger_source(owner, original_sourc
     first, _ = enqueue(owner, initial)
     merged = owner[0].merge_scheduled_manual(
         session_id=t["session_id"],
-        admission=admission(t, True, _name("later-user")),
+        admission=admission(t, True, _name("command")),
         memory_domain_id="u_local",
         guard=owner[1].guard,
         deadline_monotonic=monotonic() + 30,
@@ -949,7 +950,7 @@ def test_scheduled_session_search_includes_paused_deduplicates_and_pages(owner, 
     from pulsara_agent.conversation_kernel._repository import scheduling
 
     repo, first, cut = owner
-    keyword = _name("分类")
+    keyword = "分类-" + uuid4().hex
     first_task = mutate(owner, task(owner), "pause")
     mutate(owner, task(owner), "pause")
     repo.rename_session(session_id=first.guard.session_id, memory_domain_id="u_local",
@@ -989,7 +990,7 @@ def test_run_once_reuses_running_turn_and_reopens_after_settlement(owner, final_
 
     repo, lease, _ = owner
     t = make_due(owner, task(owner))
-    initial, _ = enqueue(owner, admission(t, manual_source, _name('initial') if manual_source else None))
+    initial, _ = enqueue(owner, admission(t, manual_source, _name("command") if manual_source else None))
     candidate = repo.prepare_prompt_head_consumption(
         session_id=t['session_id'], occurred_at=datetime.now(timezone.utc),
         actor_id='test', deadline_monotonic=monotonic() + 30,
@@ -1001,7 +1002,7 @@ def test_run_once_reuses_running_turn_and_reopens_after_settlement(owner, final_
     )
     current = read(owner, t['id'])
     assert current['last_turn_status'] == 'RUNNING'
-    request = admission(current, True, _name('repeat'))
+    request = admission(current, True, _name("command"))
     if final_admission:
         # Simulates preparation finishing after the first input was consumed.
         _, accepted = enqueue(owner, request)
@@ -1028,7 +1029,7 @@ def test_run_once_reuses_running_turn_and_reopens_after_settlement(owner, final_
     assert repo.confirm_scheduled_action(
         request=request.action_value(), memory_domain_id='u_local', deadline_monotonic=monotonic() + 30,
     )['id'] == initial.queue_item_id
-    next_request = admission(read(owner, t['id']), True, _name('after-settlement'))
+    next_request = admission(read(owner, t['id']), True, _name("command"))
     assert repo.merge_scheduled_manual(
         session_id=t['session_id'], admission=next_request, memory_domain_id='u_local',
         guard=lease.guard, deadline_monotonic=monotonic() + 30,
@@ -1048,7 +1049,7 @@ def test_concurrent_manual_submissions_share_one_pending_input(owner):
 
     def submit(_):
         gate.wait()
-        candidate, accepted = enqueue(owner, admission(t, True, _name('concurrent')))
+        candidate, accepted = enqueue(owner, admission(t, True, _name("command")))
         return accepted.queue_item_id or candidate.queue_item_id
 
     with ThreadPoolExecutor(max_workers=2) as pool:

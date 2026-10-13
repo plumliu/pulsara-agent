@@ -43,6 +43,19 @@ def hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
     return value
 
 
+def hook_snapshot_model_public(snapshot) -> dict[str, object]:
+    """Closed model projection; trust proofs stay with the inspection owner."""
+    public = hook_snapshot_public(snapshot, inspect=False)
+    result = {key: public[key] for key in (
+        "scope", "path", "description", "source_disposition", "trust_disposition",
+        "enabled", "trusted_at", "runnable_handler_count",
+        "declaration_environment", "diagnostics",
+    )}
+    if isinstance(snapshot.provenance.identity, PluginHookSourceIdentity):
+        result["plugin_id"] = snapshot.provenance.identity.plugin_id
+    return result
+
+
 def add_matching_tool_review(
     value, snapshot, *, subjects, complete: bool, workspace_root
 ):

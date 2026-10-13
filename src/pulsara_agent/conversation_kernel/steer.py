@@ -6,6 +6,9 @@ authority: PostgreSQL remains the sole truth for queue, entry, and event rows.
 """
 
 from __future__ import annotations
+
+from pulsara_agent.identity import derive_id, require_id
+
 from pulsara_agent.scheduling.contracts import ScheduledAdmission, ScheduledProvenance
 
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
@@ -68,9 +71,6 @@ MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES = 16 << 20
 MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES = 256 << 20
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    digest = sha256("\0".join(parts).encode("utf-8")).hexdigest()
-    return f"{prefix}:{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,27 +375,28 @@ class PreparedActiveRootInputAdmission:
 def build_direct_root_turn_identity(
     session_id: str, command_id: str
 ) -> PreparedRootTurnIdentity:
-    turn_id = _stable_id("turn", session_id, command_id)
+    require_id(session_id, "session")
+    require_id(command_id, "command")
+    turn_id = derive_id('turn', 'command', session_id, command_id)
     return PreparedRootTurnIdentity(
         turn_id=turn_id,
-        entry_id=_stable_id("entry", turn_id, "user"),
-        context_revision_id=_stable_id("context-revision", turn_id, "0"),
-        permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
+        entry_id=derive_id("entry", "root-user", turn_id),
+        context_revision_id=derive_id('binding', 'revision', turn_id, "0"),
+        permission_snapshot_id=derive_id('permission', 'admission', turn_id),
     )
 
 
 def build_queued_root_turn_identity(
     session_id: str, queue_item_id: str
 ) -> PreparedRootTurnIdentity:
+    require_id(session_id, "session")
+    require_id(queue_item_id, "queue")
+    turn_id = derive_id("turn", "queue", session_id, queue_item_id)
     return PreparedRootTurnIdentity(
-        turn_id=_stable_id("turn", session_id, queue_item_id),
-        entry_id=_stable_id("entry", session_id, queue_item_id),
-        context_revision_id=_stable_id(
-            "context-revision", session_id, queue_item_id
-        ),
-        permission_snapshot_id=_stable_id(
-            "permission-snapshot", session_id, queue_item_id
-        ),
+        turn_id=turn_id,
+        entry_id=derive_id("entry", "root-user", turn_id),
+        context_revision_id=derive_id("binding", "revision", turn_id, "0"),
+        permission_snapshot_id=derive_id("permission", "admission", turn_id),
     )
 
 
@@ -667,9 +668,7 @@ def build_queued_root_turn_admission(
     entry_id = identity.entry_id
     revision_id = identity.context_revision_id
     consumed = CommittedEventDraft(
-        event_id=_stable_id(
-            "event", queue_item_id, CommittedEventType.PROMPT_CONSUMED.value
-        ),
+        event_id=derive_id("event", "accepted", session_id, CommittedEventType.PROMPT_CONSUMED.name, SubjectSlot.QUEUE_ITEM.name, queue_item_id, ""),
         event_type=CommittedEventType.PROMPT_CONSUMED,
         subject=CommittedEventSubject(SubjectSlot.QUEUE_ITEM, queue_item_id),
         actor_kind="runtime",
@@ -680,9 +679,7 @@ def build_queued_root_turn_admission(
         payload={"entry_id": entry_id},
     )
     accepted = CommittedEventDraft(
-        event_id=_stable_id(
-            "event", entry_id, CommittedEventType.USER_MESSAGE_ACCEPTED.value
-        ),
+        event_id=derive_id("event", "accepted", session_id, CommittedEventType.USER_MESSAGE_ACCEPTED.name, SubjectSlot.ENTRY.name, entry_id, ""),
         event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
         actor_kind="runtime" if scheduled_input is not None else "human",
@@ -947,11 +944,9 @@ def build_steer_consumption_candidate(
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedSteerConsumptionCandidate:
-    entry_id = _stable_id("steer-entry", fact.session_id, fact.queue_item_id)
+    entry_id = derive_id('entry', 'steer', fact.session_id, fact.queue_item_id)
     prompt_event = CommittedEventDraft(
-        event_id=_stable_id(
-            "event", fact.queue_item_id, CommittedEventType.PROMPT_CONSUMED.value
-        ),
+        event_id=derive_id("event", "accepted", fact.session_id, CommittedEventType.PROMPT_CONSUMED.name, SubjectSlot.QUEUE_ITEM.name, fact.queue_item_id, ""),
         event_type=CommittedEventType.PROMPT_CONSUMED,
         subject=CommittedEventSubject(SubjectSlot.QUEUE_ITEM, fact.queue_item_id),
         actor_kind="runtime",
@@ -962,9 +957,7 @@ def build_steer_consumption_candidate(
         payload={"entry_id": entry_id},
     )
     steer_event = CommittedEventDraft(
-        event_id=_stable_id(
-            "event", entry_id, CommittedEventType.USER_STEER_ACCEPTED.value
-        ),
+        event_id=derive_id("event", "accepted", fact.session_id, CommittedEventType.USER_STEER_ACCEPTED.name, SubjectSlot.ENTRY.name, entry_id, ""),
         event_type=CommittedEventType.USER_STEER_ACCEPTED,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
         actor_kind="human",
@@ -1152,9 +1145,6 @@ class MemorySourceInvalidationReservation:
     invalidation_input_token_ceiling: int
     invalidation_epoch_bytes_ceiling: int
     estimator_fingerprint: str
-    # Existing canonical steer-ID preimage digest, derived before source text
-    # is released. Never used for admission or owner/permission validation.
-    stable_identity: str
 
     def __post_init__(self) -> None:
         if self.source_kind not in {
@@ -1178,7 +1168,6 @@ class MemorySourceInvalidationReservation:
             self.desired_semantic_fingerprint,
             self.source_contract_fingerprint,
             self.estimator_fingerprint,
-            self.stable_identity,
         ):
             if not value.startswith("sha256:"):
                 raise ValueError("memory invalidation fingerprint is invalid")
@@ -1203,7 +1192,6 @@ def build_memory_source_invalidation_reservation(
     invalidation_input_token_ceiling: int,
     invalidation_epoch_bytes_ceiling: int,
     estimator_fingerprint: str,
-    stable_identity: str,
 ) -> MemorySourceInvalidationReservation:
     return MemorySourceInvalidationReservation(
         source_kind=source_kind,
@@ -1215,7 +1203,6 @@ def build_memory_source_invalidation_reservation(
         invalidation_input_token_ceiling=invalidation_input_token_ceiling,
         invalidation_epoch_bytes_ceiling=invalidation_epoch_bytes_ceiling,
         estimator_fingerprint=estimator_fingerprint,
-        stable_identity=stable_identity,
     )
 
 
@@ -1287,7 +1274,7 @@ def build_steer_resource_rejection(
 ) -> PreparedSteerResourceRejection:
     reason = "STEER_INPUT_RESOURCE_EXHAUSTED"
     prompt_event = CommittedEventDraft(
-        event_id=_stable_id("event", fact.queue_item_id, f"PromptRejected:{reason}"),
+        event_id=derive_id("event", "accepted", fact.session_id, CommittedEventType.PROMPT_REJECTED.name, SubjectSlot.QUEUE_ITEM.name, fact.queue_item_id, ""),
         event_type=CommittedEventType.PROMPT_REJECTED,
         subject=CommittedEventSubject(SubjectSlot.QUEUE_ITEM, fact.queue_item_id),
         actor_kind="runtime",
@@ -1299,12 +1286,7 @@ def build_steer_resource_rejection(
     )
     turn_reason = "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
     turn_event = CommittedEventDraft(
-        event_id=_stable_id(
-            "event",
-            fact.exact_target_turn_id,
-            fact.queue_item_id,
-            f"TurnInterrupted:{turn_reason}",
-        ),
+        event_id=derive_id("event", "accepted", fact.session_id, CommittedEventType.TURN_INTERRUPTED.name, SubjectSlot.TURN.name, fact.exact_target_turn_id, ""),
         event_type=CommittedEventType.TURN_INTERRUPTED,
         subject=CommittedEventSubject(SubjectSlot.TURN, fact.exact_target_turn_id),
         actor_kind="runtime",
@@ -1345,7 +1327,6 @@ class SteerResourceRejectionConfirmation:
 class PreparedSteerPlanConflictInterruption:
     session_id: str
     exact_target_turn_id: str
-    source_plan_fingerprint: str
     occurred_at: datetime
     actor_id: str
     turn_interrupted_occurrence: CommittedEventDraft
@@ -1355,7 +1336,6 @@ class PreparedSteerPlanConflictInterruption:
             (
                 self.session_id,
                 self.exact_target_turn_id,
-                self.source_plan_fingerprint,
                 self.actor_id,
             )
         ):
@@ -1386,18 +1366,12 @@ def build_steer_plan_conflict_interruption(
     *,
     session_id: str,
     exact_target_turn_id: str,
-    source_plan_fingerprint: str,
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedSteerPlanConflictInterruption:
     reason = "PROVIDER_INPUT_PLAN_CONFLICT"
     event = CommittedEventDraft(
-        event_id=_stable_id(
-            "event",
-            exact_target_turn_id,
-            source_plan_fingerprint,
-            f"TurnInterrupted:{reason}",
-        ),
+        event_id=derive_id("event", "accepted", session_id, CommittedEventType.TURN_INTERRUPTED.name, SubjectSlot.TURN.name, exact_target_turn_id, ""),
         event_type=CommittedEventType.TURN_INTERRUPTED,
         subject=CommittedEventSubject(SubjectSlot.TURN, exact_target_turn_id),
         actor_kind="runtime",
@@ -1410,7 +1384,6 @@ def build_steer_plan_conflict_interruption(
     return PreparedSteerPlanConflictInterruption(
         session_id=session_id,
         exact_target_turn_id=exact_target_turn_id,
-        source_plan_fingerprint=source_plan_fingerprint,
         occurred_at=occurred_at,
         actor_id=actor_id,
         turn_interrupted_occurrence=event,
@@ -1449,113 +1422,14 @@ def build_steer_suffix_quote(
     )
 
 
-def _legacy_pending_steer_identity(fact: PendingPromptSteerFact) -> str:
-    return context_fingerprint(
-        "pulsara:pending-prompt-steer-fact:v1",
-        {
-            "session_id": fact.session_id,
-            "workspace_id": fact.workspace_id,
-            "queue_item_id": fact.queue_item_id,
-            "queue_sequence": fact.queue_sequence,
-            "command_id": fact.command_id,
-            "target_turn_id": fact.exact_target_turn_id,
-            "content": _content_manifest(fact.body_storage),
-        },
-    )
 
 
-def _legacy_steer_base_fence_identity(
-    fence: PreparedSteerCanonicalBaseFence,
-) -> str:
-    return context_fingerprint(
-        "pulsara:prepared-steer-canonical-base-fence:v1",
-        {
-            "session_id": fence.session_id,
-            "target_turn_id": fence.exact_target_turn_id,
-            "through_sequence": fence.provider_input_through_sequence,
-            "context_binding": fence.context_binding_fact.fact_fingerprint,
-            "run_permission": fence.run_permission_snapshot.snapshot_fingerprint,
-            "plan_workflow": (
-                None
-                if fence.plan_workflow_fact is None
-                else fence.plan_workflow_fact.fact_fingerprint
-            ),
-            "canonical_read_cut": fence.canonical_read_cut_fingerprint,
-        },
-    )
 
 
-def steer_consumption_candidate_identity_fingerprint(
-    candidate: PreparedSteerConsumptionCandidate,
-) -> str:
-    """Reproduce the pre-hard-cut stable identity at context/event ID boundaries."""
-
-    return context_fingerprint(
-        "pulsara:prepared-steer-consumption:v1",
-        {
-            "session_id": candidate.session_id,
-            "queue_item_id": candidate.queue_item_id,
-            "queue_sequence": candidate.queue_sequence,
-            "command_id": candidate.command_id,
-            "target_turn_id": candidate.exact_target_turn_id,
-            "content": _content_manifest(candidate.body_storage),
-            "entry_id": candidate.new_entry_id,
-            "entry_sequence": candidate.expected_entry_sequence,
-            "predecessor": _predecessor_value(candidate.predecessor),
-            "canonical_base_fence": _legacy_steer_base_fence_identity(
-                candidate.canonical_base_fence
-            ),
-            "prompt_consumed": _event_manifest(candidate.prompt_consumed_occurrence),
-            "user_steer": _event_manifest(candidate.user_steer_accepted_occurrence),
-        },
-    )
 
 
-def _legacy_steer_quote_identity(plan: PreparedSteerSuffixAdmissionPlan) -> str:
-    from pulsara_agent.model_input._stable_input_identity import steer_quote_identity
-
-    return steer_quote_identity(
-        candidate_ids=tuple(
-            steer_consumption_candidate_identity_fingerprint(item)
-            for item in plan.selected_consumption_candidates
-        ),
-        quote=plan.quote,
-        compiled=plan.prospective_compiled_input,
-    )
 
 
-def prepared_steer_suffix_plan_identity_fingerprint(
-    plan: PreparedSteerSuffixAdmissionPlan,
-) -> str:
-    """Reproduce the pre-hard-cut stable plan identity only at ID boundaries."""
-
-    return context_fingerprint(
-        "pulsara:prepared-steer-suffix-admission-plan:v1",
-        {
-            "scope": (
-                plan.scope.session_id,
-                plan.scope.scope_kind.value,
-                plan.scope.scope_subagent_task_id,
-            ),
-            "predecessor": _predecessor_value(plan.predecessor),
-            "base_cut": plan.base_cut_fingerprint,
-            "base_frontier": plan.base_canonical_frontier_fingerprint,
-            "base_compile": plan.base_compile_snapshot_fingerprint,
-            "target": plan.target_binding_fingerprint,
-            "surface": plan.tool_surface_fingerprint,
-            "sources": plan.source_facts_fingerprint,
-            "pending": tuple(
-                _legacy_pending_steer_identity(item)
-                for item in plan.ordered_pending_queue_facts
-            ),
-            "selected": tuple(
-                steer_consumption_candidate_identity_fingerprint(item)
-                for item in plan.selected_consumption_candidates
-            ),
-            "quote": _legacy_steer_quote_identity(plan),
-            "compiled": plan.prospective_compiled_input.compiled_semantic_fingerprint,
-        },
-    )
 
 
 def build_prepared_steer_suffix_plan(
@@ -1654,6 +1528,4 @@ __all__ = [
     "build_steer_resource_rejection",
     "build_steer_suffix_quote",
     "build_memory_source_invalidation_reservation",
-    "prepared_steer_suffix_plan_identity_fingerprint",
-    "steer_consumption_candidate_identity_fingerprint",
 ]

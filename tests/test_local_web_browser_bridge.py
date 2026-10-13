@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 import base64
@@ -51,7 +52,7 @@ class _Sessions:
     async def resume_session(self, session_id: str) -> SimpleNamespace:
         return SimpleNamespace(
             session_id=session_id,
-            host_session_id=f"host:{session_id}",
+            host_session_id=derive_id("host", "test-fixture", f"host:{session_id}"),
         )
 
 
@@ -68,7 +69,7 @@ class _RuntimeConnection:
         self.requests: list[tuple[str, object]] = []
         self.controller = self
         self.observer = self
-        self.attachment_id = f"attachment:{generation}"
+        self.attachment_id = derive_id("attachment", "test-fixture", f"attachment:{generation}")
 
     @classmethod
     async def open(
@@ -81,7 +82,7 @@ class _RuntimeConnection:
         role: str,
     ) -> "_RuntimeConnection":
         assert server is not None
-        assert host_session_id == f"host:{session_id}"
+        assert host_session_id == derive_id("host", "test-fixture", f"host:{session_id}")
         return cls(session_id=session_id, generation=generation, role=role)
 
     async def aclose(self) -> None:
@@ -121,7 +122,7 @@ class _RuntimeConnection:
                 background_processes=wire.BackgroundProcessPage(
                     request_id=request_id,
                     session_id=self.session_id,
-                    host_session_id=f"host:{self.session_id}",
+                    host_session_id=derive_id("host", "test-fixture", f"host:{self.session_id}"),
                 )
             )
         if kind == "read_background_process_log":
@@ -129,7 +130,7 @@ class _RuntimeConnection:
                 background_process_log=wire.BackgroundProcessLog(
                     request_id=request_id,
                     session_id=self.session_id,
-                    host_session_id=f"host:{self.session_id}",
+                    host_session_id=derive_id("host", "test-fixture", f"host:{self.session_id}"),
                     output="exact output",
                 )
             )
@@ -170,9 +171,9 @@ async def _exercise_browser_connection_roles(monkeypatch) -> None:
         protocol_server=cast(TerminalKernelProtocolServer, object()),
     )
 
-    first = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
-    second = await bridge.connect("session:one", browser_instance_id=BROWSER_TWO)
-    other_session = await bridge.connect("session:two", browser_instance_id=BROWSER_ONE)
+    first = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE)
+    second = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_TWO)
+    other_session = await bridge.connect('session:f2uxxwrmmavsqgv655dvvzytnu', browser_instance_id=BROWSER_ONE)
 
     assert first["role"] == "controller"
     assert second["role"] == "observer"
@@ -183,24 +184,24 @@ async def _exercise_browser_connection_roles(monkeypatch) -> None:
     assert not first_connection.closed
     assert not second_connection.closed
     assert not other_connection.closed
-    assert bridge._controller_by_session["session:one"] == first["connection_id"]
+    assert bridge._controller_by_session['session:5dyf7lfzp7z22pphjtostkgsjm'] == first["connection_id"]
     assert (
-        bridge._controller_by_session["session:two"] == other_session["connection_id"]
+        bridge._controller_by_session['session:f2uxxwrmmavsqgv655dvvzytnu'] == other_session["connection_id"]
     )
 
-    refreshed = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+    refreshed = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE)
 
     assert refreshed["role"] == "controller"
     assert first_connection.closed
     assert not second_connection.closed
     assert not other_connection.closed
-    assert bridge._controller_by_session["session:one"] == refreshed["connection_id"]
+    assert bridge._controller_by_session['session:5dyf7lfzp7z22pphjtostkgsjm'] == refreshed["connection_id"]
     await bridge.disconnect(str(first["connection_id"]))
-    assert bridge._controller_by_session["session:one"] == refreshed["connection_id"]
+    assert bridge._controller_by_session['session:5dyf7lfzp7z22pphjtostkgsjm'] == refreshed["connection_id"]
 
     refreshed_connection = bridge._connections[str(refreshed["connection_id"])]
     third = await bridge.connect(
-        "session:one",
+        'session:5dyf7lfzp7z22pphjtostkgsjm',
         browser_instance_id=BROWSER_THREE,
         takeover=True,
     )
@@ -210,9 +211,9 @@ async def _exercise_browser_connection_roles(monkeypatch) -> None:
     assert not second_connection.closed
     assert not other_connection.closed
     assert str(second["connection_id"]) in bridge._connections
-    assert bridge._controller_by_session["session:one"] == third["connection_id"]
+    assert bridge._controller_by_session['session:5dyf7lfzp7z22pphjtostkgsjm'] == third["connection_id"]
     assert (
-        bridge._controller_by_session["session:two"] == other_session["connection_id"]
+        bridge._controller_by_session['session:f2uxxwrmmavsqgv655dvvzytnu'] == other_session["connection_id"]
     )
 
     await bridge.aclose()
@@ -245,7 +246,7 @@ async def _exercise_dead_attachment_expiry(monkeypatch) -> None:
         sessions=cast(LocalSessionController, _Sessions()),
         protocol_server=cast(TerminalKernelProtocolServer, object()),
     )
-    payload = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+    payload = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE)
     connection_id = str(payload["connection_id"])
     connection = bridge._connections[connection_id]
     connection.closed = True
@@ -254,8 +255,8 @@ async def _exercise_dead_attachment_expiry(monkeypatch) -> None:
         await bridge._connection(connection_id)
 
     assert connection_id not in bridge._connections
-    assert "session:one" not in bridge._controller_by_session
-    replacement = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+    assert 'session:5dyf7lfzp7z22pphjtostkgsjm' not in bridge._controller_by_session
+    replacement = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE)
     assert replacement["role"] == "controller"
     await bridge.aclose()
 
@@ -285,11 +286,11 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
         sessions=cast(LocalSessionController, _Sessions()),
         protocol_server=cast(TerminalKernelProtocolServer, object()),
     )
-    payload = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+    payload = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE)
     connection_id = str(payload["connection_id"])
     connection = bridge._connections[connection_id]
     command_id = (
-        "command:control:9999999999999:44444444-4444-4444-8444-444444444444"
+        'command:56oxulp7hzsqkiylu4cl56mbja'
     )
 
     await bridge.command(
@@ -297,18 +298,18 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
         {
             "command_id": command_id,
             "command_kind": "TERMINATE_BACKGROUND_PROCESS",
-            "expected_session_id": "session:one",
-            "expected_host_session_id": "host:session:one",
-            "target_process_id": "process:exact",
+            "expected_session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
+            "expected_host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
+            "target_process_id": 'process:77t67dg5pb4j4dif5xd3xcidwe',
         },
     )
     kind, request = connection.requests[-1]
     assert kind == "command"
     assert isinstance(request, wire.CommandRequest)
     assert request.client_submission_id == ""
-    assert request.expected_session_id == "session:one"
-    assert request.expected_host_session_id == "host:session:one"
-    assert request.target_process_id == "process:exact"
+    assert request.expected_session_id == 'session:5dyf7lfzp7z22pphjtostkgsjm'
+    assert request.expected_host_session_id == 'host:7r7elstdigup6xfbo3hd3d5jfu'
+    assert request.target_process_id == 'process:77t67dg5pb4j4dif5xd3xcidwe'
     assert not request.target_turn_id
     assert not request.subagent_task_id
 
@@ -318,24 +319,24 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
             "command_id": command_id,
             "expected_control": {
                 "operation": "USER_CONTROL_TERMINATE_BACKGROUND_PROCESS",
-                "session_id": "session:one",
-                "host_session_id": "host:session:one",
+                "session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
+                "host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
                 "target_kind": "USER_CONTROL_BACKGROUND_PROCESS",
-                "target_id": "process:exact",
+                "target_id": 'process:77t67dg5pb4j4dif5xd3xcidwe',
             },
         },
     )
     kind, query = connection.requests[-1]
     assert kind == "query_command"
     assert isinstance(query, wire.QueryCommandRequest)
-    assert query.expected_control.target.target_id == "process:exact"
-    assert query.expected_control.host_session_id == "host:session:one"
+    assert query.expected_control.target.target_id == 'process:77t67dg5pb4j4dif5xd3xcidwe'
+    assert query.expected_control.host_session_id == 'host:7r7elstdigup6xfbo3hd3d5jfu'
 
     await bridge.list_background_processes(
         connection_id,
         {
-            "expected_session_id": "session:one",
-            "expected_host_session_id": "host:session:one",
+            "expected_session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
+            "expected_host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
             "cursor": "cursor:page",
             "maximum_items": 7,
         },
@@ -349,9 +350,9 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
     await bridge.read_background_process_log(
         connection_id,
         {
-            "expected_session_id": "session:one",
-            "expected_host_session_id": "host:session:one",
-            "process_id": "process:exact",
+            "expected_session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
+            "expected_host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
+            "process_id": 'process:77t67dg5pb4j4dif5xd3xcidwe',
             "output_cursor": "output:17",
             "max_output_chars": 4096,
         },
@@ -359,7 +360,7 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
     kind, log = connection.requests[-1]
     assert kind == "read_background_process_log"
     assert isinstance(log, wire.ReadBackgroundProcessLogRequest)
-    assert log.process_id == "process:exact"
+    assert log.process_id == 'process:77t67dg5pb4j4dif5xd3xcidwe'
     assert log.output_cursor == "output:17"
     assert log.max_output_chars == 4096
 
@@ -391,14 +392,14 @@ async def _exercise_typed_prompt_and_image_read(monkeypatch) -> None:
         sessions=cast(LocalSessionController, _Sessions()),
         protocol_server=cast(TerminalKernelProtocolServer, object()),
     )
-    payload = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+    payload = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE)
     connection_id = str(payload["connection_id"])
     connection = bridge._connections[connection_id]
     repeated = b"\x89PNG\r\n\x1a\nexact"
     await bridge.command(
         connection_id,
         {
-            "command_id": "command:typed",
+            "command_id": 'command:phj426c6i6nucnncfbxhn4rqki',
             "command_kind": "SUBMIT_PROMPT",
             "requested_permission_mode": "PERMISSION_MODE_READ_ONLY",
             "prompt_content": {
@@ -439,7 +440,7 @@ async def _exercise_typed_prompt_and_image_read(monkeypatch) -> None:
     response = await bridge.read_content(
         connection_id,
         {
-            "entry_id": "entry:owner",
+            "entry_id": 'entry:fssz5csfdy3rpaorzhjfs5wjqi',
             "image_ref_ordinal": 2,
             "offset_bytes": 0,
             "limit_bytes": 1 << 20,
@@ -448,7 +449,7 @@ async def _exercise_typed_prompt_and_image_read(monkeypatch) -> None:
     kind, image_request = connection.requests[-1]
     assert kind == "read_content"
     assert isinstance(image_request, wire.ReadContentRequest)
-    assert image_request.entry_id == "entry:owner"
+    assert image_request.entry_id == 'entry:fssz5csfdy3rpaorzhjfs5wjqi'
     assert image_request.queue_item_id == ""
     assert image_request.HasField("image_ref_ordinal")
     assert image_request.image_ref_ordinal == 2
@@ -462,12 +463,12 @@ async def _exercise_typed_prompt_and_image_read(monkeypatch) -> None:
     "body",
     [
         {
-            "command_id": "command:legacy-text",
+            "command_id": 'command:iowksoo3q3cmvr3wbzp5zmdjla',
             "command_kind": "SUBMIT_PROMPT",
             "text": "legacy",
         },
         {
-            "command_id": "command:side-channel",
+            "command_id": 'command:z73pvorgcpr7lu6vbnkrmuiw2a',
             "command_kind": "SUBMIT_PROMPT",
             "prompt_content": {"parts": [{"type": "text", "text": "no"}]},
             "attachments": [],
@@ -499,7 +500,7 @@ async def _exercise_removed_prompt_path(monkeypatch, body: dict[str, object]) ->
         sessions=cast(LocalSessionController, _Sessions()),
         protocol_server=cast(TerminalKernelProtocolServer, object()),
     )
-    payload = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+    payload = await bridge.connect('session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE)
     connection_id = str(payload["connection_id"])
     connection = bridge._connections[connection_id]
     with pytest.raises(ValueError):
@@ -545,7 +546,7 @@ class _FrameReader:
 def test_browser_capacity_uses_authenticated_protocol_transport(read_only, target) -> None:
     async def exercise() -> None:
         response = wire.ServerFrame(subagent_capacity=wire.SubagentCapacityResponse(
-            request_id="request:capacity", target=2, occupied=1,
+            request_id='request:byplvq6cru7c2aicyvuqtymuyu', target=2, occupied=1,
         ))
         writer = _FrameWriter()
         client = TerminalProtocolClient(
@@ -553,19 +554,19 @@ def test_browser_capacity_uses_authenticated_protocol_transport(read_only, targe
             writer=cast(asyncio.StreamWriter, writer),
             role=wire.ATTACHMENT_ROLE_CONTROLLER,
             server=cast(TerminalKernelProtocolServer, object()),
-            session_id="session:one", host_session_id="host:one",
+            session_id='session:5dyf7lfzp7z22pphjtostkgsjm', host_session_id='host:gubylb5v44ganghpuxoqfvlrji',
         )
-        client.attachment_id = "attachment:capacity"
+        client.attachment_id = 'attachment:p252eyydrofx6fl6pqvmozegvm'
         client.attachment_generation = 3
         returned = await client.request("subagent_capacity", wire.SubagentCapacityRequest(
-            request_id="request:capacity", expected_session_id="session:one",
-            expected_host_session_id="host:one", read_only=read_only, target=target,
+            request_id='request:byplvq6cru7c2aicyvuqtymuyu', expected_session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
+            expected_host_session_id='host:gubylb5v44ganghpuxoqfvlrji', read_only=read_only, target=target,
         ))
         sent = wire.ClientFrame.FromString(bytes(writer.written[4:])).subagent_capacity
-        assert sent.attachment_id == "attachment:capacity"
+        assert sent.attachment_id == 'attachment:p252eyydrofx6fl6pqvmozegvm'
         assert sent.attachment_generation == 3
-        assert sent.expected_session_id == "session:one"
-        assert sent.expected_host_session_id == "host:one"
+        assert sent.expected_session_id == 'session:5dyf7lfzp7z22pphjtostkgsjm'
+        assert sent.expected_host_session_id == 'host:gubylb5v44ganghpuxoqfvlrji'
         assert sent.read_only == read_only
         assert sent.target == target
         assert returned.subagent_capacity.target == 2
@@ -581,11 +582,11 @@ def test_u2_protocol_frame_counts_complete_typed_prompt_at_eight_mib_boundary() 
 async def _exercise_protocol_frame_boundary() -> None:
     frame = wire.ClientFrame(
         command=wire.CommandRequest(
-            request_id="request:frame-boundary",
-            attachment_id="attachment:one",
+            request_id='request:ampzufg6vkqsvl2afcdzp4otru',
+            attachment_id='attachment:msixoqvujl5evfiu57n63nkhtq',
             attachment_generation=1,
-            command_id="command:frame-boundary",
-            client_submission_id="command:frame-boundary",
+            command_id='command:tnf5j42plo2fbjoalmjki3yowm',
+            client_submission_id='command:tnf5j42plo2fbjoalmjki3yowm',
             command_kind=wire.SUBMIT_PROMPT,
             requested_permission_mode=wire.PERMISSION_MODE_READ_ONLY,
             prompt_content=wire.PromptContent(
@@ -609,8 +610,8 @@ async def _exercise_protocol_frame_boundary() -> None:
 
     response = wire.ServerFrame(
         command_outcome=wire.CommandOutcome(
-            request_id="request:frame-boundary",
-            command_id="command:frame-boundary",
+            request_id='request:ampzufg6vkqsvl2afcdzp4otru',
+            command_id='command:tnf5j42plo2fbjoalmjki3yowm',
             status=wire.PENDING,
         )
     )
@@ -620,11 +621,11 @@ async def _exercise_protocol_frame_boundary() -> None:
         writer=cast(asyncio.StreamWriter, writer),
         role=wire.ATTACHMENT_ROLE_CONTROLLER,
         server=cast(TerminalKernelProtocolServer, object()),
-        session_id="session:one",
-        host_session_id="host:one",
+        session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
+        host_session_id='host:gubylb5v44ganghpuxoqfvlrji',
     )
     returned = await client._round_trip(frame)
-    assert returned.command_outcome.command_id == "command:frame-boundary"
+    assert returned.command_outcome.command_id == 'command:tnf5j42plo2fbjoalmjki3yowm'
     assert int.from_bytes(writer.written[:4], "big") == MAXIMUM_FRAME_BYTES
     assert len(writer.written) == MAXIMUM_FRAME_BYTES + 4
 
@@ -635,8 +636,8 @@ async def _exercise_protocol_frame_boundary() -> None:
         writer=cast(asyncio.StreamWriter, rejected_writer),
         role=wire.ATTACHMENT_ROLE_CONTROLLER,
         server=cast(TerminalKernelProtocolServer, object()),
-        session_id="session:one",
-        host_session_id="host:one",
+        session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
+        host_session_id='host:gubylb5v44ganghpuxoqfvlrji',
     )
     with pytest.raises(ProtocolBridgeError) as caught:
         await rejected._round_trip(frame)
@@ -695,7 +696,7 @@ class _RuntimeReopenCore:
         self.resume_count += 1
         return _RuntimeReopenHost(
             session_id,
-            f"host:resumed:{self.resume_count}",
+            derive_id("host", "test-fixture", f"host:resumed:{self.resume_count}"),
         )
 
 
@@ -751,7 +752,7 @@ def _runtime_reopen_controller(
 
 def test_runtime_reopen_busy_keeps_the_old_host_published(tmp_path) -> None:
     async def scenario() -> None:
-        old = _RuntimeReopenHost("session:busy", "host:busy", busy=True)
+        old = _RuntimeReopenHost('session:gsikvbdgycchganur2wnjscrg4', 'host:fnej7unuravnczew6u2aj3yev4', busy=True)
         controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
 
         with pytest.raises(SessionControlRejected) as caught:
@@ -767,7 +768,7 @@ def test_runtime_reopen_busy_keeps_the_old_host_published(tmp_path) -> None:
 
 def test_runtime_reopen_full_detaches_closes_and_resumes_exactly_once(tmp_path) -> None:
     async def scenario() -> None:
-        old = _RuntimeReopenHost("session:full", "host:old")
+        old = _RuntimeReopenHost('session:744hkamlh7wp6hdanqkno5tvf4', 'host:bdrf3raz6vcwmrrowx6l566uc4')
         controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
         bridge = LocalBrowserBridge(
             sessions=controller,
@@ -806,7 +807,7 @@ def test_runtime_reopen_full_detaches_closes_and_resumes_exactly_once(tmp_path) 
         assert old.committed
         assert core.closed_host_ids == [old.host_session_id]
         assert core.resume_count == 1
-        assert resumed.host_session_id == "host:resumed:1"
+        assert resumed.host_session_id == 'host:sfhbohufvlifjsr6tcy7qtdbqa'
         assert controller._by_session[old.session_id] is resumed
 
     asyncio.run(scenario())
@@ -820,7 +821,7 @@ def test_runtime_reopen_without_old_host_uses_distinct_closed_outcome(tmp_path) 
             protocol_server=cast(TerminalKernelProtocolServer, object()),
         )
 
-        operation = await controller.prepare_runtime_reopen("session:cold")
+        operation = await controller.prepare_runtime_reopen('session:2iewavcc2san25uuwrwmaxpaai')
         assert isinstance(operation, PreparedRuntimeResumeOperation)
         detach = await bridge.detach_session_for_runtime_reopen(operation)
         assert isinstance(detach, BridgeDetachFull)
@@ -842,7 +843,7 @@ def test_runtime_reopen_without_old_host_uses_distinct_closed_outcome(tmp_path) 
         )
 
         assert core.closed_host_ids == []
-        assert resumed.host_session_id == "host:resumed:1"
+        assert resumed.host_session_id == 'host:sfhbohufvlifjsr6tcy7qtdbqa'
 
     asyncio.run(scenario())
 
@@ -851,7 +852,7 @@ def test_runtime_reopen_abort_after_detach_restores_only_the_exact_old_host(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        old = _RuntimeReopenHost("session:abort", "host:abort")
+        old = _RuntimeReopenHost('session:mjszjoixjoh2z6r4dafvcwo4fq', 'host:6jsxuoe2onmvunsj2ghwlhitcq')
         controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
         bridge = LocalBrowserBridge(
             sessions=controller,
@@ -884,7 +885,7 @@ def test_runtime_reopen_connection_close_failure_quarantines_both_owners(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        old = _RuntimeReopenHost("session:failed", "host:failed")
+        old = _RuntimeReopenHost('session:lhkh7dhxu3ngcpvrrcxv5ald6y', 'host:km6h7pl3f6es74w5k2zr2jxmji')
         controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
         bridge = LocalBrowserBridge(
             sessions=controller,
@@ -930,7 +931,7 @@ def test_runtime_reopen_post_detach_exception_quarantines_gate_and_operation(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        old = _RuntimeReopenHost("session:post-token", "host:post-token")
+        old = _RuntimeReopenHost('session:aw6h3ewxg4gmli6dw5w4oj5gme', 'host:k63qoqsfkoifkumvxmduvecfvq')
         controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
         bridge = LocalBrowserBridge(
             sessions=controller,

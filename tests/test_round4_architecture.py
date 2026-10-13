@@ -81,7 +81,7 @@ def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> 
         "CREATE TABLE ", 1
     )[0]
     assert "initial_entry_id text NOT NULL" in turns
-    assert "permission_snapshot_id text NOT NULL" in turns
+    assert re.search(r"permission_snapshot_id text[^\n]*NOT NULL", turns)
     assert "permission_snapshot_fingerprint text NOT NULL" in turns
     assert "CONSTRAINT ck_turn_permission_overlay_exact CHECK" in turns
     queue = baseline.split("CREATE TABLE pulsara_v3.prompt_queue_items (", 1)[1].split(

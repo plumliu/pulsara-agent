@@ -64,19 +64,19 @@ def _fixture(reasoning: str) -> tuple[dict[str, object], dict[str, object]]:
         transport_binding_id="test-chat",
     )
     replay = build_prepared_durable_provider_assistant_replay(
-        session_id="session:test",
-        workspace_id="workspace:test",
-        assistant_entry_id="entry:assistant",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         target=target,
         public_projection_fingerprint="sha256:" + "2" * 64,
         ordered_items=(frozen,),
     )
     answer = b"answer"
     entry = {
-        "id": "entry:assistant",
+        "id": 'entry:5qidalqvkujk5ykzzzfpwie2qy',
         "entry_owner_kind": "EXECUTED_TURN",
-        "session_id": "session:test",
-        "turn_id": "turn:test",
+        "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte',
+        "turn_id": 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         "entry_sequence": 1,
         "entry_kind": "ASSISTANT_MESSAGE",
         "scheduled_input": None,
@@ -131,8 +131,8 @@ def test_large_provider_reasoning_uses_the_existing_chunked_content_read() -> No
     block = projected.reasoning_blocks[0]
     resolved = reader._resolve_reasoning_content(
         connection,
-        session_id="session:test",
-        entry_id="entry:assistant",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         block_id=block.block_id,
     )
 
@@ -160,7 +160,7 @@ def test_long_tool_argument_preview_keeps_a_valid_utf8_boundary(
         def execute(self, sql: str, parameters: object) -> _Result:
             if "FROM pulsara_v3.assistant_message_blocks" in sql:
                 return _Result(many=({
-                    "id": "block:tool", "block_ordinal": 0,
+                    "id": 'block:wsp762qk2gdn6mufgvr73pkg3a', "block_ordinal": 0,
                     "block_kind": "TOOL_CALL", "tool_call_id": "call:write",
                     "tool_name": "write_file", "tool_arguments": arguments,
                 },))

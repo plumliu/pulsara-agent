@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from dataclasses import dataclass
 from datetime import datetime
-from hashlib import sha256
 import json
 from time import monotonic
 from typing import Sequence
@@ -55,7 +56,7 @@ def _body(value: dict[str, object]) -> str:
 
 
 def _fact_id(session_id: str, result_id: str) -> str:
-    return "memory:" + sha256((session_id + "\0" + result_id).encode()).hexdigest()
+    return derive_id("memory", "remember", session_id, result_id)
 
 
 class _MemoryOperations(_MemoryManagementOperations):

@@ -1,4 +1,5 @@
 'use client';
+import { randomIdentity, isCanonicalIdentity } from '../lib/identity';
 
 import { FilePreviewProvider } from '../components/file-preview-dialog';
 import { UserAvatarProvider } from '../components/user-avatar';
@@ -124,9 +125,13 @@ function readInitialInspectorVisibility(): boolean {
 
 function readSavedSessionId(): string {
   try {
-    return typeof window !== 'undefined'
-      ? window.localStorage?.getItem('pulsara-active-session') ?? ''
-      : '';
+    if (typeof window === 'undefined') return '';
+    const saved = window.localStorage?.getItem('pulsara-active-session') ?? '';
+    if (saved && !isCanonicalIdentity(saved, 'session')) {
+      window.localStorage?.removeItem('pulsara-active-session');
+      return '';
+    }
+    return saved;
   } catch {
     return '';
   }
@@ -1595,7 +1600,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
     const action: QueuedPromptAction = {
       sessionId: active.sessionId, connectionGeneration: active.generation,
-      commandId: `command:web:${crypto.randomUUID()}`, source, kind,
+      commandId: randomIdentity('command'), source, kind,
       restoredContent,
       targetTurnId: kind === 'send' ? targetTurnId : undefined,
       submittedAt: new Date().toISOString(), status: 'submitting',
@@ -1720,7 +1725,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       notify('这个会话正在另一个窗口中操作', '选择“在此窗口继续”后即可发送新指令。', 'warning');
       return false;
     }
-    const commandId = `command:web:${crypto.randomUUID()}`;
+    const commandId = randomIdentity('command');
     const deliveryMode = 'new-turn' as const;
     try {
       if (requestPlan && projection.isRunning) {
@@ -2035,7 +2040,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         && item.status !== 'rejected')) return false;
     const intent: ToolDecisionIntent = {
       sessionId: active.sessionId, hostSessionId, interactionId: interaction.id,
-      commandId: `command:web:${crypto.randomUUID()}`, decision,
+      commandId: randomIdentity('command'), decision,
       connectionGeneration: active.generation, status: 'submitting',
     };
     saveToolDecision(intent);

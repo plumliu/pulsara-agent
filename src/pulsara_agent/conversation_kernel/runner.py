@@ -5,6 +5,9 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 import asyncio
 from dataclasses import dataclass, field as dataclass_field
@@ -13,7 +16,6 @@ from hashlib import sha256
 import json
 from time import monotonic
 from typing import Awaitable, Callable, Mapping, Protocol
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.assembler import (
     CompletedAssistantMessage,
@@ -85,7 +87,7 @@ from pulsara_agent.llm.input import (
     MessageRole,
 )
 from pulsara_agent.model_input.lowering import (
-    image_reference_digest_part,
+    image_reference_id_part,
     ordinary_tool_result_minimum_upper,
 )
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
@@ -1249,9 +1251,9 @@ class ConversationKernelRunner:
             session_id=self._writer_lease.guard.session_id,
             task_id=task_id,
             turn_id=turn_id,
-            entry_id=_stable_id("entry", turn_id, "objective"),
-            context_binding_revision_id=_stable_id("context-revision", turn_id, "0"),
-            permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
+            entry_id=derive_id('entry', 'worker', turn_id),
+            context_binding_revision_id=derive_id('binding', 'revision', turn_id, "0"),
+            permission_snapshot_id=derive_id('permission', 'admission', turn_id),
             task_start_event_id=task_start.event_id,
             expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
             content=content,
@@ -1314,7 +1316,7 @@ class ConversationKernelRunner:
     ) -> KernelRunResult:
         if not isinstance(canonical_prompt, FrozenCanonicalPrompt):
             raise TypeError("ROOT turn requires a frozen canonical prompt")
-        stable_command_id = command_id or _id("command")
+        stable_command_id = command_id or random_id('command')
         identity = build_direct_root_turn_identity(
             self._writer_lease.guard.session_id, stable_command_id
         )
@@ -2212,7 +2214,7 @@ class ConversationKernelRunner:
                     input_selection_in_progress = False
                     execution = provider_open.execution
                     permit = provider_open.permit
-                    entry_id = _id("entry")
+                    entry_id = random_id('entry')
                     if self._workspace_gate is not None:
                         await self._workspace_gate.wait_available()
                     collected = await self._collect_model(
@@ -2337,7 +2339,7 @@ class ConversationKernelRunner:
                             scope_kind=(identity.conversation_scope_kind.value),
                             scope_subagent_task_id=(identity.scope_subagent_task_id),
                             channel_kind=LiveChannelKind.MODEL_OUTPUT,
-                            generation_id=f"model-output:{entry_id}",
+                            generation_id=derive_id("generation", "draft", entry_id),
                             proposed_entry_id=entry_id,
                         )
                         raise
@@ -2553,7 +2555,7 @@ class ConversationKernelRunner:
                         scope_kind=identity.conversation_scope_kind.value,
                         scope_subagent_task_id=identity.scope_subagent_task_id,
                         channel_kind=LiveChannelKind.MODEL_OUTPUT,
-                        generation_id=f"model-output:{entry_id}",
+                        generation_id=derive_id("generation", "draft", entry_id),
                         proposed_entry_id=entry_id,
                     )
                 finally:
@@ -3178,7 +3180,7 @@ class ConversationKernelRunner:
                     request.compiled_input.canonical_input_identity.scope_subagent_task_id
                 ),
                 channel_kind=LiveChannelKind.MODEL_OUTPUT,
-                generation_id=f"model-output:{proposed_entry_id}",
+                generation_id=derive_id("generation", "draft", proposed_entry_id),
                 proposed_entry_id=proposed_entry_id,
             )
             raise
@@ -3344,7 +3346,7 @@ class ConversationKernelRunner:
                 in {
                     ViewImageSourceKind.IMAGE_REF,
                 }
-                else "sha256:" + ("0" * 64)
+                else "image:" + ("a" * 26)
             )
             image_source_upper = LLMMessage(
                 role=MessageRole.USER,
@@ -3359,7 +3361,7 @@ class ConversationKernelRunner:
                             }
                         ).decode("utf-8")
                     ),
-                    image_reference_digest_part(reference_upper),
+                    image_reference_id_part(reference_upper),
                 ),
             )
             logical_followup += provider_neutral_message_logical_bytes(
@@ -3624,7 +3626,7 @@ class ConversationKernelRunner:
         if not result:
             result.append(
                 AssistantTextBlock(
-                    block_id=_id("block"),
+                    block_id=derive_id("block", "message", completed.draft_identity, "text", random_id("segment")),
                     text=await self._content(b"", deadline=self._canonical_deadline()),
                 )
             )
@@ -3677,8 +3679,6 @@ class ConversationKernelRunner:
         # already returned and is never invoked by this settlement loop.
 
 
-def _id(prefix: str) -> str:
-    return f"{prefix}:{uuid4().hex}"
 
 
 def _provider_incomplete_terminal_reason(error: BaseException) -> str | None:
@@ -3717,8 +3717,6 @@ def _model_input_terminal_reason(error: BaseException) -> str | None:
     return None
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
 
 def _json_digest(value: FrozenJsonObjectFact) -> str:

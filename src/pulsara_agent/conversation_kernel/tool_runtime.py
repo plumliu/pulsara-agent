@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.prompt_content import bind_prompt_images
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
+
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -11,7 +16,6 @@ from pathlib import Path
 from threading import Condition, Lock, RLock
 from time import monotonic
 from typing import Callable, Mapping, Protocol
-from uuid import uuid4
 
 from jsonschema import ValidationError, validators
 
@@ -1540,7 +1544,9 @@ class DirectKernelToolPort:
             self._require_prepared_surface_locked(prepared)
             if prepared.access.surface_generation != self._surface_generation:
                 raise RuntimeError("retiring tool surface refuses new borrows")
-            borrow_id = f"tool-surface-borrow:{uuid4().hex}"
+            borrow_id = random_id("borrow")
+            while borrow_id in self._surface_borrows or borrow_id in self._surface_borrow_owners:
+                borrow_id = random_id("borrow")
             borrow = ProcessLocalToolSurfaceBorrow(
                 prepared=prepared,
                 borrow_id=borrow_id,
@@ -1844,9 +1850,12 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
-        if tool_name == "view_image":
+        if tool_name in {"view_image", "terminal_monitor"}:
             try:
-                parse_view_image_source(arguments)
+                if tool_name == "view_image":
+                    parse_view_image_source(arguments)
+                else:
+                    parse_terminal_monitor_input(dict(arguments))
             except ValueError as exc:
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -3576,6 +3585,7 @@ class DirectKernelToolPort:
             content = FrozenPromptContent((LLMTextPart(
                 "HTML current-version screenshot; viewport 1200×800, light theme, visible, reduced motion. Publication reads the file again." if html_source else "Image loaded."
             ), image))
+            content = bind_prompt_images(content, workspace_id=invocation_context.workspace_id)
             increment = allowance.quote_owner.quote(
                 tool_call_id=tool_call_id,
                 source=source,
@@ -3843,7 +3853,7 @@ class DirectKernelToolPort:
         snapshot: TerminalOutputSnapshot,
     ) -> None:
         process_id = info.process_id
-        generation_id = f"terminal-process:{process_id}"
+        generation_id = derive_id("generation", "channel", "terminal-process", process_id)
         origin = info.origin
         self._live_bus.offer_nowait(
             event_type=LiveEventType.TERMINAL_PROCESS_COMPLETED,
@@ -4008,7 +4018,7 @@ class DirectKernelToolPort:
                 scope_kind=scope_kind.value,
                 scope_subagent_task_id=scope_subagent_task_id,
                 channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
-                generation_id=f"todo:{todo_run_id}",
+                generation_id=derive_id("generation", "channel", "todo", todo_run_id),
                 proposed_entry_id=None,
                 block_id=draft_identity,
                 block_ordinal=0,

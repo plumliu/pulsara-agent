@@ -157,7 +157,7 @@ def test_private_dependency_visible_error_without_path_fallback(tmp_path, monkey
 
 
 def test_find_files_external_scope_and_search_observations_do_not_authorize_edit(tmp_path):
-    from hashlib import sha256
+    from pulsara_agent.identity import content_revision
     from pulsara_agent.tools.builtins.filesystem import EditFileTool
     workspace = tmp_path / 'workspace'
     external = tmp_path / 'external'
@@ -170,7 +170,7 @@ def test_find_files_external_scope_and_search_observations_do_not_authorize_edit
     assert invoke(FindFilesTool(workspace), glob='*', path='/')['error'] == 'SEARCH_ROOT_TOO_BROAD'
     (workspace / 'sample.py').write_text('needle\n')
     assert invoke(FindFilesTool(workspace), glob='*.py')['files'] == ['sample.py']
-    result = invoke(EditFileTool(workspace), path='sample.py', base_revision='sha256:' + sha256(b'needle\n').hexdigest(), operations=[{'kind':'replace_lines','start_line':1,'end_line':1,'lines':['changed']}])
+    result = invoke(EditFileTool(workspace), path='sample.py', base_revision=content_revision(b'needle\n'), operations=[{'kind':'replace_lines','start_line':1,'end_line':1,'lines':['changed']}])
     assert result['error'] == 'READ_OBSERVATION_REQUIRED'
 
 
@@ -182,7 +182,7 @@ def test_hook_review_observes_full_sealed_builtin_owner_composition(tmp_path):
     from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
     from tests.support.round3 import prepare_test_direct_tool_surface
     async def exercise():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='review-host', session_id='review-session', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='review-host', session_id='session:zazc4gzsyde7brlnkyse2hjvpm', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.bind_subagent_port(SimpleNamespace(tool_names=('spawn_agent',)))
         port.bind_memory_port(SimpleNamespace(tool_names=('memory_get', 'remember')))
         try:

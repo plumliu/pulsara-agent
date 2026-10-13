@@ -7,13 +7,15 @@ block a provider stream, canonical transaction, or Host close.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, random_id
+
+
 from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 import json
 from threading import RLock
 from typing import Callable
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
@@ -235,7 +237,7 @@ class LiveAgentEventBus:
             LiveChannelKind.TOOL_RESULT,
         }:
             resolved_proposed = draft_identity
-        resolved_generation = generation_id or f"live-generation:{draft_identity}"
+        resolved_generation = generation_id or derive_id("generation", "draft", draft_identity)
         if not isinstance(payload, LIVE_PAYLOAD_TYPE_BY_EVENT[event_type]):
             raise TypeError("live payload does not match its event type")
         payload_mapping = payload_to_mapping(payload)
@@ -329,7 +331,9 @@ class LiveAgentEventBus:
                 raise RuntimeError("live bus is closed")
             if len(self._observers) >= STAGE2_LIMITS.live_observer_hard_count:
                 raise RuntimeError("live observer capacity is exhausted")
-            observer_id = f"live-observer:{uuid4().hex}"
+            observer_id = random_id("observer")
+            while observer_id in self._observers:
+                observer_id = random_id("observer")
             self._observers[observer_id] = _Observer(
                 generation=self._generation,
             )
@@ -394,7 +398,7 @@ class LiveAgentEventBus:
             LiveChannelKind.TOOL_RESULT,
         }:
             resolved_proposed = draft_identity
-        resolved_generation = generation_id or f"live-generation:{draft_identity}"
+        resolved_generation = generation_id or derive_id("generation", "draft", draft_identity)
         _validate_live_channel(
             draft_identity=draft_identity,
             scope_kind=scope_kind,

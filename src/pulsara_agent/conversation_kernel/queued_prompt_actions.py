@@ -1,9 +1,9 @@
 """Exact PR04 action values; session_commands owns durable idempotency."""
+from pulsara_agent.identity import derive_id
 
 from dataclasses import dataclass
 
 from pulsara_agent.conversation_kernel.contracts import canonical_digest
-from pulsara_agent.conversation_kernel.steer import _stable_id
 
 
 class QueuedPromptActionRejected(RuntimeError):
@@ -34,7 +34,7 @@ class QueuedPromptAction:
         if self.target_turn_id is None:
             return None
         # The same canonical ID builder used by ordinary prompt ingress.
-        return _stable_id("queue-item", self.session_id, self.command_id)
+        return derive_id('queue', 'ingress', self.session_id, self.command_id)
 
     @property
     def target_queue_item_id(self) -> str:

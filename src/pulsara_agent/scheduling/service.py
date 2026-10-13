@@ -1,12 +1,13 @@
 """One process-local scheduler; accepted work belongs to the ordinary ROOT queue."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id, is_valid_id
+
 
 import asyncio
 from contextlib import suppress
 from datetime import datetime, timezone as utc_timezone
 import logging
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.session_text import display_title
@@ -16,7 +17,6 @@ from pulsara_agent.conversation_kernel.host import (
     KernelHostCoreClosing,
 )
 from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
-from pulsara_agent.conversation_kernel.steer import _stable_id
 from pulsara_agent.llm.input import PromptContent, LLMTextPart
 from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 from pulsara_agent.primitives.permission import PermissionMode
@@ -138,7 +138,6 @@ class ScheduledTaskService:
         row = await self._manage(
             "create_scheduled_task",
             session_id=session_id,
-            task_id=f"scheduled:{uuid4().hex}",
             values=values,
             status=status,
             model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
@@ -176,7 +175,6 @@ class ScheduledTaskService:
             task_id=task_id,
             expected_revision=expected_revision,
             target=target,
-            new_task_id=f"scheduled:{uuid4().hex}",
             model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
         )
         self._prepare_errors.pop(task_id, None)
@@ -285,12 +283,17 @@ class ScheduledTaskService:
             "request_at_utc",
         }:
             raise ScheduledTaskError("INVALID_REQUEST", "运行一次参数无效。")
-        if (
-            any(
-                not isinstance(request[k], str) or not request[k]
-                for k in ("client_command_id", "session_id", "task_id")
+        if any(
+            not is_valid_id(request[field], kind)
+            for field, kind in (
+                ("client_command_id", "command"),
+                ("session_id", "session"),
+                ("task_id", "schedule"),
             )
-            or type(request["expected_revision"]) is not int
+        ):
+            raise ScheduledTaskError("INVALID_ID", "运行一次身份无效。")
+        if (
+            type(request["expected_revision"]) is not int
             or request["expected_revision"] < 1
         ):
             raise ScheduledTaskError("INVALID_REQUEST", "运行一次身份无效。")
@@ -357,12 +360,7 @@ class ScheduledTaskService:
         return self._run_result(accepted, request)
 
     async def _submit(self, host, admission):
-        command = admission.client_command_id or _stable_id(
-            "scheduled-tick",
-            admission.task_id,
-            str(admission.revision),
-            admission.due_at.isoformat(),
-        )
+        command = admission.client_command_id or derive_id("command", "scheduled-tick", admission.task_id, str(admission.revision), admission.due_at.astimezone(utc_timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))
         return await host.submit_prompt(
             command_id=command,
             content=PromptContent((LLMTextPart(admission.prompt),)),

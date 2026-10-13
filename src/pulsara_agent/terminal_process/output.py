@@ -8,6 +8,8 @@ has no serializer, database adapter, or recovery seam.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id, require_id
+
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 import codecs
 from dataclasses import dataclass
@@ -17,7 +19,6 @@ import json
 from threading import Condition, RLock
 from time import monotonic
 from typing import Callable
-from uuid import uuid4
 
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
@@ -74,7 +75,9 @@ class TerminalOutputCursor:
     sanitized_utf8_offset: int
 
     def __post_init__(self) -> None:
-        if not self.owner_epoch or not self.process_id or not self.stream_id:
+        require_id(self.process_id, "process")
+        require_id(self.stream_id, "stream")
+        if not self.owner_epoch:
             raise ValueError("terminal output cursor identity is incomplete")
         if self.sanitized_utf8_offset < 0:
             raise ValueError("terminal output cursor offset is negative")
@@ -376,7 +379,7 @@ class TerminalOutputOwner:
             raise ValueError("terminal retained output bound is invalid")
         self.owner_epoch = owner_epoch
         self.process_id = process_id
-        self.stream_id = f"terminal-stream:{uuid4().hex}"
+        self.stream_id = random_id("stream")
         self.maximum_bytes = maximum_bytes
         self._sanitizer = IncrementalTerminalSanitizer()
         self._retained = bytearray()
@@ -506,8 +509,11 @@ class TerminalOutputOwner:
         self._retained_from += boundary
 
     def subscribe(self, callback: OutputSubscriber) -> tuple[str, TerminalOutputCursor]:
-        token = f"terminal-output-subscription:{uuid4().hex}"
-        return token, self.install_subscription(token, callback)
+        with self._lock:
+            token = random_id("subscription")
+            while token in self._subscribers:
+                token = random_id("subscription")
+            return token, self.install_subscription(token, callback)
 
     def install_subscription(
         self, token: str, callback: OutputSubscriber
@@ -777,7 +783,7 @@ def encode_terminal_output_cursor(cursor: TerminalOutputCursor) -> str:
     )
     envelope = {
         "payload": payload,
-        "checksum": sha256(b"terminal-output-cursor:v1\0" + canonical).hexdigest(),
+        "checksum": sha256(b"terminal-output-cursor:v2\0" + canonical).hexdigest(),
     }
     return (
         urlsafe_b64encode(
@@ -796,7 +802,7 @@ def decode_terminal_output_cursor(value: str) -> TerminalOutputCursor:
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
-        expected = sha256(b"terminal-output-cursor:v1\0" + canonical).hexdigest()
+        expected = sha256(b"terminal-output-cursor:v2\0" + canonical).hexdigest()
         if envelope.get("checksum") != expected:
             raise ValueError
         return TerminalOutputCursor(

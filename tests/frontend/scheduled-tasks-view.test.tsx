@@ -232,5 +232,5 @@ it('prevents rapid repeated submission while the request is unresolved',async()=
  resolve({queue_item_id:'queue:a',status:'RUNNING',coalesced:false});
  expect((await screen.findByRole('button',{name:'运行中'})).hasAttribute('disabled')).toBe(true);
  await waitFor(()=>expect(notify).toHaveBeenCalledWith('任务正在运行','可在会话中查看','success'));
- expect(screen.queryByRole('status')).toBeNull();
+ await waitFor(()=>expect(screen.queryByRole('status')).toBeNull());
 });

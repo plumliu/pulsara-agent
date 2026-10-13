@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.images import bound_test_image
 
 from hashlib import sha256
 
@@ -30,7 +31,7 @@ from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 def _image(payload: bytes = b"validated-image") -> LLMImagePart:
-    return LLMImagePart("image/png", payload, 1, 1)
+    return bound_test_image("image/png", payload, 1, 1)
 
 
 def _mixed_content() -> FrozenPromptContent:
@@ -66,7 +67,7 @@ def test_compaction_request_images_are_closed_to_human_origins(
     if active:
         with pytest.raises(ValueError, match="cannot carry image"):
             FrozenCompactionActiveRequest(
-                entry_id="entry:active",
+                entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
                 entry_sequence=1,
                 location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
                 item_kind=FrozenProviderInputItemKind.USER,
@@ -102,11 +103,12 @@ def test_compaction_metadata_decoder_rejects_nonhuman_image_before_hydration() -
                     "input_origin": CanonicalInputOriginKind.SUBAGENT_OBJECTIVE.value,
                     "scheduled_input": None,
                     "content": {
-                        "schema": "pulsara.prompt/v1",
+                        "schema": "pulsara.prompt/v2",
                         "parts": (
                             {
                                 "type": "image",
                                 "digest": image.content_digest,
+                                "image_ref": image.image_ref,
                                 "encoded_bytes": len(image.immutable_bytes),
                                 "media_type": image.media_type,
                                 "width": image.width,
@@ -143,7 +145,7 @@ def test_blob_exact_read_guards_body_projection_with_expected_metadata() -> None
     class _Result:
         def fetchone(self):
             return {
-                "workspace_id": "workspace:test",
+                "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
                 "logical_digest": "sha256:" + "0" * 64,
                 "logical_size": 1024,
                 "media_type": "image/png",
@@ -167,7 +169,7 @@ def test_blob_exact_read_guards_body_projection_with_expected_metadata() -> None
             blob_id="blob:test",
             expected_digest=expected,
             expected_size=5,
-            expected_workspace_id="workspace:test",
+            expected_workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
             expected_media_type="image/png",
             expected_codec="binary",
         )

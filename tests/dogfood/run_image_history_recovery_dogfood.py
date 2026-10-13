@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import argparse
 import asyncio
 from dataclasses import replace
@@ -12,7 +14,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
 import traceback
-from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
 from psycopg.rows import dict_row
@@ -110,7 +111,7 @@ def cards(directory):
                 "number": number,
                 "color": color,
                 "shape": shape,
-                "image_ref": LLMImagePart(
+                "content_digest": LLMImagePart(
                     "image/png", path.read_bytes(), 1600, 900
                 ).content_digest,
             }
@@ -197,7 +198,7 @@ async def run(args, report, saved):
                     {"phase": phase, "text": str(prompt)}
                 )
                 outcome = await session.run_turn(
-                    prompt, command_id=f"command:recovery:{uuid4().hex}"
+                    prompt, command_id=random_id("command")
                 )
                 report["outcomes"].append({"phase": phase, "text": outcome.final_text})
                 return outcome.final_text
@@ -235,7 +236,7 @@ async def run(args, report, saved):
                 coordinator.validate_compaction_wire_transition = observe
                 try:
                     result = await session.compact_context(
-                        command_id=f"command:recovery:{uuid4().hex}", force=True
+                        command_id=random_id("command"), force=True
                     )
                 finally:
                     coordinator.validate_compaction_wire_transition = validate
@@ -245,6 +246,13 @@ async def run(args, report, saved):
                 assert result.disposition.value == "COMPACTED", result
 
             fixtures = report["fixtures"]
+            from pulsara_agent.conversation_kernel.prompt_content import bind_prompt_images
+            from pulsara_agent.llm.input import FrozenPromptContent
+            for fixture in fixtures:
+                fixture["image_ref"] = bind_prompt_images(
+                    FrozenPromptContent((LLMImagePart("image/png", Path(fixture["path"]).read_bytes(), 1600, 900),)),
+                    session.workspace.workspace_key,
+                ).parts[0].image_ref
             filler = (
                 "Disposable historical padding, no task or relevant fact. Omit it from summaries.\n"
                 * 600
@@ -313,7 +321,7 @@ async def run(args, report, saved):
                     == fixtures[0]["image_ref"]
                     for b in tool_calls(calls)
                 )
-                assert fixtures[0]["image_ref"] in base.wire_image_digests(calls[-1])
+                assert fixtures[0]["content_digest"] in base.wire_image_digests(calls[-1])
                 assert "magenta" in answer.lower() and "triangle" in answer.lower(), (
                     answer
                 )
@@ -428,7 +436,7 @@ async def run(args, report, saved):
                 == fixtures[1]["image_ref"]
                 for b in tools
             ), tools
-            assert fixtures[1]["image_ref"] in base.wire_image_digests(calls[-1])
+            assert fixtures[1]["content_digest"] in base.wire_image_digests(calls[-1])
             assert "blue" in answer.lower() and "oval" in answer.lower(), answer
             base.check_prefix(calls)
             report["checks"]["real_history_read_then_view_pixel_answer"] = True

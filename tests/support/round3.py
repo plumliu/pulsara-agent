@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -159,7 +161,7 @@ from tests.support.model_config import test_model_runtime
 
 
 def new_test_provider_input_continuity_owner(
-    session_id: str = "session:test",
+    session_id: str = 'session:336wrfwkamrr3up6kjtsgvgcte',
 ) -> HostProviderInputContinuityOwner:
     """Build a unit-test Host owner from an exact synthetic session genesis."""
 
@@ -167,7 +169,7 @@ def new_test_provider_input_continuity_owner(
         guard=HostWriterGuard(
             session_id=session_id,
             writer_generation=1,
-            writer_owner_id=f"host:test:{session_id}",
+            writer_owner_id=derive_id("host", "test-fixture", session_id),
         ),
         expires_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
         acquisition_kind=HostWriterAcquisitionKind.NEW_SESSION,
@@ -181,14 +183,14 @@ def new_test_subagent_lease_source(*, session_id: str, task_id: str):
     guard = HostWriterGuard(
         session_id=session_id,
         writer_generation=1,
-        writer_owner_id=f"host:test:{session_id}",
+        writer_owner_id=derive_id("host", "test-fixture", session_id),
     )
     task_start = build_subagent_task_start(
         session_id=session_id,
-        workspace_id="workspace:test",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         writer_generation=guard.writer_generation,
         task_id=task_id,
-        parent_turn_id="turn:test-parent",
+        parent_turn_id='turn:6acqdceiba6xlpjigpxo5o2jui',
         objective="test objective",
         profile=SubagentProfileKind.GENERAL_WORKER,
         parent_context=FrozenSubagentParentContextSelection(
@@ -517,7 +519,7 @@ class StaticContextSourceCollector:
         permission_snapshot: FrozenRunPermissionSnapshot,
     ):
         del permission_snapshot
-        turn_ref = "sha256:" + ("0" * 64)
+        turn_ref = "turn:" + "a" * 26
         return (
             self._value_observation_message(
                 ContextSourceKind.RUN_PERMISSION,
@@ -883,7 +885,7 @@ def static_canonical_compile_facts(
     """Build the final no-Plan compile fact for isolated adapter tests."""
 
     permission = build_run_permission_snapshot(
-        snapshot_id="permission:test",
+        snapshot_id='permission:53mvfpeaityebpvslz3hltgfuy',
         requested_mode=DEFAULT_PERMISSION_MODE,
         effective_mode=DEFAULT_PERMISSION_MODE,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -915,7 +917,7 @@ def static_canonical_compile_facts(
     object.__setattr__(provisional, "approved_plan_materialization_fact", None)
     freshness = build_tool_observation_freshness_fact(
         session_id=canonical_input.identity.session_id,
-        workspace_id="workspace:test",
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         current_turn_id=canonical_input.identity.turn_id,
         current_scope_kind=canonical_input.identity.conversation_scope_kind,
         scope_subagent_task_id=canonical_input.identity.scope_subagent_task_id,
@@ -1481,7 +1483,7 @@ def direct_tool_invocation_context(
     attempt_id: str,
     turn_id: str,
     assistant_entry_id: str,
-    workspace_id: str = "workspace:test",
+    workspace_id: str = 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
     permission_snapshot: FrozenRunPermissionSnapshot | None = None,
@@ -1497,7 +1499,7 @@ def direct_tool_invocation_context(
     borrow = port.borrow_tool_surface(prepared)
     try:
         permission = permission_snapshot or build_run_permission_snapshot(
-            snapshot_id=f"permission:{turn_id}",
+            snapshot_id=derive_id("permission", "test-fixture", f"permission:{turn_id}"),
             requested_mode=DEFAULT_PERMISSION_MODE,
             effective_mode=DEFAULT_PERMISSION_MODE,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -1510,7 +1512,7 @@ def direct_tool_invocation_context(
             assistant_entry_id=assistant_entry_id,
             tool_call_id=tool_call_id,
             attempt_id=attempt_id,
-            result_entry_id=f"result:{attempt_id}",
+            result_entry_id=derive_id("result", "test-fixture", f"result:{attempt_id}"),
             conversation_scope_kind=conversation_scope_kind.value,
             scope_subagent_task_id=scope_subagent_task_id,
             host_owner_epoch=1,
@@ -1552,7 +1554,7 @@ class Round10TestSubagentRuntime:
             session_id=session_id,
             caller_turn_id=parent_turn_id,
             provider_input_cut_fingerprint="sha256:test-child-parent-cut",
-            continuity_epoch_nonce="epoch:test-child-parent",
+            continuity_epoch_nonce='epoch:yktqlhzwr6vcnsbytvq7tklb5y',
             continuity_epoch_revision=0,
             compiled_semantic_input_fingerprint="sha256:test-child-parent-semantic",
             compiled_message_placements_fingerprint=(
@@ -1643,7 +1645,7 @@ class Round10TestSubagentRuntime:
         digest = "sha256:" + sha256(public_text.encode("utf-8")).hexdigest()
         result = build_subagent_result_public_fact(
             task_id=task_id,
-            result_id=f"subagent-result:{sha256(entry_id.encode()).hexdigest()}",
+            result_id=derive_id("agent-result", "completion", task_id, entry_id),
             source=SubagentResultSource.INFERRED,
             producer_entry_id=entry_id,
             summary=public_text or "Task completed without public text.",
@@ -1671,8 +1673,7 @@ class Round10TestSubagentRuntime:
         result = build_subagent_result_public_fact(
             task_id=task_id,
             result_id=(
-                "subagent-result:"
-                + sha256(f"{task_id}:{result_entry_id}".encode()).hexdigest()
+                derive_id("agent-result", "completion", task_id, result_entry_id)
             ),
             source=SubagentResultSource.EXPLICIT,
             producer_entry_id=result_entry_id,
@@ -1709,7 +1710,7 @@ async def invoke_direct_tool(
     attempt_id: str,
     turn_id: str,
     assistant_entry_id: str,
-    workspace_id: str = "workspace:test",
+    workspace_id: str = 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
     permission_snapshot: FrozenRunPermissionSnapshot | None = None,
@@ -1771,7 +1772,7 @@ async def authorize_direct_tool(
     borrow = port.borrow_tool_surface(prepared)
     try:
         permission = permission_snapshot or build_run_permission_snapshot(
-            snapshot_id=f"permission:{turn_id}",
+            snapshot_id=derive_id("permission", "test-fixture", f"permission:{turn_id}"),
             requested_mode=DEFAULT_PERMISSION_MODE,
             effective_mode=DEFAULT_PERMISSION_MODE,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,

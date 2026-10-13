@@ -87,6 +87,7 @@ class FrozenForkAnchor:
 @dataclass(frozen=True, slots=True)
 class FrozenForkGroup:
     source_group_key: str
+    source_group_kind: str
     settled_status: str
     accepted_at: datetime
     terminal_at: datetime | None
@@ -500,6 +501,7 @@ def read_fork_historical_material(
                     outcome = None
             groups[group_key] = FrozenForkGroup(
                 group_key,
+                "EXECUTED_TURN" if prefix == "executed" else "IMPORTED_HISTORY",
                 str(raw[prefix + "_status"]),
                 raw[prefix + "_accepted"],
                 raw[prefix + "_terminal"],
@@ -767,7 +769,7 @@ def read_fork_historical_material(
     frozen_groups = tuple(
         FrozenForkGroup(
             g.source_group_key,
-            g.settled_status,
+            g.source_group_kind,            g.settled_status,
             g.accepted_at,
             g.terminal_at,
             g.copied_final_source_entry_id

@@ -6,6 +6,7 @@ fixture mutates an installed provider prefix or the saved production settings.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import argparse
 import asyncio
@@ -200,7 +201,7 @@ async def run(args, report):
                                     )
                                 outcome = await session.run_turn(
                                     PromptContent.text(prompt),
-                                    command_id=f"command:artifact-dogfood:{name}:{index}",
+                                    command_id=derive_id("command", "test-fixture", f"command:artifact-dogfood:{name}:{index}"),
                                     requested_permission_mode=PermissionMode.READ_ONLY
                                     if name == "readonly" and index == 1
                                     else PermissionMode.BYPASS_PERMISSIONS,

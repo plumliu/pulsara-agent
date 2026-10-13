@@ -6,6 +6,8 @@ API key values are scrubbed. Never mutates the user's configured database.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
@@ -15,7 +17,6 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
-from uuid import uuid4
 
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -151,13 +152,13 @@ async def run(model_id, wire_api, report):
                     )
                 )
                 first = await parent.run_turn(
-                    PromptContent.text(prompt), command_id=f"command:{uuid4().hex}"
+                    PromptContent.text(prompt), command_id=random_id("command")
                 )
                 report["source_replies"].append(first.final_text)
                 anchor_a = await asyncio.to_thread(_anchor, parent)
                 later = await parent.run_turn(
                     PromptContent.text("A later branch note is FUTURE_B_913. Acknowledge in one short sentence."),
-                    command_id=f"command:{uuid4().hex}",
+                    command_id=random_id("command"),
                 )
                 report["source_replies"].append(later.final_text)
 
@@ -169,7 +170,7 @@ async def run(model_id, wire_api, report):
                     *,
                     expected_reply="FORK_ALPHA_812",
                 ):
-                    child_id = f"session:{uuid4().hex}"
+                    child_id = random_id("session")
                     creation = await core.fork_conversation(
                         source_session_id=parent.session_id,
                         anchor_entry_id=anchor,
@@ -212,7 +213,7 @@ async def run(model_id, wire_api, report):
                         else "What project token is present in the inherited conversation? Answer with the exact token only; do not use tools."
                     )
                     outcome = await child.run_turn(
-                        PromptContent.text(question), command_id=f"command:{uuid4().hex}"
+                        PromptContent.text(question), command_id=random_id("command")
                     )
                     branch_records = records[begin:]
                     agent_records = [
@@ -267,7 +268,7 @@ async def run(model_id, wire_api, report):
                     "uncompacted", anchor_a, "FORK_ALPHA_812", ["FUTURE_B_913"]
                 )
                 compacted = await parent.compact_context(
-                    command_id=f"command:{uuid4().hex}", force=True
+                    command_id=random_id("command"), force=True
                 )
                 report["compaction"] = {
                     "disposition": compacted.disposition.value,
@@ -276,13 +277,13 @@ async def run(model_id, wire_api, report):
                 assert compacted.disposition.value == "COMPACTED", compacted
                 current = await parent.run_turn(
                     PromptContent.text("Now acknowledge COMPACTED_ANCHOR_714; retain the original project token."),
-                    command_id=f"command:{uuid4().hex}",
+                    command_id=random_id("command"),
                 )
                 report["source_replies"].append(current.final_text)
                 anchor_c = await asyncio.to_thread(_anchor, parent)
                 newest = await parent.run_turn(
                     PromptContent.text("Future-only note FUTURE_D_615. Acknowledge briefly."),
-                    command_id=f"command:{uuid4().hex}",
+                    command_id=random_id("command"),
                 )
                 report["source_replies"].append(newest.final_text)
                 await branch(

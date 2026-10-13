@@ -4,9 +4,9 @@ Controller decisions are diagnostic inputs, not an assistant granting itself
 authority in a user's live session. The expiry timer override applies only to
 this isolated experiment and is restored before the continuation.
 """
+from pulsara_agent.identity import random_id
 
 import asyncio
-from uuid import uuid4
 
 import pulsara_agent.conversation_kernel.interaction as interaction_module
 from pulsara_agent.primitives.permission import PermissionMode
@@ -28,7 +28,7 @@ async def _controller(session, decisions, records):
                 expected_owner_epoch=snapshot.owner_epoch,
                 expected_live_revision=snapshot.revision,
                 interaction_id=current.interaction_id,
-                command_id=f"command:probe-decision:{uuid4().hex}",
+                command_id=random_id("command"),
                 decision=decision, actor_id="prompt-probe-controller",
             )
             records.append({"interaction_id": current.interaction_id,

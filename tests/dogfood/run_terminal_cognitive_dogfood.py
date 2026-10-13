@@ -7,6 +7,7 @@ introduced: the finite scenarios below describe this experiment, not runtime pol
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import argparse
 import asyncio
@@ -104,7 +105,7 @@ async def run(args, report):
                     start = monotonic()
                     outcome = await session.run_turn(
                         PromptContent.text(prompts[name]),
-                        command_id=f"command:terminal-cognitive:{name}",
+                        command_id=derive_id("command", "test-fixture", f"command:terminal-cognitive:{name}"),
                         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                     )
                     case = {

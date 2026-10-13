@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id, require_id
+
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
-from uuid import uuid4
 
 from pulsara_agent.llm.model_catalog import (
     MINIMUM_SELECTABLE_CONTEXT_TOKENS,
@@ -28,15 +29,11 @@ class ModelConnectionId:
     value: str
 
     def __post_init__(self) -> None:
-        if not self.value.startswith("model-connection:"):
-            raise ValueError("model connection ID has an invalid namespace")
-        suffix = self.value.removeprefix("model-connection:")
-        if len(suffix) != 32 or any(character not in "0123456789abcdef" for character in suffix):
-            raise ValueError("model connection ID must contain a lowercase UUID hex")
+        require_id(self.value, "connection")
 
     @classmethod
     def new(cls) -> "ModelConnectionId":
-        return cls(f"model-connection:{uuid4().hex}")
+        return cls(random_id("connection"))
 
 
 class ModelConnectionAuthentication(StrEnum):

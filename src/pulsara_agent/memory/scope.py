@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id, is_valid_id
+
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -11,10 +13,9 @@ from typing import Literal
 
 
 CTX_GLOBAL = "ctx:global"
-WORKSPACE_CONTEXT_PREFIX = "ctx:workspace/"
+WORKSPACE_CONTEXT_PREFIX = "workspace:"
 
 _FLAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
-_WORKSPACE_CONTEXT_KEY_CHARS = 16
 
 
 class MemoryHostWorkspaceKind(StrEnum):
@@ -133,9 +134,7 @@ def canonical_project_key(stable_project_key: str) -> str:
 
 def workspace_context_key(stable_project_key: str) -> str:
     canonical = canonical_project_key(stable_project_key)
-    return sha256(canonical.encode("utf-8")).hexdigest()[
-        :_WORKSPACE_CONTEXT_KEY_CHARS
-    ]
+    return derive_id("workspace", "project", canonical).removeprefix(WORKSPACE_CONTEXT_PREFIX)
 
 
 def workspace_context_id(stable_project_key: str) -> str:
@@ -146,8 +145,7 @@ def is_valid_context_id(context_id: str) -> bool:
     if context_id == CTX_GLOBAL:
         return True
     if context_id.startswith(WORKSPACE_CONTEXT_PREFIX):
-        key = context_id[len(WORKSPACE_CONTEXT_PREFIX) :]
-        return is_valid_flat_id(key)
+        return is_valid_id(context_id, "workspace")
     return False
 
 
@@ -158,7 +156,7 @@ def parse_context_id(
         return ("global", None)
     if context_id.startswith(WORKSPACE_CONTEXT_PREFIX):
         key = context_id[len(WORKSPACE_CONTEXT_PREFIX) :]
-        if is_valid_flat_id(key):
+        if is_valid_id(context_id, "workspace"):
             return ("workspace", key)
     raise ValueError(f"invalid memory context: {context_id!r}")
 

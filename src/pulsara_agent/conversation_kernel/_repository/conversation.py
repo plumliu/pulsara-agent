@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
+
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
 
 from pulsara_agent.conversation_kernel.annotations import validate_annotation_sources
@@ -120,7 +123,6 @@ from .contracts import (
     TurnAdmissionConfirmation,
     TurnAdmissionConfirmationKind,
     _content_columns,
-    _stable_identity,
     _stable_subagent_message_child_id,
     build_prepared_root_turn_admission,
 )
@@ -1188,7 +1190,7 @@ class _ConversationOperations:
         permission = self._freeze_root_permission_snapshot(
             connection,
             session_id=guard.session_id,
-            snapshot_id=_stable_identity("permission-snapshot", target.turn_id),
+            snapshot_id=derive_id('permission', 'admission', target.turn_id),
             requested_mode=origin_permission.effective_mode,
             admission_source=RunPermissionAdmissionSource.TERMINAL_OBSERVATION,
             inherited_from_turn_id=candidate.origin_turn_id,
@@ -1396,11 +1398,7 @@ class _ConversationOperations:
                 """,
                 (guard.session_id, entry_id),
             ).fetchone()
-            event_id = _stable_identity(
-                "event",
-                candidate.content.observation_id,
-                CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
-            )
+            event_id = derive_id("event", "accepted", guard.session_id, "TERMINAL_OBSERVATION_ACCEPTED", "ENTRY", entry_id, "")
             event_rows = connection.execute(
                 "SELECT * FROM pulsara_v3.agent_events WHERE event_id = %s",
                 (event_id,),
@@ -2524,7 +2522,7 @@ class _ConversationOperations:
                     event_type,
                     SubjectSlot.ENTRY,
                     entry_id,
-                    occurred_at=occurred_at,
+                    session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                     actor_kind="model",
                     actor_id=actor_id,
                     payload={
@@ -2540,7 +2538,7 @@ class _ConversationOperations:
                         CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED,
                         SubjectSlot.SUBAGENT_MESSAGE,
                         child_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="subagent",
                         actor_id=task_id,
                         payload={"child_ordinal": message_ordinal},
@@ -2609,7 +2607,7 @@ class _ConversationOperations:
                             CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
                             SubjectSlot.SUBAGENT_RESULT,
                             subagent_result.result_id,
-                            occurred_at=occurred_at,
+                            session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                             actor_kind="subagent",
                             actor_id=task_id,
                             payload={"result_source": "INFERRED"},
@@ -2618,7 +2616,7 @@ class _ConversationOperations:
                             CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
                             SubjectSlot.SUBAGENT_TASK,
                             task_id,
-                            occurred_at=occurred_at,
+                            session_id=guard.session_id, occurrence_key="status:" + 'COMPLETED', occurred_at=occurred_at,
                             actor_kind="runtime",
                             actor_id="foreground-runner",
                             payload={"status": "COMPLETED", "reason": None},
@@ -2658,7 +2656,7 @@ class _ConversationOperations:
                         CommittedEventType.TURN_COMPLETED,
                         SubjectSlot.TURN,
                         cut.turn_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id="foreground-runner",
                         payload={"final_entry_id": entry_id},
@@ -3059,7 +3057,7 @@ class _ConversationOperations:
                         CommittedEventType.TURN_INTERRUPTED,
                         SubjectSlot.TURN,
                         turn_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id=actor_id,
                         payload=interruption_payload(reason, public_detail),
@@ -3283,11 +3281,7 @@ class _ConversationOperations:
         entry_id: str,
     ) -> CommittedEventDraft:
         return CommittedEventDraft(
-            event_id=_stable_identity(
-                "event",
-                candidate.content.observation_id,
-                CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
-            ),
+            event_id=derive_id("event", "accepted", candidate.session_id, CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.name, SubjectSlot.ENTRY.name, entry_id, ""),
             event_type=CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED,
             subject=CommittedEventSubject(
                 slot=SubjectSlot.ENTRY,
@@ -3309,11 +3303,7 @@ class _ConversationOperations:
         candidate: UserControlFeedbackInstallationAttempt,
     ) -> CommittedEventDraft:
         return CommittedEventDraft(
-            event_id=_stable_identity(
-                "event",
-                candidate.entry_id,
-                CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED.value,
-            ),
+            event_id=derive_id("event", "accepted", candidate.session_id, CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED.name, SubjectSlot.ENTRY.name, candidate.entry_id, ""),
             event_type=CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED,
             subject=CommittedEventSubject(
                 slot=SubjectSlot.ENTRY,

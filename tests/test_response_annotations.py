@@ -48,7 +48,7 @@ from pulsara_agent.model_input.lowering import (
 def annotation(quote="中文😀 &amp;", comment="$pulsara-docs 解释一下"):
     return PromptAnnotationPart(
         quote,
-        PromptAnnotationSource("entry:source", 0, len(quote.encode("utf-16-le")) // 2),
+        PromptAnnotationSource('entry:4g4gwnnvee2tosb7zkrcv7tz3e', 0, len(quote.encode("utf-16-le")) // 2),
         comment,
     )
 
@@ -70,15 +70,15 @@ def test_codec_provider_intent_and_protocol_roundtrip():
     assert parts[-1].text == "原文不变"
     assert a.quote in parts[0].text
     assert all(
-        "entry:source" not in part.text and '"source"' not in part.text
+        'entry:4g4gwnnvee2tosb7zkrcv7tz3e' not in part.text and '"source"' not in part.text
         for part in parts
     )
     assert frozen.resource_quote.epoch_logical_bytes == llm_content_logical_bytes(parts)
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:user",
+        source_entry_id='entry:a4bjxt45dbisnge25xvuhbvfoq',
         source_entry_sequence=2,
-        source_turn_id="turn:1",
+        source_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         content=content.parts,
     )
@@ -104,9 +104,9 @@ def test_utf16_and_fork_sources_preserve_model_projection():
         with pytest.raises(ValueError):
             utf16_slice("甲😀乙", start, end)
     original = FrozenPromptContent((annotation(),))
-    child = remap_annotation_sources(original, {"entry:source": "entry:child"})
-    assert child.parts[0].source.entry_id == "entry:child"
-    grandchild = remap_annotation_sources(child, {"entry:child": "entry:grandchild"})
+    child = remap_annotation_sources(original, {'entry:4g4gwnnvee2tosb7zkrcv7tz3e': 'entry:fhx2dcgwzqpysr5bxkzd7zvgve'})
+    assert child.parts[0].source.entry_id == 'entry:fhx2dcgwzqpysr5bxkzd7zvgve'
+    grandchild = remap_annotation_sources(child, {'entry:fhx2dcgwzqpysr5bxkzd7zvgve': 'entry:ivrpj3artmlophocuhubae7jri'})
     missing = remap_annotation_sources(grandchild, {})
     assert missing.parts[0].source is None
     assert prompt_provider_parts(original.parts) == prompt_provider_parts(missing.parts)
@@ -153,9 +153,9 @@ def test_dispatch_anchor_uses_comment_intent_and_excludes_quote(origin):
 
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:user",
+        source_entry_id='entry:a4bjxt45dbisnge25xvuhbvfoq',
         source_entry_sequence=2,
-        source_turn_id="turn:test",
+        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         input_origin=origin,
         content=(annotation("$quoted-skill 使用记忆", "$pulsara-docs 不使用记忆"),),
     )
@@ -205,7 +205,7 @@ async def _image_freezer_check():
         deadline_monotonic=monotonic() + 30,
     )
     assert isinstance(mixed.parts[1], LLMImagePart)
-    frozen = freeze_canonical_prompt(mixed)
+    frozen = freeze_canonical_prompt(mixed, workspace_id="workspace:" + "a" * 26)
     assert [(x.ref_ordinal, x.part_index) for x in frozen.image_occurrences] == [(0, 1)]
     assert (
         hydrate_canonical_prompt_body(

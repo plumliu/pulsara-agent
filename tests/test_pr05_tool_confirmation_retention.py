@@ -1,6 +1,7 @@
 """PR05: exercise the production coordinator with explicit physical I/O barriers."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from datetime import datetime
@@ -71,10 +72,10 @@ class DecisionRepository:
 
 def make_owner(repository=None):
     repository = repository or DecisionRepository()
-    live = SessionLiveControlOwner(session_id="session:pr05", owner_epoch=7)
+    live = SessionLiveControlOwner(session_id='session:tdspn5k2oo6jafhz5tcbmngqga', owner_epoch=7)
     owner = KernelInteractionCoordinator(
         repository=repository,
-        guard=HostWriterGuard("session:pr05", 7, "host:pr05"),
+        guard=HostWriterGuard('session:tdspn5k2oo6jafhz5tcbmngqga', 7, 'host:u7b6kknm42lxuopzrawwykdfbu'),
         live_control=live,
         live_bus=LiveAgentEventBus(),
         io_owner=KernelSessionIO(),
@@ -85,12 +86,12 @@ def make_owner(repository=None):
 def request(owner, ordinal=1, hooks=None):
     return asyncio.create_task(
         owner.request_tool_confirmation(
-            turn_id=f"turn:{ordinal}",
-            assistant_entry_id=f"entry:{ordinal}",
+            turn_id=derive_id("turn", "test-fixture", f"turn:{ordinal}"),
+            assistant_entry_id=derive_id("entry", "test-fixture", f"entry:{ordinal}"),
             tool_call_id=f"call:{ordinal}",
             tool_name="terminal",
             permission_snapshot=build_run_permission_snapshot(
-                snapshot_id="permission:pr05",
+                snapshot_id='permission:lsf3jcj5tfegppf2erwmuymj4e',
                 requested_mode=PermissionMode.ASK_PERMISSIONS,
                 effective_mode=PermissionMode.ASK_PERMISSIONS,
                 admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -107,7 +108,7 @@ def resolve(owner, live, *, actor="controller:1", decision="ALLOW"):
         expected_owner_epoch=snapshot.owner_epoch,
         expected_live_revision=snapshot.revision,
         interaction_id=snapshot.current_interaction.interaction_id,
-        command_id=f"command:{decision}",
+        command_id=derive_id("command", "test-fixture", f"command:{decision}"),
         decision=decision,
         actor_id=actor,
     )
@@ -520,7 +521,7 @@ def test_r14_confirmation_failure_is_unknown_not_stale_at_gateway(tmp_path, fail
         state = SimpleNamespace(host_session=host, granted_role=wire.ATTACHMENT_ROLE_CONTROLLER,
             attachment_id="controller:1")
         response = await server._resolve_interaction(state, wire.ResolveInteractionRequest(
-            request_id="request:unknown", command_id="command:unknown", expected_writer_generation=7,
+            request_id='request:cconwv2i5svrojgjlg54ebigiy', command_id='command:htqmmojkkntlw2grpsdq6ceqtm', expected_writer_generation=7,
             expected_owner_epoch=snapshot.owner_epoch, expected_live_revision=snapshot.revision,
             interaction_id=snapshot.current_interaction.interaction_id, decision=wire.INTERACTION_ALLOW))
         assert response.error.stable_code == "INTERACTION_OUTCOME_UNKNOWN"
@@ -563,9 +564,9 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
             monkeypatch.setattr(repository, "confirm_tool_interaction_decision", held_read)
         owner, live, _ = make_owner(repository)
         await owner.attach_controller("controller:1")
-        supervisor = McpHostSupervisor(session_id="session:pr05", workspace_root=tmp_path, configs=(_config(tmp_path),))
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="host:pr05",
-            session_id="session:pr05", live_bus=LiveAgentEventBus(),
+        supervisor = McpHostSupervisor(session_id='session:tdspn5k2oo6jafhz5tcbmngqga', workspace_root=tmp_path, configs=(_config(tmp_path),))
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:u7b6kknm42lxuopzrawwykdfbu',
+            session_id='session:tdspn5k2oo6jafhz5tcbmngqga', live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.bind_interaction_port(owner)
         port.bind_mcp_supervisor(supervisor)
@@ -576,17 +577,17 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
             scope_subagent_task_id=None)
         effect = next(item for item in surface.model_surface.tool_specs if item.name.endswith("fixture_effect"))
         borrow = port.borrow_tool_surface(surface)
-        permission = build_run_permission_snapshot(snapshot_id="permission:pr05",
+        permission = build_run_permission_snapshot(snapshot_id='permission:lsf3jcj5tfegppf2erwmuymj4e',
             requested_mode=PermissionMode.ASK_PERMISSIONS, effective_mode=PermissionMode.ASK_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
         waiter = submission = None
         try:
             await port.authorize(tool_name=effect.name, arguments={"value": "must-not-execute"},
-                tool_call_id="call:cancel", turn_id="turn:cancel", assistant_entry_id="entry:cancel",
+                tool_call_id="call:cancel", turn_id='turn:bjo672se4p33odo75fvtqi452q', assistant_entry_id='entry:fzz4xmltqd5ttmzc3n22eqjjdu',
                 permission_snapshot=permission, surface_borrow=borrow, memory_context=_enabled_memory_context())
-            prepared = port.prepare_permission_request(tool_call_id="call:cancel", turn_id="turn:cancel", surface_borrow=borrow)
+            prepared = port.prepare_permission_request(tool_call_id="call:cancel", turn_id='turn:bjo672se4p33odo75fvtqi452q', surface_borrow=borrow)
             waiter = asyncio.create_task(port.request_confirmation(prepared_request=prepared,
-                tool_name=effect.name, assistant_entry_id="entry:cancel", permission_snapshot=permission))
+                tool_name=effect.name, assistant_entry_id='entry:fzz4xmltqd5ttmzc3n22eqjjdu', permission_snapshot=permission))
             await asyncio.sleep(0)
             pending = owner._pending
             permit = next(iter(port._mcp_dispatch_permits.values()))

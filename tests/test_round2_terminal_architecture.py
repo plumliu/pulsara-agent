@@ -97,9 +97,9 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority(
     }
     tool_owner = DirectKernelToolPort(
         workspace_root=tmp_path,
-        host_owner_id="host:terminal-architecture",
+        host_owner_id='host:67u6fcd4rvw72ska4wdziwus4a',
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
-        session_id="session:terminal-architecture",
+        session_id='session:ugdptgf7up3cikmvqamyfkq22a',
         live_bus=LiveAgentEventBus(),
     )
     try:

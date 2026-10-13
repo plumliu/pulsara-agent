@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from pulsara_agent.llm.input import annotation_from_value
 from pulsara_agent.workspace_identity import WorkspaceUnavailable, require_workspace
 
@@ -11,7 +13,6 @@ import binascii
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from uuid import uuid4
 
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
@@ -275,6 +276,8 @@ class LocalBrowserBridge:
                 async with self._lock:
                     if self._closing:
                         raise RuntimeError("Local Web application is draining")
+                    if connection.connection_id in self._connections:
+                        raise RuntimeError("IDENTITY_CONFLICT: browser transport is already published")
                     self._connections[connection.connection_id] = connection
                     self._browser_instance_by_connection[connection.connection_id] = (
                         browser_instance_id
@@ -361,7 +364,7 @@ class LocalBrowserBridge:
 
         token = BrowserSessionDetachToken(
             session_id=operation.session_id,
-            detach_nonce=f"browser-detach:{uuid4().hex}",
+            detach_nonce=random_id("request"),
             operation=operation,
             gate=gate,
             owner=self,
@@ -730,6 +733,10 @@ class LocalBrowserBridge:
             expected_session_id=str(body.get("expected_session_id", "")),
             expected_host_session_id=str(body.get("expected_host_session_id", "")),
             target_process_id=str(body.get("target_process_id", "")),
+            control_admission_deadline_ms=_uint(
+                body.get("control_admission_deadline_ms", 0),
+                "control_admission_deadline_ms",
+            ),
         )
         if "prompt_content" in body:
             request.prompt_content.CopyFrom(
@@ -766,6 +773,7 @@ class LocalBrowserBridge:
             )
             request.expected_control.CopyFrom(
                 wire.ExpectedUserControl(
+                    admission_deadline_ms=_uint(expected.get("admission_deadline_ms", 0), "admission_deadline_ms"),
                     operation=operation,
                     session_id=_required_string(expected, "session_id"),
                     host_session_id=_required_string(expected, "host_session_id"),

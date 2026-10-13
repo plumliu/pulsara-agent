@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import replace
@@ -43,7 +44,7 @@ def _request(
         handler_id="handler:test",
         manifest_digest="sha256:" + "1" * 64,
         plane=plane,
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         turn_id=None,
         event_types=event_types,
         projection_major=1,
@@ -60,9 +61,9 @@ def _request(
 def _offer(sequence: int, *, payload: str = "accepted") -> PostCommitHookOffer:
     return PostCommitHookOffer(
         event_type=CommittedEventType.ASSISTANT_MESSAGE_ACCEPTED,
-        session_id="session:test",
-        turn_id="turn:test",
-        subject_id=f"entry:{sequence}",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        subject_id=derive_id("entry", "test-fixture", f"entry:{sequence}"),
         event_sequence=sequence,
         public_payload={"status": payload},
     )
@@ -78,7 +79,7 @@ def test_post_commit_registration_cut_has_no_durable_catchup() -> None:
             delivered.set()
 
         host = KernelExtensionHost(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             authenticated_first_party_principal_ids=frozenset(
                 {"extension:first-party"}
             ),
@@ -114,7 +115,7 @@ def test_hook_overflow_delivers_one_gap_then_detaches_without_gating_offer() -> 
             delivered.set()
 
         host = KernelExtensionHost(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             authenticated_first_party_principal_ids=frozenset(
                 {"extension:first-party"}
             ),
@@ -144,7 +145,7 @@ def test_extension_vocabulary_and_sensitive_profiles_are_closed() -> None:
         return None
 
     host = KernelExtensionHost(
-        session_id="session:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         authenticated_first_party_principal_ids=frozenset(
             {"extension:first-party"}
         ),
@@ -192,7 +193,7 @@ def test_expired_extension_lease_drops_future_offers() -> None:
             deliveries.append(item)
 
         host = KernelExtensionHost(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             authenticated_first_party_principal_ids=frozenset(
                 {"extension:first-party"}
             ),
@@ -223,7 +224,7 @@ def test_extension_lease_expiry_retires_queued_delivery_after_slow_callback() ->
             await release_first.wait()
 
         host = KernelExtensionHost(
-            session_id="session:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             authenticated_first_party_principal_ids=frozenset(
                 {"extension:first-party"}
             ),
@@ -254,7 +255,7 @@ def test_redacted_live_extension_never_receives_tool_argument_text() -> None:
             deliveries.append(item)
             delivered.set()
 
-        host = KernelExtensionHost(session_id="session:test")
+        host = KernelExtensionHost(session_id='session:336wrfwkamrr3up6kjtsgvgcte')
         principal = host.authenticate_principal(
             extension_principal_id="extension:third-party"
         )
@@ -273,11 +274,11 @@ def test_redacted_live_extension_never_receives_tool_argument_text() -> None:
                 generation=1,
                 revision=1,
                 event_type=LiveEventType.TOOL_CALL_DELTA,
-                session_id="session:test",
-                turn_id="turn:test",
-                draft_identity="entry:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+                draft_identity='entry:yizmduice57hcs52bz2usckgc4',
                 payload=ToolCallDeltaPayload(
-                    block_identity="block:test",
+                    block_identity='block:dweyobrw6nyayfeqqkfqzbmtgu',
                     tool_call_id="call:test",
                     delta=secret,
                 ),
@@ -287,8 +288,8 @@ def test_redacted_live_extension_never_receives_tool_argument_text() -> None:
                 channel_tool_call_id=None,
                 channel_attempt_id=None,
                 generation_id="model-output:entry:test",
-                proposed_entry_id="entry:test",
-                block_id="block:test",
+                proposed_entry_id='entry:yizmduice57hcs52bz2usckgc4',
+                block_id='block:dweyobrw6nyayfeqqkfqzbmtgu',
                 block_ordinal=0,
                 block_kind=LiveBlockKind.TOOL_CALL,
             )
@@ -298,7 +299,7 @@ def test_redacted_live_extension_never_receives_tool_argument_text() -> None:
         encoded = repr(deliveries[0].payload)
         assert "secret" not in encoded
         assert deliveries[0].payload["payload"] == {
-            "block_identity": "block:test",
+            "block_identity": 'block:dweyobrw6nyayfeqqkfqzbmtgu',
             "tool_call_id": "call:test",
             "delta_redacted": True,
             "delta_utf8_bytes": len(secret.encode("utf-8")),

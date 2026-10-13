@@ -1,3 +1,4 @@
+import { isCanonicalIdentity } from './identity';
 export const PROMPT_BODY_MEDIA_TYPE = 'application/vnd.pulsara.prompt+json';
 
 export type PromptContentOwner =
@@ -20,6 +21,7 @@ export interface CanonicalPromptImagePart {
   type: 'image';
   source: 'canonical';
   digest: string;
+  imageRef: string;
   encodedBytes: number;
   mediaType: string;
   width: number;
@@ -93,7 +95,7 @@ export function decodeCanonicalPromptContent(
     throw new Error('输入正文格式无效。');
   }
   if (!isRecord(raw) || !hasExactKeys(raw, ['parts', 'schema'])
-    || raw.schema !== 'pulsara.prompt/v1' || !Array.isArray(raw.parts)
+    || raw.schema !== 'pulsara.prompt/v2' || !Array.isArray(raw.parts)
     || raw.parts.length === 0) {
     throw new Error('输入正文格式无效。');
   }
@@ -108,8 +110,9 @@ export function decodeCanonicalPromptContent(
     if (
       item.type !== 'image'
       || !hasExactKeys(item, [
-        'digest', 'encoded_bytes', 'height', 'media_type', 'type', 'width',
+        'digest', 'encoded_bytes', 'height', 'image_ref', 'media_type', 'type', 'width',
       ])
+      || !isCanonicalIdentity(item.image_ref, 'image')
       || typeof item.digest !== 'string'
       || !digestPattern.test(item.digest)
       || !positiveInteger(item.encoded_bytes)
@@ -122,6 +125,7 @@ export function decodeCanonicalPromptContent(
       type: 'image',
       source: 'canonical',
       digest: item.digest,
+      imageRef: item.image_ref,
       encodedBytes: item.encoded_bytes,
       mediaType: item.media_type,
       width: item.width,

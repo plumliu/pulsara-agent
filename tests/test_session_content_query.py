@@ -1,4 +1,5 @@
 """Saved conversation recovery preserves scope, original text and continuation."""
+from uuid import uuid4
 
 from datetime import datetime, timezone
 import json
@@ -47,7 +48,7 @@ from tests.test_turn_interruption_history import stop
 
 @pytest.fixture
 def context(repo):
-    domain = identity("domain").replace(":", "_")
+    domain = uuid4().hex.replace(":", "_")
 
     def new():
         return repo.acquire_host_writer(
@@ -240,7 +241,7 @@ def test_query_only_calls_do_not_match_or_consume_search_limit(repo, context):
     assert hit["items"][0]["entry_id"] != old
 
 
-def test_long_unicode_call_arguments_cursor_only_and_content_v3_hard_cut(repo, context):
+def test_long_unicode_call_arguments_cursor_only_and_content_v4_hard_cut(repo, context):
     _, new, query = context
     target = new()
     arguments = {"z": ['引号"😀\\\n' * 6000], "a": {"β": False, "null": None}}
@@ -264,7 +265,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v3_hard_cut(repo, c
     first_cursor = page["next_cursor"]
     assert (
         _decode(first_cursor, "read_session_content")["operation"]
-        == "read_session_content.v3"
+        == "read_session_content.v4"
     )
     chunks = []
     while True:
@@ -290,7 +291,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v3_hard_cut(repo, c
     )
     new_cursor = page["next_cursor"]
     old = _decode(new_cursor, "search_session_content")
-    assert old["operation"] == "search_session_content.bm25.v2"
+    assert old["operation"] == "search_session_content.bm25.v3"
     assert query("search_session_content", cursor=new_cursor)["items"]
     old["operation"] = "search_session_content"
     with pytest.raises(SessionQueryError) as error:
@@ -320,6 +321,7 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
     result_id = identity("entry")
     text = 'result-needle read_session_content {"items":["ordinary output"]}'
     projection = ToolOutputArtifactProcessor(repo.connection_provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace,
         result_entry_id=result_id,
         public_output=text,
@@ -805,6 +807,7 @@ def test_cross_session_tool_public_metadata_and_full_artifact_are_one_stable_vie
         ),
     )
     projection = processor.prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace,
         result_entry_id=result_id,
         public_output=json.dumps({"exit_code": 23, "output": source}),
@@ -991,20 +994,20 @@ def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp
     async def run():
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:query",
-            session_id="session:query",
+            host_owner_id='host:bri7pnkejy5ycd6bf5z6u6mq6e',
+            session_id='session:tonl7moeh47xjefxa32vgqmvkq',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             session_content_query=query,
         )
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id="session:query",
+            session_id='session:tonl7moeh47xjefxa32vgqmvkq',
             tool_name="read_session_content",
             tool_call_id="call:query",
-            attempt_id="attempt:query",
-            turn_id="turn:query",
-            assistant_entry_id="entry:query",
+            attempt_id='attempt:6lcu64tcolmjuk5vjtgz3jk3pa',
+            turn_id='turn:xuiovfj7unyhhjtxjxa2ejqwdy',
+            assistant_entry_id='entry:4bwk3sll4m4vlmtvnwpeywd6um',
         )
         context = replace(context, session_content_range=SessionContentRange(0))
 
@@ -1013,9 +1016,9 @@ def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp
                 tool_name="read_session_content",
                 arguments={},
                 tool_call_id="call:query",
-                attempt_id="attempt:query",
-                turn_id="turn:query",
-                assistant_entry_id="entry:query",
+                attempt_id='attempt:6lcu64tcolmjuk5vjtgz3jk3pa',
+                turn_id='turn:xuiovfj7unyhhjtxjxa2ejqwdy',
+                assistant_entry_id='entry:4bwk3sll4m4vlmtvnwpeywd6um',
                 invocation_context=context,
             )
 
@@ -1023,7 +1026,7 @@ def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp
             child = prepare_test_direct_tool_surface(
                 port,
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id="task:query",
+                scope_subagent_task_id='task:u52c5g24amk35q7qgadbaquelq',
             )
             assert SESSION_QUERY_TOOL_NAMES.isdisjoint(
                 s.name for s in child.model_surface.tool_specs

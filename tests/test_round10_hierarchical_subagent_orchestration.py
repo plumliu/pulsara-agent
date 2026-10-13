@@ -1,13 +1,15 @@
 """Round 10 hierarchical worker/task-board product contracts."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 
 import asyncio
 from dataclasses import replace
-from hashlib import sha256
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -99,18 +101,11 @@ async def _set_capacity(manager, target):
 
 
 def _id(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _round10_id(namespace: str, *parts: str) -> str:
-    digest = sha256()
-    digest.update(f"pulsara:round10:{namespace}:v1\0".encode())
-    for part in parts:
-        digest.update(part.encode("utf-8"))
-        digest.update(b"\0")
-    return f"{namespace}:{digest.hexdigest()}"
+    return derive_id(namespace, "spawn", *parts)
 
 
 def _manager_launch_kwargs(
@@ -159,37 +154,37 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
 
     with pytest.raises(TypeError, match="frozen objects"):
         build_subagent_result_public_fact(
-            task_id="task:test",
-            result_id="result:test",
+            task_id='task:kmz6pl55dsqspcz6dgmhr7sxpy',
+            result_id='result:pvg3icg6wn2puqqgiuggdo2ej4',
             source=SubagentResultSource.EXPLICIT,
-            producer_entry_id="entry:test",
+            producer_entry_id='entry:yizmduice57hcs52bz2usckgc4',
             summary="done",
             diagnostics=["not-an-object"],
         )
     with pytest.raises(ValueError, match="item bound"):
         build_subagent_result_public_fact(
-            task_id="task:test",
-            result_id="result:test",
+            task_id='task:kmz6pl55dsqspcz6dgmhr7sxpy',
+            result_id='result:pvg3icg6wn2puqqgiuggdo2ej4',
             source=SubagentResultSource.EXPLICIT,
-            producer_entry_id="entry:test",
+            producer_entry_id='entry:yizmduice57hcs52bz2usckgc4',
             summary="done",
             diagnostics=[{"code": str(index)} for index in range(33)],
         )
     absent_data = build_subagent_result_public_fact(
-        task_id="task:test", result_id="result:absent", source=SubagentResultSource.EXPLICIT,
-        producer_entry_id="entry:test", summary="done",
+        task_id='task:kmz6pl55dsqspcz6dgmhr7sxpy', result_id='result:7vsyvkdbgjfeaxmgj3t23js64y', source=SubagentResultSource.EXPLICIT,
+        producer_entry_id='entry:yizmduice57hcs52bz2usckgc4', summary="done",
     )
     assert absent_data.data is None
     structured = build_subagent_result_public_fact(
-        task_id="task:test", result_id="result:structured", source=SubagentResultSource.EXPLICIT,
-        producer_entry_id="entry:test", summary="needs changes",
+        task_id='task:kmz6pl55dsqspcz6dgmhr7sxpy', result_id='result:tzmdhcmisuv6cqe34s2tit4cmm', source=SubagentResultSource.EXPLICIT,
+        producer_entry_id='entry:yizmduice57hcs52bz2usckgc4', summary="needs changes",
         data={"decision": "needs_changes", "issue_count": 2}, data_present=True,
     )
     assert json.loads(canonical_json_bytes(structured.data)) == {"decision": "needs_changes", "issue_count": 2}
     with pytest.raises(ValueError, match="delivery bound"):
         build_subagent_result_public_fact(
-            task_id="task:test", result_id="result:large", source=SubagentResultSource.EXPLICIT,
-            producer_entry_id="entry:test", summary="x" * 16_380,
+            task_id='task:kmz6pl55dsqspcz6dgmhr7sxpy', result_id='result:rymy22yojbo37xb7rreacoqxri', source=SubagentResultSource.EXPLICIT,
+            producer_entry_id='entry:yizmduice57hcs52bz2usckgc4', summary="x" * 16_380,
             data={"decision": "needs_changes"}, data_present=True,
         )
 
@@ -215,16 +210,16 @@ def test_round10_wait_is_level_triggered_input_barrier_without_result_transport(
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=_Repository(),  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
                 owner_epoch="todo:test",
             ),
         )
-        context = SimpleNamespace(turn_id="turn:root")
+        context = SimpleNamespace(turn_id='turn:b565wrncq4ezfqthehjqni5ilm')
         idle = await manager._wait(  # noqa: SLF001
             {"timeout_seconds": 0}, context
         )
@@ -234,7 +229,7 @@ def test_round10_wait_is_level_triggered_input_barrier_without_result_transport(
             "pending_task_ids": [],
         }
 
-        assert await manager.offer_subagent_completion("task:done")
+        assert await manager.offer_subagent_completion('task:y5fpcmjc3oxo42gmcrrczbqcdq')
         immediate = await manager._wait(  # noqa: SLF001
             {"timeout_seconds": 30}, context
         )
@@ -256,8 +251,8 @@ def test_round10_targeted_all_ignores_partial_and_unrelated_completions() -> Non
     class _Repository:
         def __init__(self) -> None:
             self.statuses = {
-                "task:a": "COMPLETED",
-                "task:b": "ACTIVE",
+                'task:7ekouunh3opwy6r5hpnpyw22fa': "COMPLETED",
+                'task:ofq7v6vy25ozw4nkz722653tpy': "ACTIVE",
             }
 
         @staticmethod
@@ -280,43 +275,43 @@ def test_round10_targeted_all_ignores_partial_and_unrelated_completions() -> Non
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
                 owner_epoch="todo:test",
             ),
         )
-        await manager.open_root_completion_delivery("turn:root")
-        assert await manager.offer_subagent_completion("task:unrelated")
+        await manager.open_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
+        assert await manager.offer_subagent_completion('task:lctroqiznts2pgyju2hi3ivczu')
 
         waiter = asyncio.create_task(
             manager._wait(  # noqa: SLF001
                 {
-                    "task_ids": ["task:a", "task:b"],
+                    "task_ids": ['task:7ekouunh3opwy6r5hpnpyw22fa', 'task:ofq7v6vy25ozw4nkz722653tpy'],
                     "settle": "all",
                     "timeout_seconds": 1,
                 },
-                SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+                SimpleNamespace(turn_id='turn:b565wrncq4ezfqthehjqni5ilm', session_id='session:336wrfwkamrr3up6kjtsgvgcte'),
             )
         )
         await asyncio.sleep(0)
         assert not waiter.done()
 
-        repository.statuses["task:b"] = "COMPLETED"
+        repository.statuses['task:ofq7v6vy25ozw4nkz722653tpy'] = "COMPLETED"
         await manager.notify_root_input_activity()
         result = await asyncio.wait_for(waiter, timeout=1)
         assert json.loads(result.content) == {
             "outcome": "predicate_satisfied",
-            "satisfied_task_ids": ["task:a", "task:b"],
+            "satisfied_task_ids": ['task:7ekouunh3opwy6r5hpnpyw22fa', 'task:ofq7v6vy25ozw4nkz722653tpy'],
             "pending_task_ids": [],
         }
-        assert await manager.snapshot_pending_root_completions("turn:root") == (
-            "task:unrelated",
-            "task:a",
-            "task:b",
+        assert await manager.snapshot_pending_root_completions('turn:b565wrncq4ezfqthehjqni5ilm') == (
+            'task:lctroqiznts2pgyju2hi3ivczu',
+            'task:7ekouunh3opwy6r5hpnpyw22fa',
+            'task:ofq7v6vy25ozw4nkz722653tpy',
         )
 
     asyncio.run(exercise())
@@ -348,23 +343,23 @@ def test_round10_targeted_wait_claims_terminal_source_before_success() -> None:
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=_Repository(),  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
                 owner_epoch="todo:test",
             ),
         )
-        await manager.open_root_completion_delivery("turn:root")
+        await manager.open_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
         result = await manager._wait(  # noqa: SLF001
-            {"task_ids": ["task:done"], "timeout_seconds": 0.001},
-            SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+            {"task_ids": ['task:y5fpcmjc3oxo42gmcrrczbqcdq'], "timeout_seconds": 0.001},
+            SimpleNamespace(turn_id='turn:b565wrncq4ezfqthehjqni5ilm', session_id='session:336wrfwkamrr3up6kjtsgvgcte'),
         )
         assert json.loads(result.content)["outcome"] == "predicate_satisfied"
-        assert await manager.snapshot_pending_root_completions("turn:root") == (
-            "task:done",
+        assert await manager.snapshot_pending_root_completions('turn:b565wrncq4ezfqthehjqni5ilm') == (
+            'task:y5fpcmjc3oxo42gmcrrczbqcdq',
         )
 
     asyncio.run(exercise())
@@ -382,7 +377,7 @@ def test_round10_wait_exact_steer_precedes_join_and_untargeted_completion() -> N
 
         @staticmethod
         def read_pending_prompt_steer_facts(**kwargs: object):
-            assert kwargs["target_turn_id"] == "turn:root"
+            assert kwargs["target_turn_id"] == 'turn:b565wrncq4ezfqthehjqni5ilm'
             return ({"queue_item_id": "steer:exact"},)
 
         @staticmethod
@@ -397,25 +392,25 @@ def test_round10_wait_exact_steer_precedes_join_and_untargeted_completion() -> N
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=_Repository(),  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="todo:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch="todo:test"
             ),
         )
-        await manager.open_root_completion_delivery("turn:root")
-        assert await manager.offer_subagent_completion("task:unrelated")
-        context = SimpleNamespace(turn_id="turn:root", session_id="session:test")
+        await manager.open_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
+        assert await manager.offer_subagent_completion('task:lctroqiznts2pgyju2hi3ivczu')
+        context = SimpleNamespace(turn_id='turn:b565wrncq4ezfqthehjqni5ilm', session_id='session:336wrfwkamrr3up6kjtsgvgcte')
 
         targeted = await manager._wait(  # noqa: SLF001
-            {"task_ids": ["task:done"], "settle": "all", "timeout_seconds": 0},
+            {"task_ids": ['task:y5fpcmjc3oxo42gmcrrczbqcdq'], "settle": "all", "timeout_seconds": 0},
             context,
         )
         assert json.loads(targeted.content) == {
             "outcome": "steer_available",
-            "satisfied_task_ids": ["task:done"],
+            "satisfied_task_ids": ['task:y5fpcmjc3oxo42gmcrrczbqcdq'],
             "pending_task_ids": [],
         }
         untargeted = await manager._wait(  # noqa: SLF001
@@ -455,18 +450,18 @@ def test_round10_wait_deadline_performs_final_exact_predicate_check() -> None:
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="todo:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch="todo:test"
             ),
         )
-        await manager.open_root_completion_delivery("turn:root")
+        await manager.open_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
         result = await manager._wait(  # noqa: SLF001
-            {"task_ids": ["task:done"], "timeout_seconds": 0.001},
-            SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+            {"task_ids": ['task:y5fpcmjc3oxo42gmcrrczbqcdq'], "timeout_seconds": 0.001},
+            SimpleNamespace(turn_id='turn:b565wrncq4ezfqthehjqni5ilm', session_id='session:336wrfwkamrr3up6kjtsgvgcte'),
         )
         assert json.loads(result.content)["outcome"] == "predicate_satisfied"
         assert repository.query_count >= 2
@@ -507,23 +502,23 @@ def test_round10_join_readiness_rejects_seal_race_without_enqueuing() -> None:
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="todo:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch="todo:test"
             ),
         )
-        await manager.open_root_completion_delivery("turn:root")
+        await manager.open_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
         wait = asyncio.create_task(
             manager._wait(  # noqa: SLF001
-                {"task_ids": ["task:done"], "timeout_seconds": 30},
-                SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+                {"task_ids": ['task:y5fpcmjc3oxo42gmcrrczbqcdq'], "timeout_seconds": 30},
+                SimpleNamespace(turn_id='turn:b565wrncq4ezfqthehjqni5ilm', session_id='session:336wrfwkamrr3up6kjtsgvgcte'),
             )
         )
         await repository.entered.wait()
-        await manager.seal_root_completion_delivery("turn:root")
+        await manager.seal_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
         repository.release.set()
         result = await wait
         assert result.state == "APPLICATION_ERROR"
@@ -559,19 +554,19 @@ def test_round10_join_readiness_rechecks_owner_after_canonical_reads() -> None:
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="todo:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch="todo:test"
             ),
         )
-        await manager.open_root_completion_delivery("turn:root")
+        await manager.open_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
         readiness = await manager.ensure_root_completion_ready(
-            session_id="session:test",
-            root_turn_id="turn:root",
-            task_ids=("task:done",),
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            root_turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
+            task_ids=('task:y5fpcmjc3oxo42gmcrrczbqcdq',),
         )
         assert readiness is RootCompletionReadiness.OWNER_UNAVAILABLE
         assert repository.validations == 2
@@ -594,9 +589,9 @@ def test_round10_join_readiness_preserves_fifo_and_skips_accepted_sources() -> N
         def query_subagent_task(*, task_id: str, **_kwargs: object):
             return {
                 "id": task_id,
-                "status": "FAILED" if task_id == "task:new" else "COMPLETED",
+                "status": "FAILED" if task_id == 'task:234tdqlfjbk3fj6virjp7xhmq4' else "COMPLETED",
                 "accepted_root_entry_id": (
-                    "entry:accepted" if task_id == "task:accepted" else None
+                    'entry:4e4kqzz2pyvcy6ssu6eskeos2u' if task_id == 'task:mpdp5caeiaylumvrjj23aswl7m' else None
                 ),
             }
 
@@ -604,25 +599,25 @@ def test_round10_join_readiness_preserves_fifo_and_skips_accepted_sources() -> N
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=_Repository(),  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=_InlineIO(),  # type: ignore[arg-type]
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="todo:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch="todo:test"
             ),
         )
-        await manager.open_root_completion_delivery("turn:root")
-        assert await manager.offer_subagent_completion("task:existing")
+        await manager.open_root_completion_delivery('turn:b565wrncq4ezfqthehjqni5ilm')
+        assert await manager.offer_subagent_completion('task:iuqpkw4iottlrlyaoqzto7npim')
         readiness = await manager.ensure_root_completion_ready(
-            session_id="session:test",
-            root_turn_id="turn:root",
-            task_ids=("task:accepted", "task:existing", "task:new"),
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            root_turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
+            task_ids=('task:mpdp5caeiaylumvrjj23aswl7m', 'task:iuqpkw4iottlrlyaoqzto7npim', 'task:234tdqlfjbk3fj6virjp7xhmq4'),
         )
         assert readiness is RootCompletionReadiness.READY
-        assert await manager.snapshot_pending_root_completions("turn:root") == (
-            "task:existing",
-            "task:new",
+        assert await manager.snapshot_pending_root_completions('turn:b565wrncq4ezfqthehjqni5ilm') == (
+            'task:iuqpkw4iottlrlyaoqzto7npim',
+            'task:234tdqlfjbk3fj6virjp7xhmq4',
         )
 
     asyncio.run(exercise())
@@ -635,38 +630,38 @@ def test_round10_root_completion_answer_fence_keeps_late_delivery_for_next_turn(
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=SimpleNamespace(),
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
                 owner_epoch="todo:test",
             ),
         )
-        await manager.open_root_completion_delivery("turn:first")
-        assert await manager.offer_subagent_completion("task:before-fence")
-        assert not await manager.offer_subagent_completion("task:before-fence")
-        assert await manager.seal_root_completion_delivery("turn:first")
-        assert await manager.snapshot_pending_root_completions("turn:first") == ()
+        await manager.open_root_completion_delivery('turn:owaj6wekgpk4p37n3gf5szgdbe')
+        assert await manager.offer_subagent_completion('task:s5l4gp7u6d366mkzkzmv5kjtny')
+        assert not await manager.offer_subagent_completion('task:s5l4gp7u6d366mkzkzmv5kjtny')
+        assert await manager.seal_root_completion_delivery('turn:owaj6wekgpk4p37n3gf5szgdbe')
+        assert await manager.snapshot_pending_root_completions('turn:owaj6wekgpk4p37n3gf5szgdbe') == ()
         await manager.settle_root_completion_delivery(
-            "turn:first", turn_completed=False
+            'turn:owaj6wekgpk4p37n3gf5szgdbe', turn_completed=False
         )
-        assert await manager.snapshot_pending_root_completions("turn:first") == (
-            "task:before-fence",
+        assert await manager.snapshot_pending_root_completions('turn:owaj6wekgpk4p37n3gf5szgdbe') == (
+            'task:s5l4gp7u6d366mkzkzmv5kjtny',
         )
-        assert await manager.retire_root_completion("task:before-fence")
+        assert await manager.retire_root_completion('task:s5l4gp7u6d366mkzkzmv5kjtny')
 
         # Once the no-tool answer has sealed the exact turn, an arrival cannot
         # reopen it or force a background model sample.
-        assert not await manager.seal_root_completion_delivery("turn:first")
-        assert await manager.offer_subagent_completion("task:after-fence")
-        await manager.settle_root_completion_delivery("turn:first", turn_completed=True)
-        assert await manager.snapshot_pending_root_completions("turn:first") == ()
+        assert not await manager.seal_root_completion_delivery('turn:owaj6wekgpk4p37n3gf5szgdbe')
+        assert await manager.offer_subagent_completion('task:hvdqm3iueyyasrclf4bpgaefri')
+        await manager.settle_root_completion_delivery('turn:owaj6wekgpk4p37n3gf5szgdbe', turn_completed=True)
+        assert await manager.snapshot_pending_root_completions('turn:owaj6wekgpk4p37n3gf5szgdbe') == ()
 
-        await manager.open_root_completion_delivery("turn:next")
-        assert await manager.snapshot_pending_root_completions("turn:next") == (
-            "task:after-fence",
+        await manager.open_root_completion_delivery('turn:z73x6concrkxdlbjjzwyxkd7dq')
+        assert await manager.snapshot_pending_root_completions('turn:z73x6concrkxdlbjjzwyxkd7dq') == (
+            'task:hvdqm3iueyyasrclf4bpgaefri',
         )
 
     asyncio.run(exercise())
@@ -683,7 +678,7 @@ def test_round10_list_pages_dependency_hydration_without_inventory_cap() -> None
             accepted_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
             self.rows = tuple(
                 {
-                    "id": f"task:{index:02d}",
+                    "id": derive_id("task", "test-fixture", f"task:{index:02d}"),
                     "task_key": f"task-{index:02d}",
                     "label": None,
                     "profile_kind": "GENERAL_WORKER",
@@ -691,7 +686,7 @@ def test_round10_list_pages_dependency_hydration_without_inventory_cap() -> None
                     "status": "ACTIVE" if index == 54 else "COMPLETED",
                     "pending_reason": None,
                     "terminal_reason": None,
-                    "result_id": f"result:{index:02d}",
+                    "result_id": derive_id("result", "test-fixture", f"result:{index:02d}"),
                     "result_source": "EXPLICIT",
                     "result_summary": "done",
                     "accepted_root_entry_id": None,
@@ -739,7 +734,7 @@ def test_round10_list_pages_dependency_hydration_without_inventory_cap() -> None
         manager = object.__new__(KernelSubagentManager)
         manager._io = _InlineIO()  # type: ignore[attr-defined]
         manager._repository = repository  # type: ignore[attr-defined]
-        manager._guard = SimpleNamespace(session_id="session:test")  # type: ignore[attr-defined]
+        manager._guard = SimpleNamespace(session_id='session:336wrfwkamrr3up6kjtsgvgcte')  # type: ignore[attr-defined]
         manager._deadlines = SimpleNamespace(  # type: ignore[attr-defined]
             deadline=lambda _owner: monotonic() + 30
         )
@@ -788,7 +783,7 @@ def test_round10_list_pages_dependency_hydration_without_inventory_cap() -> None
         second_body = json.loads(second.content)
         assert second.state == "SUCCESS"
         assert [item["task_id"] for item in second_body["tasks"]] == [
-            f"task:{index:02d}" for index in range(50, 55)
+            derive_id("task", "test-fixture", f"task:{index:02d}") for index in range(50, 55)
         ]
         assert second_body["tasks"][-1]["status"] == "active"
         assert second_body["page_count"] == 5
@@ -810,8 +805,8 @@ def test_round10_root_and_child_tool_surfaces_have_one_fixed_layer_boundary(
     async def exercise() -> None:
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:test",
-            session_id="session:test",
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -826,7 +821,7 @@ def test_round10_root_and_child_tool_surfaces_have_one_fixed_layer_boundary(
         child = prepare_test_direct_tool_surface(
             port,
             conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id="task:test",
+            scope_subagent_task_id='task:kmz6pl55dsqspcz6dgmhr7sxpy',
         )
         root_names = tuple(item.name for item in root.model_surface.tool_specs)
         child_names = tuple(item.name for item in child.model_surface.tool_specs)
@@ -844,11 +839,11 @@ def test_round10_root_and_child_tool_surfaces_have_one_fixed_layer_boundary(
 def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
     units = (
         build_root_context_unit(
-            ordered_entry_ids=("entry:one",),
+            ordered_entry_ids=('entry:ay6zkjbalezbshcgcgqzdhosi4',),
             ordered_public_items=("user: one", "assistant: first"),
         ),
         build_root_context_unit(
-            ordered_entry_ids=("entry:two-a", "entry:two-b"),
+            ordered_entry_ids=('entry:5dc7vv7rkmoamilh24htzdsdsy', 'entry:mg4hkx4xoiz4xkupvjm43rurze'),
             ordered_public_items=(
                 "user: second-a",
                 "user: second-b",
@@ -857,15 +852,15 @@ def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
             ),
         ),
         build_root_context_unit(
-            ordered_entry_ids=("entry:three",),
+            ordered_entry_ids=('entry:os6w2tnypsvmnxitttst5iwkjm',),
             ordered_public_items=("user: open unit",),
         ),
     )
     subject = build_parent_context_call_subject(
-        session_id="session:test",
-        caller_turn_id="turn:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        caller_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         provider_input_cut_fingerprint="sha256:cut",
-        continuity_epoch_nonce="epoch:test",
+        continuity_epoch_nonce='epoch:oqvlxjh4xkrycrokcvcpxjjspi',
         continuity_epoch_revision=7,
         compiled_semantic_input_fingerprint="sha256:semantic",
         compiled_message_placements_fingerprint="sha256:placements",
@@ -887,15 +882,15 @@ def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
     assert "trust" not in parent_carrier
 
     dependencies = build_dependency_result_context(
-        target_task_id="task:consumer",
+        target_task_id='task:duf2lyh6uollzzwlkt7zucrd44',
         rows=(
             {
                 "dependency_ordinal": 0,
-                "dependency_task_id": "task:producer",
+                "dependency_task_id": 'task:rvzn5tykcuelnwe2r3kb2vfoja',
                 "task_key": "producer",
                 "label": None,
                 "status": "COMPLETED",
-                "result_id": "result:producer",
+                "result_id": 'result:m2dxiwyqthtxb33sjttlu4f7dm',
                 "result_source": "INFERRED",
                 "summary": "producer reported a value",
                 "result_fingerprint": "sha256:result",
@@ -943,7 +938,7 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         command_id=_id("command"),
         turn_id=parent_turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         model_call_binding=test_model_binding(test_model_runtime()),
@@ -992,7 +987,7 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         task_id=task_id,
         turn_id=child_turn,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         task_start_event_id=task_id.launch.task_start.event_id,
         expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(objective.encode("utf-8")),
@@ -1026,7 +1021,7 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         for source in seed.source_replacements
     )
     with pytest.raises(ValueError, match="subagent canonical initial seed is invalid"):
-        replace(seed, task_id="task:foreign")
+        replace(seed, task_id='task:4y2fm2v6fgdtjn5icki46tb7vy')
     with pytest.raises(ValueError, match="subagent canonical initial seed is invalid"):
         replace(seed, objective="different objective")
 
@@ -1046,32 +1041,32 @@ def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=SimpleNamespace(),  # no operation may reach it
-            guard=HostWriterGuard("session:test", 7, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 7, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
                 owner_epoch="todo:test",
             ),
         )
         subject = build_parent_context_call_subject(
-            session_id="session:test",
-            caller_turn_id="turn:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            caller_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
             provider_input_cut_fingerprint="sha256:cut",
-            continuity_epoch_nonce="epoch:test",
+            continuity_epoch_nonce='epoch:oqvlxjh4xkrycrokcvcpxjjspi',
             continuity_epoch_revision=0,
             compiled_semantic_input_fingerprint="sha256:semantic",
             compiled_message_placements_fingerprint="sha256:placements",
             ordered_eligible_units=(),
         )
         context = SimpleNamespace(
-            session_id="session:test",
-            workspace_id="workspace:test",
-            turn_id="turn:test",
-            assistant_entry_id="entry:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+            assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
             tool_call_id="call:test",
-            attempt_id="attempt:test",
+            attempt_id='attempt:wfltiqfg6cmo6cuivaxvkm4dr4',
             conversation_scope_kind="ROOT",
             scope_subagent_task_id=None,
             host_owner_epoch=7,
@@ -1087,12 +1082,12 @@ def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(
             },
             "list_agents": {},
             "list_agent_models": {},
-            "wait_agent": {"task_ids": ["task:test"]},
+            "wait_agent": {"task_ids": ['task:kmz6pl55dsqspcz6dgmhr7sxpy']},
             "send_agent_message": {
-                "task_id": "task:test",
+                "task_id": 'task:kmz6pl55dsqspcz6dgmhr7sxpy',
                 "message": "bounded message",
             },
-            "stop_agent": {"task_id": "task:test"},
+            "stop_agent": {"task_id": 'task:kmz6pl55dsqspcz6dgmhr7sxpy'},
         }
         for tool_name in ROOT_ORCHESTRATION_TOOL_NAMES:
             result = await manager.invoke(
@@ -1140,35 +1135,35 @@ def test_model_configuration_failure_is_returned_before_creating_workers(
             launch_preparation=UnavailableModels(),
             hook_workspace_root=Path.cwd,
             repository=repository,
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test", owner_epoch="todo:test"
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte', owner_epoch="todo:test"
             ),
         )
         subject = build_parent_context_call_subject(
-            session_id="session:test",
-            caller_turn_id="turn:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            caller_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
             provider_input_cut_fingerprint="cut:test",
-            continuity_epoch_nonce="epoch:test",
+            continuity_epoch_nonce='epoch:oqvlxjh4xkrycrokcvcpxjjspi',
             continuity_epoch_revision=0,
             compiled_semantic_input_fingerprint="semantic:test",
             compiled_message_placements_fingerprint="placements:test",
             ordered_eligible_units=(),
         )
         context = SimpleNamespace(
-            session_id="session:test",
-            workspace_id="workspace:test",
-            turn_id="turn:test",
-            attempt_id="attempt:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+            attempt_id='attempt:wfltiqfg6cmo6cuivaxvkm4dr4',
             conversation_scope_kind="ROOT",
             scope_subagent_task_id=None,
             host_owner_epoch=1,
             effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-            permission_snapshot_fingerprint="permission:test",
-            attempt_permission_snapshot_fingerprint="permission:test",
+            permission_snapshot_fingerprint='permission:53mvfpeaityebpvslz3hltgfuy',
+            attempt_permission_snapshot_fingerprint='permission:53mvfpeaityebpvslz3hltgfuy',
             subagent_parent_context_subject=subject,
         )
         task = {
@@ -1200,36 +1195,36 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
             repository=SimpleNamespace(),
-            guard=HostWriterGuard("session:test", 1, "host:test"),
-            host_owner_id="host:test",
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            host_owner_id='host:yinyxklzunar54s7objjdbphcy',
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id="session:test",
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
                 owner_epoch="todo:test",
             ),
         )
-        task_id = "task:test"
+        task_id = 'task:kmz6pl55dsqspcz6dgmhr7sxpy'
         parent_permission = build_run_permission_snapshot(
-            snapshot_id="permission:parent",
+            snapshot_id='permission:ode2aqcgkfsycipwf4nyc26m5u',
             requested_mode=PermissionMode.BYPASS_PERMISSIONS,
             effective_mode=PermissionMode.BYPASS_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         child_permission = build_run_permission_snapshot(
-            snapshot_id="permission:child",
+            snapshot_id='permission:6oi34lpfmqrfi4wwfgyjhaj3hu',
             requested_mode=PermissionMode.BYPASS_PERMISSIONS,
             effective_mode=PermissionMode.BYPASS_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.SUBAGENT_INHERITANCE,
-            inherited_from_turn_id="turn:parent",
+            inherited_from_turn_id='turn:um4fykhk5dunwqacqldv4fixaq',
         )
         launch = SimpleNamespace(
             configured_model_identity="test-pro",
-            child_turn_id="turn:child",
+            child_turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
             parent_permission_snapshot=parent_permission,
             task_start=SimpleNamespace(
                 task_id=task_id,
-                parent_turn_id="turn:parent",
+                parent_turn_id='turn:um4fykhk5dunwqacqldv4fixaq',
                 profile=SubagentProfileKind.GENERAL_WORKER,
             ),
         )
@@ -1238,16 +1233,16 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
             task_id=task_id,
             status="ACTIVE",
             task=physical,
-            cancellation_intent=SimpleNamespace(turn_id="turn:child"),
+            cancellation_intent=SimpleNamespace(turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m'),
             launch=launch,
             hook_scope=None,
         )
         manager._mailboxes[task_id] = []
         context = SimpleNamespace(
-            session_id="session:test",
-            turn_id="turn:root",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
             tool_call_id="call:first",
-            attempt_id="attempt:first",
+            attempt_id='attempt:xa2qz2tvsqcp4kqwzu5yc277ly',
         )
 
         # Send wins: the mailbox is non-empty, so the final answer cannot
@@ -1260,7 +1255,7 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
         assert (
             await manager.prepare_inferred_completion(
                 task_id=task_id,
-                entry_id="entry:first-final",
+                entry_id='entry:xid36pvjpuprkxdmpb2dk5ecdq',
                 public_text="premature answer",
                 model_id="test-pro",
                 permission_snapshot=child_permission,
@@ -1273,14 +1268,14 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
         manager._mailboxes[task_id].clear()
         prepared = await manager.prepare_inferred_completion(
             task_id=task_id,
-            entry_id="entry:real-final",
+            entry_id='entry:hhy6celwerspwhn6wezdrtzt2q',
             public_text="final answer",
             model_id="test-pro",
             permission_snapshot=child_permission,
         )
         assert prepared is not None
         context.tool_call_id = "call:late"
-        context.attempt_id = "attempt:late"
+        context.attempt_id = 'attempt:yqz5kie55uukcepgrzvjkt3n2q'
         late = await manager._send_message(
             {"task_id": task_id, "message": "too late"},
             context,
@@ -1339,7 +1334,7 @@ class _BlockingCanonicalAdmissionRunner:
             task_id=task_id,
             turn_id=cancellation_intent.turn_id,
             entry_id=_id("entry"),
-            context_binding_revision_id=_id("revision"),
+            context_binding_revision_id=_id("binding"),
             task_start_event_id=launch.task_start.event_id,
             expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
             content=InlineContent.from_bytes(
@@ -1383,7 +1378,7 @@ class _TodoAwareCountingBlockingChildRunner:
 
     async def admit_subagent_turn(self, *, launch, cancellation_intent):
         task_id = launch.task_start.task_id
-        context_binding_revision_id = _id("revision")
+        context_binding_revision_id = _id("binding")
         accepted = self._repository.start_subagent_turn(
             self._lease.guard,
             task_id=task_id,
@@ -1438,7 +1433,7 @@ class _CanonicalBlockingChildRunner:
             task_id=task_id,
             turn_id=cancellation_intent.turn_id,
             entry_id=_id("entry"),
-            context_binding_revision_id=_id("revision"),
+            context_binding_revision_id=_id("binding"),
             task_start_event_id=launch.task_start.event_id,
             expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
             content=InlineContent.from_bytes(
@@ -1488,7 +1483,7 @@ class _CompletingChildRunner:
             task_id=task_id,
             turn_id=turn_id,
             entry_id=_id("entry"),
-            context_binding_revision_id=_id("revision"),
+            context_binding_revision_id=_id("binding"),
             task_start_event_id=launch.task_start.event_id,
             expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
             content=InlineContent.from_bytes(objective.encode("utf-8")),
@@ -1539,8 +1534,7 @@ class _CompletingChildRunner:
         result = build_subagent_result_public_fact(
             task_id=task_id,
             result_id=(
-                "subagent-result:"
-                + sha256(f"{task_id}:{final_entry_id}".encode()).hexdigest()
+                derive_id("agent-result", "completion", task_id, final_entry_id)
             ),
             source=SubagentResultSource.INFERRED,
             producer_entry_id=final_entry_id,
@@ -1615,7 +1609,7 @@ def _prepare_root_tool_attempt(
         command_id=_id("command"),
         turn_id=turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         model_call_binding=test_model_binding(test_model_runtime()),
@@ -1670,7 +1664,7 @@ def _prepare_root_tool_attempt(
         session_id=session_id,
         caller_turn_id=turn_id,
         provider_input_cut_fingerprint="sha256:test-cut",
-        continuity_epoch_nonce="epoch:test",
+        continuity_epoch_nonce='epoch:oqvlxjh4xkrycrokcvcpxjjspi',
         continuity_epoch_revision=0,
         compiled_semantic_input_fingerprint="sha256:test-semantic",
         compiled_message_placements_fingerprint="sha256:test-placements",
@@ -1716,7 +1710,7 @@ def _prepare_root_tool_batch(
         command_id=_id("command"),
         turn_id=turn_id,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         model_call_binding=test_model_binding(test_model_runtime()),
@@ -1757,7 +1751,7 @@ def _prepare_root_tool_batch(
         session_id=session_id,
         caller_turn_id=turn_id,
         provider_input_cut_fingerprint="sha256:test-batch-cut",
-        continuity_epoch_nonce="epoch:test-batch",
+        continuity_epoch_nonce='epoch:h6f6vtdhdzduo2iily7zlfmecu',
         continuity_epoch_revision=0,
         compiled_semantic_input_fingerprint="sha256:test-batch-semantic",
         compiled_message_placements_fingerprint="sha256:test-batch-placements",
@@ -1827,7 +1821,7 @@ def test_round9_2_subagent_launch_permit_closes_both_stop_race_sides(
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id=session_id, owner_epoch=_id("todo")
+                session_id=session_id, owner_epoch=f"todo:{uuid4().hex}"
             ),
         )
         runner_factory_calls = 0
@@ -1852,7 +1846,7 @@ def test_round9_2_subagent_launch_permit_closes_both_stop_race_sides(
             )
         )
         await asyncio.wait_for(launch.entered.wait(), timeout=5)
-        task_id = _round10_id("subagent-task", context.attempt_id, "0")
+        task_id = _round10_id("task", context.attempt_id, "0")
         stopping = asyncio.create_task(
             manager.invoke(
                 tool_name="stop_agent",
@@ -1890,7 +1884,7 @@ def test_round9_2_subagent_launch_permit_closes_both_stop_race_sides(
 
     async def launch_wins_before_stop_claim() -> None:
         session_id = _id("session")
-        todo_owner = TodoRunStateOwner(session_id=session_id, owner_epoch=_id("todo"))
+        todo_owner = TodoRunStateOwner(session_id=session_id, owner_epoch=f"todo:{uuid4().hex}")
         lease, context = _prepare_root_tool_attempt(
             repository,
             session_id=session_id,
@@ -1923,7 +1917,7 @@ def test_round9_2_subagent_launch_permit_closes_both_stop_race_sides(
             )
         )
         await asyncio.wait_for(child.admission_entered.wait(), timeout=5)
-        task_id = _round10_id("subagent-task", context.attempt_id, "0")
+        task_id = _round10_id("task", context.attempt_id, "0")
         assert manager._launch_permits[task_id].launching
         stopping = asyncio.create_task(
             manager.invoke(
@@ -2015,7 +2009,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id=session_id, owner_epoch=_id("todo")
+                session_id=session_id, owner_epoch=f"todo:{uuid4().hex}"
             ),
         )
         manager.bind_runner_factory(
@@ -2134,7 +2128,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id=mismatch_session, owner_epoch=_id("todo")
+                session_id=mismatch_session, owner_epoch=f"todo:{uuid4().hex}"
             ),
         )
         mismatch_manager.bind_runner_factory(
@@ -2192,7 +2186,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             repository=repository, guard=invalid_lease.guard,
             host_owner_id=_id("host"), io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
-            todo_owner=TodoRunStateOwner(session_id=invalid_session, owner_epoch=_id("todo")),
+            todo_owner=TodoRunStateOwner(session_id=invalid_session, owner_epoch=f"todo:{uuid4().hex}"),
         )
         rejected = await invalid_manager.invoke(
             tool_name="create_agent_tasks", arguments=invalid_args,
@@ -2253,7 +2247,7 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
                 session_id=session_id,
-                owner_epoch=_id("todo"),
+                owner_epoch=f"todo:{uuid4().hex}",
             ),
         )
         started: list[str] = []
@@ -2358,7 +2352,7 @@ def test_round10_host_capacity_grandfathers_and_refills_one_ordered_queue(
         )
         todo_owner = TodoRunStateOwner(
             session_id=session_id,
-            owner_epoch=_id("todo"),
+            owner_epoch=f"todo:{uuid4().hex}",
         )
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(repository, lease.guard),
@@ -2452,7 +2446,7 @@ def test_round10_postcommit_child_activation_failure_settles_task_and_turn(
         )
         todo_owner = TodoRunStateOwner(
             session_id=session_id,
-            owner_epoch=_id("todo"),
+            owner_epoch=f"todo:{uuid4().hex}",
         )
         def reject_postcommit_activation(_prepared):
             raise RuntimeError("simulated TODO activation failure after child commit")
@@ -2551,7 +2545,7 @@ def test_round10_wait_agent_waits_for_dormant_dependency_terminalization(
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
                 session_id=session_id,
-                owner_epoch=_id("todo"),
+                owner_epoch=f"todo:{uuid4().hex}",
             ),
         )
         blocker = _CountingBlockingChildRunner()
@@ -2626,7 +2620,7 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
         workspace_id = _id("workspace")
         spawn_call = _id("call")
         spawn_attempt = _id("attempt")
-        task_id = _round10_id("subagent-task", spawn_attempt, "0")
+        task_id = _round10_id("task", spawn_attempt, "0")
         first_call, first_attempt = _id("call"), _id("attempt")
         second_call, second_attempt = _id("call"), _id("attempt")
         calls = (
@@ -2664,7 +2658,7 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
                 session_id=session_id,
-                owner_epoch=_id("todo"),
+                owner_epoch=f"todo:{uuid4().hex}",
             ),
         )
         child = _CanonicalBlockingChildRunner(repository, lease)
@@ -2728,8 +2722,8 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
         mailbox_events = [
             item for item in observation.projections
             if item.HasField("entry") and item.entry.entry_id in {
-                _round10_id("inter-agent-entry", first_attempt, task_id),
-                _round10_id("inter-agent-entry", second_attempt, task_id),
+                derive_id("entry", "agent-message", first_attempt, task_id),
+                derive_id("entry", "agent-message", second_attempt, task_id),
             }
         ]
         assert len(mailbox_events) == 2
@@ -2810,7 +2804,7 @@ def test_scheduler_waiter_cancellation_joins_shared_launch_before_propagating() 
         manager._closed = False
         manager._scheduler_task = None
         manager._scheduler_reschedule = False
-        manager._guard = SimpleNamespace(session_id="scheduler-cancel")
+        manager._guard = SimpleNamespace(session_id='session:margwsgmzpxhc6ahq6l7yiflxe')
         entered, finish = asyncio.Event(), asyncio.Event()
         settled: list[bool] = []
 
@@ -2853,7 +2847,7 @@ def test_worker_history_three_generations_survive_reload_and_gc(
     async def exercise():
         session_id, workspace_id = _id("session"), _id("workspace")
         attempts = [_id("attempt") for _ in range(3)]
-        task_ids = [_round10_id("subagent-task", attempt, "0") for attempt in attempts]
+        task_ids = [_round10_id("task", attempt, "0") for attempt in attempts]
         arguments = [
             {"task": "ancestor-alpha"},
             {
@@ -2882,7 +2876,7 @@ def test_worker_history_three_generations_survive_reload_and_gc(
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
             todo_owner=TodoRunStateOwner(
-                session_id=session_id, owner_epoch=_id("todo")
+                session_id=session_id, owner_epoch=f"todo:{uuid4().hex}"
             ),
         )
         sources, started = {}, []
@@ -2927,7 +2921,8 @@ def test_worker_history_three_generations_survive_reload_and_gc(
                 if compact_middle == "image":
                     from io import BytesIO
                     from PIL import Image
-                    from pulsara_agent.llm.input import LLMImagePart, LLMTextPart
+                    from pulsara_agent.llm.input import LLMTextPart
+                    from tests.support.images import bound_test_image
                     from pulsara_agent.model_input.contracts import (
                         FrozenRetainedHistoricalRequest,
                     )
@@ -2941,8 +2936,8 @@ def test_worker_history_three_generations_survive_reload_and_gc(
                             FrozenPromptContent(
                                 (
                                     LLMTextPart("retained illustration"),
-                                    LLMImagePart(
-                                        "image/png", image_bytes.getvalue(), 4, 4
+                                    bound_test_image(
+                                        "image/png", image_bytes.getvalue(), 4, 4, workspace_id=workspace_id
                                     ),
                                 )
                             ),
@@ -3031,7 +3026,7 @@ def test_capacity_lowering_during_query_or_reserved_launch(
         launch = _BlockingLaunchPreparation(kwargs['launch_preparation'])
         if hold_after_reservation:
             kwargs['launch_preparation'] = launch
-        manager=KernelSubagentManager(**kwargs,repository=repository,guard=lease.guard,host_owner_id=_id('host'),io_owner=KernelSessionIO(),live_bus=LiveAgentEventBus(),todo_owner=TodoRunStateOwner(session_id=session_id,owner_epoch=_id('todo')))
+        manager=KernelSubagentManager(**kwargs,repository=repository,guard=lease.guard,host_owner_id=_id('host'),io_owner=KernelSessionIO(),live_bus=LiveAgentEventBus(),todo_owner=TodoRunStateOwner(session_id=session_id,owner_epoch=_id("todo-run")))
         child = _CanonicalBlockingChildRunner(repository, lease)
         manager.bind_runner_factory(lambda scope:child)
         queried, release = Event(), Event()
@@ -3075,7 +3070,7 @@ def test_capacity_raise_while_scheduler_exits_is_not_lost():
         manager._closed=False
         manager._scheduler_task=None
         manager._scheduler_reschedule=False
-        manager._guard=SimpleNamespace(session_id='exit-race')
+        manager._guard=SimpleNamespace(session_id='session:r25t2iuwr2di5hldclqfstb5wa')
         exiting, release=asyncio.Event(),asyncio.Event()
         checks=[]
         async def worker():
@@ -3111,7 +3106,7 @@ def test_worker_controls_beyond_128_remain_queryable_and_cancellable(stage2_migr
         manager = KernelSubagentManager(**_manager_launch_kwargs(repository, lease.guard),
             repository=repository, guard=lease.guard, host_owner_id=_id('host'),
             io_owner=io, live_bus=LiveAgentEventBus(),
-            todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id('todo')))
+            todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id("todo-run")))
         attempts = {}
 
         class Worker(_CanonicalBlockingChildRunner):
@@ -3190,7 +3185,7 @@ def test_host_takeover_interrupts_active_queued_and_dependency_waiting_workers(
             **_manager_launch_kwargs(repository, lease.guard), repository=repository,
             guard=lease.guard, host_owner_id=_id('host'), io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
-            todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id('todo')),
+            todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id("todo-run")),
         )
         child = _CanonicalBlockingChildRunner(repository, lease)
         manager.bind_runner_factory(lambda scope: child)

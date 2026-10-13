@@ -1,3 +1,4 @@
+import { randomIdentity, isCanonicalIdentity } from './identity';
 import type { FilePreviewApi } from './file-preview';
 import { LocalMemoryApi } from './memory-api';
 import type {
@@ -369,6 +370,7 @@ export interface BackgroundProcessLog {
 }
 
 export interface UserControlCommandRef {
+  admissionDeadlineMs: number;
   commandId: string;
   operation: 'STOP_ACTIVE_TURN' | 'CANCEL_SUBAGENT_TASK' | 'TERMINATE_BACKGROUND_PROCESS';
   sessionId: string;
@@ -394,7 +396,8 @@ export function createUserControlCommandRef(
     );
   }
   return {
-    commandId: `command:control:${deadline}:${crypto.randomUUID()}`,
+    commandId: randomIdentity('command'),
+    admissionDeadlineMs: deadline,
     operation,
     sessionId,
     hostSessionId,
@@ -1326,11 +1329,10 @@ interface ProtocolBackgroundProcess {
   };
 }
 
-const browserInstanceStorageKey = 'pulsara-browser-instance-id-v1';
-const canonicalUuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const browserInstanceStorageKey = 'pulsara-browser-instance-id-v2';
 
 function resolveBrowserInstanceId(): string {
-  const next = () => crypto.randomUUID();
+  const next = () => randomIdentity('transport');
   if (typeof window === 'undefined') return next();
   let existing: string | null = null;
   try {
@@ -1341,7 +1343,7 @@ function resolveBrowserInstanceId(): string {
   const navigation = typeof window.performance?.getEntriesByType === 'function'
     ? window.performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
     : undefined;
-  if (navigation?.type === 'reload' && existing && canonicalUuidPattern.test(existing)) {
+  if (navigation?.type === 'reload' && existing && isCanonicalIdentity(existing, 'transport')) {
     return existing;
   }
   const created = next();
@@ -2696,6 +2698,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       client_submission_id: '',
       expected_session_id: reference.sessionId,
       expected_host_session_id: reference.hostSessionId,
+      control_admission_deadline_ms: reference.admissionDeadlineMs,
       target_turn_id: reference.targetId,
     }, reference.commandId);
   }
@@ -2725,6 +2728,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     }>('query-command', {
       command_id: reference.commandId,
       expected_control: {
+        admission_deadline_ms: reference.admissionDeadlineMs,
         operation,
         session_id: reference.sessionId,
         host_session_id: reference.hostSessionId,
@@ -3005,7 +3009,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     if (resolution.kind === 'tool') {
       throw new RuntimeApiError('INTERACTION_INVALID', '请选择一个规划操作。', false);
     }
-    const commandId = `command:web:${crypto.randomUUID()}`;
+    const commandId = randomIdentity('command');
     const resolutionFields = resolution.kind === 'plan-question-option'
       ? { resolution_kind: 'question_option', option_ordinal: resolution.optionOrdinal }
       : resolution.kind === 'plan-question-text'
@@ -3099,7 +3103,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     fields: Record<string, unknown> = {},
     suppliedCommandId?: string,
   ): Promise<CommandReceipt> {
-    const commandId = suppliedCommandId ?? `command:web:${crypto.randomUUID()}`;
+    const commandId = suppliedCommandId ?? randomIdentity('command');
     const frame = await this.post<{
       command_outcome?: ProtocolCommandOutcome;
       error?: ProtocolError;
@@ -3124,6 +3128,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       client_submission_id: '',
       expected_session_id: reference.sessionId,
       expected_host_session_id: reference.hostSessionId,
+      control_admission_deadline_ms: reference.admissionDeadlineMs,
       [targetField]: reference.targetId,
     }, reference.commandId);
   }
@@ -3139,7 +3144,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       || reference.sessionId !== this.sessionId
       || reference.hostSessionId !== (this.liveControl.host_session_id ?? '')
       || !reference.targetId
-      || !reference.commandId.startsWith('command:control:')
+      || !isCanonicalIdentity(reference.commandId, 'command')
     ) {
       throw new RuntimeApiError(
         'CONTROL_REFERENCE_INVALID',

@@ -8,6 +8,8 @@ renderer instead of copying its field list or byte formula.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import require_id
+
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -414,13 +416,7 @@ def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
     }:
         raise ValueError("tool timing observation contract is invalid")
     source_turn_ref = observation["source_turn_ref"]
-    if (
-        not isinstance(source_turn_ref, str)
-        or len(source_turn_ref) != 71
-        or not source_turn_ref.startswith("sha256:")
-        or any(character not in "0123456789abcdef" for character in source_turn_ref[7:])
-    ):
-        raise ValueError("tool timing turn reference is invalid")
+    require_id(source_turn_ref, "turn", "history")
     observed_at = observation["observed_at_utc"]
     if not isinstance(observed_at, str):
         raise ValueError("tool timing timestamp is invalid")
@@ -469,7 +465,7 @@ def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
 
 def _maximum_artifact_page_timing() -> FrozenToolObservationTimingFact:
     values = {
-        "source_turn_ref": "sha256:" + ("f" * 64),
+        "source_turn_ref": "history:" + ("a" * 26),
         "observed_at_utc": "9999-12-31T23:59:59.999999Z",
         "observation_duration_microseconds": (
             MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS
@@ -496,7 +492,7 @@ def _minimum_full_projection_timing() -> FrozenToolObservationTimingFact:
     """Return the shortest legal timing envelope for the FULL wire upper."""
 
     values = {
-        "source_turn_ref": "sha256:" + ("0" * 64),
+        "source_turn_ref": "turn:" + ("a" * 26),
         "observed_at_utc": "1970-01-01T00:00:00.000000Z",
         "observation_duration_microseconds": 0,
         "duration_disposition": ToolObservationDurationDisposition.MEASURED,

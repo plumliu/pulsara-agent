@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from time import monotonic
-from uuid import uuid4
 
 import psycopg
 import pytest
@@ -125,8 +126,8 @@ def _root_provider_input_admission(candidate) -> PreparedRootProviderInputAdmiss
 
 
 def _two_connection_resolution_cut():
-    first_id = ModelConnectionId("model-connection:" + "1" * 32)
-    second_id = ModelConnectionId("model-connection:" + "2" * 32)
+    first_id = ModelConnectionId('connection:knlsd5sz5j4bingayjthlnsehu')
+    second_id = ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli')
     first = test_model_runtime(connection_id=first_id, model_id="model-first")
     second = test_model_runtime(connection_id=second_id, model_id="model-second")
     first_cut = first.freeze_resolution_snapshot()
@@ -161,7 +162,7 @@ def _enqueue_binding_candidate(
         session_id=guard.session_id,
         command_id=command_id,
         queue_item_id=queue_item_id,
-        client_submission_id=_name("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=permission_snapshot_id,
@@ -294,7 +295,7 @@ def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
         command_id=_name("command"),
         turn_id=_name("turn"),
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("context"),
+        context_binding_revision_id=_name("binding"),
         permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         canonical_prompt=freeze_canonical_prompt(
@@ -383,7 +384,7 @@ def test_permanently_invalid_queued_binding_rejects_without_turn(
     candidate = repository.prepare_prompt_head_consumption(
         session_id=lease.guard.session_id,
         occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
         deadline_monotonic=monotonic() + 30,
     )
     assert candidate is not None
@@ -427,18 +428,18 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    session_id = f"session:{uuid4().hex}"
-    workspace_id = f"ctx:workspace/{uuid4().hex}"
+    session_id = random_id("session")
+    workspace_id = random_id("workspace")
     lease = repository.acquire_host_writer(
         intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
-        writer_owner_id=f"host:{uuid4().hex}",
+        writer_owner_id=random_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    queue_item_id = f"queue:{uuid4().hex}"
-    command_id = f"command:{uuid4().hex}"
+    queue_item_id = random_id("queue")
+    command_id = random_id("command")
     model_call_binding = test_model_binding(test_model_runtime())
     repository.update_session_model_call_binding(
         lease.guard,
@@ -450,10 +451,10 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
         lease.guard,
         command_id=command_id,
         queue_item_id=queue_item_id,
-        client_submission_id=f"submission:{uuid4().hex}",
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
-        permission_snapshot_id=f"permission:{uuid4().hex}",
+        permission_snapshot_id=random_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=model_call_binding,
         content=FrozenPromptContent.text('queued TODO run'),
@@ -464,7 +465,7 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
     candidate = repository.prepare_prompt_head_consumption(
         session_id=session_id,
         occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
+        actor_id='host:yinyxklzunar54s7objjdbphcy',
         deadline_monotonic=monotonic() + 30,
     )
     assert candidate is not None and candidate.queue_item_id == queue_item_id
@@ -493,9 +494,7 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
 
 
 def _name(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _snapshot_content(carrier) -> InlineContent:
@@ -530,13 +529,13 @@ def test_canonical_workspace_is_shared_and_transient_first_label_wins(
     def acquire_project(index: int):
         return repository.acquire_host_writer(
             intent="NEW",
-            session_id=f"session:{uuid4().hex}",
+            session_id=random_id("session"),
             workspace_id=project.workspace_key,
             workspace_kind=project.workspace_kind,
             workspace_root=str(project.workspace_root),
             workspace_label=project.display_label,
             memory_domain_id="u_local",
-            writer_owner_id=f"host:{index}:{uuid4().hex}",
+            writer_owner_id=random_id("host"),
             lease_seconds=30,
             deadline_monotonic=monotonic() + 30,
         )
@@ -569,26 +568,26 @@ def test_canonical_workspace_is_shared_and_transient_first_label_wins(
     )
     repository.acquire_host_writer(
         intent="NEW",
-        session_id=f"session:{uuid4().hex}",
+        session_id=random_id("session"),
         workspace_id=first.workspace_key,
         workspace_kind="transient",
         workspace_root=str(first.workspace_root),
         workspace_label=first.display_label,
         memory_domain_id="u_local",
-        writer_owner_id=f"host:{uuid4().hex}",
+        writer_owner_id=random_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    with pytest.raises(ConversationKernelConflict, match="metadata conflict"):
+    with pytest.raises(ConversationKernelConflict, match="IDENTITY_CONFLICT: workspace canonical metadata differs"):
         repository.acquire_host_writer(
             intent="NEW",
-            session_id=f"session:{uuid4().hex}",
+            session_id=random_id("session"),
             workspace_id=first.workspace_key,
             workspace_kind="transient",
             workspace_root=str(first.workspace_root),
             workspace_label="Second label",
             memory_domain_id="u_local",
-            writer_owner_id=f"host:{uuid4().hex}",
+            writer_owner_id=random_id("host"),
             lease_seconds=30,
             deadline_monotonic=monotonic() + 30,
         )
@@ -612,7 +611,7 @@ def _start_root_turn(repository: ConversationKernelRepository, *args, **kwargs):
         binding=model_call_binding,
         deadline_monotonic=kwargs["deadline_monotonic"],
     )
-    kwargs.setdefault("permission_snapshot_id", _name("permission-snapshot"))
+    kwargs.setdefault("permission_snapshot_id", _name("permission"))
     kwargs.setdefault("requested_permission_mode", DEFAULT_PERMISSION_MODE)
     kwargs.setdefault("model_call_binding", model_call_binding)
     return start_test_root_turn(repository, *args, **kwargs)
@@ -626,7 +625,7 @@ def _enqueue_prompt(repository: ConversationKernelRepository, *args, **kwargs):
             binding=model_call_binding,
             deadline_monotonic=kwargs["deadline_monotonic"],
         )
-        kwargs.setdefault("permission_snapshot_id", _name("permission-snapshot"))
+        kwargs.setdefault("permission_snapshot_id", _name("permission"))
         kwargs.setdefault("requested_permission_mode", DEFAULT_PERMISSION_MODE)
         kwargs.setdefault("model_call_binding", model_call_binding)
     else:
@@ -718,7 +717,7 @@ def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
         command_id=_name("command"),
         turn_id=_name("turn"),
         entry_id=entry_id,
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=prompt,
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -884,7 +883,7 @@ def test_stage2_snapshot_and_history_page_are_bounded_by_final_wire_bytes(
             command_id=_name("command"),
             turn_id=turn_id,
             entry_id=_name("entry"),
-            context_binding_revision_id=_name("revision"),
+            context_binding_revision_id=_name("binding"),
             content=FrozenPromptContent.text(payload.decode("utf-8")),
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=monotonic() + 30,
@@ -948,7 +947,7 @@ def test_stage2_text_turn_is_canonical_and_sequences_rollback_without_gaps(
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('hello'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1022,7 +1021,7 @@ def test_stage2_stale_writer_cannot_mutate_after_takeover(
             command_id=_name("command"),
             turn_id=_name("turn"),
             entry_id=_name("entry"),
-            context_binding_revision_id=_name("revision"),
+            context_binding_revision_id=_name("binding"),
             content=FrozenPromptContent.text('stale'),
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=deadline,
@@ -1076,7 +1075,7 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('initial'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1087,7 +1086,7 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         first.guard,
         command_id=_name("command"),
         queue_item_id=queue_item_id,
-        client_submission_id=_name("client"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
         content=FrozenPromptContent.text('new direction'),
@@ -1155,7 +1154,7 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('use tool'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1287,7 +1286,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('use tool'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1314,8 +1313,8 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
         actor_id="model:test",
         deadline_monotonic=deadline,
     )
-    command_id = _name("interaction-command")
-    decision_id = _name("interaction-decision")
+    command_id = _name("command")
+    decision_id = _name("decision")
     attempt_id = _name("attempt") if decision == "ALLOW" else None
     result_id = _name("result") if decision == "DENY" else None
     result_entry_id = _name("entry") if decision == "DENY" else None
@@ -1336,7 +1335,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             else None
         ),
         redacted_subject="tool:terminal",
-        actor_id="attachment:test",
+        actor_id='attachment:hmfv6qyb4msxxwadjyltzzsdse',
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1360,7 +1359,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             else None
         ),
         redacted_subject="tool:terminal",
-        actor_id="attachment:test",
+        actor_id='attachment:hmfv6qyb4msxxwadjyltzzsdse',
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1528,7 +1527,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         command_id=_name("command"),
         turn_id=root_turn,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('first'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1542,7 +1541,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             lease.guard,
             command_id=_name("command"),
             queue_item_id=first_item,
-            client_submission_id=_name("client"),
+            client_submission_id=random_id("command"),
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=root_turn,
             content=FrozenPromptContent.text('steer'),
@@ -1558,7 +1557,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             lease.guard,
             command_id=_name("command"),
             queue_item_id=second_item,
-            client_submission_id=_name("client"),
+            client_submission_id=random_id("command"),
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=root_turn,
             content=FrozenPromptContent.text('second steer'),
@@ -1574,7 +1573,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             lease.guard,
             command_id=_name("command"),
             queue_item_id=third_item,
-            client_submission_id=_name("client"),
+            client_submission_id=random_id("command"),
             delivery_mode=PromptDeliveryMode.NEW_TURN,
             target_turn_id=None,
             content=FrozenPromptContent.text('next'),
@@ -1664,7 +1663,7 @@ def test_stage2_interrupt_turn_immediately_rejects_steer_without_future_turn(
         command_id=_name("command"),
         turn_id=root_turn,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('first'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1675,7 +1674,7 @@ def test_stage2_interrupt_turn_immediately_rejects_steer_without_future_turn(
         lease.guard,
         command_id=_name("command"),
         queue_item_id=queue_item_id,
-        client_submission_id=_name("client"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=root_turn,
         content=FrozenPromptContent.text('steer'),
@@ -1741,7 +1740,7 @@ def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
         command_id=_name("command"),
         turn_id=root_turn,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('initial'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1753,7 +1752,7 @@ def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
         lease.guard,
         command_id=_name("command"),
         queue_item_id=new_item,
-        client_submission_id=_name("client"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         content=FrozenPromptContent.text('next'),
@@ -1766,7 +1765,7 @@ def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
         lease.guard,
         command_id=_name("command"),
         queue_item_id=steer_item,
-        client_submission_id=_name("client"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=root_turn,
         content=FrozenPromptContent.text('steer'),
@@ -1811,14 +1810,14 @@ def test_round3_1_prompt_ingress_confirmation_is_semantically_exact_and_stable(
         command_id=_name("command"),
         turn_id=root_turn,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('initial'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
-    command_id = _name("command-steer")
-    queue_item_id = _name("queue-steer")
-    client_submission_id = _name("submission")
+    command_id = _name("command")
+    queue_item_id = _name("queue")
+    client_submission_id = random_id("command")
     content = b"exact steer"
     candidate = build_prompt_ingress_command(
         session_id=session_id,
@@ -1906,7 +1905,7 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
         deadline_monotonic=deadline,
     )
     turn_id = _name("turn")
-    revision_id = _name("revision")
+    revision_id = _name("binding")
     _start_root_turn(
         repository,
         lease.guard,
@@ -1921,9 +1920,9 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
     _enqueue_prompt(
         repository,
         lease.guard,
-        command_id=_name("command-steer"),
-        queue_item_id=_name("queue-steer"),
-        client_submission_id=_name("submission"),
+        command_id=_name("command"),
+        queue_item_id=_name("queue"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
         content=FrozenPromptContent.text('exact steer'),
@@ -2030,7 +2029,7 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         deadline_monotonic=deadline,
     )
     turn_id = _name("turn")
-    revision_id = _name("revision")
+    revision_id = _name("binding")
     _start_root_turn(
         repository,
         lease.guard,
@@ -2045,9 +2044,9 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
     _enqueue_prompt(
         repository,
         lease.guard,
-        command_id=_name("command-steer"),
-        queue_item_id=_name("queue-steer"),
-        client_submission_id=_name("submission"),
+        command_id=_name("command"),
+        queue_item_id=_name("queue"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
         content=FrozenPromptContent.text('must remain pending'),
@@ -2152,8 +2151,8 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
                 ),
             ),
             snapshot_id=_name("snapshot"),
-            binding_revision_id=_name("replacement-revision"),
-            event_id=_name("compaction-event"),
+            binding_revision_id=_name("binding"),
+            event_id=_name("event"),
             source_through_sequence=(
                 compaction_read.safe_head_range.source_through_sequence
             ),
@@ -2303,14 +2302,14 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
     )
     prior_assistant_sequences: list[int] = []
     for index in range(3):
-        turn_id = _name(f"prior-turn-{index}")
+        turn_id = _name("turn")
         _start_root_turn(
             repository,
             lease.guard,
-            command_id=_name(f"prior-command-{index}"),
+            command_id=_name("command"),
             turn_id=turn_id,
-            entry_id=_name(f"prior-user-{index}"),
-            context_binding_revision_id=_name(f"prior-revision-{index}"),
+            entry_id=_name("entry"),
+            context_binding_revision_id=_name("binding"),
             content=FrozenPromptContent.text(f'prior user {index}'),
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=deadline,
@@ -2321,13 +2320,13 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
         accepted = repository.commit_assistant_message(
             lease.guard,
             cut=cut,
-            entry_id=_name(f"prior-assistant-{index}"),
+            entry_id=_name("entry"),
             parent_content=InlineContent.from_bytes(
                 f"prior assistant {index}".encode()
             ),
             blocks=(
                 AssistantTextBlock(
-                    _name(f"prior-block-{index}"),
+                    _name("block"),
                     InlineContent.from_bytes(f"prior assistant {index}".encode()),
                 ),
             ),
@@ -2338,14 +2337,14 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
         )
         prior_assistant_sequences.append(accepted.entry_sequence)
 
-    turn_id = _name("current-turn")
-    revision_id = _name("current-revision")
+    turn_id = _name("turn")
+    revision_id = _name("binding")
     current = _start_root_turn(
         repository,
         lease.guard,
-        command_id=_name("current-command"),
+        command_id=_name("command"),
         turn_id=turn_id,
-        entry_id=_name("current-user"),
+        entry_id=random_id("entry"),
         context_binding_revision_id=revision_id,
         content=FrozenPromptContent.text('current user'),
         occurred_at=datetime.now(timezone.utc),
@@ -2403,8 +2402,8 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
                 source_through_sequence=lineage.persisted_revision_genesis_marker,
             ),
             snapshot_id=_name("snapshot"),
-            binding_revision_id=_name("replacement-revision"),
-            event_id=_name("compaction-event"),
+            binding_revision_id=_name("binding"),
+            event_id=_name("event"),
             source_through_sequence=boundary,
             source_digest=canonical_compaction_range_digest(lineage, canonical_range),
             snapshot_content=_snapshot_content(snapshot_carrier),
@@ -2455,15 +2454,15 @@ def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
     _start_root_turn(
         repository,
         lease.guard,
-        command_id=_name("prompt-command"),
+        command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('initial'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
-    command_id = _name("compact-command")
+    command_id = _name("command")
     candidate = build_prepared_manual_compaction_command(
         session_id=session_id,
         command_id=command_id,
@@ -2529,14 +2528,14 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         lease_seconds=30,
         deadline_monotonic=deadline,
     )
-    first_turn = _name("first-turn")
-    first_revision = _name("first-revision")
+    first_turn = _name("turn")
+    first_revision = _name("binding")
     _start_root_turn(
         repository,
         lease.guard,
-        command_id=_name("first-command"),
+        command_id=_name("command"),
         turn_id=first_turn,
-        entry_id=_name("first-entry"),
+        entry_id=_name("entry"),
         context_binding_revision_id=first_revision,
         content=FrozenPromptContent.text('old prompt'),
         occurred_at=datetime.now(timezone.utc),
@@ -2587,8 +2586,8 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
                 ),
             ),
             snapshot_id=_name("snapshot"),
-            binding_revision_id=_name("snapshot-revision"),
-            event_id=_name("snapshot-event"),
+            binding_revision_id=_name("binding"),
+            event_id=_name("event"),
             source_through_sequence=read.safe_head_range.source_through_sequence,
             source_digest=canonical_compaction_range_digest(
                 read.lineage_base,
@@ -2626,14 +2625,14 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         deadline_monotonic=deadline,
     )
 
-    second_turn = _name("second-turn")
-    second_revision = _name("second-revision")
+    second_turn = _name("turn")
+    second_revision = _name("binding")
     _start_root_turn(
         repository,
         lease.guard,
-        command_id=_name("second-command"),
+        command_id=_name("command"),
         turn_id=second_turn,
-        entry_id=_name("second-entry"),
+        entry_id=_name("entry"),
         context_binding_revision_id=second_revision,
         content=FrozenPromptContent.text('new prompt'),
         occurred_at=datetime.now(timezone.utc),
@@ -2682,7 +2681,7 @@ def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         content=FrozenPromptContent.text('initial'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -2690,9 +2689,9 @@ def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(
     _enqueue_prompt(
         repository,
         lease.guard,
-        command_id=_name("command-steer"),
-        queue_item_id=_name("queue-steer"),
-        client_submission_id=_name("submission"),
+        command_id=_name("command"),
+        queue_item_id=_name("queue"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
         content=FrozenPromptContent.text('too large for the fixed prefix'),
@@ -2763,7 +2762,7 @@ def test_stage2_prompt_cancel_is_single_terminal_cas(
         lease.guard,
         command_id=_name("command"),
         queue_item_id=item_id,
-        client_submission_id=_name("submission"),
+        client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         content=FrozenPromptContent.text('cancel me'),

@@ -1,4 +1,7 @@
 from __future__ import annotations
+from tests.support.images import bound_test_image
+
+from pulsara_agent.identity import random_id
 
 from datetime import datetime, timezone
 from io import BytesIO
@@ -85,9 +88,7 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 
 
 def identity(prefix):
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 @pytest.fixture
@@ -118,7 +119,7 @@ def turn(repo, guard, text, *, finish=True, answer="answer", complete=True):
         permission_snapshot_id=identity("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=identity("entry"),
-        context_binding_revision_id=identity("revision"),
+        context_binding_revision_id=identity("binding"),
         content=FrozenPromptContent.text(text),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -298,7 +299,7 @@ def compact(
                 source_through_sequence=lineage.persisted_revision_genesis_marker,
             ),
             snapshot_id=identity("snapshot"),
-            binding_revision_id=identity("revision"),
+            binding_revision_id=identity("binding"),
             event_id=identity("event"),
             source_through_sequence=boundary,
             source_digest=canonical_compaction_range_digest(lineage, scope_range),
@@ -591,6 +592,7 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
     result_id = identity("entry")
     source = "large historical artifact\n" * 4000
     projection = ToolOutputArtifactProcessor(repo.connection_provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace,
         result_entry_id=result_id,
         public_output=source,
@@ -667,9 +669,16 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
         assert closure[0]["closure_kind"] == "INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED"
     guard = child_lease(repo, child).guard
     _, cut, _ = turn(repo, guard, "continue imported tools", finish=False)
-    snapshot = CanonicalProviderInputReader(
-        repo.connection_provider
-    ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
+    reader = CanonicalProviderInputReader(repo.connection_provider)
+    facts = reader.read_frozen_compile_snapshot(cut, deadline_monotonic=monotonic() + 30)
+    snapshot = facts.canonical_input
+    freshness = facts.tool_observation_freshness_fact
+    assert freshness.current_turn_ref == cut.turn_id
+    assert freshness.immediate_predecessor_turn_ref is None
+    sources = [item.tool_result_context.timing.source_turn_ref
+        for item in snapshot.items
+        if item.tool_result_context is not None]
+    assert sources and all(source.startswith("history:") for source in sources)
     assert len(snapshot.late_outcomes) == int(late) and len(snapshot.closures) == int(
         late
     )
@@ -909,7 +918,7 @@ def test_protocol_projects_only_anchor_eligibility_and_genesis_without_occurrenc
         assert [row.fork_eligible for row in projected] == [False, False, False, True]
         assert [row.root_final for row in projected] == [False, True, False, True]
         assert all(row.entry_owner_kind == "IMPORTED_HISTORY" for row in projected)
-        assert all(row.turn_id.startswith("history-group:") for row in projected)
+        assert all(row.turn_id.startswith("history:") for row in projected)
         control = protocol._control(
             connection,
             session_id=created.child_session_id,
@@ -945,6 +954,7 @@ def test_web_fork_outcomes_are_closed_and_open_is_post_commit(
 
         child = identity("session")
         core = SimpleNamespace(
+            _canonical_deadline=lambda: monotonic() + 30,
             mcp_management=SimpleNamespace(lane=asyncio.Lock()),
             fork_conversation=AsyncMock(
                 return_value=CanonicalForkCreation(child, created, "test")
@@ -959,10 +969,10 @@ def test_web_fork_outcomes_are_closed_and_open_is_post_commit(
             side_effect=RuntimeError("workspace unavailable") if open_failure else None
         )
         result = await controller.fork_conversation(
-            "parent", anchor_entry_id="anchor"
+            "session:i57pxzdyhsytkgynv3h2acm5ea", anchor_entry_id="entry:lqbyc3pbwy7gywvl2ogtett7ce"
         )
         child = core.fork_conversation.await_args.kwargs["child_session_id"]
-        assert child.startswith("session:") and len(child) == 40
+        assert child.startswith("session:") and len(child) == 34
         assert result["outcome"] == expected and result["child_session_id"] == child
         assert controller.resume_session.await_count == int(created)
 
@@ -991,6 +1001,7 @@ def test_web_fork_disconnected_waiter_does_not_cancel_creation(tmp_path):
             return CanonicalForkCreation(child, True, "created")
 
         core = SimpleNamespace(
+            _canonical_deadline=lambda: monotonic() + 30,
             mcp_management=SimpleNamespace(lane=asyncio.Lock()),
             fork_conversation=create,
         )
@@ -1002,7 +1013,7 @@ def test_web_fork_disconnected_waiter_does_not_cancel_creation(tmp_path):
         controller.resume_session = AsyncMock()
         waiter = asyncio.create_task(
             controller.fork_conversation(
-                "parent", anchor_entry_id="anchor"
+                "session:i57pxzdyhsytkgynv3h2acm5ea", anchor_entry_id="entry:lqbyc3pbwy7gywvl2ogtett7ce"
             )
         )
         await entered.wait()
@@ -1089,7 +1100,7 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
 ):
     from tests.test_direct_advisory_memory import _open_direct_memory_session
 
-    workspace_root = f"/tmp/{identity('fork-memory-root')}"
+    workspace_root = f"/tmp/{uuid4().hex}"
     workspace_id = workspace_context_id(workspace_root)
     lease, _invoke, remember = _open_direct_memory_session(
         repo, workspace_root=workspace_root
@@ -1178,7 +1189,7 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
     lease = new_session(repo)
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
-    image = LLMImagePart("image/png", payload.getvalue(), 7, 5)
+    image = bound_test_image("image/png", payload.getvalue(), 7, 5, workspace_id=repo.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30))
     content = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("after"), image)
     )
@@ -1191,7 +1202,7 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
         permission_snapshot_id=identity("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=identity("entry"),
-        context_binding_revision_id=identity("revision"),
+        context_binding_revision_id=identity("binding"),
         content=content,
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -1241,7 +1252,7 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
     ).read_image(
         session_id=child,
         workspace_id=workspace_id,
-        image_ref=image.content_digest,
+        image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
     ) == image
@@ -1261,7 +1272,7 @@ def test_fork_cannot_reread_image_outside_its_anchor_cut(repo):
     assert anchor is not None
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
-    image = LLMImagePart("image/png", payload.getvalue(), 7, 5)
+    image = bound_test_image("image/png", payload.getvalue(), 7, 5, workspace_id=repo.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30))
     turn_id = identity("turn")
     start_test_root_turn(
         repo,
@@ -1271,7 +1282,7 @@ def test_fork_cannot_reread_image_outside_its_anchor_cut(repo):
         permission_snapshot_id=identity("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=identity("entry"),
-        context_binding_revision_id=identity("revision"),
+        context_binding_revision_id=identity("binding"),
         content=FrozenPromptContent((LLMTextPart("later"), image)),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -1298,7 +1309,7 @@ def test_fork_cannot_reread_image_outside_its_anchor_cut(repo):
         child_reader.read_image(
             session_id=child,
             workspace_id=workspace_id,
-            image_ref=image.content_digest,
+            image_ref=image.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
         )
@@ -1311,7 +1322,7 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
     lease = new_session(repo)
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
-    image = LLMImagePart("image/png", payload.getvalue(), 7, 5)
+    image = bound_test_image("image/png", payload.getvalue(), 7, 5, workspace_id=repo.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30))
     content = FrozenPromptContent((LLMTextPart("before"), image, image))
     turn_id = identity("turn")
     start_test_root_turn(
@@ -1322,7 +1333,7 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
         permission_snapshot_id=identity("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=identity("entry"),
-        context_binding_revision_id=identity("revision"),
+        context_binding_revision_id=identity("binding"),
         content=content,
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -1433,7 +1444,7 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
     ).read_image(
         session_id=child,
         workspace_id=child_workspace_id,
-        image_ref=image.content_digest,
+        image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
     ) == image
@@ -1886,8 +1897,8 @@ def test_fork_http_closed_request_scoped_lookup_and_cross_site_rejection(tmp_pat
         await server.start()
         try:
             async with ClientSession(headers={"X-Pulsara-Connection-Id":"connection-1", "X-Pulsara-Connection-Generation":"1"}) as client:
-                url = f"{server.origin}/api/sessions/parent/fork"
-                body = {"anchor_entry_id": "anchor"}
+                url = f"{server.origin}/api/sessions/session:i57pxzdyhsytkgynv3h2acm5ea/fork"
+                body = {"anchor_entry_id": 'entry:lqbyc3pbwy7gywvl2ogtett7ce'}
                 async with client.post(url, json=body) as response:
                     assert response.status == 200
                     assert (await response.json())["outcome"] == "CREATED_OPEN_DEFERRED"
@@ -1907,7 +1918,7 @@ def test_fork_http_closed_request_scoped_lookup_and_cross_site_rejection(tmp_pat
                     assert response.status == 200
                     assert (await response.json())["session"]["id"] == child
                 sessions.fork_conversation.assert_awaited_once_with(
-                    "parent", anchor_entry_id="anchor"
+                    "session:i57pxzdyhsytkgynv3h2acm5ea", anchor_entry_id="entry:lqbyc3pbwy7gywvl2ogtett7ce"
                 )
         finally:
             await server.aclose()

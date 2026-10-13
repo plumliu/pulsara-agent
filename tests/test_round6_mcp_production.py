@@ -1,4 +1,7 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 from tests.support.model_config import frozen_test_prompt
 import asyncio
@@ -710,7 +713,7 @@ def test_round6_transport_exception_notification_is_typed(tmp_path: Path) -> Non
 
 async def _installed_runtime(tmp_path: Path):
     supervisor = McpHostSupervisor(
-        session_id="session:round6",
+        session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
         workspace_root=tmp_path,
         configs=(_config(tmp_path),),
     )
@@ -725,7 +728,7 @@ def test_round6_discovery_calls_only_negotiated_listing_capabilities(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:tools-only",
+            session_id='session:resivbejnajapmzuxzp24fzpyi',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_ToolsOnlyFakeMcpClient,  # type: ignore[arg-type]
@@ -754,7 +757,7 @@ def test_round9_discovery_retains_canonical_valid_wire_incompatible_mcp_tool(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:mixed-schema",
+            session_id='session:kzt3jditqplhw72s5uchn6s2eu',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, invalid_tool_policy="OMIT_INVALID"),),
             client_factory=_MixedSchemaFakeMcpClient,  # type: ignore[arg-type]
@@ -804,12 +807,12 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    session_id = f"session:round9-meta:{uuid4().hex}"
+    session_id = derive_id("session", "test-fixture", f"session:round9-meta:{uuid4().hex}")
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
-        workspace_id=f"ctx:workspace/{uuid4().hex}",
-        writer_owner_id=f"host:{uuid4().hex}",
+        workspace_id=random_id("workspace"),
+        writer_owner_id=random_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
@@ -825,7 +828,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:round9-meta",
+            host_owner_id='host:g5wosu2bcbheegwb23wgxr36s4',
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -964,7 +967,7 @@ def test_round6_host_discovery_reservation_covers_client_open(
         _DiscoveryReservationFakeMcpClient.active_open = 0
         _DiscoveryReservationFakeMcpClient.peak_open = 0
         supervisor = McpHostSupervisor(
-            session_id="session:discovery-reservation",
+            session_id='session:34wp6lf6zoimndds5ai5tfdu44',
             workspace_root=tmp_path,
             configs=load_mcp_server_configs(user_config_path=config_path),
             client_factory=_DiscoveryReservationFakeMcpClient,  # type: ignore[arg-type]
@@ -983,7 +986,7 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:long-remote-name",
+            session_id='session:5z3uyfooohbmggby3l6ije7mzy',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_LongNameFakeMcpClient,  # type: ignore[arg-type]
@@ -999,10 +1002,10 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
             )
             executor = runtime.executors[semantic.provider_tool_name]
             permit = executor.admit(
-                session_id="session:long-remote-name",
+                session_id='session:5z3uyfooohbmggby3l6ije7mzy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:long-remote-name",
+                turn_id='turn:atzljbrnatyfps6wohqabxsrce',
                 tool_call_id="call:long-remote-name",
             )
             permit.mark_attempt_accepted()
@@ -1011,8 +1014,8 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
             assert len(result.remote_identity.encode("utf-8")) <= 4_096
             assert _LongNameFakeMcpSession.remote_name not in result.remote_identity
             candidate = build_prepared_tool_remote_identity_publication(
-                session_id="session:long-remote-name",
-                attempt_id="attempt:long-remote-name",
+                session_id='session:5z3uyfooohbmggby3l6ije7mzy',
+                attempt_id='attempt:4oajl4xe4p4jowyz5ras4ckwcy',
                 remote_identity=result.remote_identity,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="tool:mcp",
@@ -1030,7 +1033,7 @@ def test_round6_advertised_resource_template_instance_is_readable(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:template-resource",
+            session_id='session:thb7hvrgs22eocnwhmz2egts4e',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_TemplateResourceFakeMcpClient,  # type: ignore[arg-type]
@@ -1047,10 +1050,10 @@ def test_round6_advertised_resource_template_instance_is_readable(
                 tool_name="read_mcp_resource",
                 arguments=arguments,
                 descriptor_fingerprint="sha256:resource-descriptor",
-                session_id="session:template-resource",
+                session_id='session:thb7hvrgs22eocnwhmz2egts4e',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:template-resource",
+                turn_id='turn:2g7vymhkzpph2g2co37y7s4oia',
                 tool_call_id="call:template-resource",
             )
             assert permit is not None
@@ -1070,10 +1073,10 @@ def test_round6_advertised_resource_template_instance_is_readable(
                         "uri": "fixture://round6/users/alice/private",
                     },
                     descriptor_fingerprint="sha256:resource-descriptor",
-                    session_id="session:template-resource",
+                    session_id='session:thb7hvrgs22eocnwhmz2egts4e',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    turn_id="turn:template-resource",
+                    turn_id='turn:2g7vymhkzpph2g2co37y7s4oia',
                     tool_call_id="call:template-resource-invalid",
                 )
         finally:
@@ -1095,7 +1098,7 @@ async def _parallel_probe(runtime, *, session_id: str) -> tuple[bytes, bytes]:
             session_id=session_id,
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
-            turn_id="turn:parallel",
+            turn_id='turn:tdglhtkirqfq7dqv4s7bn3iory',
             tool_call_id=f"call:parallel:{index}",
         )
         for index in range(2)
@@ -1535,10 +1538,10 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
             )
             executor = runtime.executors[echo.provider_tool_name]
             permit = executor.admit(
-                session_id="session:round6",
+                session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:1",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 tool_call_id="tool-call:1",
             )
             permit.mark_attempt_accepted()
@@ -1549,7 +1552,7 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
             assert (
                 stdio_slot.concurrency_kind is McpPhysicalConcurrencyKind.SERIAL_SESSION
             )
-            serial_results = await _parallel_probe(runtime, session_id="session:round6")
+            serial_results = await _parallel_probe(runtime, session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy')
             assert all(b"parallel:no" in item for item in serial_results)
 
             resource_permit = runtime.admit_standard_operation(
@@ -1559,10 +1562,10 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
                     "uri": "fixture://round6/resource",
                 },
                 descriptor_fingerprint="sha256:resource-descriptor",
-                session_id="session:round6",
+                session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:1",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 tool_call_id="tool-call:resource",
             )
             assert resource_permit is not None
@@ -1585,10 +1588,10 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
                     "arguments": {"topic": "MCP"},
                 },
                 descriptor_fingerprint="sha256:prompt-descriptor",
-                session_id="session:round6",
+                session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:1",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 tool_call_id="tool-call:prompt",
             )
             assert prompt_permit is not None
@@ -1634,7 +1637,7 @@ def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
         )
         (config,) = load_mcp_server_configs(user_config_path=config_path)
         supervisor = McpHostSupervisor(
-            session_id="session:legacy",
+            session_id='session:tqomikq3fcgadm6sdh7zbbtgda',
             workspace_root=tmp_path,
             configs=(config,),
         )
@@ -1655,10 +1658,10 @@ def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
             assert echo.remote_tool_name == "legacy_echo"
             executor = runtime.executors[echo.provider_tool_name]
             permit = executor.admit(
-                session_id="session:legacy",
+                session_id='session:tqomikq3fcgadm6sdh7zbbtgda',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:legacy",
+                turn_id='turn:zwrjd2zu27abngapao6cbc5u6u',
                 tool_call_id="tool-call:legacy",
             )
             permit.mark_attempt_accepted()
@@ -1679,7 +1682,7 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
         _FakeMcpClient.instances.clear()
         first_config = _config(tmp_path, default_tool_timeout_ms=10_000)
         supervisor = McpHostSupervisor(
-            session_id="session:runtime-rebind",
+            session_id='session:t27jbgbhxwm2aoobyft5xudi3i',
             workspace_root=tmp_path,
             configs=(first_config,),
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
@@ -1725,10 +1728,10 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
             ].status_matches_config
             with pytest.raises(McpSnapshotStale):
                 old_executor.admit(
-                    session_id="session:runtime-rebind",
+                    session_id='session:t27jbgbhxwm2aoobyft5xudi3i',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    turn_id="turn:old-runtime",
+                    turn_id='turn:eirpehrijaxkayahvj5yxnwhfa',
                     tool_call_id="call:old-runtime",
                 )
             deadline = monotonic() + 2
@@ -1759,10 +1762,10 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
                     == second.root_tool_specs[0].descriptor_fingerprint
                 )
                 permit = next(iter(second.executors.values())).admit(
-                    session_id="session:runtime-rebind",
+                    session_id='session:t27jbgbhxwm2aoobyft5xudi3i',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    turn_id="turn:new-runtime",
+                    turn_id='turn:6sosfsakqna4xyy6kjnevq32ha',
                     tool_call_id="call:new-runtime",
                 )
                 permit.release()
@@ -1781,7 +1784,7 @@ def test_round9_old_draining_slot_failure_keeps_old_config_provenance(
     async def exercise() -> None:
         first_config = _config(tmp_path, default_tool_timeout_ms=10_000)
         supervisor = McpHostSupervisor(
-            session_id="session:old-draining-slot-failure",
+            session_id='session:2xjnutorsfmufwsjqgplu2fnoq',
             workspace_root=tmp_path,
             configs=(first_config,),
             client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
@@ -1823,7 +1826,7 @@ def test_round9_semantic_config_reload_publishes_catalog_only_successor(
     async def exercise() -> None:
         first_config = _config(tmp_path)
         supervisor = McpHostSupervisor(
-            session_id="session:semantic-config-reload",
+            session_id='session:brgs5f4adltb7p2goriuuqrs5u',
             workspace_root=tmp_path,
             configs=(first_config,),
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
@@ -1864,7 +1867,7 @@ def test_round6_replacement_attempt_keeps_installed_catalog_status_stable(
     async def exercise() -> None:
         _FakeMcpClient.instances.clear()
         supervisor = McpHostSupervisor(
-            session_id="session:refresh-status",
+            session_id='session:5u2fxsq77k4obzdfukurb2pcpq',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
@@ -1895,7 +1898,7 @@ def test_round9_optional_mcp_failure_publishes_catalog_only_successor(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:optional-failure-catalog",
+            session_id='session:ckxl4fthoo3swxexxtax7sunly',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, required=False),),
             client_factory=_DelayedTerminalFailureFakeMcpClient,  # type: ignore[arg-type]
@@ -1941,7 +1944,7 @@ def test_round9_late_optional_mcp_discovery_is_visible_without_surface_publicati
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:late-optional-discovery-inspection",
+            session_id='session:7b3xjrrrsbsklvupb3gcjo5lpa',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, required=False),),
             client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
@@ -2085,7 +2088,7 @@ def test_round6_terminal_failure_retires_only_exact_pending_slot(
     async def exercise() -> None:
         _FakeMcpClient.instances.clear()
         supervisor = McpHostSupervisor(
-            session_id="session:exact-slot-failure",
+            session_id='session:itf2que2cwp3azaxelqftk43si',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
@@ -2127,7 +2130,7 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
 ) -> None:
     async def invoke_with(client_factory, *, call_id: str):
         supervisor = McpHostSupervisor(
-            session_id="session:failure-matrix",
+            session_id='session:jiztxctq27fn75sefs4ifbfzvq',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=client_factory,
@@ -2139,10 +2142,10 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
             semantic = next(iter(runtime.root_tool_specs))
             executor = runtime.executors[semantic.provider_tool_name]
             permit = executor.admit(
-                session_id="session:failure-matrix",
+                session_id='session:jiztxctq27fn75sefs4ifbfzvq',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:failure-matrix",
+                turn_id='turn:4dkrueyqhkesbx4pjfnb7hxwhe',
                 tool_call_id=call_id,
             )
             permit.mark_attempt_accepted()
@@ -2221,7 +2224,7 @@ def test_mcp_call_failure_preserves_outcome_and_cancellation(
                 raise RuntimeError("injected implementation defect")
 
         supervisor = McpHostSupervisor(
-            session_id="session:failure-continuation",
+            session_id='session:wrofat77wvcxtwhfmgxsenmrli',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, default_effect=default_effect),),
             client_factory=Client,
@@ -2232,10 +2235,10 @@ def test_mcp_call_failure_preserves_outcome_and_cancellation(
         try:
             executor = next(iter(runtime.executors.values()))
             permit = executor.admit(
-                session_id="session:failure-continuation",
+                session_id='session:wrofat77wvcxtwhfmgxsenmrli',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:failure-continuation",
+                turn_id='turn:63tkghpnryt6t3hsfjuizpzv5e',
                 tool_call_id="call:failure-continuation",
             )
             permit.mark_attempt_accepted()
@@ -2300,12 +2303,12 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    session_id = f"session:mcp-continuation:{uuid4().hex}"
+    session_id = derive_id("session", "test-fixture", f"session:mcp-continuation:{uuid4().hex}")
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
-        workspace_id=f"ctx:workspace/{uuid4().hex}",
-        writer_owner_id=f"host:{uuid4().hex}",
+        workspace_id=random_id("workspace"),
+        writer_owner_id=random_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
@@ -2342,7 +2345,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:mcp-continuation",
+            host_owner_id='host:6qfxzwje2tb5inaqte4s5fu4yi',
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -2477,7 +2480,7 @@ def test_mcp_standard_read_keeps_connection_failure_detail(
                 )
 
         supervisor = McpHostSupervisor(
-            session_id="session:read-failure",
+            session_id='session:3qzoc6pdmhzviikq6ok7je2yfu',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=Client,
@@ -2491,10 +2494,10 @@ def test_mcp_standard_read_keeps_connection_failure_detail(
                 tool_name="read_mcp_resource",
                 arguments=arguments,
                 descriptor_fingerprint="resource-descriptor",
-                session_id="session:read-failure",
+                session_id='session:3qzoc6pdmhzviikq6ok7je2yfu',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:read-failure",
+                turn_id='turn:w7c7upnqceifyjchads64u7o6i',
                 tool_call_id="call:read-failure",
             )
             result = await runtime.invoke_standard(
@@ -2524,7 +2527,7 @@ def test_round6_unsupported_input_required_preserves_external_effect_unknown(
 ) -> None:
     async def invoke(default_effect: str):
         supervisor = McpHostSupervisor(
-            session_id=f"session:input-required:{default_effect}",
+            session_id=derive_id("session", "test-fixture", f"session:input-required:{default_effect}"),
             workspace_root=tmp_path,
             configs=(_config(tmp_path, default_effect=default_effect),),
             client_factory=_UnsupportedInputFakeMcpClient,  # type: ignore[arg-type]
@@ -2535,10 +2538,10 @@ def test_round6_unsupported_input_required_preserves_external_effect_unknown(
         try:
             executor = next(iter(runtime.executors.values()))
             permit = executor.admit(
-                session_id=f"session:input-required:{default_effect}",
+                session_id=derive_id("session", "test-fixture", f"session:input-required:{default_effect}"),
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:input-required",
+                turn_id='turn:g4jamomerc5hvzznyaotsfom6q',
                 tool_call_id=f"call:{default_effect}",
             )
             permit.mark_attempt_accepted()
@@ -2563,15 +2566,15 @@ def test_round6_direct_surface_over_64_tools_fails_without_truncation(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:surface-bound",
+            session_id='session:qoeu2rwdadfcdaqzqa2zlzkk7e',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_LargeSurfaceFakeMcpClient,  # type: ignore[arg-type]
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:surface-bound",
-            session_id="session:surface-bound",
+            host_owner_id='host:tglx27oivromnzgakjq4mgawke',
+            session_id='session:qoeu2rwdadfcdaqzqa2zlzkk7e',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -2608,7 +2611,7 @@ def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:standard-timeout",
+            session_id='session:cvnmzolif3db3m3a73i6vzqlka',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, default_tool_timeout_ms=1_000),),
             client_factory=_SlowStandardReadFakeMcpClient,  # type: ignore[arg-type]
@@ -2624,10 +2627,10 @@ def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
                     "uri": "fixture://slow/resource",
                 },
                 descriptor_fingerprint="sha256:resource-descriptor",
-                session_id="session:standard-timeout",
+                session_id='session:cvnmzolif3db3m3a73i6vzqlka',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:standard-timeout",
+                turn_id='turn:2tft5wzj2hh3gasvoo6felsfgi',
                 tool_call_id="call:standard-timeout",
             )
             assert permit is not None
@@ -2656,7 +2659,7 @@ def test_round6_unsupported_schema_dialect_never_installs_candidate(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:unsupported-dialect",
+            session_id='session:iao3zl7iyuntyqsz6xndmzqf7a',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_UnsupportedDialectFakeMcpClient,  # type: ignore[arg-type]
@@ -2685,19 +2688,19 @@ def test_round6_dirty_fence_blocks_new_dispatch_but_pre_admission_drains(
             )
             executor = runtime.executors[echo.provider_tool_name]
             admitted = executor.admit(
-                session_id="session:round6",
+                session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:1",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 tool_call_id="tool-call:before-dirty",
             )
             runtime.slot_lease_by_server["fixture"]._slot.mark_dirty()  # noqa: SLF001
             with pytest.raises(McpSnapshotStale):
                 executor.admit(
-                    session_id="session:round6",
+                    session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    turn_id="turn:1",
+                    turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                     tool_call_id="tool-call:after-dirty",
                 )
             admitted.mark_attempt_accepted()
@@ -2716,7 +2719,7 @@ def test_round6_dirty_candidate_cannot_publish_at_safe_point(
     async def exercise() -> None:
         _FakeMcpClient.instances.clear()
         supervisor = McpHostSupervisor(
-            session_id="session:dirty-candidate",
+            session_id='session:psojv5rfsmn3s3xnipyldh2rly',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
@@ -2744,7 +2747,7 @@ def test_round6_list_changed_storm_coalesces_and_installs_fresh_lease(
     async def exercise() -> None:
         _FakeMcpClient.instances.clear()
         supervisor = McpHostSupervisor(
-            session_id="session:list-changed",
+            session_id='session:dnsc3xcuock3b3fz3myv6t6d7a',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
@@ -2766,10 +2769,10 @@ def test_round6_list_changed_storm_coalesces_and_installs_fresh_lease(
             assert old_slot.dirty_generation == 32
             with pytest.raises(McpSnapshotStale):
                 old_executor.admit(
-                    session_id="session:list-changed",
+                    session_id='session:dnsc3xcuock3b3fz3myv6t6d7a',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    turn_id="turn:stale",
+                    turn_id='turn:fgyzcoedrv2bbyjidkij64paci',
                     tool_call_id="call:stale",
                 )
 
@@ -2794,10 +2797,10 @@ def test_round6_list_changed_storm_coalesces_and_installs_fresh_lease(
                 assert second.slot_lease_by_server["fixture"]._slot is old_slot
                 fresh = next(iter(second.executors.values()))
                 permit = fresh.admit(
-                    session_id="session:list-changed",
+                    session_id='session:dnsc3xcuock3b3fz3myv6t6d7a',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    turn_id="turn:fresh",
+                    turn_id='turn:vbgt43i3qhv5xjmunkbka6obgy',
                     tool_call_id="call:fresh",
                 )
                 permit.release()
@@ -2822,7 +2825,7 @@ def test_round6_required_startup_retries_transient_discovery(
             lambda _low, _high: 0.001,
         )
         supervisor = McpHostSupervisor(
-            session_id="session:required-retry",
+            session_id='session:bnpqxmsvsjy6hq6sylodrqdwgy',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_TransientFakeMcpClient,  # type: ignore[arg-type]
@@ -2847,14 +2850,14 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:surface",
+            session_id='session:vbyef3afwygcmgc6kb7o4cgo3u',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:surface",
-            session_id="session:surface",
+            host_owner_id='host:um5edy62izvdyaqfp7sleqd3qm',
+            session_id='session:vbyef3afwygcmgc6kb7o4cgo3u',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -2874,7 +2877,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
         )
         borrow = port.borrow_tool_surface(surface)
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:surface",
+            snapshot_id='permission:xe33u4flpejjy72jmvg5arcvtu',
             requested_mode=PermissionMode.READ_ONLY,
             effective_mode=PermissionMode.READ_ONLY,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -2909,21 +2912,21 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
                 tool_name=dynamic.name,
                 arguments={"text": "surface"},
                 tool_call_id="call:surface",
-                turn_id="turn:surface",
-                assistant_entry_id="entry:assistant",
+                turn_id='turn:fugd2z4wkqsu77svw4oie5ktvy',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 permission_snapshot=permission,
                 surface_borrow=borrow,
                 memory_context=_enabled_memory_context(),
             )
             assert authorization.kind is KernelToolAuthorizationKind.ALLOW
             invocation = KernelToolInvocationContext(
-                session_id="session:surface",
-                workspace_id="workspace:surface",
-                turn_id="turn:surface",
-                assistant_entry_id="entry:assistant",
+                session_id='session:vbyef3afwygcmgc6kb7o4cgo3u',
+                workspace_id='workspace:o7umcg4kw34zo5te63yniff7ze',
+                turn_id='turn:fugd2z4wkqsu77svw4oie5ktvy',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:surface",
-                attempt_id="attempt:surface",
-                result_entry_id="entry:result",
+                attempt_id='attempt:p6lbqwaoo356qvim3is7ntneem',
+                result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.ROOT.value,
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
@@ -2939,9 +2942,9 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
                 tool_name=dynamic.name,
                 arguments={"text": "surface"},
                 tool_call_id="call:surface",
-                attempt_id="attempt:surface",
-                turn_id="turn:surface",
-                assistant_entry_id="entry:assistant",
+                attempt_id='attempt:p6lbqwaoo356qvim3is7ntneem',
+                turn_id='turn:fugd2z4wkqsu77svw4oie5ktvy',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=invocation,
             )
             assert result.state == "SUCCESS"
@@ -2962,14 +2965,14 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:policy",
+            session_id='session:6zhufomqduz6x4wcaleyiq2f3m',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:policy",
-            session_id="session:policy",
+            host_owner_id='host:mpb7n43ja4kri63x6vzied3cmm',
+            session_id='session:6zhufomqduz6x4wcaleyiq2f3m',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -2999,7 +3002,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
             ] = {}
             for mode in PermissionMode:
                 permission = build_run_permission_snapshot(
-                    snapshot_id=f"permission:{mode.value}",
+                    snapshot_id=derive_id("permission", "test-fixture", f"permission:{mode.value}"),
                     requested_mode=mode,
                     effective_mode=mode,
                     admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -3013,8 +3016,8 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
                         tool_name=semantic.name,
                         arguments=arguments,
                         tool_call_id=call_id,
-                        turn_id="turn:policy",
-                        assistant_entry_id="entry:policy",
+                        turn_id='turn:2xp6wtr7zict6zayr4kdgireum',
+                        assistant_entry_id='entry:mjbqlitwrnojm2ywmk6xzrb7du',
                         permission_snapshot=permission,
                         surface_borrow=borrow,
                         memory_context=_enabled_memory_context(),
@@ -3049,7 +3052,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
             await close
 
         root_only = McpHostSupervisor(
-            session_id="session:root-only",
+            session_id='session:g7kqyvbwicnfvtw6ebmeo45jwa',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, scope_policy="ROOT_ONLY"),),
         )
@@ -3075,7 +3078,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
             )
             child_owner = root_only.freeze_capability_source_snapshot_set(
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id="subagent-task:root-only",
+                scope_subagent_task_id='task:7z5vx2tutdezl2ghwczvzieuli',
             )
             assert child_owner.source_snapshots == ()
             assert child_owner.catalog_snapshot.servers == ()
@@ -3087,10 +3090,10 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
                         "uri": "fixture://round6/resource",
                     },
                     descriptor_fingerprint="sha256:resource-descriptor",
-                    session_id="session:root-only",
+                    session_id='session:g7kqyvbwicnfvtw6ebmeo45jwa',
                     scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                    scope_subagent_task_id="subagent-task:root-only",
-                    turn_id="turn:child",
+                    scope_subagent_task_id='task:7z5vx2tutdezl2ghwczvzieuli',
+                    turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
                     tool_call_id="call:child-resource",
                 )
         finally:
@@ -3130,7 +3133,8 @@ def _exercise_postgres_mcp_effect_and_reconnect(
     from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
     from tests.test_kernel_image_input_k2_postgres import _image
 
-    image = _image()
+    workspace_id = random_id("workspace")
+    image = _image(workspace_id=workspace_id)
     first_prompt = (
         freeze_canonical_prompt(
             FrozenPromptContent(
@@ -3152,12 +3156,12 @@ def _exercise_postgres_mcp_effect_and_reconnect(
     )
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    session_id = f"session:round6:{uuid4().hex}"
+    session_id = derive_id("session", "test-fixture", f"session:round6:{uuid4().hex}")
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
-        workspace_id=f"ctx:workspace/{uuid4().hex}",
-        writer_owner_id=f"host:{uuid4().hex}",
+        workspace_id=workspace_id,
+        writer_owner_id=random_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
@@ -3170,7 +3174,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:round6-postgres",
+            host_owner_id='host:kbav6xzxarmakf57sa6g65g65u',
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -3285,12 +3289,12 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    session_id = f"session:round6-long:{uuid4().hex}"
+    session_id = derive_id("session", "test-fixture", f"session:round6-long:{uuid4().hex}")
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
-        workspace_id=f"ctx:workspace/{uuid4().hex}",
-        writer_owner_id=f"host:{uuid4().hex}",
+        workspace_id=random_id("workspace"),
+        writer_owner_id=random_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
@@ -3304,7 +3308,7 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:round6-long",
+            host_owner_id='host:t6dujgbaxha6xlrwwmansdt3wi',
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -3388,10 +3392,10 @@ def test_round6_same_schema_reconnect_keeps_semantics_and_old_borrow(
             )
             first_executor = first.executors[first_echo.provider_tool_name]
             admitted_old = first_executor.admit(
-                session_id="session:round6",
+                session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:1",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 tool_call_id="tool-call:old-admitted",
             )
             admitted_old.mark_attempt_accepted()
@@ -3420,10 +3424,10 @@ def test_round6_same_schema_reconnect_keeps_semantics_and_old_borrow(
             assert b"fixture:old" in old_known.content
             with pytest.raises(McpSnapshotStale):
                 first_executor.admit(
-                    session_id="session:round6",
+                    session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    turn_id="turn:1",
+                    turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                     tool_call_id="tool-call:old-after-fence",
                 )
             second_echo = next(
@@ -3433,10 +3437,10 @@ def test_round6_same_schema_reconnect_keeps_semantics_and_old_borrow(
             )
             second_executor = second.executors[second_echo.provider_tool_name]
             new_permit = second_executor.admit(
-                session_id="session:round6",
+                session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
-                turn_id="turn:1",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 tool_call_id="tool-call:new",
             )
             new_permit.mark_attempt_accepted()
@@ -3458,7 +3462,7 @@ def test_round6_schema_change_reconnect_requires_safe_point_rebase(
         _SchemaChangingFakeMcpClient.instances.clear()
         _SchemaChangingFakeMcpSession.description = "schema-v1"
         supervisor = McpHostSupervisor(
-            session_id="session:schema-change",
+            session_id='session:bxds26z5lgoqer2ls64k4weove',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
             client_factory=_SchemaChangingFakeMcpClient,  # type: ignore[arg-type]
@@ -3504,14 +3508,14 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:disable",
+            session_id='session:o46r5a6j53mt6ahctc5hserqky',
             workspace_root=tmp_path,
             configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:disable",
-            session_id="session:disable",
+            host_owner_id='host:j7jpfcc42ktkhqt7brnajmmyny',
+            session_id='session:o46r5a6j53mt6ahctc5hserqky',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -3550,7 +3554,7 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
             # config disable fences the slot, only a permit admitted before the
             # fence may drain; authorization attempted afterward must fail.
             permission = build_run_permission_snapshot(
-                snapshot_id="permission:disable",
+                snapshot_id='permission:nxtlg4se3fk7jzi47eu4etc4ri',
                 requested_mode=PermissionMode.READ_ONLY,
                 effective_mode=PermissionMode.READ_ONLY,
                 admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -3559,8 +3563,8 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
                 tool_name=old_dynamic.name,
                 arguments={"text": "old-batch"},
                 tool_call_id="call:disable-old",
-                turn_id="turn:disable",
-                assistant_entry_id="entry:disable",
+                turn_id='turn:vb4fdzl3ytcweesb64zuaudpsa',
+                assistant_entry_id='entry:hwjwv3oojkolrw7ke26qre2fk4',
                 permission_snapshot=permission,
                 surface_borrow=old_borrow,
                 memory_context=_enabled_memory_context(),
@@ -3631,25 +3635,25 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:disable-confirmation",
+            session_id='session:ykzttetwxf62cyq3xywg2kkiey',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
         )
         live = SessionLiveControlOwner(
-            session_id="session:disable-confirmation", owner_epoch=1
+            session_id='session:ykzttetwxf62cyq3xywg2kkiey', owner_epoch=1
         )
         coordinator = KernelInteractionCoordinator(
             repository=_InteractionRepository(),  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:disable-confirmation", 1, "host:1"),
+            guard=HostWriterGuard('session:ykzttetwxf62cyq3xywg2kkiey', 1, 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
             live_control=live,
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert await coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller('attachment:dqozinnq4ir4wm3cz5udiaqdoa')
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:1",
-            session_id="session:disable-confirmation",
+            host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
+            session_id='session:ykzttetwxf62cyq3xywg2kkiey',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -3670,7 +3674,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
         )
         borrow = port.borrow_tool_surface(surface)
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:disable-confirmation",
+            snapshot_id='permission:hc4krizxiaoqo2fidvci2sj56u',
             requested_mode=PermissionMode.ASK_PERMISSIONS,
             effective_mode=PermissionMode.ASK_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -3680,8 +3684,8 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
                 tool_name=effect.name,
                 arguments={"value": "cancel-me"},
                 tool_call_id="call:disable-confirmation",
-                turn_id="turn:disable-confirmation",
-                assistant_entry_id="entry:disable-confirmation",
+                turn_id='turn:7x6zgmrnoj4y65nwzjlx37kisq',
+                assistant_entry_id='entry:xedxcmf5dpahplt7jyzwxzziue',
                 permission_snapshot=permission,
                 surface_borrow=borrow,
                 memory_context=_enabled_memory_context(),
@@ -3691,14 +3695,14 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
             )
             prepared_permission = port.prepare_permission_request(
                 tool_call_id="call:disable-confirmation",
-                turn_id="turn:disable-confirmation",
+                turn_id='turn:7x6zgmrnoj4y65nwzjlx37kisq',
                 surface_borrow=borrow,
             )
             waiter = asyncio.create_task(
                 port.request_confirmation(
                     prepared_request=prepared_permission,
                     tool_name=effect.name,
-                    assistant_entry_id="entry:disable-confirmation",
+                    assistant_entry_id='entry:xedxcmf5dpahplt7jyzwxzziue',
                     permission_snapshot=permission,
                 )
             )
@@ -3726,25 +3730,25 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
 def test_round6_interaction_close_joins_started_canonical_resolution() -> None:
     async def exercise() -> None:
         repository = _BlockingInteractionRepository()
-        owner = SessionLiveControlOwner(session_id="session:close", owner_epoch=1)
+        owner = SessionLiveControlOwner(session_id='session:t2m4xiiioiwca5di5rlzp2pcru', owner_epoch=1)
         coordinator = KernelInteractionCoordinator(
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:close", 1, "host:1"),
+            guard=HostWriterGuard('session:t2m4xiiioiwca5di5rlzp2pcru', 1, 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
             live_control=owner,
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert await coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller('attachment:dqozinnq4ir4wm3cz5udiaqdoa')
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:close",
+            snapshot_id='permission:ozt27munhscgoahueg5rienife',
             requested_mode=PermissionMode.ASK_PERMISSIONS,
             effective_mode=PermissionMode.ASK_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         waiter = asyncio.create_task(
             coordinator.request_tool_confirmation(
-                turn_id="turn:close",
-                assistant_entry_id="entry:close",
+                turn_id='turn:xlydhkijwcj57gxatjj7r3zobm',
+                assistant_entry_id='entry:vvyy67wxbd4ja3ia7enkykvhx4',
                 tool_call_id="call:close",
                 tool_name="tool_close",
                 permission_snapshot=permission,
@@ -3759,9 +3763,9 @@ def test_round6_interaction_close_joins_started_canonical_resolution() -> None:
                 expected_owner_epoch=1,
                 expected_live_revision=snapshot.revision,
                 interaction_id=snapshot.current_interaction.interaction_id,
-                command_id="command:close",
+                command_id='command:pmflyvwck66ormdvzu66zmt5xe',
                 decision="ALLOW",
-                actor_id="attachment:1",
+                actor_id='attachment:dqozinnq4ir4wm3cz5udiaqdoa',
             )
         )
         assert await asyncio.to_thread(repository.started.wait, 2)
@@ -3779,25 +3783,25 @@ def test_round6_interaction_close_joins_started_canonical_resolution() -> None:
 def test_round6_interaction_retry_installs_fresh_unsettled_edge() -> None:
     async def exercise() -> None:
         repository = _FailThenBlockingInteractionRepository()
-        owner = SessionLiveControlOwner(session_id="session:retry", owner_epoch=1)
+        owner = SessionLiveControlOwner(session_id='session:5itf3kdgqxeydulbvh6lasbfvi', owner_epoch=1)
         coordinator = KernelInteractionCoordinator(
             repository=repository,  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:retry", 1, "host:1"),
+            guard=HostWriterGuard('session:5itf3kdgqxeydulbvh6lasbfvi', 1, 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
             live_control=owner,
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert await coordinator.attach_controller("attachment:retry")
+        assert await coordinator.attach_controller('attachment:hfysvvvl77gatjkivhnvvc3nie')
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:retry",
+            snapshot_id='permission:qmvaet55jqjc7xn4omzhtapafe',
             requested_mode=PermissionMode.ASK_PERMISSIONS,
             effective_mode=PermissionMode.ASK_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         waiter = asyncio.create_task(
             coordinator.request_tool_confirmation(
-                turn_id="turn:retry",
-                assistant_entry_id="entry:retry",
+                turn_id='turn:ax6y2mzd7lxwumght7qxav4eoq',
+                assistant_entry_id='entry:mmbbrs7b7naf3avzv65zagvsz4',
                 tool_call_id="call:retry",
                 tool_name="tool_retry",
                 permission_snapshot=permission,
@@ -3811,9 +3815,9 @@ def test_round6_interaction_retry_installs_fresh_unsettled_edge() -> None:
             "expected_owner_epoch": 1,
             "expected_live_revision": snapshot.revision,
             "interaction_id": snapshot.current_interaction.interaction_id,
-            "command_id": "command:retry",
+            "command_id": 'command:wtcttge4izuewdrxl4hvotk2g4',
             "decision": "ALLOW",
-            "actor_id": "attachment:retry",
+            "actor_id": 'attachment:hfysvvvl77gatjkivhnvvc3nie',
         }
         with pytest.raises(ToolInteractionDecisionNotAccepted, match="confirmed not accepted"):
             await coordinator.resolve_tool_interaction(**kwargs)
@@ -3824,11 +3828,11 @@ def test_round6_interaction_retry_installs_fresh_unsettled_edge() -> None:
         assert pending is not None and pending.settlement_changed is not None
         assert not pending.settlement_changed.is_set()
         detached = asyncio.create_task(
-            coordinator.controller_detached("attachment:retry")
+            coordinator.controller_detached('attachment:hfysvvvl77gatjkivhnvvc3nie')
         )
         await asyncio.sleep(0.02)
         assert detached.done()
-        assert not coordinator.is_current_controller("attachment:retry")
+        assert not coordinator.is_current_controller('attachment:hfysvvvl77gatjkivhnvvc3nie')
         assert not retry.done()
         repository.release.set()
         await asyncio.wait_for(retry, timeout=2)
@@ -3844,23 +3848,23 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
-            session_id="session:confirmation",
+            session_id='session:qdz43qjn33wb5r7xkqjllmiqbm',
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
         )
-        live = SessionLiveControlOwner(session_id="session:confirmation", owner_epoch=1)
+        live = SessionLiveControlOwner(session_id='session:qdz43qjn33wb5r7xkqjllmiqbm', owner_epoch=1)
         coordinator = KernelInteractionCoordinator(
             repository=_InteractionRepository(),  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:confirmation", 1, "host:1"),
+            guard=HostWriterGuard('session:qdz43qjn33wb5r7xkqjllmiqbm', 1, 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
             live_control=live,
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert await coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller('attachment:dqozinnq4ir4wm3cz5udiaqdoa')
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:1",
-            session_id="session:confirmation",
+            host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
+            session_id='session:qdz43qjn33wb5r7xkqjllmiqbm',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
@@ -3881,7 +3885,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
         )
         borrow = port.borrow_tool_surface(surface)
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:confirmation",
+            snapshot_id='permission:ybsaoz4esihcab2uh4tq3vlguu',
             requested_mode=PermissionMode.ASK_PERMISSIONS,
             effective_mode=PermissionMode.ASK_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -3891,8 +3895,8 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 tool_name=effect.name,
                 arguments={"value": "confirmed"},
                 tool_call_id="call:confirmation",
-                turn_id="turn:confirmation",
-                assistant_entry_id="entry:assistant",
+                turn_id='turn:lx2t6m7itytcet27oko7ja2ffq',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 permission_snapshot=permission,
                 surface_borrow=borrow,
                 memory_context=_enabled_memory_context(),
@@ -3903,14 +3907,14 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
             assert not port._mcp_dispatch_permits  # noqa: SLF001
             prepared_permission = port.prepare_permission_request(
                 tool_call_id="call:confirmation",
-                turn_id="turn:confirmation",
+                turn_id='turn:lx2t6m7itytcet27oko7ja2ffq',
                 surface_borrow=borrow,
             )
             waiter = asyncio.create_task(
                 port.request_confirmation(
                     prepared_request=prepared_permission,
                     tool_name=effect.name,
-                    assistant_entry_id="entry:assistant",
+                    assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                     permission_snapshot=permission,
                 )
             )
@@ -3926,21 +3930,21 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 expected_owner_epoch=1,
                 expected_live_revision=snapshot.revision,
                 interaction_id=snapshot.current_interaction.interaction_id,
-                command_id="command:confirmation",
+                command_id='command:vaykpkhaqqz4s7fn34w2rwakzy',
                 decision="ALLOW",
-                actor_id="attachment:1",
+                actor_id='attachment:dqozinnq4ir4wm3cz5udiaqdoa',
             )
             allowed = await waiter
             assert allowed.kind is KernelToolAuthorizationKind.ALLOW
             assert allowed.accepted_attempt_id is not None
             invocation = KernelToolInvocationContext(
-                session_id="session:confirmation",
-                workspace_id="workspace:confirmation",
-                turn_id="turn:confirmation",
-                assistant_entry_id="entry:assistant",
+                session_id='session:qdz43qjn33wb5r7xkqjllmiqbm',
+                workspace_id='workspace:f2iig7gotarpr2jkefqo3n5wky',
+                turn_id='turn:lx2t6m7itytcet27oko7ja2ffq',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:confirmation",
                 attempt_id=allowed.accepted_attempt_id,
-                result_entry_id="entry:result",
+                result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.ROOT.value,
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
@@ -3957,8 +3961,8 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 arguments={"value": "confirmed"},
                 tool_call_id="call:confirmation",
                 attempt_id=allowed.accepted_attempt_id,
-                turn_id="turn:confirmation",
-                assistant_entry_id="entry:assistant",
+                turn_id='turn:lx2t6m7itytcet27oko7ja2ffq',
+                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=invocation,
             )
             assert b"effect:confirmed" in result.content
@@ -3976,18 +3980,18 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
 
 def test_round6_confirmation_arbiter_is_single_visible_fifo() -> None:
     async def exercise() -> None:
-        owner = SessionLiveControlOwner(session_id="session:1", owner_epoch=1)
+        owner = SessionLiveControlOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch=1)
         coordinator = KernelInteractionCoordinator(
             repository=_InteractionRepository(),  # type: ignore[arg-type]
-            guard=HostWriterGuard("session:1", 1, "host:1"),
+            guard=HostWriterGuard('session:cbauiajfisf4gvpdotrq4qgxhq', 1, 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
             live_control=owner,
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert await coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller('attachment:dqozinnq4ir4wm3cz5udiaqdoa')
         admission_order: list[str] = []
         permission = build_run_permission_snapshot(
-            snapshot_id="permission:1",
+            snapshot_id='permission:2d34d3zc4faknjmh3rkv2tftdm',
             requested_mode=PermissionMode.ASK_PERMISSIONS,
             effective_mode=PermissionMode.ASK_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -3995,8 +3999,8 @@ def test_round6_confirmation_arbiter_is_single_visible_fifo() -> None:
 
         def request(index: int):
             return coordinator.request_tool_confirmation(
-                turn_id="turn:1",
-                assistant_entry_id="entry:1",
+                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                assistant_entry_id='entry:jfasfwsw2puygc3hrueckpvgba',
                 tool_call_id=f"call:{index}",
                 tool_name=f"tool_{index}",
                 permission_snapshot=permission,
@@ -4017,9 +4021,9 @@ def test_round6_confirmation_arbiter_is_single_visible_fifo() -> None:
             expected_owner_epoch=1,
             expected_live_revision=snapshot.revision,
             interaction_id=snapshot.current_interaction.interaction_id,
-            command_id="command:1",
+            command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
             decision="ALLOW",
-            actor_id="attachment:1",
+            actor_id='attachment:dqozinnq4ir4wm3cz5udiaqdoa',
         )
         assert (await first).decision == "ALLOW"
         assert admission_order == ["1", "2"]
@@ -4030,9 +4034,9 @@ def test_round6_confirmation_arbiter_is_single_visible_fifo() -> None:
             expected_owner_epoch=1,
             expected_live_revision=snapshot.revision,
             interaction_id=snapshot.current_interaction.interaction_id,
-            command_id="command:2",
+            command_id='command:wpqnljdtvxcoaudexasizwddny',
             decision="DENY",
-            actor_id="attachment:1",
+            actor_id='attachment:dqozinnq4ir4wm3cz5udiaqdoa',
         )
         assert (await second).decision == "DENY"
         await coordinator.aclose()
@@ -4219,7 +4223,7 @@ def test_round6_streamable_http_fixture(tmp_path: Path) -> None:
                 await client.aclose()
 
             supervisor = McpHostSupervisor(
-                session_id="session:http-parallel",
+                session_id='session:vu3vmhq6c4ircqti3fdv42vi7q',
                 workspace_root=tmp_path,
                 configs=(config,),
             )
@@ -4233,7 +4237,7 @@ def test_round6_streamable_http_fixture(tmp_path: Path) -> None:
                     is McpPhysicalConcurrencyKind.BOUNDED_STATELESS_HTTP
                 )
                 parallel_results = await _parallel_probe(
-                    runtime, session_id="session:http-parallel"
+                    runtime, session_id='session:vu3vmhq6c4ircqti3fdv42vi7q'
                 )
                 assert all(b"parallel:yes" in item for item in parallel_results)
             finally:

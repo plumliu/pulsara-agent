@@ -58,13 +58,13 @@ def assert_shape(name, arguments, valid):
         ({"mode": "none"}, True),
         ({"mode": "last_n", "turns": 1}, True),
         ({"mode": "last_n", "turns": 3}, True),
-        ({"mode": "worker_history", "task_id": "task:old"}, True),
+        ({"mode": "worker_history", "task_id": 'task:fuyejuysqofwdfmpmtb7nq5iim'}, True),
         ({}, False),
         (None, False),
         ({"mode": "last_n"}, False),
         ({"mode": "last_n", "turns": True}, False),
         ({"mode": "last_n", "turns": 4}, False),
-        ({"mode": "last_n", "turns": 1, "task_id": "task:old"}, False),
+        ({"mode": "last_n", "turns": 1, "task_id": 'task:fuyejuysqofwdfmpmtb7nq5iim'}, False),
         ({"mode": "none", "turns": 1}, False),
         ({"mode": "none", "task_id": None}, False),
         ({"mode": "worker_history"}, False),
@@ -131,7 +131,7 @@ def test_session_first_page_and_cursor_only_shapes(name):
         {"query": "same", "lifecycle": "ALL"}
         if name == "search_sessions"
         else {
-            "session_id": "same-session",
+            "session_id": 'session:erpkjonqekxozlvfhjfu6p5tjq',
             "include_tools": False,
             **(
                 {"query": "same"}
@@ -159,8 +159,8 @@ def test_first_content_search_needs_actual_keywords(query):
     [
         ({}, True),
         ({"timeout_seconds": 0}, True),
-        ({"task_ids": ["task:one"]}, True),
-        ({"task_ids": ["task:one"], "settle": "first"}, True),
+        ({"task_ids": ['task:74xe3yvbpqgx6s4jejk25ed6c4']}, True),
+        ({"task_ids": ['task:74xe3yvbpqgx6s4jejk25ed6c4'], "settle": "first"}, True),
         ({"settle": "all"}, False),
         ({"settle": None}, False),
         ({"task_ids": []}, False),
@@ -173,7 +173,7 @@ def test_wait_join_shape(args, valid):
 
 def scheduled_args(action):
     if action == "list":
-        return {"action": action, "status": "PAUSED", "cursor": "scheduled:previous"}
+        return {"action": action, "status": "PAUSED", "cursor": 'schedule:bcud6jffakbgubat6jskaqqhme'}
     if action == "create":
         return {
             "action": action,
@@ -183,7 +183,7 @@ def scheduled_args(action):
                 "timezone": "Asia/Shanghai",
                 "permission_mode": "read-only",
                 "schedule": {
-                    "contract": "scheduled-rule:v1",
+                    "contract": 'scheduled-rule:v1',
                     "kind": "interval",
                     "anchor_at_utc": "2026-10-07T00:00:00Z",
                     "seconds": 60,
@@ -197,9 +197,9 @@ def scheduled_args(action):
 @pytest.mark.parametrize(
     "session_field,expected",
     [
-        ({}, "current"),
-        ({"session_id": None}, "current"),
-        ({"session_id": "other"}, "other"),
+        ({}, 'session:6g3pqrtwdp2ilmnlzfmxxxhelu'),
+        ({"session_id": None}, 'session:6g3pqrtwdp2ilmnlzfmxxxhelu'),
+        ({"session_id": 'session:pusyod5zvaz4i6yode652m7ble'}, 'session:pusyod5zvaz4i6yode652m7ble'),
     ],
 )
 def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_identity(
@@ -214,7 +214,7 @@ def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_ident
         assert_shape("scheduled_tasks", arguments, True)
         await service.invoke(
             arguments,
-            default_session_id="current",
+            default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
             permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
         dispatched = {key: value for key, value in original.items() if key != "action"}
@@ -236,11 +236,11 @@ def test_scheduled_service_none_keeps_its_unfiltered_meaning():
         service._read.reset_mock()
         await service.invoke(
             {"action": "list", "session_id": None},
-            default_session_id="current",
+            default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
             permission_mode=PermissionMode.READ_ONLY,
         )
         service._read.assert_awaited_once_with(
-            "list_scheduled_tasks", cursor=None, status=None, session_id="current"
+            "list_scheduled_tasks", cursor=None, status=None, session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu'
         )
 
     asyncio.run(run())
@@ -263,7 +263,7 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
         with pytest.raises(ScheduledTaskError):
             await service.invoke(
                 args,
-                default_session_id="current",
+                default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
                 permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
         service.get.assert_not_awaited()
@@ -279,8 +279,8 @@ def test_scheduled_create_status_schema_and_dispatch(status_fields):
         service.create = AsyncMock(return_value={})
         arguments = {**scheduled_args("create"), **status_fields}
         assert_shape("scheduled_tasks", arguments, True)
-        await service.invoke(arguments, default_session_id="current", permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-        service.create.assert_awaited_once_with(session_id="current", values=arguments["values"], **status_fields)
+        await service.invoke(arguments, default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu', permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+        service.create.assert_awaited_once_with(session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu', values=arguments["values"], **status_fields)
 
     asyncio.run(run())
 
@@ -386,18 +386,18 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
             await service.invoke(
                 {
                     "action": "run_now",
-                    "task_id": "a",
+                    "task_id": "schedule:" + "a" * 26,
                     "expected_revision": 1,
-                    "client_command_id": "cmd",
+                    "client_command_id": 'command:knzz7jzjjydzbbeubc3tt7q32m',
                     "request_at_utc": "2026-10-13T00:00:00Z",
                 },
-                default_session_id="session",
+                default_session_id="session:" + "a" * 26,
                 permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
         assert error.value.code == "INVALID_ACTION"
         assert_shape("scheduled_tasks", {
-            "action": "run_now", "task_id": "a", "expected_revision": 1,
-            "client_command_id": "cmd", "request_at_utc": "2026-10-13T00:00:00Z",
+            "action": "run_now", "task_id": "schedule:" + "a" * 26, "expected_revision": 1,
+            "client_command_id": 'command:knzz7jzjjydzbbeubc3tt7q32m', "request_at_utc": "2026-10-13T00:00:00Z",
         }, False)
         service.run_now.assert_not_awaited()
         service.get = AsyncMock(return_value={"permission_mode": "bypass-permissions"})
@@ -406,15 +406,15 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
             await service.invoke(
                 {
                     "action": "switch",
-                    "task_id": "a",
+                    "task_id": "schedule:" + "a" * 26,
                     "expected_revision": 1,
                     "target": {
                         "kind": "existing",
-                        "task_id": "b",
+                        "task_id": "schedule:" + "b" * 25 + "a",
                         "expected_revision": 2,
                     },
                 },
-                default_session_id="session",
+                default_session_id="session:" + "a" * 26,
                 permission_mode=PermissionMode.READ_ONLY,
             )
         assert error.value.code == "PERMISSION_ESCALATION"

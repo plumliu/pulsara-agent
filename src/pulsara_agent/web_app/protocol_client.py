@@ -6,10 +6,11 @@ requests are translated into attached Protocol-v3 frames after authentication.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import asyncio
 from contextlib import suppress
 from typing import Final, Literal
-from uuid import uuid4
 
 from google.protobuf.message import Message
 
@@ -61,7 +62,7 @@ _ATTACHED_FIELDS: Final = frozenset(
 
 
 def _request_id() -> str:
-    return f"web-request:{uuid4().hex}"
+    return random_id("request")
 
 
 class TerminalProtocolClient:
@@ -296,7 +297,7 @@ class BrowserRuntimeConnection:
         generation: int,
         role: Literal["controller", "observer"] = "controller",
     ) -> "BrowserRuntimeConnection":
-        connection_id = f"browser-connection:{uuid4().hex}"
+        connection_id = random_id("transport")
         control_role = (
             wire.ATTACHMENT_ROLE_CONTROLLER
             if role == "controller"

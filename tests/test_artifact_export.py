@@ -62,7 +62,7 @@ class BodyPort:
     def __init__(self, content=b"retained text", *, snapshot=False):
         self.reads = 0
         self.record = ToolArtifactRecordView(
-            artifact_id="artifact:test",
+            artifact_id='artifact:3uxyc2nlsokzkts3xmlji4zimy',
             role="OUTPUT",
             media_type="text/plain",
             size_bytes=len(content),
@@ -81,7 +81,7 @@ class BodyPort:
             digest="sha256:" + sha256(content).hexdigest(),
             codec="utf-8",
             accepted_at_utc="2026-09-30T00:00:00Z",
-            model_visible_memory_fact_ids=("memory:not-displayed",),
+            model_visible_memory_fact_ids=('memory:k7m4xmjpnnauzg7avslrfaqqwm',),
         )
         self.content = content
 
@@ -92,7 +92,7 @@ class BodyPort:
         return ToolArtifactBodyView(self.record, self.content)
 
 
-def call(path="output.txt", artifact_id="artifact:test", **extra):
+def call(path="output.txt", artifact_id='artifact:3uxyc2nlsokzkts3xmlji4zimy', **extra):
     return ToolCall(
         id="call:export",
         name="artifact_export",
@@ -127,7 +127,7 @@ def test_export_exact_bytes_coverage_and_nonrecursive_location(
     assert target.read_bytes() == content
     assert payload == {
         "status": "success",
-        "artifact_id": "artifact:test",
+        "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy',
         "path": str(target),
         "bytes_written": len(content),
         "source_coverage": port.record.source_coverage.value,
@@ -142,8 +142,9 @@ def test_export_exact_bytes_coverage_and_nonrecursive_location(
     assert result.output_artifact_candidate is None
     publisher = _RecordingPublisher()
     projected = _processor(publisher).prepare(
-        workspace_id="workspace:test",
-        result_entry_id="entry:test",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        result_entry_id='entry:yizmduice57hcs52bz2usckgc4',
         public_output=result.output,
         candidate=None,
         artifact_inline_result=result.artifact_inline_result,
@@ -270,8 +271,8 @@ def test_export_cancel_after_publication_keeps_exact_single_outcome(
     async def run():
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:export",
-            session_id="session:export",
+            host_owner_id='host:m2lzworel4eoc2mmilyyzj7nxm',
+            session_id='session:yovkoffbw6sro643t4zfhazd24',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             artifact_read_port=BodyPort(),
@@ -279,17 +280,17 @@ def test_export_cancel_after_publication_keeps_exact_single_outcome(
         operation = asyncio.create_task(
             invoke_direct_tool(
                 port,
-                session_id="session:export",
+                session_id='session:yovkoffbw6sro643t4zfhazd24',
                 tool_name="artifact_export",
-                arguments={"artifact_id": "artifact:test", "path": "output.txt"},
+                arguments={"artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy', "path": "output.txt"},
                 tool_call_id="call:export",
-                attempt_id="attempt:export",
-                turn_id="turn:export",
-                assistant_entry_id="entry:export",
+                attempt_id='attempt:u3xrx7rpcwqzvgtl24sz2q7u7y',
+                turn_id='turn:kkdrrjecidt6ni3sgr7kc4p6ge',
+                assistant_entry_id='entry:5nuy4yboonqd6fi6ppzl54b42i',
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK
                 if child
                 else ModelInputScopeKind.ROOT,
-                scope_subagent_task_id="task:export" if child else None,
+                scope_subagent_task_id='task:ytms6ry3rylwzvrx4mydmqoira' if child else None,
             )
         )
         try:
@@ -320,8 +321,8 @@ def test_export_available_to_root_and_child_with_same_scoped_owner(tmp_path):
     async def run():
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:export",
-            session_id="session:export",
+            host_owner_id='host:m2lzworel4eoc2mmilyyzj7nxm',
+            session_id='session:yovkoffbw6sro643t4zfhazd24',
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             artifact_read_port=BodyPort(),
@@ -329,7 +330,7 @@ def test_export_available_to_root_and_child_with_same_scoped_owner(tmp_path):
         try:
             for scope, task in [
                 (ModelInputScopeKind.ROOT, None),
-                (ModelInputScopeKind.SUBAGENT_TASK, "task:export"),
+                (ModelInputScopeKind.SUBAGENT_TASK, 'task:ytms6ry3rylwzvrx4mydmqoira'),
             ]:
                 surface = prepare_test_direct_tool_surface(
                     port, conversation_scope_kind=scope, scope_subagent_task_id=task
@@ -436,8 +437,9 @@ def test_inline_metadata_above_archive_threshold_does_not_create_an_artifact(tmp
     assert len(result.output.encode()) > 8000
     publisher = _RecordingPublisher()
     projected = _processor(publisher).prepare(
-        workspace_id="workspace:test",
-        result_entry_id="entry:large-export",
+        session_id='session:6ej3oydnee24zzis2etyixxioi',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        result_entry_id='entry:5hqbdfcsubcf4mozpjzxvhcp4e',
         public_output=result.output,
         candidate=None,
         artifact_inline_result=True,
@@ -466,7 +468,7 @@ def test_unknown_parameters_fail_without_read_or_write(tmp_path, extra):
 def test_export_uses_existing_file_write_permissions(tmp_path, mode, outside):
     path = tmp_path.parent / "outside.txt" if outside else tmp_path / "result.txt"
     permission = build_run_permission_snapshot(
-        snapshot_id="permission:export",
+        snapshot_id='permission:oprmhhxajdgr3pjcq6lsshgfmi',
         requested_mode=mode,
         effective_mode=mode,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -476,9 +478,9 @@ def test_export_uses_existing_file_write_permissions(tmp_path, mode, outside):
             ToolDispatchAuthorizationRequest(
                 "artifact_export",
                 "call:export",
-                {"artifact_id": "artifact:test", "path": str(path)},
-                "turn:export",
-                "entry:export",
+                {"artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy', "path": str(path)},
+                'turn:kkdrrjecidt6ni3sgr7kc4p6ge',
+                'entry:5nuy4yboonqd6fi6ppzl54b42i',
                 permission,
                 tmp_path,
             )
@@ -528,6 +530,7 @@ def test_postgres_export_scope_corruption_and_deleted_edge(
     source = ('{"duplicate":1,"duplicate":2,"text":"中🙂"}\r\n' * 600).encode()
     result_entry_id = _name("entry")
     projection = ToolOutputArtifactProcessor(provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=result_entry_id,
         public_output=source.decode(),
@@ -575,8 +578,8 @@ def test_postgres_export_scope_corruption_and_deleted_edge(
 
     artifact_id = projection.artifact_id
     for tool in (
-        exporter(session_id="session:unknown"),
-        exporter(workspace="workspace:unknown"),
+        exporter(session_id='session:svficmkrsuonkqjbynptyvlsba'),
+        exporter(workspace='workspace:i6e42ow4tdg7gl2sdpco4vb4hi'),
     ):
         assert (
             json.loads(tool.execute(call(artifact_id=artifact_id)).output)["status"]
@@ -642,7 +645,7 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
             _tool_stream(
                 1,
                 tool_name="artifact_export",
-                arguments='{"artifact_id":"artifact:test","path":"result.txt"}',
+                arguments='{"artifact_id":"artifact:3uxyc2nlsokzkts3xmlji4zimy","path":"result.txt"}',
             ),
             _tool_stream(2, tool_name="read_file", arguments='{"path":"result.txt"}'),
             _text_stream("source checked", block_id="answer"),
@@ -652,7 +655,7 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
     async def run():
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
-            host_owner_id="host:export",
+            host_owner_id='host:m2lzworel4eoc2mmilyyzj7nxm',
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),

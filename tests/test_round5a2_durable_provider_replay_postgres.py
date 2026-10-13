@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from pulsara_agent.llm.input import FrozenPromptContent
 
 from datetime import datetime, timezone
@@ -45,9 +47,7 @@ pytestmark = pytest.mark.postgres
 
 
 def _name(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 def _open_turn(repository: ConversationKernelRepository, lease):
@@ -58,7 +58,7 @@ def _open_turn(repository: ConversationKernelRepository, lease):
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
+        context_binding_revision_id=_name("binding"),
         permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
@@ -106,7 +106,7 @@ def _native_candidate(
 
 def _commit_arguments(repository, lease, *, workspace_id: str, detail_count: int = 0):
     _turn_id, cut = _open_turn(repository, lease)
-    entry_id = _name("assistant")
+    entry_id = _name("entry")
     content = InlineContent.from_bytes(b"answer")
     blocks = (AssistantTextBlock(_name("block"), content),)
     replay = _native_candidate(
@@ -231,7 +231,7 @@ def test_round5a2_deferred_fk_rejects_replay_without_assistant(
     candidate = _native_candidate(
         session_id=session_id,
         workspace_id=workspace_id,
-        entry_id=_name("missing-assistant"),
+        entry_id=f"missing-assistant:{uuid4().hex}",
     )
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         with psycopg.connect(

@@ -1,6 +1,7 @@
 """Round 9.2 independent Hook subsystem product and architecture gates."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import fields, replace
@@ -156,7 +157,7 @@ def _provenance(
     kind: HookSourceKind = HookSourceKind.USER_FILE,
     label: str = "USER",
 ) -> FrozenHookSourceProvenance:
-    workspace_key = "workspace:test" if kind is HookSourceKind.WORKSPACE_FILE else None
+    workspace_key = 'workspace:wdl6b3mtrkghwnvjo4an3ekbau' if kind is HookSourceKind.WORKSPACE_FILE else None
     return FrozenHookSourceProvenance(
         LocalFileHookSourceIdentity(
             kind,
@@ -232,19 +233,19 @@ def _scope(*, child_task_id: str | None = None) -> HookDispatchScopeRef:
 
 
 def _inputs() -> tuple[object, ...]:
-    common = {"session_id": "session:1", "cwd": "/tmp", "model": "model:1"}
+    common = {"session_id": 'session:cbauiajfisf4gvpdotrq4qgxhq', "cwd": "/tmp", "model": "model:1"}
     return (
         SessionStartInput(**common, source="startup", permission_mode="default"),
         SessionEndInput(**common),
         UserPromptSubmitInput(
             **common,
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             prompt="hello",
             permission_mode="acceptEdits",
         ),
         PreToolUseInput(
             **common,
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             tool_name="Bash",
             tool_use_id="call:1",
             tool_input={"command": "pwd"},
@@ -252,33 +253,33 @@ def _inputs() -> tuple[object, ...]:
         ),
         PermissionRequestInput(
             **common,
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             tool_name="remote.tool",
             tool_input={"value": 1},
             permission_mode="default",
         ),
         PostToolUseInput(
             **common,
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             tool_name="remote.tool",
             tool_use_id="call:1",
             tool_input={"value": 1},
             tool_response={"status": "ok"},
             permission_mode="default",
         ),
-        PreCompactInput(**common, turn_id="turn:1", trigger="auto"),
-        PostCompactInput(**common, turn_id="turn:1", trigger="auto"),
+        PreCompactInput(**common, turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', trigger="auto"),
+        PostCompactInput(**common, turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', trigger="auto"),
         SubagentStartInput(
             **common,
-            turn_id="turn:child",
-            agent_id="task:1",
+            turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
+            agent_id='task:itnsbirlmxzeu74pn7keq6zuzi',
             agent_type="research_worker",
             permission_mode="dontAsk",
         ),
         SubagentStopInput(
             **common,
-            turn_id="turn:child",
-            agent_id="task:1",
+            turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
+            agent_id='task:itnsbirlmxzeu74pn7keq6zuzi',
             agent_type="research_worker",
             stop_hook_active=False,
             last_assistant_message="done",
@@ -286,7 +287,7 @@ def _inputs() -> tuple[object, ...]:
         ),
         StopInput(
             **common,
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             stop_hook_active=False,
             last_assistant_message="done",
             permission_mode="default",
@@ -298,18 +299,18 @@ def _causal_refs() -> tuple[object, ...]:
     return (
         SessionStartRef(object(), "startup"),
         SessionEndRef(object()),
-        DirectPromptRef("command:1", "turn:1", "entry:1", "revision:1"),
-        QueuedPromptRef("command:1", "queue:1", "turn:2", "entry:2", "revision:2"),
-        PreToolRef("turn:1", "entry:assistant", "call:1", "terminal"),
-        PermissionRef("turn:1", "call:1", object()),
+        DirectPromptRef('command:3mkyvtvppfglbmqedm6zqizjvy', 'turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:jfasfwsw2puygc3hrueckpvgba', "revision:1"),
+        QueuedPromptRef('command:3mkyvtvppfglbmqedm6zqizjvy', 'queue:yq3kjvg2mf5ew7orchg44qn4eu', 'turn:u7jrb7ntdvxsawfkehwcc4rhu4', 'entry:yym6qf3l4xz6437gradtmhjrke', "revision:2"),
+        PreToolRef('turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:5qidalqvkujk5ykzzzfpwie2qy', "call:1", "terminal"),
+        PermissionRef('turn:nzc36cttgo7xxki7bcjc7ops7a', "call:1", object()),
         PostToolRef(
-            "turn:1", "call:1", "result:1", "entry:result", "SUCCESS", object()
+            'turn:nzc36cttgo7xxki7bcjc7ops7a', "call:1", 'result:7aagd37kva2jqg4uxj3eppdpdy', 'entry:zvmjajlmix3vyoeoy2zhz6xd2a', "SUCCESS", object()
         ),
-        PreCompactRef(object(), "ROOT", "turn:1", "auto"),
-        PostCompactRef(object(), "snapshot:1", "revision:compact"),
-        SubagentStartRef("event:start", "task:1", "turn:child"),
-        SubagentStopRef("task:1", "INFERRED", "entry:assistant"),
-        StopRef("turn:1", "entry:assistant", object(), "revision:1"),
+        PreCompactRef(object(), "ROOT", 'turn:nzc36cttgo7xxki7bcjc7ops7a', "auto"),
+        PostCompactRef(object(), 'snapshot:hui7qoo4witxjjls4whfaupz2e', "revision:compact"),
+        SubagentStartRef('event:4f5ye2dst5usqy5siopmw5skua', 'task:itnsbirlmxzeu74pn7keq6zuzi', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m'),
+        SubagentStopRef('task:itnsbirlmxzeu74pn7keq6zuzi', "INFERRED", 'entry:5qidalqvkujk5ykzzzfpwie2qy'),
+        StopRef('turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:5qidalqvkujk5ykzzzfpwie2qy', object(), "revision:1"),
     )
 
 
@@ -362,7 +363,7 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
         assert wire["hook_event_name"] == public_input.event_type.external_name
         assert wire["transcript_path"] is None
         assert wire.keys().isdisjoint(internal_fields)
-        assert wire["session_id"] == "session:1"
+        assert wire["session_id"] == 'session:cbauiajfisf4gvpdotrq4qgxhq'
         assert wire["cwd"] == "/tmp"
         assert wire["model"] == "model:1"
     assert "permission_mode" not in inputs[1].to_wire()
@@ -719,10 +720,10 @@ def test_round9_2_edit_alias_preserves_native_line_operation_input() -> None:
         ],
     }
     public = PreToolUseInput(
-        session_id="session:1",
+        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         cwd="/workspace",
         model="model",
-        turn_id="turn:1",
+        turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
         tool_name="edit_file",
         tool_use_id="call:1",
         tool_input=native_input,
@@ -895,7 +896,7 @@ def test_round9_2_ordered_aggregation_precedence_and_once_guard(tmp_path: Path) 
         _definition(
             tmp_path,
             HookEventType.PERMISSION_REQUEST_EVENT,
-            f"permission:{ordinal}",
+            derive_id("permission", "test-fixture", f"permission:{ordinal}"),
             ordinal=ordinal,
         )
         for ordinal in range(3)
@@ -1179,10 +1180,10 @@ print('visible stderr ' + secret, file=sys.stderr)
         request = HookExecutionRequest(
             definition,
             UserPromptSubmitInput(
-                "session:1",
+                'session:cbauiajfisf4gvpdotrq4qgxhq',
                 str(tmp_path),
                 "model:1",
-                "turn:1",
+                'turn:nzc36cttgo7xxki7bcjc7ops7a',
                 "prompt contains " + secret,
                 "default",
             ).to_wire(),
@@ -1220,7 +1221,7 @@ print('visible stderr ' + secret, file=sys.stderr)
         owner.register_scope(scope)
         owner.accept_sync(
             scope=scope,
-            causal_ref=DirectPromptRef("command:1", "turn:1", "entry:1", "revision:1"),
+            causal_ref=DirectPromptRef('command:3mkyvtvppfglbmqedm6zqizjvy', 'turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:jfasfwsw2puygc3hrueckpvgba', "revision:1"),
             entries=outcome.context_entries,
         )
         prepared = owner.freeze_for_target(
@@ -1323,7 +1324,7 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
 ) -> None:
     scrub = HookSecretScrubSet.capture()
     root = _scope()
-    child = _scope(child_task_id="task:1")
+    child = _scope(child_task_id='task:itnsbirlmxzeu74pn7keq6zuzi')
     owner = HookContextOwner()
     owner.register_scope(root)
     owner.register_scope(child)
@@ -1339,7 +1340,7 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
     owner.accept_sync(
         scope=root,
         causal_ref=PostToolRef(
-            "turn:1", "call:1", "result:1", "entry:1", "SUCCESS", object()
+            'turn:nzc36cttgo7xxki7bcjc7ops7a', "call:1", 'result:7aagd37kva2jqg4uxj3eppdpdy', 'entry:jfasfwsw2puygc3hrueckpvgba', "SUCCESS", object()
         ),
         entries=(entry,),
     )
@@ -1356,14 +1357,14 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
     owner.accept_sync(
         scope=root,
         causal_ref=PostToolRef(
-            "turn:1", "call:1", "result:2", "entry:2", "SUCCESS", object()
+            'turn:nzc36cttgo7xxki7bcjc7ops7a', "call:1", 'result:3nkgnuvh4mx5af6bevh2ni2zpm', 'entry:yym6qf3l4xz6437gradtmhjrke', "SUCCESS", object()
         ),
         entries=(first,),
     )
     owner.accept_sync(
         scope=root,
         causal_ref=PostToolRef(
-            "turn:1", "call:2", "result:3", "entry:3", "SUCCESS", object()
+            'turn:nzc36cttgo7xxki7bcjc7ops7a', "call:2", 'result:qrv3fmol5whta2knpb2ctqb45q', 'entry:nvhyc6ehb7acx2htbxgk6cev4q', "SUCCESS", object()
         ),
         entries=(second,),
     )
@@ -1375,7 +1376,7 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
     assert len(set(prepared.domain_identity)) == 2
     assert (
         owner.freeze_for_target(
-            scope_kind="CHILD", child_task_id="task:1", estimator=_Estimator()
+            scope_kind="CHILD", child_task_id='task:itnsbirlmxzeu74pn7keq6zuzi', estimator=_Estimator()
         )
         is None
     )
@@ -1383,13 +1384,13 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
 
     owner.accept_sync(
         scope=child,
-        causal_ref=SubagentStartRef("event:1", "task:1", "turn:child"),
+        causal_ref=SubagentStartRef('event:kbzy7pq2fiwhwkbekyclr7czmy', 'task:itnsbirlmxzeu74pn7keq6zuzi', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m'),
         entries=(HookContextEntry(accepted, 0, 4, "child only", scrub),),
     )
     owner.retire_scope(child)
     assert (
         owner.freeze_for_target(
-            scope_kind="CHILD", child_task_id="task:1", estimator=_Estimator()
+            scope_kind="CHILD", child_task_id='task:itnsbirlmxzeu74pn7keq6zuzi', estimator=_Estimator()
         )
         is None
     )
@@ -1598,7 +1599,7 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     scrub = HookSecretScrubSet.capture()
     active = owner.prepare_sync(
         scope=scope,
-        causal_ref=DirectPromptRef("command:A", "turn:A", "entry:A", "revision:A"),
+        causal_ref=DirectPromptRef('command:dgeavwvig55n3uzk2zxinbgaee', 'turn:74y74rvr2pht5lydgxvy57nxgq', 'entry:mf74nwta7ulytsfrqcjlnrxkxa', "revision:A"),
         entries=(
             HookContextEntry(definition, 0, 1, "context-for-active-turn-A", scrub),
         ),
@@ -1606,10 +1607,10 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     queued = owner.prepare_sync(
         scope=scope,
         causal_ref=QueuedPromptRef(
-            "command:B",
-            "queue:B",
-            "turn:B",
-            "entry:B",
+            'command:odnox7ugjdnns5kuspunx2q274',
+            'queue:dvzibiul2jmfaj5m6reewz35fe',
+            'turn:paqqn75nkrrptym5iw4zxx6u6e',
+            'entry:z24wqokjse36cbgojj5qpqioqi',
             "revision:B",
         ),
         entries=(
@@ -1618,7 +1619,7 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     )
     assert active is not None and queued is not None
     active.commit()
-    queued.commit_prompt_bound("queue:B")
+    queued.commit_prompt_bound('queue:dvzibiul2jmfaj5m6reewz35fe')
 
     selected_for_a = owner.freeze_for_target(
         scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
@@ -1628,7 +1629,7 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     assert "context-for-queued-turn-B" not in selected_for_a.full_text
     selected_for_a.reservation.retire()
 
-    owner.activate_prompt_candidate(scope=scope, prompt_candidate_id="queue:B")
+    owner.activate_prompt_candidate(scope=scope, prompt_candidate_id='queue:dvzibiul2jmfaj5m6reewz35fe')
     selected_for_b = owner.freeze_for_target(
         scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
     )
@@ -1774,7 +1775,7 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
         scope = _scope()
         context_owner.register_scope(scope)
         permission = SimpleNamespace(
-            snapshot_id="permission:1",
+            snapshot_id='permission:2d34d3zc4faknjmh3rkv2tftdm',
             effective_mode=PermissionMode.ACCEPT_EDITS,
             plan_workflow_id=None,
         )
@@ -1786,13 +1787,13 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
         runner._hook_context_owner = context_owner
         runner._hook_scope = scope
         runner._writer_lease = SimpleNamespace(
-            guard=SimpleNamespace(session_id="session:1")
+            guard=SimpleNamespace(session_id='session:cbauiajfisf4gvpdotrq4qgxhq')
         )
         runner._tools = SimpleNamespace(snapshot_workspace_root=lambda: tmp_path)
         initial_deadline = monotonic() + 11
         await runner._dispatch_initial_session_start(
             ActiveTurnCancellationIntent(
-                "turn:initial", ModelInputScopeKind.ROOT, None
+                'turn:xnx64h3ay32hesrkbwvxpz65dy', ModelInputScopeKind.ROOT, None
             ),
             permission_snapshot=permission,
             model_id="model:1",
@@ -1801,30 +1802,30 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
 
         compact_boundary = _SessionStartColdBoundaryOwner("resume")
         attempt = _new_compaction_attempt_token(
-            session_id="session:1",
-            turn_id="turn:compact",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+            turn_id='turn:g2nuzaupht4ax6fo5ydrqiuzni',
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
             trigger=CompactionTrigger.MANUAL,
         )
         await compact_boundary.arm_compact_boundary(
             attempt_token=attempt,
-            adopted_snapshot_id="snapshot:1",
+            adopted_snapshot_id='snapshot:hui7qoo4witxjjls4whfaupz2e',
             adopted_binding_revision_id="revision:1",
         )
         compact_deadline = monotonic() + 7
         facts = PreparedCompactSessionStartFacts(
             attempt_token=attempt,
-            adopted_snapshot_id="snapshot:1",
+            adopted_snapshot_id='snapshot:hui7qoo4witxjjls4whfaupz2e',
             adopted_binding_revision_id="revision:1",
             scope=CompactionScope(
-                "session:1",
-                "workspace:1",
-                "turn:compact",
+                'session:cbauiajfisf4gvpdotrq4qgxhq',
+                'workspace:tx722zsrfsrhp7m363cs7ve6ii',
+                'turn:g2nuzaupht4ax6fo5ydrqiuzni',
                 ModelInputScopeKind.ROOT,
                 None,
             ),
-            turn_id="turn:compact",
+            turn_id='turn:g2nuzaupht4ax6fo5ydrqiuzni',
             model_id="model:1",
             permission_snapshot=permission,
             deadline_monotonic=compact_deadline,
@@ -1835,9 +1836,9 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
             scope,
             compact_boundary,
             ActiveTurnCancellationIntent(
-                "turn:compact", ModelInputScopeKind.ROOT, None
+                'turn:g2nuzaupht4ax6fo5ydrqiuzni', ModelInputScopeKind.ROOT, None
             ),
-            "session:1",
+            'session:cbauiajfisf4gvpdotrq4qgxhq',
             str(tmp_path),
         )
         assert (await port(facts)).proceed
@@ -1914,7 +1915,7 @@ def test_pending_root_session_start_failure_retires_hook_context(
             )
             self.admission = SimpleNamespace(
                 candidate=SimpleNamespace(
-                    exact_turn_id="turn:pending-root",
+                    exact_turn_id='turn:6lpydfwcm7rxi7t3wlyt5ke4pe',
                     permission_snapshot=permission,
                 )
             )
@@ -1943,13 +1944,13 @@ def test_pending_root_session_start_failure_retires_hook_context(
         runner._hook_context_owner = context_owner
         runner._hook_scope = scope
         runner._writer_lease = SimpleNamespace(
-            guard=SimpleNamespace(session_id="session:1")
+            guard=SimpleNamespace(session_id='session:cbauiajfisf4gvpdotrq4qgxhq')
         )
         runner._tools = SimpleNamespace(snapshot_workspace_root=lambda: tmp_path)
         runner._provider_dispatch = provider_dispatch
         runner._planning_deadline = lambda: monotonic() + 10
         intent = ActiveTurnCancellationIntent(
-            "turn:pending-root", ModelInputScopeKind.ROOT, None
+            'turn:6lpydfwcm7rxi7t3wlyt5ke4pe', ModelInputScopeKind.ROOT, None
         )
         task = asyncio.create_task(
             runner._attach_pending_root_hook_context(prepared, intent)
@@ -2091,25 +2092,25 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         coordinator._io = _IO()
         dry = _Dry()
         scope = CompactionScope(
-            "session:1",
-            "workspace:1",
-            "turn:1",
+            'session:cbauiajfisf4gvpdotrq4qgxhq',
+            'workspace:tx722zsrfsrhp7m363cs7ve6ii',
+            'turn:nzc36cttgo7xxki7bcjc7ops7a',
             ModelInputScopeKind.ROOT,
             None,
         )
         attempt = _new_compaction_attempt_token(
-            session_id="session:1",
-            turn_id="turn:1",
+            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
             trigger=CompactionTrigger.MANUAL,
         )
         candidate = SimpleNamespace(
-            snapshot=SimpleNamespace(snapshot_id="snapshot:1"),
+            snapshot=SimpleNamespace(snapshot_id='snapshot:hui7qoo4witxjjls4whfaupz2e'),
             binding=SimpleNamespace(binding_revision_id="revision:1"),
         )
         result = await coordinator._complete_compaction_settlement(
-            turn_id="turn:1",
+            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             model_call_index=1,
             inherited_memory_use_policy=None,
             force=True,
@@ -2133,9 +2134,9 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     compile_snapshot=SimpleNamespace(
                         canonical_input=SimpleNamespace(
                             identity=SimpleNamespace(
-                                session_id="session:1",
-                                turn_id="turn:1",
-                                context_binding_revision_id="revision:0",
+                                session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+                                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                                context_binding_revision_id='binding:3vfvanewv4qpeybytylj6rvquu',
                                 provider_input_through_sequence=1,
                             )
                         )
@@ -2166,7 +2167,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             carrier = raised.value
             assert carrier.error is failure
             assert carrier.outcome.disposition is CompactionDisposition.COMPACTED
-            assert carrier.outcome.snapshot_id == "snapshot:1"
+            assert carrier.outcome.snapshot_id == 'snapshot:hui7qoo4witxjjls4whfaupz2e'
             assert carrier.outcome.revision_ordinal == 3
             assert carrier.outcome.public_code == "COMPACTED_CONTINUATION_UNAVAILABLE"
 
@@ -2192,12 +2193,12 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             outer_owner = _OuterOwner()
             outer._compaction_owner = outer_owner
             outer._writer_lease = SimpleNamespace(
-                guard=SimpleNamespace(session_id="session:1")
+                guard=SimpleNamespace(session_id='session:cbauiajfisf4gvpdotrq4qgxhq')
             )
             outer._hook_root_scope = None
 
             async def workspace_id():
-                return "workspace:1"
+                return 'workspace:tx722zsrfsrhp7m363cs7ve6ii'
 
             async def fail_after_adoption(**kwargs):
                 del kwargs
@@ -2206,13 +2207,13 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             outer._resolved_workspace_id = workspace_id
             outer._execute_compaction_fenced = fail_after_adoption
             manual = SimpleNamespace(
-                command_id="command:1",
+                command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
             )
             with pytest.raises(type(failure)) as propagated:
                 await outer._execute_active(
-                    turn_id="turn:1",
+                    turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                     model_call_index=1,
                     inherited_memory_use_policy=MemoryUsePolicy.ENABLED,
                     trigger=CompactionTrigger.MANUAL,
@@ -2242,7 +2243,7 @@ def test_v3_invalidates_old_trust_without_changing_enabled_or_time(tmp_path, mon
     key = 'future-project' if scope is HookVisibilityScope.WORKSPACE else None
     if plugin:
         provenance = FrozenHookSourceProvenance(
-            PluginHookSourceIdentity(scope, 'sample', 'pkg_' + '1' * 32,
+            PluginHookSourceIdentity(scope, 'sample', 'package:fmrsm7m5in754a7bzjajljis5q',
                 'dev.pulsara/hooks/hooks.json', tmp_path / 'hooks.json', key),
             PluginHookTrustSubject(scope, 'sample', key), None, 'sample')
     else:
@@ -2304,7 +2305,7 @@ def test_plugin_hook_directory_aliases_execute_without_reinterpreting_path(tmp_p
     data = tmp_path / 'data with spaces'
     data.mkdir()
     provenance = FrozenHookSourceProvenance(
-        PluginHookSourceIdentity(HookVisibilityScope.USER, 'example', 'pkg_' + '1' * 32,
+        PluginHookSourceIdentity(HookVisibilityScope.USER, 'example', 'package:fmrsm7m5in754a7bzjajljis5q',
             'dev.pulsara/hooks/hooks.json', package / 'hooks.json'),
         PluginHookTrustSubject(HookVisibilityScope.USER, 'example'), None, 'example',
         declaration_environment=plugin_hook_environment(package, data),

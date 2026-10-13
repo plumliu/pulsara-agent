@@ -8,6 +8,7 @@ Configured credentials are scrubbed from the evidence file.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import argparse
 import ast
@@ -62,7 +63,7 @@ from tests.dogfood.prompt_cognitive_fixtures import seed_unknown_local_append
 
 
 SCHEMA_VERSION = "prompt-cognitive-load-real-model-dogfood.v1"
-CONNECTION_ID = "model-connection:a8ba63a362f74ddd89107d724b5d867e"
+CONNECTION_ID = "connection:pkguzkyqoz4z4seaj6a2do2bkm"
 MODEL_ID = "openai/gpt-6-luna"
 ORCHESTRATION_TOOLS = {
     "spawn_agent",
@@ -181,7 +182,7 @@ async def _run_turn(
     try:
         outcome = await session.run_turn(
             PromptContent.text(prompt),
-            command_id=f"command:prompt-cognitive:{case_name}:{datetime.now(timezone.utc).timestamp()}",
+            command_id=derive_id("command", "test-fixture", f"command:prompt-cognitive:{case_name}:{datetime.now(timezone.utc).timestamp()}"),
             requested_permission_mode=permission,
         )
         record["reply"] = outcome.final_text
@@ -900,7 +901,7 @@ async def _case_explicit_plan_review(
     running = asyncio.create_task(
         session.run_turn(
             PromptContent.text(prompt),
-            command_id="command:prompt-cognitive:explicit-plan-review",
+            command_id='command:gszd7jbf2l3gmbze7x57hwfh6i',
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
     )
@@ -946,8 +947,8 @@ async def _case_explicit_plan_review(
                 raise RuntimeError("open Plan question has no canonical workflow")
             await session.resolve_plan_question(
                 command_id=(
-                    "command:prompt-cognitive:answer-explicit-plan-review:"
-                    f"{len(question_records)}"
+                    derive_id("command", "test-fixture", "command:prompt-cognitive:answer-explicit-plan-review:"
+                    f"{len(question_records)}")
                 ),
                 workflow_id=str(workflow["plan_workflow_id"]),
                 expected_workflow_revision=int(workflow["workflow_revision"]),
@@ -1033,7 +1034,7 @@ async def _case_explicit_plan_review(
             "fixture_kind": "diagnostic local reviewer approved the complete provider-produced draft after inspecting its exact text; no production project files are in scope",
         }
         approved = await session.resolve_plan_draft_review(
-            command_id="command:prompt-cognitive:approve-explicit-plan-draft",
+            command_id='command:qhwfuqmeyz4z2mdmo6ahka6l6y',
             workflow_id=str(review["plan_workflow_id"]),
             expected_workflow_revision=int(review["workflow_revision"]),
             interaction_id=review_reference,

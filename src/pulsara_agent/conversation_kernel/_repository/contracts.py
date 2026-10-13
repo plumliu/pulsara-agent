@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
+
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -9,7 +12,6 @@ from hashlib import sha256
 import json
 from types import MappingProxyType
 from typing import Mapping
-from uuid import uuid4
 from pulsara_agent.conversation_kernel.contracts import (
     BlobContent,
     CanonicalContent,
@@ -285,7 +287,7 @@ class PreparedRootTurnAdmission:
             or self.semantic_digest != expected_digest
             or self.candidate_fingerprint != expected_fingerprint
             or self.event.event_id
-            != _stable_identity("event", expected_fingerprint, "UserMessageAccepted")
+            != derive_id("event", "accepted", self.session_id, "USER_MESSAGE_ACCEPTED", "ENTRY", self.entry_id, "")
             or self.event.event_type is not CommittedEventType.USER_MESSAGE_ACCEPTED
             or self.event.subject
             != CommittedEventSubject(SubjectSlot.ENTRY, self.entry_id)
@@ -402,7 +404,7 @@ class PreparedSubagentTurnAdmission:
             is not None
             or self.candidate_fingerprint != expected
             or self.event.event_id
-            != _stable_identity("event", expected, "UserMessageAccepted")
+            != derive_id("event", "accepted", self.session_id, "USER_MESSAGE_ACCEPTED", "ENTRY", self.entry_id, "")
             or self.event.event_type is not CommittedEventType.USER_MESSAGE_ACCEPTED
             or self.event.subject
             != CommittedEventSubject(SubjectSlot.ENTRY, self.entry_id)
@@ -460,11 +462,7 @@ class PreparedToolRemoteIdentityPublication:
             or not self.actor_id
             or self.candidate_fingerprint != expected
             or self.event.event_id
-            != _stable_identity(
-                "event",
-                expected,
-                CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED.value,
-            )
+            != derive_id("event", "accepted", self.session_id, "TOOL_REMOTE_IDENTITY_PUBLISHED", "TOOL_ATTEMPT", self.attempt_id, "")
             or self.event.event_type
             is not CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED
             or self.event.subject
@@ -657,9 +655,7 @@ class PreparedToolResultAcceptance:
             or blob.size > 16 << 20
         ):
             raise ValueError("prepared primary artifact descriptor is invalid")
-        expected_event_id = _stable_identity(
-            "event", self.result_entry_id, "ToolResultAccepted"
-        )
+        expected_event_id = derive_id("event", "accepted", self.session_id, "TOOL_RESULT_ACCEPTED", "ENTRY", self.result_entry_id, "")
         occurrence = self.tool_result_occurrence
         if (
             occurrence.event_id != expected_event_id
@@ -799,7 +795,7 @@ class PreparedPlanToolBatch:
     selected_arguments: FrozenJsonObjectFact
     request_binding: PlanInteractionBinding
     permission_snapshot: FrozenRunPermissionSnapshot
-    workflow_id: str
+    workflow_id: str | None
     expected_workflow_revision: int | None
     interaction_id: str | None
     continuation_turn_id: str | None
@@ -855,6 +851,8 @@ class PreparedPlanToolBatch:
         }
         if interaction != (self.interaction_id is not None):
             raise ValueError("prepared Plan interaction union is invalid")
+        if not rejected and self.workflow_id is None:
+            raise ValueError("accepted Plan control requires a workflow")
         if rejected:
             if any(item.result_id is None for item in self.calls):
                 raise ValueError("rejected Plan batch result identity is absent")
@@ -1046,13 +1044,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _id(prefix: str) -> str:
-    return f"{prefix}:{uuid4().hex}"
 
 
 def _stable_subagent_message_child_id(task_id: str, entry_id: str) -> str:
-    digest = sha256(f"{task_id}\0{entry_id}".encode()).hexdigest()
-    return f"subagent-message:{digest}"
+    return derive_id("agent-message", "message", task_id, entry_id)
 
 
 def _deterministic_retry_due(
@@ -1088,9 +1083,6 @@ def _content_columns(content: CanonicalContent) -> tuple[object, ...]:
     )
 
 
-def _stable_identity(prefix: str, *parts: str) -> str:
-    digest = sha256("\0".join(parts).encode("utf-8")).hexdigest()
-    return f"{prefix}:{digest}"
 
 
 def _canonical_content_identity(content: CanonicalContent) -> Mapping[str, object]:
@@ -1195,9 +1187,7 @@ def build_prepared_root_turn_admission(
         {**payload, "semantic_digest": semantic_digest},
     )
     event = CommittedEventDraft(
-        event_id=_stable_identity(
-            "event", candidate_fingerprint, "UserMessageAccepted"
-        ),
+        event_id=derive_id("event", "accepted", session_id, CommittedEventType.USER_MESSAGE_ACCEPTED.name, SubjectSlot.ENTRY.name, entry_id, ""),
         event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
         actor_kind=actor_kind,
@@ -1320,9 +1310,7 @@ def build_prepared_subagent_turn_admission(
         "pulsara:prepared-subagent-turn-admission:v1", payload
     )
     event = CommittedEventDraft(
-        event_id=_stable_identity(
-            "event", candidate_fingerprint, "UserMessageAccepted"
-        ),
+        event_id=derive_id("event", "accepted", session_id, CommittedEventType.USER_MESSAGE_ACCEPTED.name, SubjectSlot.ENTRY.name, entry_id, ""),
         event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
         actor_kind="runtime",
@@ -1386,11 +1374,7 @@ def build_prepared_tool_remote_identity_publication(
     )
     identity_bytes = remote_identity.encode("utf-8")
     event = CommittedEventDraft(
-        event_id=_stable_identity(
-            "event",
-            candidate_fingerprint,
-            CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED.value,
-        ),
+        event_id=derive_id("event", "accepted", session_id, CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED.name, SubjectSlot.TOOL_ATTEMPT.name, attempt_id, ""),
         event_type=CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED,
         subject=CommittedEventSubject(SubjectSlot.TOOL_ATTEMPT, attempt_id),
         actor_kind="tool",
@@ -1655,7 +1639,7 @@ def build_prepared_tool_result_acceptance(
     """Freeze every semantic field before the first canonical write."""
 
     tool_result_occurrence = CommittedEventDraft(
-        event_id=_stable_identity("event", result_entry_id, "ToolResultAccepted"),
+        event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.TOOL_RESULT_ACCEPTED.name, SubjectSlot.ENTRY.name, result_entry_id, ""),
         event_type=CommittedEventType.TOOL_RESULT_ACCEPTED,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, result_entry_id),
         actor_kind="tool",

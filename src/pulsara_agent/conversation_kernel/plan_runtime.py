@@ -7,6 +7,8 @@ keeps automatic continuation tasks alive when an origin request detaches.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -54,9 +56,9 @@ from pulsara_agent.primitives.context import canonical_json_bytes, thaw_json
 from pulsara_agent.primitives.plan_workflow import (
     PlanInteractionBinding,
     PlanQuestionContent,
-    extract_plan_draft,
+    parse_plan_draft_arguments,
     extract_plan_entry_reason,
-    extract_plan_question,
+    parse_plan_question_arguments,
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.hooks.context import HookContextOwner
@@ -207,8 +209,8 @@ class ContinuationAdmissionPhase(StrEnum):
 class ContinuationAdmissionAttempt:
     """Host-owned process-local task; request cancellation only detaches."""
 
-    attempt_id: str
-    turn_id: str
+    attempt_id: tuple[str, str]
+    turn_id: str | None
     semantic_candidate_fingerprint: str
     task: asyncio.Task[object]
     phase: ContinuationAdmissionPhase = ContinuationAdmissionPhase.ADMITTING
@@ -216,14 +218,14 @@ class ContinuationAdmissionAttempt:
 
 class ContinuationAdmissionOwner:
     def __init__(self) -> None:
-        self._attempts: dict[str, ContinuationAdmissionAttempt] = {}
+        self._attempts: dict[tuple[str, str], ContinuationAdmissionAttempt] = {}
         self._closing = False
 
     def start(
         self,
         *,
-        attempt_id: str,
-        turn_id: str,
+        attempt_id: tuple[str, str],
+        turn_id: str | None,
         semantic_candidate_fingerprint: str,
         run: Callable[[], Awaitable[object]],
         before_start: Callable[[], None] | None = None,
@@ -260,14 +262,14 @@ class ContinuationAdmissionOwner:
         return attempt
 
     def mark_terminalizing(
-        self, *, attempt_id: str, task: asyncio.Task[object]
+        self, *, attempt_id: tuple[str, str], task: asyncio.Task[object]
     ) -> None:
         attempt = self._attempts.get(attempt_id)
         if attempt is None or attempt.task is not task:
             raise RuntimeError("continuation terminalization owner changed")
         attempt.phase = ContinuationAdmissionPhase.TERMINALIZING
 
-    def _retire(self, attempt_id: str, task: asyncio.Task[object]) -> None:
+    def _retire(self, attempt_id: tuple[str, str], task: asyncio.Task[object]) -> None:
         try:
             task.exception()
         except (asyncio.CancelledError, Exception):
@@ -308,8 +310,6 @@ class AutomaticPlanContinuationPort(Protocol):
     ) -> AcceptedPlanToolBatch: ...
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
 
 def _json_digest(value) -> str:
@@ -507,12 +507,7 @@ class PlanToolBatchCoordinator:
         workflow_fact = canonical_facts.plan_workflow_fact
         if kind is PlanToolControlKind.ENTER:
             if workflow_fact is None:
-                workflow_id = _stable_id(
-                    "plan-workflow",
-                    self._writer_lease.guard.session_id,
-                    assistant_entry_id,
-                    selected.tool_call_id,
-                )
+                workflow_id = derive_id('plan', 'tool', self._writer_lease.guard.session_id, assistant_entry_id, selected.tool_call_id)
                 expected_revision = None
             else:
                 workflow_id = workflow_fact.workflow_id
@@ -521,12 +516,7 @@ class PlanToolBatchCoordinator:
             workflow_id = (
                 workflow_fact.workflow_id
                 if workflow_fact is not None
-                else _stable_id(
-                    "plan-unavailable-workflow",
-                    self._writer_lease.guard.session_id,
-                    assistant_entry_id,
-                    selected.tool_call_id,
-                )
+                else None
             )
             expected_revision = (
                 None
@@ -535,13 +525,8 @@ class PlanToolBatchCoordinator:
             )
         provisional_interaction_id = (
             None
-            if kind is PlanToolControlKind.ENTER
-            else _stable_id(
-                "plan-interaction",
-                workflow_id,
-                assistant_entry_id,
-                selected.tool_call_id,
-            )
+            if kind is PlanToolControlKind.ENTER or workflow_id is None
+            else derive_id('plan-interaction', 'tool', workflow_id, assistant_entry_id, selected.tool_call_id)
         )
         catalog_entry = builtin_tool_catalog_entry(selected.tool_name)
         catalog_binding = catalog_entry.binding_contract.base
@@ -604,21 +589,12 @@ class PlanToolBatchCoordinator:
                         arguments=selected.arguments,
                     )
                 elif kind is PlanToolControlKind.QUESTION:
-                    assert provisional_interaction_id is not None
-                    extract_plan_question(
-                        interaction_id=provisional_interaction_id,
-                        binding=request_binding,
-                        arguments=selected.arguments,
+                    parse_plan_question_arguments(
+                        binding=request_binding, arguments=selected.arguments,
                     )
                 else:
-                    assert provisional_interaction_id is not None
-                    extract_plan_draft(
-                        interaction_id=provisional_interaction_id,
-                        assistant_entry_id=assistant_entry_id,
-                        tool_call_id=selected.tool_call_id,
-                        binding=request_binding,
-                        request_semantic_digest=_json_digest(selected.arguments),
-                        arguments=selected.arguments,
+                    parse_plan_draft_arguments(
+                        binding=request_binding, arguments=selected.arguments,
                     )
             except ValueError:
                 disposition = PlanToolBatchDisposition.INVALID_ARGUMENTS
@@ -668,21 +644,21 @@ class PlanToolBatchCoordinator:
         apply_control = disposition is PlanToolBatchDisposition.APPLY
         interaction_id = provisional_interaction_id if apply_control else None
         continuation_turn_id = (
-            _stable_id("plan-continuation-turn", workflow_id, selected.tool_call_id)
+            derive_id('turn', 'plan-enter', self._writer_lease.guard.session_id, workflow_id, assistant_entry_id, selected.tool_call_id)
             if apply_control
             and kind is PlanToolControlKind.ENTER
             and workflow_fact is None
             else None
         )
         continuation_entry_id = (
-            _stable_id("plan-continuation-entry", workflow_id, selected.tool_call_id)
+            derive_id('entry', 'plan-enter', continuation_turn_id)
             if apply_control
             and kind is PlanToolControlKind.ENTER
             and workflow_fact is None
             else None
         )
         continuation_revision_id = (
-            _stable_id("context-revision", continuation_turn_id or "", "0")
+            derive_id('binding', 'revision', continuation_turn_id or "", "0")
             if continuation_turn_id is not None
             else None
         )
@@ -702,16 +678,12 @@ class PlanToolBatchCoordinator:
                     result_id=(
                         None
                         if selected_question
-                        else _stable_id(
-                            "tool-result", assistant_entry_id, call.tool_call_id
-                        )
+                        else derive_id('result', 'plan-control', self._writer_lease.guard.session_id, assistant_entry_id, call.tool_call_id)
                     ),
                     result_entry_id=(
                         None
                         if selected_question
-                        else _stable_id(
-                            "tool-result-entry", assistant_entry_id, call.tool_call_id
-                        )
+                        else derive_id('entry', 'tool-result', derive_id('result', 'plan-control', self._writer_lease.guard.session_id, assistant_entry_id, call.tool_call_id))
                     ),
                 )
             )

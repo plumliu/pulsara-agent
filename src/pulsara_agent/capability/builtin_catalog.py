@@ -870,7 +870,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Exact sha256: image reference previously shown beside an "
+                        "Exact image: reference previously shown beside an "
                         "image or a historical image placeholder in this session, including a visualization screenshot. "
                         "HTML content digests are not image references."
                     ),
@@ -978,7 +978,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                 },
                 "base_revision": {
                     "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "pattern": "^revision:[a-z2-7]{51}[aq]$",
                     "description": (
                         "Exact content_revision copied from the read_file result for this path."
                     ),
@@ -1465,8 +1465,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                 "description": (
                                     "Exact prerequisites for this task. Within this request, "
                                     "use another task's task_key. For an earlier task, use "
-                                    "task: followed by its exact task_id, for example "
-                                    "task:subagent-task:.... Omit or use an empty list for "
+                                    "its complete canonical task ID (task:<payload>). "
+                                    "Omit or use an empty list for "
                                     "independent work. Add only dependencies whose results "
                                     "this task truly needs."
                                 ),

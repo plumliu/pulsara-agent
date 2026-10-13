@@ -37,7 +37,7 @@ from pulsara_agent.mcp_credentials import (
 )
 
 
-LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v4"
+LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v5"
 
 
 LOCAL_SETTINGS_FILE_NAME = "local-settings.yaml"
@@ -143,6 +143,10 @@ class LocalSettings:
         self, owner: McpCredentialOwner
     ) -> LocalMcpOAuthRecord | None:
         return next((item for item in self.mcp_oauth if item.owner == owner), None)
+
+
+class ModelConnectionIdentityConflict(ValueError):
+    """The explicit connection key is occupied; only its creation caller may retry."""
 
 
 class LocalSettingsUnavailable(RuntimeError):
@@ -572,7 +576,7 @@ class LocalSettingsStore:
         api_key: str | None,
     ) -> tuple[LocalSettings, None]:
         if current.connection(connection.id) is not None:
-            raise ValueError("model connection ID already exists")
+            raise ModelConnectionIdentityConflict("IDENTITY_CONFLICT: model connection ID already exists")
         key = () if api_key is None else (LocalModelApiKey(connection.id, api_key),)
         return (
             LocalSettings(

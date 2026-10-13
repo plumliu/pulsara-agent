@@ -918,7 +918,8 @@ def test_large_hook_details_use_existing_output_artifact_owner(tmp_path):
         )
         publisher = _RecordingPublisher()
         output = _processor(publisher).prepare(
-            workspace_id="workspace",
+            session_id='session:6ej3oydnee24zzis2etyixxioi',
+            workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
             result_entry_id="hook-result",
             public_output=result.content.decode(),
             candidate=result.output_artifact_candidate,
@@ -997,6 +998,7 @@ def test_large_hook_query_artifact_roundtrips_through_canonical_postgres_owner(
     )
     entry_id = _name("entry")
     output = ToolOutputArtifactProcessor(provider).prepare(
+        session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=entry_id,
         public_output=body,

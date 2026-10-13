@@ -89,15 +89,15 @@ def test_remember_is_main_only_in_frozen_and_model_surfaces(tmp_path):
 
     async def exercise():
         port = DirectKernelToolPort(
-            workspace_root=tmp_path, host_owner_id="host:memory-main-only",
-            session_id="session:memory-main-only", live_bus=LiveAgentEventBus(),
+            workspace_root=tmp_path, host_owner_id='host:jx2n72tacopn3if4goyyza5ztm',
+            session_id='session:2wae56asyel532v3i7tvactdee', live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port.bind_memory_port(SimpleNamespace(tool_names=frozenset({"remember", "memory_get"})))
         try:
             for scope, task, expected in (
                 (ModelInputScopeKind.ROOT, None, True),
-                (ModelInputScopeKind.SUBAGENT_TASK, "task:child", False),
+                (ModelInputScopeKind.SUBAGENT_TASK, 'task:t2ptfli5koch6nfrihpkwl3kvi', False),
             ):
                 surface = prepare_test_direct_tool_surface(
                     port, conversation_scope_kind=scope, scope_subagent_task_id=task,
@@ -550,7 +550,7 @@ def test_round9_installed_epoch_keeps_native_surface_and_routes_late_mcp_meta() 
     )
     predecessor = InstalledCapabilityEpochPredecessor(
         expected_continuity_revision=1,
-        continuity_epoch_nonce="epoch:installed",
+        continuity_epoch_nonce='epoch:f73un4csnfa5zhqolzezsotshe',
         tool_surface=cold.direct_tool_surface,
         direct_projection_set=cold.direct_projection_set,
         mcp_route_projection=cold.mcp_catalog_route_projection,
@@ -603,7 +603,7 @@ def test_round9_provider_contract_reset_reprojects_only_installed_cohort() -> No
     )
     predecessor = InstalledCapabilityEpochPredecessor(
         expected_continuity_revision=1,
-        continuity_epoch_nonce="epoch:chat",
+        continuity_epoch_nonce='epoch:ukmrjw7k7wlnkvanlr7b3ck4km',
         tool_surface=cold.direct_tool_surface,
         direct_projection_set=cold.direct_projection_set,
         mcp_route_projection=cold.mcp_catalog_route_projection,
@@ -650,7 +650,7 @@ def test_round9_installed_schema_replacement_cannot_bypass_native_via_meta() -> 
     cold = _finalized_plan(view=_planning_view(builtin_facts=(), mcp_facts=(old,)))
     predecessor = InstalledCapabilityEpochPredecessor(
         expected_continuity_revision=1,
-        continuity_epoch_nonce="epoch:installed",
+        continuity_epoch_nonce='epoch:f73un4csnfa5zhqolzezsotshe',
         tool_surface=cold.direct_tool_surface,
         direct_projection_set=cold.direct_projection_set,
         mcp_route_projection=cold.mcp_catalog_route_projection,
@@ -711,7 +711,7 @@ def test_round9_cold_mcp_native_aggregate_is_all_direct_or_all_meta() -> None:
 
     predecessor = InstalledCapabilityEpochPredecessor(
         expected_continuity_revision=1,
-        continuity_epoch_nonce="epoch:cold-meta",
+        continuity_epoch_nonce='epoch:bsrg4gjfyl4eyhiftnis4ez7p4',
         tool_surface=plan.direct_tool_surface,
         direct_projection_set=plan.direct_projection_set,
         mcp_route_projection=plan.mcp_catalog_route_projection,
@@ -736,12 +736,12 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
     prepared = owner.prepare(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        continuity_epoch_nonce="epoch:one",
+        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         capability_identity_fingerprint="sha256:identity",
         tool_semantic_fingerprint="sha256:semantic",
         mcp_execution_policy_fingerprint="sha256:policy",
         tool_route_fingerprint="sha256:route",
-        result_entry_id="entry:inspect-result",
+        result_entry_id='entry:okwolwkgl3d2koiqkyi5mc5zj4',
     )
     owner.settle(
         prepared=prepared,
@@ -752,19 +752,19 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
             prepared.ref.opaque_token,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
-            continuity_epoch_nonce="epoch:one",
+            continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         )
     assert owner.install_full_result(
-        result_entry_id="entry:inspect-result",
+        result_entry_id='entry:okwolwkgl3d2koiqkyi5mc5zj4',
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        continuity_epoch_nonce="epoch:one",
+        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
     )
     resolved = owner.resolve_callable(
         prepared.ref.opaque_token,
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        continuity_epoch_nonce="epoch:one",
+        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
     )
     assert resolved is prepared.ref
     with pytest.raises(LookupError, match="STALE_OR_DORMANT"):
@@ -772,7 +772,7 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
             prepared.ref.opaque_token,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
-            continuity_epoch_nonce="epoch:two",
+            continuity_epoch_nonce='epoch:heb6jusirvxkuhyvcwlhgyqtbq',
         )
 
 
@@ -788,40 +788,40 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
     first = owner.prepare(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        continuity_epoch_nonce="epoch:one",
+        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         capability_identity_fingerprint="sha256:identity-one",
         tool_semantic_fingerprint="sha256:semantic-one",
         mcp_execution_policy_fingerprint="sha256:policy",
         tool_route_fingerprint="sha256:route-one",
-        result_entry_id="entry:first",
+        result_entry_id='entry:ja6ihq637wrsnc35ze6r5r3ezq',
     )
     with pytest.raises(McpToolRefCapacityExceeded):
         owner.prepare(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
-            continuity_epoch_nonce="epoch:one",
+            continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
             capability_identity_fingerprint="sha256:identity-two",
             tool_semantic_fingerprint="sha256:semantic-two",
             mcp_execution_policy_fingerprint="sha256:policy",
             tool_route_fingerprint="sha256:route-two",
-            result_entry_id="entry:second",
+            result_entry_id='entry:ov4rsdfxayf37gxhe3ehjugwoe',
         )
     owner.settle(
         prepared=first,
         committed=True,
     )
     assert owner.install_full_result(
-        result_entry_id="entry:first",
+        result_entry_id='entry:ja6ihq637wrsnc35ze6r5r3ezq',
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
-        continuity_epoch_nonce="epoch:one",
+        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
     )
     assert (
         owner.resolve_callable(
             first.ref.opaque_token,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
-            continuity_epoch_nonce="epoch:one",
+            continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         )
         == first.ref
     )
@@ -1101,12 +1101,12 @@ def test_round9_installed_predecessor_rejects_foreign_child_task() -> None:
         builtin_facts=(fact,),
         mcp_facts=(),
         conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id="task:child-a",
+        scope_subagent_task_id='task:xf2km7nsw6mnh2uevbbikzaseu',
     )
     first = _finalized_plan(view=child_a)
     predecessor = InstalledCapabilityEpochPredecessor(
         expected_continuity_revision=1,
-        continuity_epoch_nonce="epoch:child-a",
+        continuity_epoch_nonce='epoch:jab4555mywnmhhu3736nwansui',
         tool_surface=first.direct_tool_surface,
         direct_projection_set=first.direct_projection_set,
         mcp_route_projection=first.mcp_catalog_route_projection,
@@ -1117,7 +1117,7 @@ def test_round9_installed_predecessor_rejects_foreign_child_task() -> None:
             mcp_facts=(),
             predecessor=predecessor,
             conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id="task:child-b",
+            scope_subagent_task_id='task:ql7r3tmtnkfblocnrgoiict6g4',
         )
 
 

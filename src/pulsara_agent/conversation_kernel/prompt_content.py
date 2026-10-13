@@ -6,7 +6,7 @@ remain with their existing owners.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 import json
 import re
@@ -33,9 +33,10 @@ from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.identity import derive_id, require_id
 
 
-PROMPT_BODY_SCHEMA = "pulsara.prompt/v1"
+PROMPT_BODY_SCHEMA = "pulsara.prompt/v2"
 PROMPT_BODY_MEDIA_TYPE = "application/vnd.pulsara.prompt+json"
 PROMPT_BODY_CODEC = "utf-8"
 PROMPT_IMAGE_BLOB_CODEC = "binary"
@@ -46,6 +47,7 @@ _SHA256_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 @dataclass(frozen=True, slots=True)
 class CanonicalPromptImageDescriptor:
+    image_ref: str
     digest: str
     encoded_bytes: int
     media_type: str
@@ -53,6 +55,7 @@ class CanonicalPromptImageDescriptor:
     height: int
 
     def __post_init__(self) -> None:
+        require_id(self.image_ref, "image")
         if not isinstance(self.digest, str) or not _SHA256_DIGEST_RE.fullmatch(
             self.digest
         ):
@@ -199,6 +202,7 @@ class FrozenCanonicalPrompt:
 
 def _descriptor_for_image(image: LLMImagePart) -> CanonicalPromptImageDescriptor:
     return CanonicalPromptImageDescriptor(
+        image_ref=require_id(image.image_ref, "image"),
         digest=image.content_digest,
         encoded_bytes=len(image.immutable_bytes),
         media_type=image.media_type,
@@ -217,6 +221,7 @@ def _part_value(
     descriptor = _descriptor_for_image(part) if isinstance(part, LLMImagePart) else part
     return {
         "type": "image",
+        "image_ref": descriptor.image_ref,
         "digest": descriptor.digest,
         "encoded_bytes": descriptor.encoded_bytes,
         "media_type": descriptor.media_type,
@@ -314,7 +319,25 @@ def prompt_content_resource_quote(
     return quote
 
 
-def freeze_canonical_prompt(content: FrozenPromptContent) -> FrozenCanonicalPrompt:
+def bind_prompt_images(content: FrozenPromptContent, workspace_id: str) -> FrozenPromptContent:
+    require_id(workspace_id, "workspace")
+    parts: list[FrozenPromptPart] = []
+    for part in content.parts:
+        if isinstance(part, LLMImagePart):
+            expected = derive_id("image", "content", workspace_id, part.media_type,
+                                 PROMPT_IMAGE_BLOB_CODEC, part.content_digest)
+            if part.image_ref is not None and part.image_ref != expected:
+                raise ValueError("image reference does not match its workspace/content")
+            part = replace(part, image_ref=expected)
+        parts.append(part)
+    return FrozenPromptContent(tuple(parts))
+
+
+def freeze_canonical_prompt(
+    content: FrozenPromptContent, *, workspace_id: str | None = None,
+) -> FrozenCanonicalPrompt:
+    if workspace_id is not None:
+        content = bind_prompt_images(content, workspace_id)
     if not isinstance(content, FrozenPromptContent):
         raise TypeError("canonical prompt requires frozen prompt content")
     return FrozenCanonicalPrompt(
@@ -363,6 +386,7 @@ def decode_canonical_prompt_body(body: bytes) -> CanonicalPromptBody:
         if item["type"] == "image":
             expected = {
                 "type",
+                "image_ref",
                 "digest",
                 "encoded_bytes",
                 "media_type",
@@ -373,6 +397,7 @@ def decode_canonical_prompt_body(body: bytes) -> CanonicalPromptBody:
                 raise ValueError("canonical prompt image part is invalid")
             try:
                 descriptor = CanonicalPromptImageDescriptor(
+                    image_ref=item["image_ref"],
                     digest=item["digest"],
                     encoded_bytes=item["encoded_bytes"],
                     media_type=item["media_type"],
@@ -423,6 +448,7 @@ def hydrate_canonical_prompt_body(
             raise ValueError("canonical prompt image payload identity mismatch")
         hydrated.append(
             LLMImagePart(
+                image_ref=part.image_ref,
                 media_type=part.media_type,
                 immutable_bytes=payload,
                 width=part.width,

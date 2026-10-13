@@ -1,6 +1,7 @@
 """Saved-provider history recovery, isolated canonical DB, exact wire evidence."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import replace
@@ -110,7 +111,7 @@ async def run():
                     result = await asyncio.wait_for(
                         session.run_turn(
                             PromptContent.text(text),
-                            command_id=f"command:query-dogfood:{label}",
+                            command_id=derive_id("command", "test-fixture", f"command:query-dogfood:{label}"),
                         ),
                         timeout=240,
                     )
@@ -152,7 +153,7 @@ async def run():
                 await turn(source, "recent", "原始资料保持不变。只回答收到，不要重述资料。")
                 compact = await asyncio.wait_for(
                     source.compact_context(
-                        command_id="command:query-dogfood:compact", force=True
+                        command_id='command:ghcruarl3twmqsik45cf3wnxai', force=True
                     ),
                     timeout=240,
                 )

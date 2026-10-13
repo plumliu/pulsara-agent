@@ -34,16 +34,16 @@ class NoCanonicalWrites:
 
 
 def setup():
-    live = SessionLiveControlOwner(session_id="session:form")
+    live = SessionLiveControlOwner(session_id='session:stbviscrr5ifbtdh7dv4x7vbzm')
     coordinator = KernelInteractionCoordinator(
         repository=NoCanonicalWrites(),
-        guard=HostWriterGuard("session:form", 1, "host:1"),
+        guard=HostWriterGuard('session:stbviscrr5ifbtdh7dv4x7vbzm', 1, 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
         live_control=live,
         live_bus=LiveAgentEventBus(),
         io_owner=KernelSessionIO(),
     )
     permission = build_run_permission_snapshot(
-        snapshot_id="permission:form",
+        snapshot_id='permission:e76qha6ihok75f34aszwdwli6q',
         requested_mode=PermissionMode.READ_ONLY,
         effective_mode=PermissionMode.READ_ONLY,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -54,8 +54,8 @@ def setup():
 async def open_form(coordinator, permission, prepare):
     waiter = asyncio.create_task(
         coordinator.request_capability_form(
-            turn_id="turn:form",
-            assistant_entry_id="entry:form",
+            turn_id='turn:qc5obgzujf23avn6iwnfufogvq',
+            assistant_entry_id='entry:t6fhz2rqzpnvsw3jyj34jkgtre',
             tool_call_id="call:form",
             permission_snapshot=permission,
             form=PendingCapabilityForm(
@@ -151,7 +151,7 @@ def test_boolean_confirmation_cannot_settle_capability_form(decision):
             await coordinator.resolve_tool_interaction(
                 expected_writer_generation=1,
                 **{k: v for k, v in expected.items() if k != "attachment_id"},
-                command_id="command:form",
+                command_id='command:dtidxasjpgnczwk2mdgmj4bwx4',
                 actor_id="browser:1",
                 decision=decision,
             )
@@ -292,8 +292,8 @@ def test_capability_and_boolean_confirmation_share_one_fifo_slot():
         waiter = await open_form(coordinator, permission, prepare)
         ordinary = asyncio.create_task(
             coordinator.request_tool_confirmation(
-                turn_id="turn:ordinary",
-                assistant_entry_id="entry:ordinary",
+                turn_id='turn:gurc7dtswjz5gkjsi3arjyt744',
+                assistant_entry_id='entry:vvq6ea7vlkiyqqg2ygzssu7k6e',
                 tool_call_id="call:ordinary",
                 tool_name="terminal",
                 permission_snapshot=permission,
@@ -336,7 +336,7 @@ def test_browser_form_uses_current_host_without_secret_protocol_frames():
         )
 
         def get_session(host_id):
-            assert host_id == "host:form"
+            assert host_id == 'host:ry7e4bmpbggddedtrhcfbibkzu'
             return session
 
         bridge = LocalBrowserBridge(
@@ -346,7 +346,7 @@ def test_browser_form_uses_current_host_without_secret_protocol_frames():
         bridge._connections["connection:form"] = SimpleNamespace(
             is_open=True,
             role="controller",
-            host_session_id="host:form",
+            host_session_id='host:ry7e4bmpbggddedtrhcfbibkzu',
             controller=SimpleNamespace(attachment_id="browser:1"),
         )
         body = {k: v for k, v in guard(live).items() if k != "attachment_id"}

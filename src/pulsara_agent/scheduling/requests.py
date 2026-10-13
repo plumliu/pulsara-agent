@@ -1,6 +1,7 @@
 """Closed model-management actions; UI run-once has its own request owner."""
 
 from __future__ import annotations
+from pulsara_agent.identity import is_valid_id
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
 
 _FIELDS = {
@@ -35,8 +36,8 @@ def validate_action(value):
     if not required <= keys or keys - required - optional:
         raise ScheduledTaskError("INVALID_REQUEST", "任务操作字段无效。")
     for key in keys & {"task_id", "session_id", "cursor"}:
-        if not isinstance(value[key], str) or not value[key]:
-            raise ScheduledTaskError("INVALID_REQUEST", "任务身份字段无效。")
+        if not is_valid_id(value[key], "session" if key == "session_id" else "schedule"):
+            raise ScheduledTaskError("INVALID_ID", "任务身份字段无效。")
     if "expected_revision" in value and (
         type(value["expected_revision"]) is not int or value["expected_revision"] < 1
     ):

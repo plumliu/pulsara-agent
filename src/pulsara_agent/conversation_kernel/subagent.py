@@ -6,6 +6,8 @@ lease, checkpoint, or resume carrier is durable.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import is_valid_id, require_id, derive_id
+
 
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 
@@ -825,9 +827,7 @@ class KernelSubagentManager:
         ):
             return _result("INVALID_ARGUMENTS", {"error": "invalid task batch"})
         try:
-            batch_id = _stable_id(
-                "subagent-batch", invocation_context.attempt_id, "batch"
-            )
+            batch_id = derive_id('batch', 'spawn', invocation_context.attempt_id)
             normalized: list[dict[str, object]] = []
             parent_binding = await self._io.run(
                 self._repository.read_turn_model_call_binding,
@@ -867,9 +867,7 @@ class KernelSubagentManager:
                     raise ValueError("task_key is invalid")
                 if task_key is not None and task_key in key_to_id:
                     raise ValueError("task_key is duplicated")
-                task_id = _stable_id(
-                    "subagent-task", invocation_context.attempt_id, str(ordinal)
-                )
+                task_id = derive_id('task', 'spawn', invocation_context.attempt_id, str(ordinal))
                 if task_key is not None:
                     key_to_id[task_key] = task_id
                 profile = SubagentProfileKind(str(raw.get("profile", "general_worker")))
@@ -938,8 +936,8 @@ class KernelSubagentManager:
                         raise ValueError("dependency reference is invalid")
                     if token in key_to_id:
                         resolved = key_to_id[token]
-                    elif token.startswith("task:") and len(token) > 5:
-                        resolved = token[5:]
+                    elif is_valid_id(token, "task"):
+                        resolved = token
                     else:
                         raise ValueError("dependency reference is not exact")
                     if resolved in dependency_ids:
@@ -2201,7 +2199,7 @@ class KernelSubagentManager:
                 "seen_count": seen_count,
                 "session_fingerprint": "sha256:"
                 + sha256(self._guard.session_id.encode("utf-8")).hexdigest(),
-                "version": 1,
+                "version": 2,
             }
         )
         signature = hmac.new(self._list_cursor_secret, body, sha256).digest()
@@ -2246,12 +2244,14 @@ class KernelSubagentManager:
             "order": "accepted_at,id",
             "session_fingerprint": "sha256:"
             + sha256(self._guard.session_id.encode("utf-8")).hexdigest(),
-            "version": 1,
+            "version": 2,
         }
         if any(payload.get(key) != value for key, value in expected.items()):
             raise ValueError("STALE_CURSOR")
         accepted_at_raw = payload.get("after_accepted_at")
         task_id = payload.get("after_task_id")
+        if not is_valid_id(task_id, "task"):
+            raise ValueError("INVALID_ID: cursor task identity")
         seen_count = payload.get("seen_count")
         if (
             not isinstance(accepted_at_raw, str)
@@ -2350,7 +2350,7 @@ class KernelSubagentManager:
                     "result_summary": item.get("result_summary"),
                     "result_data": item.get("result_data"),
                     "model_call_binding": item.get("model_call_binding"),
-                    "model_target": item.get("model_target_fact"),
+                    "model_target": _model_target_public(item.get("model_target_fact")),
                     "material_refs": item.get("material_refs"),
                     "history_source_task_id": item.get("history_source_task_id"),
                     "completion_accepted": (
@@ -2780,14 +2780,18 @@ class KernelSubagentManager:
             ):
                 return _result("RESOURCE_EXHAUSTED", {"error": "mailbox is full"})
             ordinal = self._mailbox_ordinals.get(task_id, 0)
-            self._mailbox_ordinals[task_id] = ordinal + 1
             digest = "sha256:" + sha256(message.encode("utf-8")).hexdigest()
-            entry_id = _stable_id(
-                "inter-agent-entry", invocation_context.attempt_id, task_id
-            )
-            event_id = _stable_id(
-                "inter-agent-event", invocation_context.attempt_id, task_id
-            )
+            entry_id = derive_id('entry', 'agent-message', invocation_context.attempt_id, task_id)
+            event_id = derive_id("event", "accepted", self._guard.session_id, "INTER_AGENT_MESSAGE_ACCEPTED", "ENTRY", entry_id, "")
+            if any(
+                item.entry_id == entry_id or item.event_id == event_id
+                for retained in self._mailboxes.values()
+                for item in retained
+            ):
+                raise ConversationKernelConflict(
+                    "IDENTITY_CONFLICT: inter-agent mailbox identity is occupied"
+                )
+            self._mailbox_ordinals[task_id] = ordinal + 1
             mailbox.append(
                 PreparedInterAgentMailboxItem(
                     session_id=invocation_context.session_id,
@@ -3454,7 +3458,7 @@ class KernelSubagentManager:
             scope_kind="SUBAGENT_TASK",
             scope_subagent_task_id=task_id,
             channel_kind=LiveChannelKind.SUBAGENT_EXTENSION,
-            generation_id=f"subagent:{task_id}",
+            generation_id=derive_id("generation", "task", task_id),
             block_id=task_id,
             block_ordinal=0,
             block_kind=LiveBlockKind.OPERATIONAL,
@@ -3475,16 +3479,9 @@ def _result(
 
 
 def _stable_child_id(task_id: str, entry_id: str) -> str:
-    return "subagent-result:" + sha256(f"{task_id}:{entry_id}".encode()).hexdigest()
+    return derive_id("agent-result", "completion", task_id, entry_id)
 
 
-def _stable_id(namespace: str, *parts: str) -> str:
-    digest = sha256()
-    digest.update(f"pulsara:round10:{namespace}:v1\0".encode())
-    for part in parts:
-        digest.update(part.encode("utf-8"))
-        digest.update(b"\0")
-    return f"{namespace}:" + digest.hexdigest()
 
 
 def _parse_context(value: object) -> tuple[SubagentContextMode, int | None, str | None]:
@@ -3497,7 +3494,7 @@ def _parse_context(value: object) -> tuple[SubagentContextMode, int | None, str 
         return SubagentContextMode.NONE, None, None
     if raw_mode == "worker_history":
         task_id = value.get("task_id")
-        if value.get("turns") is not None or not isinstance(task_id, str) or not task_id:
+        if value.get("turns") is not None or not is_valid_id(task_id, "task"):
             raise ValueError("WORKER_HISTORY requires an exact task_id")
         return SubagentContextMode.WORKER_HISTORY, None, task_id
     if raw_mode != "last_n" or value.get("task_id") is not None:
@@ -3568,7 +3565,7 @@ def _validate_task_definition(value: object) -> None:
         reasoning_selection_from_dict(model.get("reasoning"))
     dependencies = value.get("depends_on", [])
     material_ids = value.get("material_task_ids", [])
-    if not isinstance(material_ids, list) or len(material_ids) > 16 or any(not isinstance(item, str) or not item for item in material_ids) or len(set(material_ids)) != len(material_ids):
+    if not isinstance(material_ids, list) or len(material_ids) > 16 or any(not is_valid_id(item, "task") for item in material_ids) or len(set(material_ids)) != len(material_ids):
         raise ValueError("material_task_ids is invalid")
     if (
         not isinstance(dependencies, list)
@@ -3662,7 +3659,7 @@ def _validate_subagent_tool_arguments(
                 or not 1 <= len(task_ids) <= 16
                 or any(
                     not isinstance(item, str)
-                    or not item
+                    or not is_valid_id(item, "task")
                     or len(item.encode("utf-8")) > 512
                     for item in task_ids
                 )
@@ -3678,7 +3675,7 @@ def _validate_subagent_tool_arguments(
     if tool_name == "stop_agent":
         if set(arguments) - {"task_id", "reason"}:
             raise ValueError("stop request has unknown fields")
-        _bounded_nonempty_text(arguments.get("task_id"), "task_id", 512)
+        require_id(arguments.get("task_id"), "task")
         reason = arguments.get("reason")
         if reason is not None:
             _bounded_nonempty_text(reason, "reason", 4096)
@@ -3686,7 +3683,7 @@ def _validate_subagent_tool_arguments(
     if tool_name == "send_agent_message":
         if set(arguments) != {"task_id", "message"}:
             raise ValueError("message request must contain task_id and message")
-        _bounded_nonempty_text(arguments.get("task_id"), "task_id", 512)
+        require_id(arguments.get("task_id"), "task")
         _bounded_nonempty_text(
             arguments.get("message"),
             "message",
@@ -3861,3 +3858,24 @@ async def _cancel_and_join_at_absolute_deadline(
 
 
 __all__ = ["KernelSubagentManager", "MAXIMUM_LIVE_SUBAGENTS", "SUBAGENT_TOOL_NAMES"]
+
+
+def _model_target_public(value: object) -> object:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("stored model target must be an object")
+    result = {key: value[key] for key in (
+        "contract_version", "route_id", "wire_api", "model_id",
+        "canonical_endpoint_base_url", "transport_binding_id",
+        "transport_contract_version", "reasoning_wire_profile", "model_identity_policy",
+        "input_modalities", "tool_call_capability", "limits", "context_budget",
+        "context_window_tokens", "reasoning_contract",
+    )}
+    estimator = value["token_estimator"]
+    result["token_estimator"] = {key: estimator[key] for key in (
+        "estimator_id", "estimator_version", "image_grid_pixels",
+        "image_scale_numerator", "image_scale_denominator", "image_min_tokens",
+        "image_wire_accounting_contract",
+    )}
+    return result

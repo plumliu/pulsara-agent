@@ -7,9 +7,12 @@ or child mutation seams.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
+from pulsara_agent.identity import derive_id
+
 from datetime import datetime, timezone
 from time import monotonic
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
@@ -27,7 +30,6 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentContextMode,
     SubagentProfileKind,
     SubagentTaskStatus,
-    _stable_id,
     build_parent_context_call_subject,
     build_parent_context_selection,
     build_subagent_task_start,
@@ -53,7 +55,7 @@ from tests.support.model_config import test_model_binding, test_model_runtime
 
 
 def _fixture_id(prefix: str) -> str:
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 class ActiveSubagentFixtureId(str):
@@ -197,7 +199,7 @@ def accept_active_subagent_fixture(
         authorization_kind="policy",
         authorization_reference="allow",
         actor_kind="runtime",
-        actor_id="host:test-fixture",
+        actor_id='host:yv6y2haobg3zpxa6spitpvbvkm',
         remote_idempotency_key=None,
         retry_of_attempt_id=None,
         permission_snapshot_fingerprint=permission_fingerprint,
@@ -209,7 +211,7 @@ def accept_active_subagent_fixture(
         session_id=guard.session_id,
         caller_turn_id=parent_turn_id,
         provider_input_cut_fingerprint="sha256:test-fixture-cut",
-        continuity_epoch_nonce="epoch:test-fixture",
+        continuity_epoch_nonce='epoch:qfem2bsszc42pf4glqdhuejawm',
         continuity_epoch_revision=0,
         compiled_semantic_input_fingerprint="sha256:test-fixture-semantic",
         compiled_message_placements_fingerprint="sha256:test-fixture-placements",
@@ -220,7 +222,7 @@ def accept_active_subagent_fixture(
         mode=SubagentContextMode.NONE,
         last_n_turns=None,
     )
-    task_id = _stable_id("subagent-task", attempt_id, "0")
+    task_id = derive_id("task", "spawn", attempt_id, "0")
     model_runtime = model_runtime or test_model_runtime(
         model_id="test-pro", wire_api="openai_chat_completions"
     )
@@ -250,7 +252,7 @@ def accept_active_subagent_fixture(
         terminal_reason=None,
     )
     occurred_at = datetime.now(timezone.utc)
-    batch_id = _stable_id("subagent-batch", attempt_id, "batch")
+    batch_id = derive_id("batch", "spawn", attempt_id)
     candidate = PreparedSubagentTaskBatchAdmission(
         session_id=guard.session_id,
         workspace_id=workspace_id,
@@ -262,7 +264,7 @@ def accept_active_subagent_fixture(
         batch_id=batch_id,
         ordered_tasks=(draft,),
         occurred_at=occurred_at,
-        actor_id="host:test-fixture",
+        actor_id='host:yv6y2haobg3zpxa6spitpvbvkm',
     )
     assert repository.accept_subagent_task_batch(
         guard,
@@ -281,7 +283,7 @@ def accept_active_subagent_fixture(
         parent_context=selection,
         dependency_context=None,
         occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test-fixture",
+        actor_id='host:yv6y2haobg3zpxa6spitpvbvkm',
     )
     assert repository.accept_subagent_task_start(
         guard,
@@ -330,7 +332,7 @@ def accept_active_subagent_fixture(
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.BUILTIN,
         trusted_tool_reported_duration_microseconds=None,
-        actor_id="host:test-fixture",
+        actor_id='host:yv6y2haobg3zpxa6spitpvbvkm',
     )
     repository.accept_tool_result(
         guard,

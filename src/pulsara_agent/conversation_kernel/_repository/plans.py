@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
+
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
 
 from datetime import datetime
@@ -101,7 +104,6 @@ from .contracts import (
     PreparedPlanToolBatch,
     _EligiblePlanHandoff,
     _plan_inline,
-    _stable_identity,
     plan_draft_review_semantic_candidate,
     plan_exit_semantic_fingerprint,
     plan_question_resolution_semantic_fingerprint,
@@ -251,9 +253,7 @@ def _plan_review_permission(
     requested = PermissionMode(str(row["resume_permission_mode"]))
     if decision is PlanDraftDecision.REVISE:
         return build_run_permission_snapshot(
-            snapshot_id=_stable_identity(
-                "permission-snapshot", continuation_turn_id
-            ),
+            snapshot_id=derive_id('permission', 'admission', continuation_turn_id),
             requested_mode=requested,
             effective_mode=PermissionMode.READ_ONLY,
             admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
@@ -266,7 +266,7 @@ def _plan_review_permission(
     if decision is not PlanDraftDecision.APPROVE:
         raise ValueError("cancelled Plan review has no continuation permission")
     return build_run_permission_snapshot(
-        snapshot_id=_stable_identity("permission-snapshot", continuation_turn_id),
+        snapshot_id=derive_id('permission', 'admission', continuation_turn_id),
         requested_mode=requested,
         effective_mode=requested,
         admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
@@ -512,9 +512,7 @@ class _PlanOperations:
                 ).fetchone()["next"]
             )
             permission = build_run_permission_snapshot(
-                snapshot_id=_stable_identity(
-                    "permission-snapshot", candidate.continuation_turn_id
-                ),
+                snapshot_id=derive_id('permission', 'admission', candidate.continuation_turn_id),
                 requested_mode=candidate.permission_snapshot.requested_mode,
                 effective_mode=PermissionMode.READ_ONLY,
                 admission_source=(
@@ -804,9 +802,7 @@ class _PlanOperations:
                 continuation_permission = self._freeze_root_permission_snapshot(
                     connection,
                     session_id=guard.session_id,
-                    snapshot_id=_stable_identity(
-                        "permission-snapshot", candidate.continuation_turn_id
-                    ),
+                    snapshot_id=derive_id('permission', 'admission', candidate.continuation_turn_id),
                     requested_mode=candidate.permission_snapshot.requested_mode,
                     admission_source=(
                         RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION
@@ -1565,9 +1561,7 @@ class _PlanOperations:
             )
             drafts = (
                 CommittedEventDraft(
-                    event_id=_stable_identity(
-                        "event", command_id, "PlanQuestionAnswered"
-                    ),
+                    event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_QUESTION_ANSWERED.name, SubjectSlot.PLAN_INTERACTION.name, interaction_id, command_id),
                     event_type=CommittedEventType.PLAN_QUESTION_ANSWERED,
                     subject=CommittedEventSubject(
                         SubjectSlot.PLAN_INTERACTION, interaction_id
@@ -1583,9 +1577,7 @@ class _PlanOperations:
                     },
                 ),
                 CommittedEventDraft(
-                    event_id=_stable_identity(
-                        "event", result_entry_id, "ToolResultAccepted"
-                    ),
+                    event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.TOOL_RESULT_ACCEPTED.name, SubjectSlot.ENTRY.name, result_entry_id, command_id),
                     event_type=CommittedEventType.TOOL_RESULT_ACCEPTED,
                     subject=CommittedEventSubject(SubjectSlot.ENTRY, result_entry_id),
                     actor_kind="runtime",
@@ -1811,9 +1803,7 @@ class _PlanOperations:
                 workspace_id=workspace_id,
                 drafts=(
                     CommittedEventDraft(
-                        event_id=_stable_identity(
-                            "event", command_id, "PlanWorkflowEntered"
-                        ),
+                        event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_WORKFLOW_ENTERED.name, SubjectSlot.PLAN_WORKFLOW.name, workflow_id, command_id),
                         event_type=CommittedEventType.PLAN_WORKFLOW_ENTERED,
                         subject=CommittedEventSubject(
                             SubjectSlot.PLAN_WORKFLOW, workflow_id
@@ -1956,9 +1946,7 @@ class _PlanOperations:
                     workspace_id=str(running["workspace_id"]),
                     drafts=(
                         CommittedEventDraft(
-                            event_id=_stable_identity(
-                                "event", command_id, "ForceExitTurnInterrupted"
-                            ),
+                            event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.TURN_INTERRUPTED.name, SubjectSlot.TURN.name, interrupted_turn_id, command_id),
                             event_type=CommittedEventType.TURN_INTERRUPTED,
                             subject=CommittedEventSubject(
                                 SubjectSlot.TURN, interrupted_turn_id
@@ -2110,9 +2098,7 @@ class _PlanOperations:
                 workspace_id=str(workflow["workspace_id"]),
                 drafts=(
                     CommittedEventDraft(
-                        event_id=_stable_identity(
-                            "event", command_id, "PlanWorkflowExited"
-                        ),
+                        event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_WORKFLOW_EXITED.name, SubjectSlot.PLAN_WORKFLOW.name, workflow_id, command_id),
                         event_type=CommittedEventType.PLAN_WORKFLOW_EXITED,
                         subject=CommittedEventSubject(
                             SubjectSlot.PLAN_WORKFLOW, workflow_id
@@ -2628,9 +2614,7 @@ class _PlanOperations:
             )
             drafts: list[CommittedEventDraft] = [
                 CommittedEventDraft(
-                    event_id=_stable_identity(
-                        "event", command_id, "PlanDraftDecisionAccepted"
-                    ),
+                    event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_DRAFT_DECISION_ACCEPTED.name, SubjectSlot.PLAN_INTERACTION.name, interaction_id, command_id),
                     event_type=CommittedEventType.PLAN_DRAFT_DECISION_ACCEPTED,
                     subject=CommittedEventSubject(
                         SubjectSlot.PLAN_INTERACTION, interaction_id
@@ -2649,9 +2633,7 @@ class _PlanOperations:
             if decision in {PlanDraftDecision.APPROVE, PlanDraftDecision.CANCEL}:
                 drafts.append(
                     CommittedEventDraft(
-                        event_id=_stable_identity(
-                            "event", command_id, "PlanWorkflowExited"
-                        ),
+                        event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_WORKFLOW_EXITED.name, SubjectSlot.PLAN_WORKFLOW.name, str(interaction["plan_workflow_id"]), command_id),
                         event_type=CommittedEventType.PLAN_WORKFLOW_EXITED,
                         subject=CommittedEventSubject(
                             SubjectSlot.PLAN_WORKFLOW,
@@ -2670,9 +2652,7 @@ class _PlanOperations:
                 assert handoff_kind is not None
                 drafts.append(
                     CommittedEventDraft(
-                        event_id=_stable_identity(
-                            "event", command_id, "PlanContinuationAccepted"
-                        ),
+                        event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_CONTINUATION_ACCEPTED.name, SubjectSlot.ENTRY.name, continuation_entry_id, command_id),
                         event_type=CommittedEventType.PLAN_CONTINUATION_ACCEPTED,
                         subject=CommittedEventSubject(
                             SubjectSlot.ENTRY, continuation_entry_id
@@ -3198,9 +3178,7 @@ class _PlanOperations:
         payload: Mapping[str, object],
     ) -> CommittedEventDraft:
         return CommittedEventDraft(
-            event_id=_stable_identity(
-                "event", candidate.candidate_fingerprint, event_type.value, subject_id
-            ),
+            event_id=derive_id("event", "accepted", candidate.session_id, event_type.name, slot.name, subject_id, candidate.assistant_entry_id),
             event_type=event_type,
             subject=CommittedEventSubject(slot, subject_id),
             actor_kind=actor_kind,
@@ -3778,9 +3756,7 @@ class _PlanOperations:
                 ),
             ).fetchone()
             expected_permission = build_run_permission_snapshot(
-                snapshot_id=_stable_identity(
-                    "permission-snapshot", candidate.continuation_turn_id
-                ),
+                snapshot_id=derive_id('permission', 'admission', candidate.continuation_turn_id),
                 requested_mode=candidate.permission_snapshot.requested_mode,
                 effective_mode=PermissionMode.READ_ONLY,
                 admission_source=(
@@ -4157,18 +4133,14 @@ class _PlanOperations:
                 """SELECT * FROM pulsara_v3.agent_events
                    WHERE event_id = %s""",
                 (
-                    _stable_identity(
-                        "event", command_id, "PlanQuestionAnswered"
-                    ),
+                    derive_id("event", "accepted", session_id, "PLAN_QUESTION_ANSWERED", "PLAN_INTERACTION", str(row["id"]), command_id),
                 ),
             ).fetchone()
             result_event = connection.execute(
                 """SELECT * FROM pulsara_v3.agent_events
                    WHERE event_id = %s""",
                 (
-                    _stable_identity(
-                        "event", expected_result_entry_id, "ToolResultAccepted"
-                    ),
+                    derive_id("event", "accepted", session_id, "TOOL_RESULT_ACCEPTED", "ENTRY", expected_result_entry_id, command_id),
                 ),
             ).fetchone()
             expected_result_payload = {

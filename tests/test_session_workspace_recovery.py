@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import asyncio
 from datetime import datetime, timezone
 import shutil
 from time import monotonic
-from uuid import uuid4
 
 import pytest
 
@@ -98,7 +99,7 @@ def test_workspace_gate_wait_is_cancelable_and_external_restore_wakes(tmp_path):
 
 def test_workspace_feedback_closed_codec_has_no_process_facts(tmp_path):
     fact = WorkspaceRecreatedFeedbackContent(
-        "session:one", str(tmp_path), datetime.now(timezone.utc), "turn:one"
+        'session:5dyf7lfzp7z22pphjtostkgsjm', str(tmp_path), datetime.now(timezone.utc), 'turn:xayicncb3vcols33532v4oov6a'
     )
     value = fact.canonical_mapping()
     assert value["kind"] == "workspace_recreated"
@@ -118,25 +119,25 @@ def test_restore_writer_intent_does_not_steal_effective_other_owner(
         HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path)
     )
     arguments = dict(
-        session_id=f"session:{uuid4().hex}",
+        session_id=random_id("session"),
         workspace_id=workspace.workspace_key,
         workspace_root=str(workspace.workspace_root),
         workspace_label=workspace.display_label,
-        writer_owner_id="host:original",
+        writer_owner_id='host:wyf4kdcijrxhmzakftg3x4owha',
         lease_seconds=60,
         deadline_monotonic=monotonic() + 30,
     )
     first = repository.acquire_host_writer(intent="NEW", **arguments)
     with pytest.raises(SessionWriterConflict):
         repository.acquire_host_writer(
-            intent="RESTORE", **{**arguments, "writer_owner_id": "host:restore"}
+            intent="RESTORE", **{**arguments, "writer_owner_id": 'host:crhelvxh3rip73wptaom5vvhx4'}
         )
     repository.validate_host_writer(first.guard, deadline_monotonic=monotonic() + 30)
     renewed = repository.acquire_host_writer(intent="RESTORE", **arguments)
     assert renewed.guard == first.guard
     repository.release_host_writer(first.guard, deadline_monotonic=monotonic() + 30)
     restored = repository.acquire_host_writer(
-        intent="RESTORE", **{**arguments, "writer_owner_id": "host:restore"}
+        intent="RESTORE", **{**arguments, "writer_owner_id": 'host:crhelvxh3rip73wptaom5vvhx4'}
     )
     assert restored.guard.writer_generation == first.guard.writer_generation + 1
     repository.release_host_writer(restored.guard, deadline_monotonic=monotonic() + 30)
@@ -229,7 +230,7 @@ def test_cold_history_and_explicit_restore_use_real_core_without_read_activation
             )
             with pytest.raises(KeyError):
                 await foreign.history_snapshot(session_id)
-            child_id = f"session:{uuid4().hex}"
+            child_id = random_id("session")
             with pytest.raises(WorkspaceUnavailable):
                 await core.fork_conversation(
                     source_session_id=session_id,
@@ -295,24 +296,24 @@ def test_running_response_settles_but_accepted_queue_waits_for_directory(
             running = asyncio.create_task(session.run_turn(PromptContent.text("First")))
             await asyncio.wait_for(model.started.wait(), 5)
             queued = await session.submit_prompt(
-                command_id="command:parked", content=PromptContent.text("Next")
+                command_id='command:l3t6waitd6btt5ovsvwsop5fhu', content=PromptContent.text("Next")
             )
             assert queued.status == "PENDING"
             shutil.rmtree(root)
             with pytest.raises(WorkspaceUnavailable):
                 await session.submit_prompt(
-                    command_id="command:rejected", content=PromptContent.text("Reject")
+                    command_id='command:yuxpa3brwjaweujxd3zh5gfyhm', content=PromptContent.text("Reject")
                 )
             model.release.set()
             assert (await asyncio.wait_for(running, 5)).final_text == "BEFORE_STEER"
             await asyncio.sleep(0)
             assert len(model.requests) == 1
-            assert (await session.query_command("command:parked")).status == "PENDING"
+            assert (await session.query_command('command:l3t6waitd6btt5ovsvwsop5fhu')).status == "PENDING"
             guard = session._lease.guard
             await session.restore_missing_workspace()
             assert session._lease.guard == guard
             deadline = monotonic() + 5
-            while (await session.query_command("command:parked")).status == "PENDING":
+            while (await session.query_command('command:l3t6waitd6btt5ovsvwsop5fhu')).status == "PENDING":
                 assert monotonic() < deadline
                 await asyncio.sleep(0.01)
             assert len(model.requests) == 2
@@ -593,15 +594,15 @@ def test_browser_write_gate_rejects_takeover_while_directory_read_is_pending(tmp
         )
         bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
         a = SimpleNamespace(
-            session_id="one", role="controller", generation=1, is_open=True
+            session_id='session:5dofirezik2z5wyc4ouhsixn3i', role="controller", generation=1, is_open=True
         )
         bridge._connections["a"] = a
-        bridge._controller_by_session["one"] = "a"
+        bridge._controller_by_session[a.session_id] = "a"
         pending = asyncio.create_task(
-            bridge.require_chat_controller("a", 1, session_id="one")
+            bridge.require_chat_controller("a", 1, session_id='session:5dofirezik2z5wyc4ouhsixn3i')
         )
         await entered.wait()
-        bridge._controller_by_session["one"] = "b"
+        bridge._controller_by_session[a.session_id] = "b"
         release.set()
         with pytest.raises(ProtocolBridgeError):
             await pending
@@ -640,7 +641,7 @@ def test_host_close_joins_prepared_queue_admission_blocked_by_directory(
             first = asyncio.create_task(session.run_turn(PromptContent.text("First")))
             await asyncio.wait_for(model.started.wait(), 5)
             queued = await session.submit_prompt(
-                command_id="command:prepared-close", content=PromptContent.text("Next")
+                command_id='command:7qtphtxhficyfqfpas3yp3543a', content=PromptContent.text("Next")
             )
             assert queued.status == "PENDING"
             prepared, release, blocked = (

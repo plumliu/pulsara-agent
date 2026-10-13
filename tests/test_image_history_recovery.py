@@ -39,6 +39,7 @@ from tests.test_kernel_image_input_k2_postgres import (
     _bound_session,
     _direct_intent,
     _image,
+    _workspace,
 )
 
 
@@ -48,7 +49,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
 ):
     repo = _repository(stage2_migrated_postgres_database)
     lease, runtime, _ = _bound_session(repo)
-    image = _image()
+    image = _image(workspace_id=_workspace(repo, lease))
     placeholder = image_omission_part(image).text
     originals = [
         FrozenPromptContent(
@@ -121,7 +122,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
     with pytest.raises(SessionQueryError) as exc:
         read(cursor=_encode(old))
     assert exc.value.code == "CURSOR_INVALID"
-    old["operation"] = "read_session_content.v3"
+    old["operation"] = "read_session_content.v4"
     old["offset"] = 1
     with pytest.raises(SessionQueryError, match="splits an image"):
         read(cursor=_encode(old))
@@ -218,7 +219,7 @@ def test_annotation_near_body_quota_remains_searchable_with_image(
                     source=PromptAnnotationSource(source_entry, 0, len(quote)),
                     comment="needle ",
                 ),
-                _image(),
+                _image(workspace_id=_workspace(repo, lease)),
             )
         ),
     )
@@ -254,7 +255,7 @@ def test_excerpt_image_markers_are_whole_and_bounded():
     text = "needle " + chunk * 100
     start = len("needle ")
     message = {
-        "entry_id": "entry:image",
+        "entry_id": 'entry:ik465kijafixxa6kpdisy6g4vu',
         "sequence": 1,
         "text": text,
         "annotated": False,
@@ -304,7 +305,7 @@ def test_search_and_recall_charge_image_packaging_at_final_admission(oversized):
         else 1
     )
     message = {
-        "entry_id": "entry:image",
+        "entry_id": 'entry:ik465kijafixxa6kpdisy6g4vu',
         "sequence": 1,
         "role": "user",
         "label": "用户输入",
@@ -328,7 +329,7 @@ def test_search_and_recall_charge_image_packaging_at_final_admission(oversized):
     selected = excerpt_history(document, ([[0, 6]],), budget=2)
     assert selected == (message,)
     candidate = HistoryCandidate(
-        "session:test", "entry:image", "", 1, document, selected
+        'session:336wrfwkamrr3up6kjtsgvgcte', 'entry:ik465kijafixxa6kpdisy6g4vu', "", 1, document, selected
     )
     assert (
         _fits({"items": [candidate.projection()], "next_cursor": None}, "call:h")
@@ -341,9 +342,9 @@ def test_image_marker_is_atomic_when_result_packaging_budget_binds(monkeypatch):
     from types import SimpleNamespace
     from pulsara_agent.conversation_kernel import session_content
 
-    marker = image_omission_part(_image()).text
+    marker = image_omission_part(_image(workspace_id="workspace:" + "a" * 26)).text
     text = "前\n" + marker + "\n后"
-    item = {"role": "user", "entry_id": "entry:image"}
+    item = {"role": "user", "entry_id": 'entry:ik465kijafixxa6kpdisy6g4vu'}
     reader = SimpleNamespace(
         _document=lambda *args: (item, text, (), ((2, 2 + len(marker)),))
     )

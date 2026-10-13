@@ -1,3 +1,4 @@
+import { randomIdentity } from '../lib/identity';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { CalendarClock, ChevronDown, ChevronRight, CircleAlert, Clock3, LoaderCircle, MessageSquare, Pencil, Play, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react';
@@ -134,7 +135,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
       else if (action === 'run') {
         let request = runRequests.current.get(task.id);
         if (!request) {
-          request = { task_id: task.id, session_id: task.session_id, expected_revision: task.revision, client_command_id: crypto.randomUUID(), request_at_utc: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() };
+          request = { task_id: task.id, session_id: task.session_id, expected_revision: task.revision, client_command_id: randomIdentity('command'), request_at_utc: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() };
           runRequests.current.set(task.id, request);
         }
         const result = await api.runNow(request);

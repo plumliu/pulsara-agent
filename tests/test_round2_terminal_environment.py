@@ -339,7 +339,7 @@ def test_round2_environment_close_linearizes_popen_and_waits_attempt_done(
 def test_round2_pipe_and_pty_receive_the_same_bounded_environment(
     tmp_path: Path,
 ) -> None:
-    owner_id = "host:environment-parity"
+    owner_id = 'host:hwhdzw2sjcl2qjafrum2jc6reu'
     environment_owner = TerminalEnvironmentOwner(
         tmp_path,
         config=TerminalEnvConfig(

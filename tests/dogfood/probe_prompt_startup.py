@@ -5,6 +5,8 @@ Run with the repository Python; pass a saved connection ID and an output path.
 """
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import argparse
 import asyncio
 from dataclasses import replace
@@ -12,7 +14,6 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.input import PromptContent
@@ -81,7 +82,7 @@ async def run(args):
                 for text in ("你好", "接下来我要测试一下runtime，请只回复PULSARA_OK，不要使用工具。"):
                     spans.clear()
                     clock[0] = perf_counter()
-                    receipt = await session.submit_prompt(command_id=f"command:probe:{uuid4().hex}", content=PromptContent.text(text))
+                    receipt = await session.submit_prompt(command_id=random_id("command"), content=PromptContent.text(text))
                     submit_ms = (perf_counter()-clock[0])*1000
                     if receipt.status == "REJECTED":
                         raise RuntimeError("startup probe prompt was rejected")

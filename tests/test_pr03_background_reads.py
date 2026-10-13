@@ -43,7 +43,7 @@ def test_pr03_background_inventory_uses_adoption_and_retained_log_cursor(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry(maximum_host_retained_bytes=64)
-    owner = "host:background-read"
+    owner = 'host:pyugolwqgrjoyrgehpbxnbwvku'
     registry.activate_owner(owner)
     foreground, foreground_yielded = _launch(
         registry,
@@ -101,21 +101,21 @@ def test_pr03_background_inventory_uses_adoption_and_retained_log_cursor(
 
 def test_pr03_background_cursor_is_bound_to_exact_session_and_host() -> None:
     cursor = _encode_background_cursor(
-        session_id="session:one",
-        host_session_id="host:one",
+        session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
+        host_session_id='host:gubylb5v44ganghpuxoqfvlrji',
         started_at=12.5,
-        process_id="process:one",
+        process_id='process:34npgaljkboupr4n456vrmou6a',
     )
     assert _decode_background_cursor(
-        cursor, session_id="session:one", host_session_id="host:one"
-    ) == (12.5, "process:one")
+        cursor, session_id='session:5dyf7lfzp7z22pphjtostkgsjm', host_session_id='host:gubylb5v44ganghpuxoqfvlrji'
+    ) == (12.5, 'process:34npgaljkboupr4n456vrmou6a')
     with pytest.raises(ValueError, match="background cursor"):
         _decode_background_cursor(
-            cursor, session_id="session:one", host_session_id="host:two"
+            cursor, session_id='session:5dyf7lfzp7z22pphjtostkgsjm', host_session_id='host:eemam3abmyadtcyqhpde3rik7y'
         )
     with pytest.raises(ValueError, match="background cursor"):
         _decode_background_cursor(
-            cursor, session_id="session:two", host_session_id="host:one"
+            cursor, session_id='session:f2uxxwrmmavsqgv655dvvzytnu', host_session_id='host:gubylb5v44ganghpuxoqfvlrji'
         )
 
 
@@ -123,8 +123,8 @@ class _ReadCore:
     def __init__(self) -> None:
         self.group_rows = [
             {
-                "batch_id": "batch:a",
-                "parent_turn_id": "turn:root",
+                "batch_id": 'batch:z4r54kiyr64jgch7t3nj3ibuy4',
+                "parent_turn_id": 'turn:b565wrncq4ezfqthehjqni5ilm',
                 "first_accepted_at": datetime(2026, 9, 11, 1, tzinfo=timezone.utc),
                 "task_count": 2,
                 "pending_count": 0,
@@ -140,8 +140,8 @@ class _ReadCore:
                 "read_event_sequence": 17,
             },
             {
-                "batch_id": "batch:b",
-                "parent_turn_id": "turn:root",
+                "batch_id": 'batch:4h6jcehydq3vhy4pj2tkjmuqlm',
+                "parent_turn_id": 'turn:b565wrncq4ezfqthehjqni5ilm',
                 "first_accepted_at": datetime(2026, 9, 11, 2, tzinfo=timezone.utc),
                 "task_count": 1,
                 "pending_count": 0,
@@ -166,17 +166,18 @@ class _ReadCore:
     ):
         if after_batch_id is None:
             return tuple(self.group_rows)
-        return tuple(row for row in self.group_rows if row["batch_id"] > after_batch_id)
+        index = next(i for i, row in enumerate(self.group_rows) if row["batch_id"] == after_batch_id)
+        return tuple(self.group_rows[index + 1:])
 
     async def read_subagent_task_activity_page(
         self, *, task_id: str, after_entry_sequence: int, **_kwargs
     ):
-        if task_id != "task:a":
+        if task_id != 'task:7ekouunh3opwy6r5hpnpyw22fa':
             raise KeyError(task_id)
         rows = [
             {
-                "id": "entry:1",
-                "turn_id": "turn:child",
+                "id": 'entry:jfasfwsw2puygc3hrueckpvgba',
+                "turn_id": 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
                 "turn_status": "RUNNING",
                 "entry_sequence": 10,
                 "entry_kind": "ASSISTANT_TOOL_REQUEST",
@@ -189,8 +190,8 @@ class _ReadCore:
                 "content_codec": "utf-8",
             },
             {
-                "id": "entry:2",
-                "turn_id": "turn:child",
+                "id": 'entry:yym6qf3l4xz6437gradtmhjrke',
+                "turn_id": 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
                 "turn_status": "RUNNING",
                 "entry_sequence": 11,
                 "entry_kind": "TOOL_RESULT",
@@ -208,8 +209,8 @@ class _ReadCore:
             return (
                 tuple(selected[:1]),
                 ({
-                    "id": "block:1",
-                    "assistant_entry_id": "entry:1",
+                    "id": 'block:b6jcz3ejkiu6yivknhzowsm5eu',
+                    "assistant_entry_id": 'entry:jfasfwsw2puygc3hrueckpvgba',
                     "block_ordinal": 0,
                     "block_kind": "TOOL_CALL",
                     "tool_call_id": "call:1",
@@ -225,7 +226,7 @@ class _ReadCore:
 def _read_controller(core: _ReadCore) -> LocalSessionController:
     controller = object.__new__(LocalSessionController)
     controller.core = core
-    controller.memory_domain_id = "memory:one"
+    controller.memory_domain_id = 'memory:onhr6dgbcyncplx7gw4h7dsldq'
     controller.trust_workspace_mcp_config = False
     return controller
 
@@ -234,38 +235,38 @@ def test_pr03_task_group_and_activity_cursors_preserve_exact_read_identity() -> 
     async def scenario() -> None:
         controller = _read_controller(_ReadCore())
         first = await controller.list_session_task_groups(
-            "session:one", maximum_items=1
+            'session:5dyf7lfzp7z22pphjtostkgsjm', maximum_items=1
         )
-        assert [value["group_id"] for value in first["groups"]] == ["batch:a"]
+        assert [value["group_id"] for value in first["groups"]] == ['batch:z4r54kiyr64jgch7t3nj3ibuy4']
         assert first["remaining_count"] == 1
         assert isinstance(first["next_cursor"], str)
         second = await controller.list_session_task_groups(
-            "session:one", maximum_items=1, cursor=first["next_cursor"]
+            'session:5dyf7lfzp7z22pphjtostkgsjm', maximum_items=1, cursor=first["next_cursor"]
         )
-        assert [value["group_id"] for value in second["groups"]] == ["batch:b"]
+        assert [value["group_id"] for value in second["groups"]] == ['batch:4h6jcehydq3vhy4pj2tkjmuqlm']
         with pytest.raises(ValueError, match="task group cursor"):
             await controller.list_session_task_groups(
-                "session:other", maximum_items=1, cursor=first["next_cursor"]
+                'session:sjiboxs4asbh5n6mg6cpdgcsqu', maximum_items=1, cursor=first["next_cursor"]
             )
 
         activity = await controller.list_session_task_activities(
-            "session:one", "task:a", maximum_items=1
+            'session:5dyf7lfzp7z22pphjtostkgsjm', 'task:7ekouunh3opwy6r5hpnpyw22fa', maximum_items=1
         )
         assert activity["activities"][0]["blocks"][0]["tool_name"] == "read_file"
         assert isinstance(activity["next_cursor"], str)
         continued = await controller.list_session_task_activities(
-            "session:one",
-            "task:a",
+            'session:5dyf7lfzp7z22pphjtostkgsjm',
+            'task:7ekouunh3opwy6r5hpnpyw22fa',
             maximum_items=1,
             cursor=activity["next_cursor"],
         )
         assert [value["entry_id"] for value in continued["activities"]] == [
-            "entry:2"
+            'entry:yym6qf3l4xz6437gradtmhjrke'
         ]
         with pytest.raises(ValueError, match="task activity cursor"):
             await controller.list_session_task_activities(
-                "session:one",
-                "task:b",
+                'session:5dyf7lfzp7z22pphjtostkgsjm',
+                'task:ofq7v6vy25ozw4nkz722653tpy',
                 maximum_items=1,
                 cursor=activity["next_cursor"],
             )

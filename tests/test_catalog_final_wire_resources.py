@@ -1,6 +1,7 @@
 """Real compiler/adapter selection with frozen reads; no database or provider calls."""
 
 from __future__ import annotations
+from tests.support.images import bound_test_image
 
 import asyncio
 from dataclasses import replace
@@ -169,7 +170,7 @@ def _mcp_source():
 def _mixed_results():
     encoded = BytesIO()
     Image.new("RGB", (3_500, 3_500), (11, 23, 41)).save(encoded, "PNG")
-    image = LLMImagePart("image/png", encoded.getvalue(), 3_500, 3_500)
+    image = bound_test_image("image/png", encoded.getvalue(), 3_500, 3_500)
     arguments = (
         freeze_json({"action": "SET_PLUGIN_ENABLED"}),
         freeze_json({"path": "plot.png"}),
@@ -182,9 +183,9 @@ def _mixed_results():
     )
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:assistant",
+        'entry:5qidalqvkujk5ykzzzfpwie2qy',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (),
         tool_calls=calls,
     )
@@ -192,7 +193,7 @@ def _mixed_results():
     public_text = frozen_tool_result_public_text(content)
     results = tuple(
         replace(
-            _tool_result(text, sequence=index + 3, turn_id="turn:test", artifact=False),
+            _tool_result(text, sequence=index + 3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu', artifact=False),
             tool_call_id=call.tool_call_id,
             tool_request_entry_id=assistant.source_entry_id,
             tool_call_ordinal=index,
@@ -260,7 +261,7 @@ def _prepare_case(
         sources=_sources(source, *extra_sources),
     )
     scope = ProviderInputContinuityScope(
-        "session:test", snapshot.identity.conversation_scope_kind, None
+        'session:336wrfwkamrr3up6kjtsgvgcte', snapshot.identity.conversation_scope_kind, None
     )
     planning = owner.freeze_planning_input(
         scope=scope,
@@ -534,7 +535,7 @@ def test_pending_root_hook_binds_the_measured_catalog_winner():
     expected = object()
     sibling = SimpleNamespace(candidate=original, owns_reservation=False)
     prepared = SimpleNamespace(
-        admission=SimpleNamespace(candidate=SimpleNamespace(exact_turn_id="turn:test")),
+        admission=SimpleNamespace(candidate=SimpleNamespace(exact_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')),
         owns_resources=False,
     )
 
@@ -601,7 +602,7 @@ def test_catalog_wire_retry_omits_optional_source_only_after_wire_feedback(api, 
 
 @pytest.mark.parametrize("request_owner", ("candidate", "cold-assembly"))
 @pytest.mark.parametrize(
-    "field,value", (("context_id", "context:other"), ("model_call_index", 2))
+    "field,value", (("context_id", 'context:slooqntuoemzed5ha7sta3saq4'), ("model_call_index", 2))
 )
 def test_cold_wire_candidate_rejects_mixed_compilation_basis(
     request_owner, field, value

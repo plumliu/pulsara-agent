@@ -31,7 +31,6 @@ from pulsara_agent.conversation_kernel.steer import (
     SteerPlanConflictConfirmationKind,
     SteerResourceRejectionConfirmationKind,
     build_steer_plan_conflict_interruption,
-    prepared_steer_suffix_plan_identity_fingerprint,
 )
 class PreparedSteerPlanStale(ConversationKernelConflict):
     """The quoted FIFO prefix stopped matching before its first mutation."""
@@ -164,9 +163,6 @@ class SteerConsumptionCoordinator:
         candidate = build_steer_plan_conflict_interruption(
             session_id=first.session_id,
             exact_target_turn_id=first.exact_target_turn_id,
-            source_plan_fingerprint=prepared_steer_suffix_plan_identity_fingerprint(
-                plan
-            ),
             occurred_at=datetime.now(timezone.utc),
             actor_id=self._writer_lease.guard.writer_owner_id,
         )

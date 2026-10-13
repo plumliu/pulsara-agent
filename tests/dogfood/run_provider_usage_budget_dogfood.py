@@ -1,5 +1,6 @@
 """Real configured Chat/Responses usage calibration and cold history reads."""
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import replace
@@ -71,8 +72,8 @@ async def run() -> dict[str, object]:
                     await session.update_model_call_binding(_binding(delegate, connections[wire]))
                     marker = 'USAGE_' + uuid4().hex[:10]
                     start = len(records)
-                    first = await session.run_turn(PromptContent.text(f'The literal marker in this message is {marker}. Reply exactly OK.'), command_id='command:usage:'+uuid4().hex)
-                    second = await session.run_turn(PromptContent.text('Reply with the exact marker from my previous message.'), command_id='command:usage:'+uuid4().hex)
+                    first = await session.run_turn(PromptContent.text(f'The literal marker in this message is {marker}. Reply exactly OK.'), command_id=derive_id("command", "test-fixture", 'command:usage:'+uuid4().hex))
+                    second = await session.run_turn(PromptContent.text('Reply with the exact marker from my previous message.'), command_id=derive_id("command", "test-fixture", 'command:usage:'+uuid4().hex))
                     calls = records[start:]
                     assert len(calls) == 2, calls
                     assert calls[0]['budget_source'] == 'heuristic'
@@ -87,7 +88,7 @@ async def run() -> dict[str, object]:
                     assert len(page.usages) == 2, page.to_dict()
                     assert all(row['input_tokens'] is not None and row['input_tokens'] > 0 for row in page.usages)
                     source_start = len(source_quotes)
-                    compaction = await session.compact_context(command_id='command:usage-compact:'+uuid4().hex, force=True)
+                    compaction = await session.compact_context(command_id=derive_id("command", "test-fixture", 'command:usage-compact:'+uuid4().hex), force=True)
                     scoped_source_quotes = source_quotes[source_start:]
                     assert scoped_source_quotes and scoped_source_quotes[0]['budget_source'] == 'reported_input_anchor', scoped_source_quotes
                     assert len((await core.read_provider_call_usage_page(session_id=session.session_id)).usages) == 2  # summary purpose excluded
@@ -98,7 +99,7 @@ async def run() -> dict[str, object]:
                     resumed = await core.resume_session(session_id, workspace_input=workspace_input, system_prompt='Reply briefly and directly. Do not call tools.')
                     assert all(slot.usage_anchor is None for slot in resumed._input_continuity._slots.values())
                     await resumed.attach_controller('provider-usage-budget-dogfood-resume')
-                    after_restart = await resumed.run_turn(PromptContent.text('Reply RESTART_OK.'), command_id='command:usage:'+uuid4().hex)
+                    after_restart = await resumed.run_turn(PromptContent.text('Reply RESTART_OK.'), command_id=derive_id("command", "test-fixture", 'command:usage:'+uuid4().hex))
                     assert records[-1]['budget_source'] == 'heuristic'
                     final_history = await core.read_provider_call_usage_page(session_id=session_id)
                     assert len(final_history.usages) == 3

@@ -289,21 +289,21 @@ def test_openai_function_lowering_rejects_intersecting_nested_unions() -> None:
 
 
 def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
-    cut = PreparedProviderInputCut("session:test", "turn:test", "revision:test", 1)
+    cut = PreparedProviderInputCut('session:336wrfwkamrr3up6kjtsgvgcte', 'turn:klmmazz67vfgsfsvg6ceqgdsfu', "revision:test", 1)
     content = InlineContent.from_bytes(b"assistant")
     occurred_at = datetime(2026, 8, 17, tzinfo=timezone.utc)
-    root = ProviderInputContinuityScope("session:test", ModelInputScopeKind.ROOT, None)
+    root = ProviderInputContinuityScope('session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.ROOT, None)
     child = ProviderInputContinuityScope(
-        "session:test", ModelInputScopeKind.SUBAGENT_TASK, "task:test"
+        'session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.SUBAGENT_TASK, 'task:kmz6pl55dsqspcz6dgmhr7sxpy'
     )
 
     def candidate(
         scope: ProviderInputContinuityScope, nonce: str, revision: int
     ) -> PreparedAssistantMessageSettlement:
         return PreparedAssistantMessageSettlement(
-            guard=HostWriterGuard("session:test", 1, "host:test"),
+            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
             cut=cut,
-            entry_id="entry:test",
+            entry_id='entry:yizmduice57hcs52bz2usckgc4',
             parent_content=content,
             blocks=(),
             complete_turn=True,
@@ -315,12 +315,12 @@ def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
             provider_replay=None,
         )
 
-    baseline = candidate(root, "epoch:root", 1)
-    assert candidate(root, "epoch:other", 1) != baseline
-    assert candidate(root, "epoch:root", 2) != baseline
-    assert candidate(child, "epoch:root", 1) != baseline
+    baseline = candidate(root, 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm', 1)
+    assert candidate(root, 'epoch:r2tjjdwcpwvkoidgh7sk5cbadu', 1) != baseline
+    assert candidate(root, 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm', 2) != baseline
+    assert candidate(child, 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm', 1) != baseline
     assert baseline.continuity_scope is root
-    assert baseline.continuity_epoch_nonce == "epoch:root"
+    assert baseline.continuity_epoch_nonce == 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm'
     assert baseline.continuity_epoch_revision == 1
 
 
@@ -775,7 +775,7 @@ def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
     )
     assert (
         completion.bind_assistant_entry(
-            assistant_entry_id="entry:no-reasoning",
+            assistant_entry_id='entry:qheyerqszsjkbm2bkcamidqnmy',
             public_projection_fingerprint="sha256:" + "3" * 64,
             has_tool_calls=True,
         )
@@ -3351,7 +3351,7 @@ def test_completed_replay_must_exactly_match_public_projection() -> None:
     )
     with pytest.raises(RuntimeError, match="public projection"):
         completion.bind_assistant_entry(
-            assistant_entry_id="entry:test",
+            assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
             public_projection_fingerprint="sha256:" + "3" * 64,
             has_tool_calls=False,
         )
@@ -3445,7 +3445,7 @@ def test_responses_accepts_message_before_ordered_function_calls() -> None:
         ),
     )
     fragment = completion.bind_assistant_entry(
-        assistant_entry_id="entry:ordered",
+        assistant_entry_id='entry:ravoga4jkj4q6tvxlxo25hlwhi',
         public_projection_fingerprint=projection,
         has_tool_calls=True,
     )

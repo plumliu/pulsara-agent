@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import require_id
+
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
@@ -114,16 +116,10 @@ class ProjectedToolResultPublicValue:
     body: str = ""
 
 
-def image_reference_digest_part(image_ref: str) -> LLMTextPart:
+def image_reference_id_part(image_ref: str) -> LLMTextPart:
     """Render one provider-only label from the canonical image digest value."""
 
-    if (
-        not isinstance(image_ref, str)
-        or not image_ref.startswith("sha256:")
-        or len(image_ref) != 71
-        or any(character not in "0123456789abcdef" for character in image_ref[7:])
-    ):
-        raise ValueError("image reference digest is invalid")
+    require_id(image_ref, "image")
     return LLMTextPart(
         canonical_json_bytes(
             {"pulsara_image": {"image_ref": image_ref}}
@@ -136,13 +132,13 @@ def image_reference_part(image: LLMImagePart) -> LLMTextPart:
 
     if not isinstance(image, LLMImagePart):
         raise TypeError("image reference label requires a validated image")
-    return image_reference_digest_part(image.content_digest)
+    return image_reference_id_part(image.image_ref)
 
 
 def image_omission_part(image: LLMImagePart) -> LLMTextPart:
     """Keep an image's identity without its visual content or a read directive."""
     return LLMTextPart(image_reference_text(
-        digest=image.content_digest, media_type=image.media_type,
+        image_ref=image.image_ref, media_type=image.media_type,
         width=image.width, height=image.height,
     ))
 
@@ -471,8 +467,9 @@ def ordinary_tool_result_can_degrade(item: FrozenProviderInputItem) -> bool:
 def ordinary_tool_result_minimum_upper(tool_call_id: str) -> LLMMessage:
     """Bound an ordinary omitted late carrier with the existing renderers.
 
+    This witness covers live tool execution in the current turn, not imported history.
     This admission witness is neither sent nor stored. Metadata has closed ASCII
-    enums and a native artifact:tool-result:<64 hex> ID. Timing witnesses cover
+    enums and a native artifact:<26 base32> ID. Timing witnesses cover
     all legal origin/duration combinations. Provenance is already JSON bounded:
     one all-backslash ID fills that bound and maximizes the next JSON escaping.
     The runner adds a closure, bounding normal delivery as well as closure+late.
@@ -481,8 +478,8 @@ def ordinary_tool_result_minimum_upper(tool_call_id: str) -> LLMMessage:
     maximum = MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS
     timings = tuple(
         freeze_tool_observation_timing_fact(
-            session_id="minimum-upper",
-            turn_id="minimum-upper",
+            session_id="session:" + "a" * 26,
+            turn_id="turn:" + "a" * 26,
             observed_at=datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc),
             observation_duration_microseconds=duration,
             tool_reported_duration_microseconds=reported,
@@ -530,7 +527,7 @@ def ordinary_tool_result_minimum_upper(tool_call_id: str) -> LLMMessage:
             tool_result_context=replace(
                 metadata,
                 artifact_disposition=disposition,
-                artifact_id=("artifact:tool-result:" + "0" * 64)
+                artifact_id=("artifact:" + "a" * 26)
                 if disposition
                 in {
                     ToolOutputArtifactDisposition.AVAILABLE,
@@ -994,7 +991,7 @@ def _utf8_suffix(value: bytes, maximum: int) -> bytes:
 
 __all__ = [
     "decode_tool_result_observation",
-    "image_reference_digest_part",
+    "image_reference_id_part",
     "image_reference_part",
     "image_referenced_content",
     "LoweredCanonicalItem",

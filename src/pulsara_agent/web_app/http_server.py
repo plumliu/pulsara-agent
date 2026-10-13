@@ -1,6 +1,8 @@
 """Loopback-only HTTP surface for Pulsara Web."""
 
 from __future__ import annotations
+
+from pulsara_agent.settings import ModelConnectionIdentityConflict
 from pulsara_agent.conversation_kernel.session_deletion import SessionDeleteRejected
 from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
@@ -11,7 +13,7 @@ import asyncio
 from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable, cast
-from uuid import UUID
+from pulsara_agent.identity import require_id
 
 from aiohttp import web
 from psycopg.errors import QueryCanceled
@@ -961,11 +963,18 @@ class LocalHttpServer:
 
     async def _add_model_configuration(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        resolved, api_key = self._resolve_model_configuration_body(body)
-        await self.settings.add_model_connection(
-            connection=resolved.config,
-            api_key=api_key,
-        )
+        while True:
+            resolved, api_key = self._resolve_model_configuration_body(body)
+            try:
+                await self.settings.add_model_connection(
+                    connection=resolved.config,
+                    api_key=api_key,
+                )
+                break
+            except ModelConnectionIdentityConflict:
+                # This create request has not exposed its allocated ID or key binding.
+                # Published/edit requests never enter this retry path.
+                continue
         return web.json_response(
             {
                 "model_configuration": await self._connection_summary(resolved.config),
@@ -2521,15 +2530,7 @@ class LocalHttpServer:
         browser_instance_id = _optional_body_string(body, "browser_instance_id")
         if browser_instance_id is None:
             raise ValueError("browser_instance_id is required")
-        try:
-            parsed_browser_instance_id = UUID(browser_instance_id)
-        except ValueError as exc:
-            raise ValueError("browser_instance_id must be a canonical UUID") from exc
-        if (
-            parsed_browser_instance_id.version != 4
-            or str(parsed_browser_instance_id) != browser_instance_id
-        ):
-            raise ValueError("browser_instance_id must be a canonical UUID")
+        require_id(browser_instance_id, "transport")
         takeover = body.get("takeover", False)
         if not isinstance(takeover, bool):
             raise ValueError("takeover must be boolean")

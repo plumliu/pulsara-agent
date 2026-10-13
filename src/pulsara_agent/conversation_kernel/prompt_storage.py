@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import require_id
+
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol
 
@@ -76,7 +78,7 @@ class CanonicalImageReferenceReadPort(Protocol):
 
 
 class PostgresCanonicalImageReferenceReadPort:
-    """Exact, session/workspace-scoped read owner for one known image digest."""
+    """Exact, session/workspace-scoped read owner for one known canonical image ID."""
 
     def __init__(
         self,
@@ -100,6 +102,7 @@ class PostgresCanonicalImageReferenceReadPort:
         maximum_encoded_bytes: int,
         deadline_monotonic: float,
     ) -> LLMImagePart:
+        require_id(image_ref, "image")
         if session_id != self._session_id or workspace_id != self._workspace_id:
             raise RuntimeError("canonical image reference scope does not exact-join")
         if maximum_encoded_bytes < 1:
@@ -129,7 +132,7 @@ class PostgresCanonicalImageReferenceReadPort:
                      AND e.id = r.transcript_entry_id
                     WHERE r.session_id = %s
                       AND r.workspace_id = %s
-                      AND b.logical_digest = %s
+                      AND b.id = %s
                       AND e.entry_kind IN (
                           'USER_MESSAGE', 'USER_STEER', 'TOOL_RESULT'
                       )
@@ -148,7 +151,7 @@ class PostgresCanonicalImageReferenceReadPort:
                      AND s.id = r.context_snapshot_id
                     WHERE r.session_id = %s
                       AND r.workspace_id = %s
-                      AND b.logical_digest = %s
+                      AND b.id = %s
                 )
                 SELECT owner_kind_rank, owner_id, ref_ordinal, content_size, blob_id
                 FROM candidates
@@ -249,11 +252,11 @@ class PostgresCanonicalImageReferenceReadPort:
             descriptor = descriptors[ref_ordinal]
             reference = refs[ref_ordinal]
             if (
-                descriptor.digest != image_ref
+                descriptor.image_ref != image_ref
                 or str(reference["blob_id"]) != blob_id
                 or blob_id != _blob_id(
                     workspace_id, descriptor.digest,
-                    descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC,
+                    descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC, image=True,
                 )
             ):
                 raise ConversationKernelConflict(
@@ -277,6 +280,7 @@ class PostgresCanonicalImageReferenceReadPort:
                 expected_codec=PROMPT_IMAGE_BLOB_CODEC,
             )
             return LLMImagePart(
+                image_ref=descriptor.image_ref,
                 media_type=descriptor.media_type,
                 immutable_bytes=payload,
                 width=descriptor.width,
@@ -309,6 +313,7 @@ def materialize_canonical_prompt(
             content=occurrence.image.immutable_bytes,
             media_type=occurrence.image.media_type,
             codec=PROMPT_IMAGE_BLOB_CODEC,
+            validated_image=occurrence.image,
         ).blob_id
         for occurrence in prompt.image_occurrences
     )
@@ -340,7 +345,8 @@ def materialize_compaction_snapshot(
     blob_ids: list[str] = []
     for descriptor, image in zip(descriptors, images, strict=True):
         if (
-            image.content_digest != descriptor.digest
+            image.image_ref != descriptor.image_ref
+            or image.content_digest != descriptor.digest
             or len(image.immutable_bytes) != descriptor.encoded_bytes
             or image.media_type != descriptor.media_type
             or image.width != descriptor.width
@@ -354,6 +360,7 @@ def materialize_compaction_snapshot(
                 content=image.immutable_bytes,
                 media_type=image.media_type,
                 codec=PROMPT_IMAGE_BLOB_CODEC,
+                validated_image=image,
             ).blob_id
         )
     return CanonicalPromptPublication(body=body, image_blob_ids=tuple(blob_ids))
@@ -795,8 +802,9 @@ def _refs_match_descriptors(
             or str(row["workspace_id"]) != workspace_id
             or str(row["blob_id"]) != _blob_id(
                 workspace_id, descriptor.digest,
-                descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC,
+                descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC, image=True,
             )
+            or str(row["blob_id"]) != descriptor.image_ref
             or row["logical_digest"] is None
             or str(row["logical_digest"]) != descriptor.digest
             or int(row["logical_size"]) != descriptor.encoded_bytes

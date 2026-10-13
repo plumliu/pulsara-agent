@@ -50,8 +50,8 @@ def test_input_allowance_preserves_provider_output_and_hands_over_frozen_budget(
     )
     port = DirectKernelModelPort(model_runtime=runtime)
     request = KernelModelTargetPreparationRequest(
-        session_id="session:test",
-        turn_id="turn:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         model_call_index=1,
         purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
         maximum_input_tokens=None,
@@ -142,8 +142,8 @@ def test_frozen_explicit_allowance_survives_a_smaller_saved_allowance():
     set_allowance(runtime, 512_000)
     port = DirectKernelModelPort(model_runtime=runtime)
     request = KernelModelTargetPreparationRequest(
-        session_id="session:test",
-        turn_id="turn:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         model_call_index=1,
         purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
         maximum_input_tokens=None,
@@ -194,8 +194,8 @@ def test_frozen_allowance_reborrow_checks_the_returned_connection_once(monkeypat
     runtime = test_model_runtime()
     port = DirectKernelModelPort(model_runtime=runtime)
     request = KernelModelTargetPreparationRequest(
-        session_id="session:test",
-        turn_id="turn:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         model_call_index=1,
         purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
         maximum_input_tokens=None,

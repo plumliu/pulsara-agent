@@ -1,4 +1,5 @@
 """Context preview is disposable, read-only, and specific to the selected model."""
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import replace
@@ -26,10 +27,10 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
         postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
         limits=test_model_limits(total_context_tokens=1024000, max_input_tokens=1024000))
     medium = test_model_runtime(wire_api='openai_chat_completions', model_id='medium',
-        connection_id=ModelConnectionId('model-connection:' + '1' * 32),
+        connection_id=ModelConnectionId('connection:knlsd5sz5j4bingayjthlnsehu'),
         limits=test_model_limits(total_context_tokens=512000, max_input_tokens=512000))
     small = test_model_runtime(wire_api='openai_chat_completions', model_id='small',
-        connection_id=ModelConnectionId('model-connection:' + '2' * 32),
+        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
         limits=test_model_limits(total_context_tokens=256000, max_input_tokens=256000))
     include_test_runtime_connections(runtime, medium, small)
     monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'product-home'))
@@ -76,7 +77,7 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             assert empty['state'] == 'empty' and empty['input_tokens'] is None
             assert not requests and session._input_continuity._slots == slots_before
             # Exceed the small model's token budget within the prompt byte bound.
-            await session.run_turn(PromptContent.text('上下文演示。' * 45000), command_id='command:preview:' + uuid4().hex)
+            await session.run_turn(PromptContent.text('上下文演示。' * 45000), command_id=derive_id("command", "test-fixture", 'command:yvn63bga34r6hjj5a222xi5lt4' + uuid4().hex))
             scope = next(iter(session._input_continuity._slots))
             cohort = session._input_continuity.current_cohort(scope)
             anchor = session._input_continuity.current_usage_anchor(scope)
@@ -116,7 +117,7 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             await session.update_model_call_binding(test_model_binding(runtime))
             pause.update(started=asyncio.Event(), release=asyncio.Event())
             active = asyncio.create_task(session.run_turn(PromptContent.text('continue'),
-                command_id='command:preview:' + uuid4().hex))
+                command_id=derive_id("command", "test-fixture", 'command:yvn63bga34r6hjj5a222xi5lt4' + uuid4().hex)))
             await asyncio.wait_for(pause['started'].wait(), timeout=30)
             running = await read_preview()
             assert running['state'] == 'ready' and running['model_switch_pending'] is False

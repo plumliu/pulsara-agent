@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 import asyncio
 from time import monotonic
 
@@ -48,7 +50,6 @@ from tests.test_stage2_conversation_runner import (
     _AssertingTool,
     _CompactionSequencedDirectKernelModel,
     _name,
-    _stable_id,
 )
 
 
@@ -66,7 +67,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
     workspace_id = repository.read_session_workspace_id(
         lease.guard, deadline_monotonic=monotonic() + 30
     )
-    image = _image()
+    image = _image(workspace_id=workspace_id)
     original = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("between"), image)
     )
@@ -84,13 +85,13 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
     text_runtime = model_runtime(
         model_id="text-destination",
         wire_api=wire_api,
-        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
         input_modalities=("text",),
     )
     vision_runtime = model_runtime(
         model_id="vision-return",
         wire_api=wire_api,
-        connection_id=ModelConnectionId("model-connection:" + "3" * 32),
+        connection_id=ModelConnectionId('connection:bx3rsdxruwnyw3gwh4qltipqlq'),
         input_modalities=("text", "image"),
     )
     owned = []
@@ -123,7 +124,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                         "output": [
                             {
                                 "type": "message",
-                                "id": _name("message"),
+                                "id": _name("entry"),
                                 "status": "completed",
                                 "role": "assistant",
                                 "content": [{"type": "output_text", "text": reply}],
@@ -182,9 +183,9 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
 
     async def compact_next(runner, owner, label):
         command = _name("command")
-        turn_id = _stable_id("turn", source_session, command)
+        turn_id = derive_id("turn", "command", source_session, command)
         _, waiter = await owner.request_manual(
-            command_id=_name("compact"),
+            command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
             expected_turn_id=turn_id,

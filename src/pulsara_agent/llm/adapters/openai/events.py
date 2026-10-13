@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 import json
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import uuid4
 
 from pulsara_agent.ports.live_agent_event import (
     ProviderStreamPayload,
@@ -71,7 +72,7 @@ class ProviderLiveItemBuilder:
         self.has_semantic_output = True
         events: list[ProviderStreamPayload] = []
         if self.text_block_id is None:
-            self.text_block_id = f"text:{uuid4()}"
+            self.text_block_id = random_id("segment")
             events.append(TextStartPayload(block_identity=self.text_block_id))
         events.append(TextDeltaPayload(block_identity=self.text_block_id, delta=delta))
         self.text_parts.append(delta)
@@ -88,7 +89,7 @@ class ProviderLiveItemBuilder:
         self.has_semantic_output = True
         events: list[ProviderStreamPayload] = []
         if self.thinking_block_id is None:
-            self.thinking_block_id = f"thinking:{uuid4()}"
+            self.thinking_block_id = random_id("segment")
             self.thinking_presentation_kind = presentation_kind
             events.append(
                 ThinkingStartPayload(

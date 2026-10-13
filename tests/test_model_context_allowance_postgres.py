@@ -1,4 +1,5 @@
 """Same-model budget edits reuse the complete existing three-tier handover."""
+from pulsara_agent.identity import derive_id
 
 import asyncio
 import json
@@ -110,7 +111,7 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
             )
             await session.run_turn(
                 PromptContent.text("start"),
-                command_id="command:allowance:" + uuid4().hex,
+                command_id=derive_id("command", "test-fixture", 'command:bsnwlwz6ffqscxn4kfqknrjp7m' + uuid4().hex),
             )
             scope = next(iter(session._input_continuity._slots))
             cohort = session._input_continuity.current_cohort(scope)
@@ -141,7 +142,7 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
                 )
             await session.run_turn(
                 PromptContent.text("continue"),
-                command_id="command:allowance:" + uuid4().hex,
+                command_id=derive_id("command", "test-fixture", 'command:bsnwlwz6ffqscxn4kfqknrjp7m' + uuid4().hex),
             )
             current = session._input_continuity.current_cohort(scope)
             assert current.view.epoch_nonce != cohort.view.epoch_nonce
@@ -298,7 +299,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
             if manual:
                 manual_request = asyncio.create_task(
                     session.compact_context(
-                        command_id="command:manual:" + uuid4().hex, force=True
+                        command_id=derive_id("command", "test-fixture", 'command:wqrovmuymwbwo5mv2fcsscwr2a' + uuid4().hex), force=True
                     )
                 )
                 await asyncio.sleep(0.02)
@@ -380,7 +381,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
                 )
             result = await session.run_turn(
                 PromptContent.text("read the file and finish"),
-                command_id="command:followup:" + uuid4().hex,
+                command_id=derive_id("command", "test-fixture", 'command:632ndwmlcmy4t64nartiqaq2dq' + uuid4().hex),
             )
             if manual_request is not None:
                 outcome = await manual_request
@@ -542,7 +543,7 @@ def test_queued_child_preserves_accepted_allowance_then_hands_over_on_followup(
             root_run = asyncio.create_task(
                 session.run_turn(
                     PromptContent.text(root_prompt),
-                    command_id="command:queued:" + uuid4().hex,
+                    command_id=derive_id("command", "test-fixture", 'command:svlhv6ql2xglb4r3wqwyqma6ni' + uuid4().hex),
                 )
             )
             await asyncio.wait_for(accepted.wait(), timeout=30)
@@ -680,7 +681,7 @@ def test_headroom_decision_failure_releases_handle_before_next_turn(
             with pytest.raises(ValueError, match="injected headroom"):
                 await session.run_turn(
                     PromptContent.text("read the sample"),
-                    command_id="command:failed:" + uuid4().hex,
+                    command_id=derive_id("command", "test-fixture", 'command:u3576yuqmhqziyfhuaeudkcuza' + uuid4().hex),
                 )
             assert calls == 1
             assert closed
@@ -694,7 +695,7 @@ def test_headroom_decision_failure_releases_handle_before_next_turn(
             )
             result = await session.run_turn(
                 PromptContent.text("continue"),
-                command_id="command:resume:" + uuid4().hex,
+                command_id=derive_id("command", "test-fixture", 'command:t35kedyyq6qep4fkjrz4xiigpe' + uuid4().hex),
             )
             assert result.final_text == "Completed."
         finally:

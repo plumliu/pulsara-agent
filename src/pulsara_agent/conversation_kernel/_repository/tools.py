@@ -148,7 +148,7 @@ class _ToolOperations:
                     CommittedEventType.CAPABILITY_DECISION_ACCEPTED,
                     SubjectSlot.INTERACTION_DECISION,
                     decision_id,
-                    occurred_at=occurred_at,
+                    session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                     actor_kind="machine",
                     actor_id=actor_id,
                     payload={"decision": decision, "subject_kind": "TOOL_CALL"},
@@ -179,7 +179,7 @@ class _ToolOperations:
                         CommittedEventType.TOOL_ATTEMPT_ACCEPTED,
                         SubjectSlot.TOOL_ATTEMPT,
                         attempt_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id="foreground-tool-executor",
                         payload={
@@ -240,7 +240,7 @@ class _ToolOperations:
                         CommittedEventType.TOOL_RESULT_ACCEPTED,
                         SubjectSlot.ENTRY,
                         result_entry_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="tool",
                         actor_id="permission",
                         payload={
@@ -347,7 +347,7 @@ class _ToolOperations:
                         CommittedEventType.TOOL_ATTEMPT_ACCEPTED,
                         SubjectSlot.TOOL_ATTEMPT,
                         attempt_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind=actor_kind,
                         actor_id=actor_id,
                         payload={
@@ -1098,7 +1098,7 @@ class _ToolOperations:
                     CommittedEventType.INTERACTION_DECISION_ACCEPTED,
                     SubjectSlot.INTERACTION_DECISION,
                     decision_id,
-                    occurred_at=occurred_at,
+                    session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                     actor_kind="human",
                     actor_id=actor_id,
                     payload={"decision": decision, "subject_kind": "TOOL_CALL"},
@@ -1129,7 +1129,7 @@ class _ToolOperations:
                         CommittedEventType.TOOL_ATTEMPT_ACCEPTED,
                         SubjectSlot.TOOL_ATTEMPT,
                         attempt_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="runtime",
                         actor_id="foreground-tool-executor",
                         payload={
@@ -1190,7 +1190,7 @@ class _ToolOperations:
                         CommittedEventType.TOOL_RESULT_ACCEPTED,
                         SubjectSlot.ENTRY,
                         result_entry_id,
-                        occurred_at=occurred_at,
+                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
                         actor_kind="tool",
                         actor_id="permission",
                         payload={

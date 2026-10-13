@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import replace
@@ -54,14 +55,14 @@ class _Repository:
         self.turns: dict[str, dict[str, object]] = {}
 
     def read_turn_terminal_outcome(self, *, session_id, turn_id):
-        assert session_id == "session:one"
+        assert session_id == 'session:5dyf7lfzp7z22pphjtostkgsjm'
         return self.turns.get(turn_id)
 
 
 def _host(clock: _Clock) -> KernelHostSession:
     host = object.__new__(KernelHostSession)
-    host.session_id = "session:one"
-    host.host_session_id = "host:one"
+    host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'
+    host.host_session_id = 'host:gubylb5v44ganghpuxoqfvlrji'
     host._control_monotonic = clock
     host._user_control_attempts = {}
     host._lock = asyncio.Lock()
@@ -86,7 +87,7 @@ def _host(clock: _Clock) -> KernelHostSession:
 
 
 def _command(host: KernelHostSession, suffix: str) -> str:
-    return f"command:control:{host.control_admission_deadline_ms()}:{suffix}"
+    return derive_id("command", "test-fixture", str(host.control_admission_deadline_ms()), suffix)
 
 
 def test_pr03_exact_stop_never_cancels_a_successor_that_takes_the_root_slot() -> None:
@@ -100,22 +101,22 @@ def test_pr03_exact_stop_never_cancels_a_successor_that_takes_the_root_slot() ->
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
-                host.repository.turns["turn:A"] = {
+                host.repository.turns['turn:74y74rvr2pht5lydgxvy57nxgq'] = {
                     "status": "INTERRUPTED",
                     "terminal_reason": "USER_STOPPED",
                 }
                 host._active_task = successor
-                host._active_turn_id = "turn:B"
+                host._active_turn_id = 'turn:paqqn75nkrrptym5iw4zxx6u6e'
                 host._active_cancellation_intent = ActiveTurnCancellationIntent(
-                    "turn:B", ModelInputScopeKind.ROOT, None
+                    'turn:paqqn75nkrrptym5iw4zxx6u6e', ModelInputScopeKind.ROOT, None
                 )
                 raise
 
         root = asyncio.create_task(root_a())
         host._active_task = root
-        host._active_turn_id = "turn:A"
+        host._active_turn_id = 'turn:74y74rvr2pht5lydgxvy57nxgq'
         host._active_cancellation_intent = ActiveTurnCancellationIntent(
-            "turn:A", ModelInputScopeKind.ROOT, None
+            'turn:74y74rvr2pht5lydgxvy57nxgq', ModelInputScopeKind.ROOT, None
         )
 
         async def settle_exact(_task) -> None:
@@ -127,8 +128,8 @@ def test_pr03_exact_stop_never_cancels_a_successor_that_takes_the_root_slot() ->
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            target_turn_id="turn:A",
-        )
+            target_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert accepted.status == "PENDING"
         attempt = host._user_control_attempts[command_id]
         assert attempt.task is not None
@@ -137,7 +138,7 @@ def test_pr03_exact_stop_never_cancels_a_successor_that_takes_the_root_slot() ->
         assert query.status is ControlQueryStatus.FOUND
         assert query.outcome is not None
         assert query.outcome.public_code == "ROOT_STOPPED"
-        assert host._active_turn_id == "turn:B"
+        assert host._active_turn_id == 'turn:paqqn75nkrrptym5iw4zxx6u6e'
         assert not successor.done()
         successor_release.set()
         await successor
@@ -173,20 +174,20 @@ def test_pr03_control_identity_deduplicates_exact_values_and_rejects_conflicts()
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:one",
-        )
+            task_id='task:74xe3yvbpqgx6s4jejk25ed6c4',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         duplicate = await host.request_cancel_subagent(
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:one",
-        )
+            task_id='task:74xe3yvbpqgx6s4jejk25ed6c4',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         conflict = await host.request_cancel_subagent(
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:other",
-        )
+            task_id='task:b3pqjvjpgab3uwzucbs6fg2rmq',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert first is duplicate
         assert conflict.public_code == "CONTROL_COMMAND_CONFLICT"
         attempt = host._user_control_attempts[command_id]
@@ -204,8 +205,8 @@ def test_pr03_control_identity_deduplicates_exact_values_and_rejects_conflicts()
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:one",
-        )
+            task_id='task:74xe3yvbpqgx6s4jejk25ed6c4',
+         admission_deadline_ms=attempt.request.admission_deadline_ms)
         assert expired.public_code == "CONTROL_REQUEST_EXPIRED"
         assert calls == 1
 
@@ -220,7 +221,7 @@ def test_pr03_subagent_target_is_validated_before_control_acceptance() -> None:
         class _Subagents:
             result = SubagentCancelResult(
                 SubagentCancelDisposition.TARGET_UNAVAILABLE,
-                "task:missing",
+                'task:i5c7unweqbacv3f2tlydxnoeui',
                 None,
                 "TARGET_UNAVAILABLE",
             )
@@ -239,15 +240,15 @@ def test_pr03_subagent_target_is_validated_before_control_acceptance() -> None:
             command_id=_command(host, "missing-target"),
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:missing",
-        )
+            task_id='task:i5c7unweqbacv3f2tlydxnoeui',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert missing.status == "REJECTED"
         assert missing.public_code == "CONTROL_TARGET_UNAVAILABLE"
         assert host._user_control_attempts == {}
 
         subagents.result = SubagentCancelResult(
             SubagentCancelDisposition.ALREADY_TERMINAL,
-            "task:done",
+            'task:y5fpcmjc3oxo42gmcrrczbqcdq',
             "COMPLETED",
             "SUCCEEDED",
         )
@@ -256,8 +257,8 @@ def test_pr03_subagent_target_is_validated_before_control_acceptance() -> None:
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:done",
-        )
+            task_id='task:y5fpcmjc3oxo42gmcrrczbqcdq',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert terminal.status == "SUCCEEDED"
         assert terminal.public_code == "CONTROL_ALREADY_TERMINAL"
         assert terminal.user_control is not None
@@ -281,16 +282,16 @@ def test_pr03_background_control_closes_monitor_before_physical_termination() ->
             def cancel_for_process(self, process_id: str):
                 order.append(f"monitor:{process_id}")
                 return TerminalMonitorCancelResult(
-                    "monitor:one",
+                    'monitor:4jgfcphmbriq5w4bko5mhb2qri',
                     TerminalMonitorCancelOutcome.CANCELLED,
-                    ("entry:in-flight",),
+                    ('entry:sl7dldallpsjyohxno62xsfnoy',),
                 )
 
         class _Tools:
             terminal_monitor_coordinator = _Monitor()
 
             def list_background_terminal_processes(self):
-                return [SimpleNamespace(process_id="process:one")]
+                return [SimpleNamespace(process_id='process:34npgaljkboupr4n456vrmou6a')]
 
             def terminate_background_terminal_process(self, process_id: str):
                 order.append(f"process:{process_id}")
@@ -309,8 +310,8 @@ def test_pr03_background_control_closes_monitor_before_physical_termination() ->
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            process_id="process:one",
-        )
+            process_id='process:34npgaljkboupr4n456vrmou6a',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert accepted.status == "PENDING"
         assert accepted.user_control is not None
         assert accepted.user_control.feedback is not None
@@ -318,12 +319,12 @@ def test_pr03_background_control_closes_monitor_before_physical_termination() ->
         attempt = host._user_control_attempts[command_id]
         assert attempt.task is not None
         await attempt.task
-        assert order == ["monitor:process:one", "process:process:one"]
+        assert order == ['monitor:process:34npgaljkboupr4n456vrmou6a', 'process:process:34npgaljkboupr4n456vrmou6a']
         assert attempt.outcome.status == "SUCCEEDED"
         assert attempt.outcome.user_control is not None
         assert attempt.outcome.user_control.monitor is not None
         assert attempt.outcome.user_control.monitor.in_flight_observation_ids == (
-            "entry:in-flight",
+            'entry:sl7dldallpsjyohxno62xsfnoy',
         )
 
     asyncio.run(scenario())
@@ -335,7 +336,7 @@ def test_pr03_root_completion_seal_prevents_late_feedback_binding() -> None:
         active_release = asyncio.Event()
         active = asyncio.create_task(active_release.wait())
         host._active_task = active
-        host._active_turn_id = "turn:A"
+        host._active_turn_id = 'turn:74y74rvr2pht5lydgxvy57nxgq'
 
         class _Monitor:
             def cancel_for_process(self, _process_id: str):
@@ -345,7 +346,7 @@ def test_pr03_root_completion_seal_prevents_late_feedback_binding() -> None:
             terminal_monitor_coordinator = _Monitor()
 
             def list_background_terminal_processes(self):
-                return [SimpleNamespace(process_id="process:one")]
+                return [SimpleNamespace(process_id='process:34npgaljkboupr4n456vrmou6a')]
 
             def terminate_background_terminal_process(self, _process_id: str):
                 return SimpleNamespace(
@@ -359,17 +360,17 @@ def test_pr03_root_completion_seal_prevents_late_feedback_binding() -> None:
 
         host._tools = _Tools()
         assert not await host._coordinate_user_control_feedback_at_root_completion(
-            "turn:A"
+            'turn:74y74rvr2pht5lydgxvy57nxgq'
         )
-        assert host._control_completion_sealed_turn_id == "turn:A"
+        assert host._control_completion_sealed_turn_id == 'turn:74y74rvr2pht5lydgxvy57nxgq'
 
         command_id = _command(host, "sealed-root")
         accepted = await host.request_terminate_background_process(
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            process_id="process:one",
-        )
+            process_id='process:34npgaljkboupr4n456vrmou6a',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert accepted.user_control is not None
         assert accepted.user_control.feedback is not None
         assert accepted.user_control.feedback.target_root_turn_id is None
@@ -383,7 +384,7 @@ def test_pr03_root_completion_seal_prevents_late_feedback_binding() -> None:
         assert attempt.outcome.user_control.feedback.reason == "TARGET_CLOSED"
 
         await host._settle_user_control_feedback_root_completion(
-            "turn:A", turn_completed=False
+            'turn:74y74rvr2pht5lydgxvy57nxgq', turn_completed=False
         )
         assert host._control_completion_sealed_turn_id is None
         active_release.set()
@@ -404,7 +405,7 @@ def test_pr03_already_terminal_background_control_is_a_queryable_no_op() -> None
             terminal_monitor_coordinator = _Monitor()
 
             def list_background_terminal_processes(self):
-                return [SimpleNamespace(process_id="process:done")]
+                return [SimpleNamespace(process_id='process:qmi3ybigp4h4iv3tmaqmlm64am')]
 
             def terminate_background_terminal_process(self, _process_id: str):
                 return SimpleNamespace(
@@ -422,8 +423,8 @@ def test_pr03_already_terminal_background_control_is_a_queryable_no_op() -> None
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            process_id="process:done",
-        )
+            process_id='process:qmi3ybigp4h4iv3tmaqmlm64am',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert first.status == "PENDING"
         attempt = host._user_control_attempts[command_id]
         assert attempt.task is not None
@@ -451,13 +452,13 @@ def test_pr03_attempt_retention_waits_for_feedback_owner_and_restarts_at_termina
             _command(host, "feedback-retention"),
             host.session_id,
             host.host_session_id,
-            UserControlTarget(UserControlTargetKind.BACKGROUND_PROCESS, "process:one"),
-        )
+            UserControlTarget(UserControlTargetKind.BACKGROUND_PROCESS, 'process:34npgaljkboupr4n456vrmou6a'),
+         admission_deadline_ms=host.control_admission_deadline_ms())
         feedback = UserControlFeedbackState(
             FeedbackCanonicalStatus.PENDING,
             FeedbackInclusionStatus.PENDING,
             FeedbackOwnerAvailability.AVAILABLE,
-            target_root_turn_id="turn:A",
+            target_root_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
         )
         outcome = host._pending_control_outcome(request, feedback=feedback)
         attempt = host._install_control_attempt_locked(request, outcome)
@@ -495,13 +496,13 @@ def test_pr03_missing_target_and_wrong_owner_never_install_control() -> None:
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
             task_id="",
-        )
+         admission_deadline_ms=host.control_admission_deadline_ms())
         wrong_owner = await host.request_cancel_subagent(
             command_id=_command(host, "wrong-owner"),
             expected_session_id=host.session_id,
-            expected_host_session_id="host:other",
-            task_id="task:one",
-        )
+            expected_host_session_id='host:r77neyfksldterpdnoirnf7zxu',
+            task_id='task:74xe3yvbpqgx6s4jejk25ed6c4',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert missing.public_code == "CONTROL_REQUEST_INVALID"
         assert wrong_owner.public_code == "OWNER_UNAVAILABLE"
         assert host._user_control_attempts == {}
@@ -530,8 +531,8 @@ def test_pr03_closing_host_rejects_new_control_before_and_after_preflight() -> N
             command_id=_command(host, "already-closing"),
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:one",
-        )
+            task_id='task:74xe3yvbpqgx6s4jejk25ed6c4',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert rejected.public_code == "OWNER_UNAVAILABLE"
         assert not preflight_started.is_set()
 
@@ -541,8 +542,8 @@ def test_pr03_closing_host_rejects_new_control_before_and_after_preflight() -> N
                 command_id=_command(host, "closing-after-preflight"),
                 expected_session_id=host.session_id,
                 expected_host_session_id=host.host_session_id,
-                task_id="task:two",
-            )
+                task_id='task:r7vf2gydnecjw6x22sqtkceg6u',
+             admission_deadline_ms=host.control_admission_deadline_ms())
         )
         await preflight_started.wait()
         async with host._lock:
@@ -563,8 +564,8 @@ def test_pr03_query_requires_the_exact_control_value() -> None:
             _command(host, "unknown"),
             host.session_id,
             host.host_session_id,
-            UserControlTarget(UserControlTargetKind.ROOT_TURN, "turn:A"),
-        )
+            UserControlTarget(UserControlTargetKind.ROOT_TURN, 'turn:74y74rvr2pht5lydgxvy57nxgq'),
+         admission_deadline_ms=host.control_admission_deadline_ms())
         unavailable = await host.query_control_command(request)
         assert unavailable.status is ControlQueryStatus.RESULT_UNAVAILABLE
         old_owner = await host.query_control_command(
@@ -572,9 +573,9 @@ def test_pr03_query_requires_the_exact_control_value() -> None:
                 request.operation,
                 request.command_id,
                 request.session_id,
-                "host:old",
+                'host:bdrf3raz6vcwmrrowx6l566uc4',
                 request.target,
-            )
+             admission_deadline_ms=host.control_admission_deadline_ms())
         )
         assert old_owner.status is ControlQueryStatus.OWNER_UNAVAILABLE
 
@@ -600,8 +601,8 @@ def test_pr03_accepted_control_owner_failure_settles_instead_of_staying_pending(
             command_id=command_id,
             expected_session_id=host.session_id,
             expected_host_session_id=host.host_session_id,
-            task_id="task:one",
-        )
+            task_id='task:74xe3yvbpqgx6s4jejk25ed6c4',
+         admission_deadline_ms=host.control_admission_deadline_ms())
         assert accepted.status == "PENDING"
         attempt = host._user_control_attempts[command_id]
         assert attempt.task is not None
@@ -621,28 +622,28 @@ def test_pr03_subagent_cancel_reports_a_naturally_completed_race_as_terminal() -
         await completed
         manager._lock = asyncio.Lock()
         manager._tasks = {
-            "task:done": SimpleNamespace(
+            'task:y5fpcmjc3oxo42gmcrrczbqcdq': SimpleNamespace(
                 task=completed,
                 status="COMPLETED",
                 cancellation_reason=None,
             )
         }
         manager._launch_permits = {}
-        manager._guard = SimpleNamespace(session_id="session:one")
+        manager._guard = SimpleNamespace(session_id='session:5dyf7lfzp7z22pphjtostkgsjm')
         manager._canonical_deadline = lambda: 10_000.0
         manager._io = _IO()
 
         class _SubagentRepository:
             @staticmethod
             def query_subagent_task(*, session_id: str, task_id: str):
-                assert (session_id, task_id) == ("session:one", "task:done")
+                assert (session_id, task_id) == ('session:5dyf7lfzp7z22pphjtostkgsjm', 'task:y5fpcmjc3oxo42gmcrrczbqcdq')
                 return {
                     "status": "COMPLETED",
                     "terminal_reason": "SUCCEEDED",
                 }
 
         manager._repository = _SubagentRepository()
-        result = await manager.cancel_task("task:done")
+        result = await manager.cancel_task('task:y5fpcmjc3oxo42gmcrrczbqcdq')
         assert result.disposition is SubagentCancelDisposition.ALREADY_TERMINAL
         assert result.status == "COMPLETED"
         assert result.reason == "SUCCEEDED"
@@ -658,19 +659,19 @@ def test_pr03_durable_subagent_cancel_loser_reports_the_actual_terminal_winner()
         manager._lock = asyncio.Lock()
         manager._tasks = {}
         manager._launch_permits = {}
-        manager._guard = SimpleNamespace(session_id="session:one")
+        manager._guard = SimpleNamespace(session_id='session:5dyf7lfzp7z22pphjtostkgsjm')
         manager._canonical_deadline = lambda: 10_000.0
         manager._io = _IO()
         state = {
             "status": "PENDING_START",
             "terminal_reason": None,
-            "workspace_id": "workspace:one",
+            "workspace_id": 'workspace:scvzq3m6ilgcdfi5qvvqwjwvla',
         }
 
         class _SubagentRepository:
             @staticmethod
             def query_subagent_task(*, session_id: str, task_id: str):
-                assert (session_id, task_id) == ("session:one", "task:done")
+                assert (session_id, task_id) == ('session:5dyf7lfzp7z22pphjtostkgsjm', 'task:y5fpcmjc3oxo42gmcrrczbqcdq')
                 return dict(state)
 
         async def lose_cancellation_to_natural_completion(*_args, **_kwargs):
@@ -687,7 +688,7 @@ def test_pr03_durable_subagent_cancel_loser_reports_the_actual_terminal_winner()
         manager._settle_task_terminal_exact = lose_cancellation_to_natural_completion
         manager._settle_dependency_frontier = unexpected_dependency_settlement
 
-        result = await manager.cancel_task("task:done")
+        result = await manager.cancel_task('task:y5fpcmjc3oxo42gmcrrczbqcdq')
         assert result.disposition is SubagentCancelDisposition.ALREADY_TERMINAL
         assert result.status == "COMPLETED"
         assert result.reason == "SUCCEEDED"

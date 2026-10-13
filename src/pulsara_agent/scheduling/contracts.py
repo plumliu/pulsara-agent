@@ -1,6 +1,8 @@
 """Closed task values; configuration rows own plans, the ordinary queue owns runs."""
 
 from __future__ import annotations
+
+from pulsara_agent.identity import require_id
 from dataclasses import dataclass
 from enum import StrEnum
 from datetime import date, datetime, time, timedelta, timezone
@@ -175,6 +177,10 @@ class ScheduledAdmission:
     client_command_id: str | None = None
 
     def __post_init__(self):
+        require_id(self.task_id, "schedule")
+        require_id(self.session_id, "session")
+        if self.client_command_id is not None:
+            require_id(self.client_command_id, "command")
         if (
             not self.task_id
             or not self.session_id

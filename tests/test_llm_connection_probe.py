@@ -94,7 +94,7 @@ def test_probe_content_bound_is_independent_of_fragments_and_closes_transport(
         ),
         route_wires=route_wires,
         reasoning_wire_profile=ReasoningWireProfile.PROVIDER_DEFAULT,
-        connection_id=ModelConnectionId("model-connection:" + "e" * 32),
+        connection_id=ModelConnectionId('connection:u3fhi2cnkc3xuq3zoj54eodwai'),
     )
     try:
         async def probe():

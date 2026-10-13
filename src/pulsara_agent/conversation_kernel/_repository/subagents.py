@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
+
+
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
 
 from datetime import datetime
@@ -34,7 +38,6 @@ from .contracts import (
     TurnAdmissionConfirmation,
     TurnAdmissionConfirmationKind,
     _canonical_content_matches_utf8_text,
-    _stable_identity,
     build_prepared_subagent_turn_admission,
 )
 
@@ -59,7 +62,6 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_default_terminal_public_detail,
     build_dependency_result_context,
     derive_subagent_batch_initial_dispositions,
-    subagent_task_batch_identity_digest,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
 from pulsara_agent.llm.model_connections import (
@@ -356,12 +358,7 @@ class _SubagentOperations:
         status: str,
     ) -> CommittedEventDraft:
         return CommittedEventDraft(
-            event_id=_stable_identity(
-                "event",
-                subagent_task_batch_identity_digest(candidate),
-                task_id,
-                "SubagentTaskAccepted",
-            ),
+            event_id=derive_id("event", "accepted", candidate.session_id, CommittedEventType.SUBAGENT_TASK_ACCEPTED.name, SubjectSlot.SUBAGENT_TASK.name, task_id, ""),
             event_type=CommittedEventType.SUBAGENT_TASK_ACCEPTED,
             subject=CommittedEventSubject(SubjectSlot.SUBAGENT_TASK, task_id),
             actor_kind="runtime",
@@ -857,12 +854,7 @@ class _SubagentOperations:
                        WHERE session_id = %s AND event_id = %s""",
                     (
                         candidate.session_id,
-                        _stable_identity(
-                            "event",
-                            subagent_task_batch_identity_digest(candidate),
-                            item.task_id,
-                            "SubagentTaskAccepted",
-                        ),
+                        derive_id("event", "accepted", candidate.session_id, "SUBAGENT_TASK_ACCEPTED", "SUBAGENT_TASK", item.task_id, ""),
                     ),
                 ).fetchone()
                 for item in candidate.ordered_tasks
@@ -1229,9 +1221,7 @@ class _SubagentOperations:
         observed_at = candidate.tool_result.observed_at
         return (
             CommittedEventDraft(
-                event_id=_stable_identity(
-                    "event", result.result_id, "SubagentResultAccepted"
-                ),
+                event_id=derive_id("event", "accepted", candidate.tool_result.session_id, CommittedEventType.SUBAGENT_RESULT_ACCEPTED.name, SubjectSlot.SUBAGENT_RESULT.name, result.result_id, ""),
                 event_type=CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
                 subject=CommittedEventSubject(
                     SubjectSlot.SUBAGENT_RESULT, result.result_id
@@ -1244,13 +1234,7 @@ class _SubagentOperations:
                 payload={"result_source": "EXPLICIT"},
             ),
             CommittedEventDraft(
-                event_id=_stable_identity(
-                    "event",
-                    candidate.task_id,
-                    candidate.tool_result.turn_id,
-                    "SubagentTaskStatusAccepted",
-                    "COMPLETED",
-                ),
+                event_id=derive_id("event", "accepted", candidate.tool_result.session_id, CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED.name, SubjectSlot.SUBAGENT_TASK.name, candidate.task_id, "status:COMPLETED"),
                 event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
                 subject=CommittedEventSubject(
                     SubjectSlot.SUBAGENT_TASK, candidate.task_id
@@ -1263,12 +1247,7 @@ class _SubagentOperations:
                 payload={"status": "COMPLETED", "reason": None},
             ),
             CommittedEventDraft(
-                event_id=_stable_identity(
-                    "event",
-                    candidate.tool_result.turn_id,
-                    candidate.tool_result.result_entry_id,
-                    "TurnCompleted",
-                ),
+                event_id=derive_id("event", "accepted", candidate.tool_result.session_id, CommittedEventType.TURN_COMPLETED.name, SubjectSlot.TURN.name, candidate.tool_result.turn_id, ""),
                 event_type=CommittedEventType.TURN_COMPLETED,
                 subject=CommittedEventSubject(
                     SubjectSlot.TURN, candidate.tool_result.turn_id
@@ -1701,6 +1680,7 @@ class _SubagentOperations:
     @staticmethod
     def _subagent_cancellation_drafts(
         *,
+        session_id: str,
         task_id: str,
         turn_id: str,
         task_status: str,
@@ -1719,24 +1699,14 @@ class _SubagentOperations:
         }
         return (
             CommittedEventDraft(
-                event_id=_stable_identity(
-                    "event", task_id, turn_id, "TurnInterrupted", turn_reason
-                ),
+                event_id=derive_id("event", "accepted", session_id, CommittedEventType.TURN_INTERRUPTED.name, SubjectSlot.TURN.name, turn_id, ""),
                 event_type=CommittedEventType.TURN_INTERRUPTED,
                 subject=CommittedEventSubject(SubjectSlot.TURN, turn_id),
                 payload=interruption_payload(turn_reason, terminal_public_detail),
                 **common,
             ),
             CommittedEventDraft(
-                event_id=_stable_identity(
-                    "event",
-                    task_id,
-                    turn_id,
-                    "SubagentTaskStatusAccepted",
-                    task_status,
-                    task_reason,
-                    terminal_public_detail,
-                ),
+                event_id=derive_id("event", "accepted", session_id, CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED.name, SubjectSlot.SUBAGENT_TASK.name, task_id, turn_id),
                 event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
                 subject=CommittedEventSubject(SubjectSlot.SUBAGENT_TASK, task_id),
                 payload={
@@ -1783,6 +1753,7 @@ class _SubagentOperations:
         if not closed_disposition:
             raise ValueError("joint child terminal disposition is invalid")
         drafts = self._subagent_cancellation_drafts(
+            session_id=guard.session_id,
             task_id=task_id,
             turn_id=turn_id,
             task_status=task_status,
@@ -1897,6 +1868,7 @@ class _SubagentOperations:
         if not closed_disposition:
             raise ValueError("joint child terminal disposition is invalid")
         drafts = self._subagent_cancellation_drafts(
+            session_id=session_id,
             task_id=task_id,
             turn_id=turn_id,
             task_status=task_status,
@@ -2027,7 +1999,7 @@ class _SubagentOperations:
             turn_id=turn_id,
             entry_id=entry_id,
             context_binding_revision_id=context_binding_revision_id,
-            permission_snapshot_id=_stable_identity("permission-snapshot", turn_id),
+            permission_snapshot_id=derive_id('permission', 'admission', turn_id),
             task_start_event_id=task_start_event_id,
             expected_parent_permission_snapshot=(
                 expected_parent_permission_snapshot
@@ -2948,7 +2920,7 @@ class _SubagentOperations:
                                 CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
                                 SubjectSlot.SUBAGENT_TASK,
                                 task_id,
-                                occurred_at=occurred_at,
+                                session_id=guard.session_id, occurrence_key="status:" + new_status, occurred_at=occurred_at,
                                 actor_kind="runtime",
                                 actor_id=actor_id,
                                 payload={"status": new_status, "reason": reason},

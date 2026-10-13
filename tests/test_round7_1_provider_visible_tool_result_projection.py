@@ -1,6 +1,7 @@
 """Round 7.1 logical ToolResult projection and FULL-delivery gates."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 import ast
 from dataclasses import replace
@@ -73,7 +74,7 @@ def _body_with_exact_logical_bytes(
     *,
     seed: str,
 ) -> tuple[object, str]:
-    template = _tool_result("", sequence=2, turn_id="turn:test")
+    template = _tool_result("", sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     metadata = template.tool_result_context
     assert metadata is not None and template.tool_call_id is not None
 
@@ -144,7 +145,7 @@ def test_round7_1_no_full_variant_reports_actual_first_mode() -> None:
 
 
 def test_round7_1_complete_canonical_body_can_still_have_no_full_variant() -> None:
-    item = _tool_result("a" * 40_000, sequence=2, turn_id="turn:test")
+    item = _tool_result("a" * 40_000, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     lowered = lower_canonical_item(
         item,
         artifact_read_available=True,
@@ -160,7 +161,7 @@ def test_round7_1_complete_canonical_body_can_still_have_no_full_variant() -> No
 
 
 def test_round7_1_variant_validator_accepts_ordered_subsets_without_full() -> None:
-    item = _tool_result("x" * 40_000, sequence=2, turn_id="turn:test")
+    item = _tool_result("x" * 40_000, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     lowered = lower_canonical_item(
         item,
         artifact_read_available=True,
@@ -196,7 +197,7 @@ def test_round7_1_tool_result_carriers_and_delivery_requirement_are_closed() -> 
     with pytest.raises(ValueError, match="carrier union"):
         LoweredCanonicalItem(user, None)
 
-    result = _tool_result("body", sequence=2, turn_id="turn:test")
+    result = _tool_result("body", sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     with pytest.raises(ValueError, match="carrier union"):
         LoweredCanonicalItem(result, None)
 
@@ -213,11 +214,11 @@ def test_round7_1_tool_result_carriers_and_delivery_requirement_are_closed() -> 
 
 
 def test_round7_1_fifty_memory_ids_share_the_canonical_eight_kib_bound() -> None:
-    memory_ids = tuple(f"memory:{index:064x}" for index in range(50))
+    memory_ids = tuple(derive_id("memory", "test-fixture", f"memory:{index:064x}") for index in range(50))
     assert len(canonical_json_bytes(memory_ids)) <= (
         MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES
     )
-    item = _tool_result("memory search result", sequence=2, turn_id="turn:test")
+    item = _tool_result("memory search result", sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     metadata = item.tool_result_context
     assert metadata is not None
     item = replace(
@@ -264,16 +265,16 @@ def test_round7_1_compatible_append_keeps_installed_prefix_and_actual_mode() -> 
     call = ProviderToolCall("call:2", "test_tool", freeze_json({}))
     request_item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:2",
+        'entry:yym6qf3l4xz6437gradtmhjrke',
         2,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart(""),),
         tool_calls=(call,),
     )
     result_item, _body = _body_with_exact_logical_bytes(40_001, seed="中")
     result_item = replace(
         result_item,
-        source_entry_id="entry:3",
+        source_entry_id='entry:nvhyc6ehb7acx2htbxgk6cev4q',
         source_entry_sequence=3,
         tool_call_id=call.tool_call_id,
     )
@@ -302,9 +303,9 @@ def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result(
     )
     request_item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:request",
+        'entry:k5zfbzct6mhkogz33gyubxx3pa',
         1,
-        "turn:test",
+        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         (LLMTextPart(""),),
         tool_calls=calls,
     )
@@ -313,7 +314,7 @@ def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result(
             _tool_result(
                 ("required-" if index == 1 else "ordinary-") + ("x" * 12_000),
                 sequence=index + 1,
-                turn_id="turn:test",
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
             ),
             tool_call_id=calls[index - 1].tool_call_id,
             tool_result_delivery=(
@@ -474,12 +475,12 @@ def test_tool_result_wire_has_no_citation_handle_or_legacy_null_slot() -> None:
         body=item.tool_result_body_text,
         result_state=metadata.result_state,
         timing=metadata.timing,
-        model_visible_memory_ids=("memory:existing",),
+        model_visible_memory_ids=('memory:zop43vgzo2odv6e7hqu23cb2aa',),
     )
     payload = json.loads(rendered.content)
     inner = payload["pulsara_tool_result"]
     assert "citation_handle" not in inner
-    assert inner["model_visible_memory_ids"] == ["memory:existing"]
+    assert inner["model_visible_memory_ids"] == ['memory:zop43vgzo2odv6e7hqu23cb2aa']
     inner["citation_handle"] = None
     with pytest.raises(ValueError, match="member contract"):
         decode_provider_tool_result_observation(json.dumps(payload))

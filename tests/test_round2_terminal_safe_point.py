@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -30,9 +31,9 @@ def _content() -> TerminalObservationContentV1:
     output = "safe-point output"
     size = len(output.encode())
     return TerminalObservationContentV1(
-        observation_id="observation:safe-point",
-        monitor_id="monitor:safe-point",
-        process_id="process:safe-point",
+        observation_id='observation:kytyw5wkgu3m5stc25uuvzg4s4',
+        monitor_id='monitor:h5lgsu2pl6hsfwwjglomo3vug4',
+        process_id='process:3wg7ifjrhtznxi2pzm5khfau7q',
         observation_ordinal=1,
         observation_kind=TerminalObservationKind.PROGRESS,
         process_status="running",
@@ -99,10 +100,10 @@ class _Coordinator:
         content = _content()
         digest = f"sha256:{sha256(content.canonical_bytes()).hexdigest()}"
         self.attempt = TerminalObservationInstallationAttempt(
-            session_id="session:safe-point",
+            session_id='session:efdemxvcwptgvo7epkffpc4odu',
             workspace_id=workspace_id,
             writer_generation=writer_generation,
-            origin_turn_id="turn:origin",
+            origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
             content=content,
             content_digest=digest,
             retained_from_cursor="cursor:retained",
@@ -124,13 +125,13 @@ class _Coordinator:
 def _safe_point(repository: _Repository) -> ProviderSafePointCoordinator:
     return ProviderSafePointCoordinator(
         repository=repository,  # type: ignore[arg-type]
-        guard=HostWriterGuard("session:safe-point", 1, "host:safe-point"),
+        guard=HostWriterGuard('session:efdemxvcwptgvo7epkffpc4odu', 1, 'host:25ga3dpuequk3buwjewptk4xgm'),
     )
 
 
 def _target(suffix: str) -> NewTurnInstallation:
     return NewTurnInstallation(
-        f"turn:{suffix}", f"revision:{suffix}", f"entry:{suffix}"
+        derive_id("turn", "test-fixture", f"turn:{suffix}"), derive_id("binding", "test-fixture", f"revision:{suffix}"), derive_id("entry", "test-fixture", f"entry:{suffix}")
     )
 
 
@@ -139,15 +140,15 @@ def test_round2_active_provider_handle_prevents_monitor_freeze() -> None:
     safe_point = _safe_point(repository)
     coordinator = _Coordinator()
     handle = safe_point.freeze_provider_input(
-        turn_id="turn:active", deadline_monotonic=monotonic() + 5
+        turn_id='turn:kezb35l4prynpikloa5x3helji', deadline_monotonic=monotonic() + 5
     )
     with pytest.raises(ExternalSourceNotAtSafePoint):
         safe_point.prepare_terminal_observation_installation(
             coordinator=coordinator,  # type: ignore[arg-type]
-            monitor_id="monitor:safe-point",
+            monitor_id='monitor:h5lgsu2pl6hsfwwjglomo3vug4',
             target=_target("blocked"),
-            workspace_id="workspace:safe-point",
-            actor_id="host:safe-point",
+            workspace_id='workspace:uatnuo5patlcp3swg3su3vopdm',
+            actor_id='host:25ga3dpuequk3buwjewptk4xgm',
             deadline_monotonic=monotonic() + 5,
         )
     assert coordinator.freeze_targets == []
@@ -162,10 +163,10 @@ def test_round2_canonical_safe_predicate_conflict_retires_mutable_candidate() ->
     coordinator = _Coordinator()
     attempt = safe_point.prepare_terminal_observation_installation(
         coordinator=coordinator,  # type: ignore[arg-type]
-        monitor_id="monitor:safe-point",
+        monitor_id='monitor:h5lgsu2pl6hsfwwjglomo3vug4',
         target=_target("conflict"),
-        workspace_id="workspace:safe-point",
-        actor_id="host:safe-point",
+        workspace_id='workspace:uatnuo5patlcp3swg3su3vopdm',
+        actor_id='host:25ga3dpuequk3buwjewptk4xgm',
         deadline_monotonic=monotonic() + 5,
     )
     assert isinstance(attempt, TerminalObservationInstallationAttempt)
@@ -190,10 +191,10 @@ def test_round2_ack_unknown_exact_confirms_original_attempt_without_retarget() -
     original = _target("original")
     attempt = safe_point.prepare_terminal_observation_installation(
         coordinator=coordinator,  # type: ignore[arg-type]
-        monitor_id="monitor:safe-point",
+        monitor_id='monitor:h5lgsu2pl6hsfwwjglomo3vug4',
         target=original,
-        workspace_id="workspace:safe-point",
-        actor_id="host:safe-point",
+        workspace_id='workspace:uatnuo5patlcp3swg3su3vopdm',
+        actor_id='host:25ga3dpuequk3buwjewptk4xgm',
         deadline_monotonic=monotonic() + 5,
     )
     assert isinstance(attempt, TerminalObservationInstallationAttempt)
@@ -214,10 +215,10 @@ def test_round2_ack_unknown_exact_confirms_original_attempt_without_retarget() -
     )
     accepted = safe_point.prepare_terminal_observation_installation(
         coordinator=coordinator,  # type: ignore[arg-type]
-        monitor_id="monitor:safe-point",
+        monitor_id='monitor:h5lgsu2pl6hsfwwjglomo3vug4',
         target=_target("must-not-replace-original"),
-        workspace_id="workspace:safe-point",
-        actor_id="host:safe-point",
+        workspace_id='workspace:uatnuo5patlcp3swg3su3vopdm',
+        actor_id='host:25ga3dpuequk3buwjewptk4xgm',
         deadline_monotonic=monotonic() + 5,
     )
     assert accepted == repository.confirmed

@@ -1,7 +1,9 @@
 """Task row mutations compose with the existing session, queue and event owners."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id, random_id
 from contextlib import contextmanager
+from time import monotonic
 import json
 from datetime import datetime, timezone
 from psycopg.rows import dict_row
@@ -24,7 +26,6 @@ from pulsara_agent.conversation_kernel.steer import (
     PromptIngressConfirmationKind,
     PromptIngressWriteRejection,
     prompt_ingress_semantic_digest,
-    _stable_id,
 )
 from pulsara_agent.conversation_kernel.queued_prompt_actions import QueuedPromptAction
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
@@ -226,7 +227,6 @@ class _ScheduledTaskOperations:
     def create_scheduled_task(
         self,
         *,
-        task_id,
         session_id,
         memory_domain_id,
         guard,
@@ -258,22 +258,27 @@ class _ScheduledTaskOperations:
                 raise ScheduledTaskError(
                     "TIME_RANGE_EXHAUSTED", "没有可用的未来触发时点。"
                 )
-            return c.execute(
-                """INSERT INTO pulsara_v3.scheduled_tasks
-                (id, session_id, name, prompt, schedule, timezone, permission_mode, status, next_run_at, revision)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1) RETURNING *""",
-                (
-                    task_id,
-                    session_id,
-                    values["name"],
-                    values["prompt"],
-                    Jsonb(values["schedule"]),
-                    values["timezone"],
-                    values["permission_mode"],
-                    status,
-                    due if status == "ACTIVE" else None,
-                ),
-            ).fetchone()
+            while monotonic() < deadline_monotonic:
+                task_id = random_id("schedule")
+                created = c.execute(
+                    """INSERT INTO pulsara_v3.scheduled_tasks
+                    (id, session_id, name, prompt, schedule, timezone, permission_mode, status, next_run_at, revision)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1) ON CONFLICT (id) DO NOTHING RETURNING *""",
+                    (
+                        task_id,
+                        session_id,
+                        values["name"],
+                        values["prompt"],
+                        Jsonb(values["schedule"]),
+                        values["timezone"],
+                        values["permission_mode"],
+                        status,
+                        due if status == "ACTIVE" else None,
+                    ),
+                ).fetchone()
+                if created is not None:
+                    return created
+            raise TimeoutError("schedule allocation deadline expired")
 
     def switch_scheduled_task(
         self,
@@ -284,7 +289,6 @@ class _ScheduledTaskOperations:
         guard,
         expected_revision,
         target,
-        new_task_id,
         model_resolution_snapshot,
         cancelled_candidates=None,
         deadline_monotonic,
@@ -366,21 +370,27 @@ class _ScheduledTaskOperations:
                     (due, target["task_id"]),
                 ).fetchone()
             else:
-                active = c.execute(
-                    """INSERT INTO pulsara_v3.scheduled_tasks
-                    (id,session_id,name,prompt,schedule,timezone,permission_mode,status,next_run_at,revision)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,'ACTIVE',%s,1) RETURNING *""",
-                    (
-                        new_task_id,
-                        session_id,
-                        values["name"],
-                        values["prompt"],
-                        Jsonb(values["schedule"]),
-                        values["timezone"],
-                        values["permission_mode"],
-                        due,
-                    ),
-                ).fetchone()
+                while monotonic() < deadline_monotonic:
+                    new_task_id = random_id("schedule")
+                    active = c.execute(
+                        """INSERT INTO pulsara_v3.scheduled_tasks
+                        (id,session_id,name,prompt,schedule,timezone,permission_mode,status,next_run_at,revision)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,'ACTIVE',%s,1) ON CONFLICT (id) DO NOTHING RETURNING *""",
+                        (
+                            new_task_id,
+                            session_id,
+                            values["name"],
+                            values["prompt"],
+                            Jsonb(values["schedule"]),
+                            values["timezone"],
+                            values["permission_mode"],
+                            due,
+                        ),
+                    ).fetchone()
+                    if active is not None:
+                        break
+                else:
+                    raise TimeoutError("schedule allocation deadline expired")
             return paused, active
 
     @staticmethod
@@ -540,9 +550,7 @@ class _ScheduledTaskOperations:
         for row in rows:
             candidate = QueuedPromptAction(
                 task["session_id"],
-                _stable_id(
-                    "command", task["id"], str(task["revision"]), row["id"], "cancel"
-                ),
+                derive_id("command", "scheduled-cancel", task["id"], str(task["revision"]), row["id"]),
                 row["id"],
             )
             if cancelled_candidates is not None:

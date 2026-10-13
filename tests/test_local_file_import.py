@@ -26,18 +26,18 @@ async def surface(tmp_path, monkeypatch):
     static.mkdir(exist_ok=True)
     (static / "index.html").write_text("test")
     async def workspace_availability(session_id):
-        assert session_id == "session"
+        assert session_id == 'session:tpsqggcbte7fwanzpf642ljwli'
         return {"path": str(root), "outcome": "AVAILABLE"}
     sessions = SimpleNamespace(workspace_availability=workspace_availability,
                                _lock=asyncio.Lock(), _operations={})
     bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
     owner = SimpleNamespace(
-        session_id="session", role="controller", generation=7, is_open=True
+        session_id='session:tpsqggcbte7fwanzpf642ljwli', role="controller", generation=7, is_open=True
     )
     bridge._connections["owner"] = owner
-    bridge._controller_by_session["session"] = "owner"
+    bridge._controller_by_session['session:tpsqggcbte7fwanzpf642ljwli'] = "owner"
     bridge._connections["observer"] = SimpleNamespace(
-        session_id="session", role="observer", generation=8, is_open=True
+        session_id='session:tpsqggcbte7fwanzpf642ljwli', role="observer", generation=8, is_open=True
     )
     server = LocalHttpServer(
         sessions=SimpleNamespace(),
@@ -191,7 +191,7 @@ def test_controller_generation_origin_and_takeover_are_checked(tmp_path, monkeyp
                 )
             )
             await started.wait()
-            bridge._controller_by_session["session"] = "new-owner"
+            bridge._controller_by_session['session:tpsqggcbte7fwanzpf642ljwli'] = "new-owner"
             proceed.set()
             response = await task
             assert response.status == 409

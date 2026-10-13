@@ -6,14 +6,15 @@ with the exact tool attempt (allow) or no-attempt result (deny).
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 from threading import Lock
-from uuid import uuid4
 
 from pulsara_agent.capability.management_form import (
     AcceptedCapabilityFormSubmission,
@@ -268,7 +269,16 @@ class KernelInteractionCoordinator:
                     "interaction:capacity",
                     "tool confirmation capacity is full",
                 )
-            interaction_id = f"interaction:{uuid4().hex}"
+            retained = (*self._dormant, *((self._pending,) if self._pending is not None else ()))
+            interaction_id = random_id("interaction")
+            while any(item.interaction_id == interaction_id for item in retained):
+                interaction_id = random_id("interaction")
+            result_id = random_id("result")
+            while any(item.result_id == result_id for item in retained):
+                result_id = random_id("result")
+            attempt_id = random_id("attempt")
+            while any(item.attempt_id == attempt_id for item in retained):
+                attempt_id = random_id("attempt")
             pending = _PendingToolInteraction(
                 interaction_id=interaction_id,
                 revision=0,
@@ -276,9 +286,9 @@ class KernelInteractionCoordinator:
                 assistant_entry_id=assistant_entry_id,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
-                attempt_id=f"tool-attempt:{uuid4().hex}",
-                result_id=f"tool-result:{uuid4().hex}",
-                result_entry_id=f"entry:{uuid4().hex}",
+                attempt_id=attempt_id,
+                result_id=result_id,
+                result_entry_id=derive_id("entry", "tool-result", result_id),
                 permission_snapshot_fingerprint=(
                     permission_snapshot.snapshot_fingerprint
                 ),
@@ -391,10 +401,7 @@ class KernelInteractionCoordinator:
             self._publish_resolving(pending)
             kwargs = {
                 "command_id": command_id,
-                "decision_id": "interaction-decision:"
-                + sha256(
-                    f"{self._guard.session_id}\0{command_id}".encode("utf-8")
-                ).hexdigest(),
+                "decision_id": derive_id("decision", "accepted", self._guard.session_id, command_id),
                 "assistant_entry_id": pending.assistant_entry_id,
                 "tool_call_id": pending.tool_call_id,
                 "decision": decision,
@@ -950,7 +957,7 @@ class KernelInteractionCoordinator:
             draft_identity=identity,
             payload=payload,
             channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
-            generation_id=f"interaction:{identity}",
+            generation_id=derive_id("generation", "channel", "interaction", identity),
             block_id=identity,
             block_ordinal=0,
             block_kind=LiveBlockKind.OPERATIONAL,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import is_valid_id
+
 import base64
 from contextlib import nullcontext
 from datetime import datetime
@@ -91,7 +93,7 @@ def _cursor_position(cursor, query, lifecycle):
             type(value["rank"]) is not int
             or not 0 <= value["rank"] <= 3
             or not isinstance(value["id"], str)
-            or not value["id"]
+            or not is_valid_id(value["id"], "session")
         ):
             raise ValueError()
         at = datetime.fromisoformat(value["at"])

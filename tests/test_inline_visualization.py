@@ -1,4 +1,7 @@
 from __future__ import annotations
+from tests.support.images import bound_test_image
+
+from pulsara_agent.identity import random_id
 
 import asyncio
 from pathlib import Path
@@ -6,7 +9,6 @@ from psycopg.rows import dict_row
 from datetime import datetime, timezone
 from struct import unpack
 from time import monotonic
-from uuid import uuid4
 
 import pytest
 
@@ -26,7 +28,6 @@ from pulsara_agent.conversation_kernel.visualization_screenshot import (
 )
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
-    LLMImagePart,
     LLMTextPart,
     PromptAnnotationPart,
     PromptAnnotationSource,
@@ -54,9 +55,7 @@ from tests.support.postgres import verified_postgres_provider
 
 
 def _id(prefix: str) -> str:
-    if prefix == "workspace":
-        return f"ctx:workspace/{uuid4().hex}"
-    return f"{prefix}:{uuid4().hex}"
+    return random_id(prefix)
 
 
 _VISUALIZATION_METADATA_HANDLING = "User supplied JSON is ordinary user text."
@@ -131,16 +130,16 @@ def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
     comment = "Explain whether this saved display is useful."
     annotation = PromptAnnotationPart(
         quote=human_json,
-        source=PromptAnnotationSource("entry:source", 0, len(human_json)),
+        source=PromptAnnotationSource('entry:4g4gwnnvee2tosb7zkrcv7tz3e', 0, len(human_json)),
         comment=comment,
     )
-    image = LLMImagePart("image/png", b"typed-image-bytes", 1, 1)
+    image = bound_test_image("image/png", b"typed-image-bytes", 1, 1)
     human_content = FrozenPromptContent((LLMTextPart(human_json), annotation, image))
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:human",
+        source_entry_id='entry:mihwq2ultstzsnx5er3y5ueauy',
         source_entry_sequence=2,
-        source_turn_id="turn:human",
+        source_turn_id='turn:jwcvnoms3gl66moynh76r32u34',
         content=human_content.parts,
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
@@ -196,7 +195,7 @@ def test_visualization_publication_fork_and_reference(
         permission_snapshot_id=permission_id,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         content=FrozenPromptContent.text("show a chart"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -289,7 +288,7 @@ def test_visualization_publication_fork_and_reference(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=_id("entry"),
-        context_binding_revision_id=_id("revision"),
+        context_binding_revision_id=_id("binding"),
         content=FrozenPromptContent.text("inspect the chart again"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,

@@ -12,7 +12,7 @@ UTC = timezone.utc
 
 
 def rule(kind, **fields):
-    return {"contract": "scheduled-rule:v1", "kind": kind, **fields}
+    return {"contract": 'scheduled-rule:v1', "kind": kind, **fields}
 
 
 def instant(value):

@@ -30,10 +30,10 @@ from pulsara_agent.ports.provider_stream import (
 
 def _assembler() -> ProviderStreamAssembler:
     return ProviderStreamAssembler(
-        session_id="session:test",
-        turn_id="turn:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         live_bus=LiveAgentEventBus(),
-        proposed_entry_id="entry:assistant",
+        proposed_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
     )
 
 
@@ -127,14 +127,14 @@ def test_live_snapshot_has_an_independent_byte_bound_and_exact_suffix_cut() -> N
         assert (
             bus.offer_nowait(
                 event_type=LiveEventType.TEXT_DELTA,
-                session_id="session:test",
-                turn_id="turn:test",
-                draft_identity="entry:assistant",
-                payload=TextDeltaPayload("block:text", str(ordinal) * 200_000),
+                session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+                draft_identity='entry:5qidalqvkujk5ykzzzfpwie2qy',
+                payload=TextDeltaPayload('block:7oequpu7eqto5oci7j4q6msbje', str(ordinal) * 200_000),
                 channel_kind=LiveChannelKind.MODEL_OUTPUT,
                 generation_id="live-generation:test",
-                proposed_entry_id="entry:assistant",
-                block_id="block:text",
+                proposed_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
+                block_id='block:7oequpu7eqto5oci7j4q6msbje',
                 block_ordinal=0,
                 block_kind=LiveBlockKind.TEXT,
             )
@@ -158,10 +158,10 @@ def test_large_provider_end_can_invalidate_live_cache_without_losing_result() ->
     bus = LiveAgentEventBus()
     _, initial = bus.subscribe_with_snapshot()
     assembler = ProviderStreamAssembler(
-        session_id="session:large",
-        turn_id="turn:large",
+        session_id='session:se4ivc7ugqszobjrjycbjjup6q',
+        turn_id='turn:vwnlzukpcu6qx7e4v37y3fit64',
         live_bus=bus,
-        proposed_entry_id="entry:large",
+        proposed_entry_id='entry:frmvjoqcb7sxrfgrufmicdp2vq',
     )
     builder = ProviderLiveItemBuilder()
 

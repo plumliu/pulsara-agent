@@ -6,9 +6,10 @@ no durable cancellation generation or recovery promise.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from dataclasses import dataclass, field
 from enum import StrEnum
-from hashlib import sha256
 from threading import Lock
 
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
@@ -69,8 +70,7 @@ class ActiveTurnCancellationIntent:
 def stable_subagent_turn_id(*, session_id: str, task_id: str) -> str:
     if not session_id or not task_id:
         raise ValueError("subagent turn identity input is empty")
-    digest = sha256(f"{session_id}\0{task_id}".encode()).hexdigest()
-    return f"subagent-turn:{digest}"
+    return derive_id("turn", "worker", session_id, task_id)
 
 
 __all__ = [

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id, ID_PAYLOAD_PATTERN
+
+
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import errno
@@ -80,9 +83,9 @@ except ImportError:  # pragma: no cover - unsupported platform
 
 
 MAXIMUM_PLUGIN_STATE_BYTES = 1024 * 1024
-_PACKAGE_ID = re.compile(r"pkg_[0-9a-f]{32}")
+_PACKAGE_ID = re.compile("package:" + ID_PAYLOAD_PATTERN)
 _PLUGIN_ID = re.compile(r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
-_STAGE = re.compile(r"\.pulsara-stage-(pkg_[0-9a-f]{32})-([0-9a-f]{32})")
+_STAGE = re.compile(r"\.pulsara-stage-(package:" + ID_PAYLOAD_PATTERN + r")-([0-9a-f]{32})")
 _STATE_TEMP = re.compile(
     r"\.pulsara-state-((?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)-([0-9a-f]{32})\.tmp"
 )
@@ -404,7 +407,10 @@ class ManagedPluginStore:
                     scrub_set=scrub_set,
                 )
                 return StoreAlreadyPresent(current, summary)
-            package_install_id = f"pkg_{uuid4().hex}"
+            package_install_id = random_id("package")
+            while (layout.plugin_package_parent / package_install_id).exists():
+                _check_abort(deadline_monotonic, cancellation)
+                package_install_id = random_id("package")
             state = PluginInstanceState(
                 identity.plugin_id,
                 identity.scope,

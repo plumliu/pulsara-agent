@@ -109,9 +109,9 @@ def _candidate(
     api: str = "openai_chat_completions",
 ):
     return build_prepared_durable_provider_assistant_replay(
-        session_id="session:test",
-        workspace_id="workspace:test",
-        assistant_entry_id="entry:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
         target=_target(api=api),
         public_projection_fingerprint="sha256:" + "2" * 64,
         ordered_items=(item,),
@@ -119,9 +119,9 @@ def _candidate(
 
 
 def _visualization_metadata_replay_input():
-    session_id = "session:visualization-replay"
-    assistant_entry_id = "entry:visualization-owner"
-    revision_id = "context-revision:visualization-replay"
+    session_id = 'session:ithrg5jkytmdpwu4j3pjyomziu'
+    assistant_entry_id = 'entry:blzvcxjwbvctrcbukdihh2ftim'
+    revision_id = 'binding:67mceq5thnuwnjbyyblz5yjhbq'
     target = _target()
     assistant = LLMMessage(
         role=MessageRole.ASSISTANT,
@@ -142,7 +142,7 @@ def _visualization_metadata_replay_input():
     )
     candidate = build_prepared_durable_provider_assistant_replay(
         session_id=session_id,
-        workspace_id="workspace:visualization-replay",
+        workspace_id='workspace:vertdndd53lvcqdkafjgh6t46i',
         assistant_entry_id=assistant_entry_id,
         target=target,
         public_projection_fingerprint=(
@@ -552,9 +552,9 @@ def test_round5a2_responses_item_count_and_allowlist_are_closed() -> None:
         for index in range(4_096)
     )
     candidate = build_prepared_durable_provider_assistant_replay(
-        session_id="session:test",
-        workspace_id="workspace:test",
-        assistant_entry_id="entry:test",
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
         target=target,
         public_projection_fingerprint="sha256:" + "2" * 64,
         ordered_items=items,
@@ -562,18 +562,18 @@ def test_round5a2_responses_item_count_and_allowlist_are_closed() -> None:
     assert candidate.item_count == 4_096
     with pytest.raises(ValueError, match="payload"):
         build_prepared_durable_provider_assistant_replay(
-            session_id="session:test",
-            workspace_id="workspace:test",
-            assistant_entry_id="entry:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
             target=target,
             public_projection_fingerprint="sha256:" + "2" * 64,
             ordered_items=(*items, items[0]),
         )
     with pytest.raises(ValueError, match="item type"):
         build_prepared_durable_provider_assistant_replay(
-            session_id="session:test",
-            workspace_id="workspace:test",
-            assistant_entry_id="entry:test",
+            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
             target=target,
             public_projection_fingerprint="sha256:" + "2" * 64,
             ordered_items=(_frozen_object({"type": "hosted_tool_call"}),),

@@ -976,7 +976,7 @@ def _valid_plugin_id(value: str) -> bool:
 def _valid_package_install_id(value: str) -> bool:
     import re
 
-    return bool(re.fullmatch(r"pkg_[0-9a-f]{32}", value))
+    return bool(re.fullmatch(r"package:[a-z2-7]{25}[aeimquy4]", value))
 
 
 def _valid_workspace_state_key(value: str) -> bool:

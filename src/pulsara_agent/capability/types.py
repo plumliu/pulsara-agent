@@ -184,7 +184,7 @@ class PluginSkillOrigin:
                 self.plugin_id,
             )
             or len(self.plugin_id.encode("utf-8")) > 64
-            or not re.fullmatch(r"pkg_[0-9a-f]{32}", self.package_install_id)
+            or not re.fullmatch(r"package:[a-z2-7]{25}[aeimquy4]", self.package_install_id)
             or len(relative.parts) != 2
             or relative.parts[0] != "skills"
             or any(part in {"", ".", ".."} for part in relative.parts)

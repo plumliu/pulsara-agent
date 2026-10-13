@@ -44,19 +44,19 @@ def queue_case(stage2_migrated_postgres_database):
         lease_seconds=300,
         deadline_monotonic=monotonic() + 30,
     ).guard
-    turn_id, revision_id = _name("turn"), _name("revision")
+    turn_id, revision_id = _name("turn"), _name("binding")
     _start_root_turn(
         repository,
         guard,
-        command_id=_name("initial-command"),
+        command_id=_name("command"),
         turn_id=turn_id,
-        entry_id=_name("initial-entry"),
+        entry_id=_name("entry"),
         context_binding_revision_id=revision_id,
         content=FrozenPromptContent.text('initial'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
-    source, submission = _name("source"), _name("submission")
+    source, submission = _name("queue"), _name("command")
     _enqueue_prompt(
         repository,
         guard,
@@ -77,7 +77,7 @@ def action(case, *, command=None, steer=True, source=None):
     _, guard, turn, _, original, _ = case
     return QueuedPromptAction(
         session_id=guard.session_id,
-        command_id=command or _name("action"),
+        command_id=command or _name("command"),
         source_queue_item_id=source or original,
         target_turn_id=turn if steer else None,
     )
@@ -117,7 +117,7 @@ def complete(case):
             context_binding_revision_id=revision,
             provider_input_through_sequence=1,
         ),
-        entry_id=_name("assistant"),
+        entry_id=_name("entry"),
         parent_content=InlineContent.from_bytes(b"terminal-looking answer"),
         blocks=(AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"done")),),
         complete_turn=True,
@@ -146,9 +146,9 @@ def test_two_request_cancel_then_steer_can_lose_input(queue_case):
         _enqueue_prompt(
             repository,
             guard,
-            command_id=_name("unsafe-command"),
-            queue_item_id=_name("unsafe-replacement"),
-            client_submission_id=_name("client"),
+            command_id=_name("command"),
+            queue_item_id=_name("queue"),
+            client_submission_id=_name("command"),
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=turn,
             content=FrozenPromptContent.text('exact queued\ninput'),
@@ -167,9 +167,9 @@ def test_two_request_steer_then_cancel_can_duplicate_input(queue_case):
     _enqueue_prompt(
         repository,
         guard,
-        command_id=_name("unsafe-command"),
-        queue_item_id=_name("unsafe-replacement"),
-        client_submission_id=_name("client"),
+        command_id=_name("command"),
+        queue_item_id=_name("queue"),
+        client_submission_id=_name("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn,
         content=FrozenPromptContent.text('exact queued\ninput'),
@@ -283,13 +283,13 @@ def test_redirect_reuses_large_blob_without_materializing_another_copy(queue_cas
     assert len(body) > 64 << 10
     content = FrozenPromptContent.text(body.decode("utf-8"))
     canonical_prompt = freeze_canonical_prompt(content)
-    source = _name("large-source")
+    source = _name("queue")
     _enqueue_prompt(
         repository,
         guard,
-        command_id=_name("large-command"),
+        command_id=_name("command"),
         queue_item_id=source,
-        client_submission_id=_name("large-submission"),
+        client_submission_id=_name("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         content=content,
@@ -356,7 +356,7 @@ def test_plan_handoff_redirect_rejects_without_changing_source_or_action(
     workflow, _ = _open_user_plan(repository, lease)
     repository.exit_plan_by_user(
         lease.guard,
-        command_id=_name("cancel-plan"),
+        command_id=_name("command"),
         command_kind="CANCEL_PLAN",
         workflow_id=workflow,
         expected_workflow_revision=1,
@@ -364,13 +364,13 @@ def test_plan_handoff_redirect_rejects_without_changing_source_or_action(
         actor_id="user",
         deadline_monotonic=monotonic() + 30,
     )
-    source = _name("handoff-source")
+    source = _name("queue")
     _enqueue_prompt(
         repository,
         lease.guard,
-        command_id=_name("handoff-command"),
+        command_id=_name("command"),
         queue_item_id=source,
-        client_submission_id=_name("submission"),
+        client_submission_id=_name("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         content=FrozenPromptContent.text('handoff'),
@@ -379,11 +379,11 @@ def test_plan_handoff_redirect_rejects_without_changing_source_or_action(
         actor_id="user",
         deadline_monotonic=monotonic() + 30,
     )
-    turn, revision = _name("target"), _name("revision")
+    turn, revision = _name("turn"), _name("binding")
     _start_root_turn(
         repository,
         lease.guard,
-        command_id=_name("root-command"),
+        command_id=_name("command"),
         turn_id=turn,
         entry_id=_name("entry"),
         context_binding_revision_id=revision,

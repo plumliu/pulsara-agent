@@ -29,7 +29,7 @@ from pulsara_agent.llm.model_connections import (
 
 def test_model_connection_closed_codec_preserves_exact_target() -> None:
     value = ModelConnectionConfig(
-        ModelConnectionId("model-connection:" + "1" * 32),
+        ModelConnectionId('connection:knlsd5sz5j4bingayjthlnsehu'),
         ModelTargetKey(
             "openrouter",
             WireApi.OPENAI_RESPONSES,
@@ -43,7 +43,7 @@ def test_model_connection_closed_codec_preserves_exact_target() -> None:
 
 def test_catalog_connection_persists_nondefault_reasoning_profile() -> None:
     value = ModelConnectionConfig(
-        ModelConnectionId("model-connection:" + "8" * 32),
+        ModelConnectionId('connection:sxult4bjf2ao5ujmxb2mxmy5da'),
         ModelTargetKey(
             "moonshotai-cn",
             WireApi.OPENAI_CHAT_COMPLETIONS,
@@ -60,7 +60,7 @@ def test_catalog_connection_persists_nondefault_reasoning_profile() -> None:
 
 def test_user_declared_connection_closed_codec_preserves_asserted_facts() -> None:
     value = ModelConnectionConfig(
-        ModelConnectionId("model-connection:" + "5" * 32),
+        ModelConnectionId('connection:vxjrlvlidhqx5hxhzwryf24p5y'),
         ModelTargetKey(
             "user_declared",
             WireApi.OPENAI_CHAT_COMPLETIONS,
@@ -128,7 +128,7 @@ def test_user_declared_reasoning_profile_codec_is_closed(
     encoded: dict[str, object],
 ) -> None:
     value = ModelConnectionConfig(
-        ModelConnectionId("model-connection:" + "7" * 32),
+        ModelConnectionId('connection:bsbbomi5dviaoirygerusjgzyq'),
         ModelTargetKey(
             "user_declared",
             WireApi.OPENAI_CHAT_COMPLETIONS,
@@ -164,7 +164,7 @@ def test_user_declared_target_enforces_minimum_without_extra_reasoning_shapes() 
 
     with pytest.raises(ValueError, match="source union"):
         ModelConnectionConfig(
-            ModelConnectionId("model-connection:" + "6" * 32),
+            ModelConnectionId('connection:6byzpoxw745hsdi74shmtqqryy'),
             ModelTargetKey(
                 "catalog-route",
                 WireApi.OPENAI_CHAT_COMPLETIONS,
@@ -208,7 +208,7 @@ def test_user_declared_target_enforces_minimum_without_extra_reasoning_shapes() 
 )
 def test_model_call_binding_closed_codec_round_trips(selection) -> None:
     value = ModelCallBinding(
-        ModelConnectionId("model-connection:" + "2" * 32), selection
+        ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'), selection
     )
     assert model_call_binding_from_dict(model_call_binding_to_dict(value)) == value
 
@@ -216,7 +216,7 @@ def test_model_call_binding_closed_codec_round_trips(selection) -> None:
 def test_binding_does_not_duplicate_target() -> None:
     rendered = model_call_binding_to_dict(
         ModelCallBinding(
-            ModelConnectionId("model-connection:" + "3" * 32),
+            ModelConnectionId('connection:bx3rsdxruwnyw3gwh4qltipqlq'),
             ReasoningEffortSelection("high"),
         )
     )
@@ -230,7 +230,7 @@ def test_unknown_binding_fields_are_rejected() -> None:
     with pytest.raises(ValueError, match="closed shape"):
         model_call_binding_from_dict(
             {
-                "connection_id": "model-connection:" + "4" * 32,
+                "connection_id": 'connection:q5dhz3n5fujoz3wiu5ya7ui3rm',
                 "reasoning": None,
                 "target": {},
             }

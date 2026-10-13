@@ -1348,7 +1348,7 @@ def _withheld_identity(scope: PluginScopeKind) -> PluginInstanceIdentity:
 
 def _safe_package_install_id(value: str, scrub_set: ProcessCredentialScrubSet) -> str:
     if scrub_set.contains(value):
-        return "pkg_00000000000000000000000000000000"
+        return "package:aaaaaaaaaaaaaaaaaaaaaaaaaa"
     return value
 
 

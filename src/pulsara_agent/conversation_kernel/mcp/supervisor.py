@@ -1,6 +1,9 @@
 """Host-scoped MCP physical owner, discovery, fencing, and exact execution."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
+from pulsara_agent.identity import random_id
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
@@ -284,7 +287,7 @@ class McpConnectionSlot:
         failure_reporter: Callable[["McpConnectionSlot", str, bool], None],
         physical_lifetime_anchor: object | None = None,
     ) -> None:
-        self.slot_id = f"mcp-slot:{server_id}:{uuid4().hex}"
+        self.slot_id = random_id("slot")
         self.server_id = server_id
         self.supervisor_epoch = supervisor_epoch
         self.connection_generation = connection_generation
@@ -491,8 +494,11 @@ class McpConnectionSlot:
                 or lease.admitted_discovery_generation != self._dirty_generation
             ):
                 raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+            permit_id = random_id("permit")
+            while permit_id in self._permits:
+                permit_id = random_id("permit")
             permit = McpDispatchAdmissionPermit(
-                permit_id=f"mcp-dispatch:{uuid4().hex}",
+                permit_id=permit_id,
                 session_id=session_id,
                 scope_kind=scope_kind,
                 scope_subagent_task_id=scope_subagent_task_id,
@@ -3032,7 +3038,7 @@ def _candidate(
         },
     )
     return McpInstallationCandidate(
-        candidate_id=f"mcp-candidate:{fingerprint.removeprefix('sha256:')}",
+        candidate_id=derive_id("mcp-candidate", "installation", fingerprint),
         server_id=config.server_id,
         expected_supervisor_epoch=epoch,
         expected_semantic_config_fingerprint=config.semantic_config_fingerprint,

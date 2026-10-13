@@ -7,10 +7,11 @@ It never reads or writes PostgreSQL and never opens a provider transport.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from dataclasses import dataclass, field as dataclass_field, replace
 from enum import StrEnum
 from threading import RLock
-from uuid import uuid4
 
 from pulsara_agent.capability.contracts import FrozenToolCapabilityExposurePlan
 from pulsara_agent.conversation_kernel.contracts import (
@@ -1026,7 +1027,7 @@ class HostProviderInputContinuityOwner:
                     )
                 reservation = EmptyPreparationReservation(
                     lease=lease,
-                    reservation_nonce=f"empty-preparation:{uuid4().hex}",
+                    reservation_nonce=random_id("preparation"),
                     _seal=_EMPTY_PREPARATION_RESERVATION_SEAL,
                 )
                 slot.bootstrap_lease = None
@@ -1365,11 +1366,14 @@ class HostProviderInputContinuityOwner:
             slot.empty_reservation = None
             slot.prepared = None
             slot.state = _SlotState.INSTALLED
+            permit_nonce = random_id("permit")
+            while permit_nonce in self._issued_permits:
+                permit_nonce = random_id("permit")
             permit = ProcessLocalProviderInputInstallPermit(
                 scope=scope,
                 epoch_nonce=view.epoch_nonce,
                 epoch_revision=view.epoch_revision,
-                permit_nonce=f"provider-input-permit:{uuid4().hex}",
+                permit_nonce=permit_nonce,
             )
             self._issued_permits[permit.permit_nonce] = (
                 _IssuedProviderInputInstallPermit(
@@ -1471,7 +1475,7 @@ class HostProviderInputContinuityOwner:
                 fragment=fragment,
                 additional_resident_bytes=additional_bytes,
                 already_bound=already_bound,
-                reservation_nonce=f"assistant-replay-reservation:{uuid4().hex}",
+                reservation_nonce=random_id("replay-reservation"),
                 _seal=_ASSISTANT_REPLAY_RESERVATION_SEAL,
             )
             slot.replay_reservation = reservation
@@ -1761,7 +1765,7 @@ class HostProviderInputContinuityOwner:
                 destination=destination,
                 adopted_snapshot_id=adopted_snapshot_id,
                 adopted_binding_revision_id=adopted_binding_revision_id,
-                fence_nonce=f"no-continuation-fence:{uuid4().hex}",
+                fence_nonce=random_id("fence"),
                 _seal=_NO_CONTINUATION_FENCE_SEAL,
             )
             slot.no_continuation_fence = fence
@@ -2013,7 +2017,7 @@ class HostProviderInputContinuityOwner:
                 )
             slot.bootstrap_lease = AuthorizedEmptyBootstrapLease(
                 scope=scope,
-                lease_nonce=f"empty-bootstrap-lease:{uuid4().hex}",
+                lease_nonce=random_id("bootstrap"),
                 source=AdoptedBaseLeaseSource(
                     writer_guard=self._writer_guard,
                     adoption_confirmation=settling.confirmation,
@@ -2155,7 +2159,7 @@ class HostProviderInputContinuityOwner:
             slot.empty_reservation = None
             slot.bootstrap_lease = AuthorizedEmptyBootstrapLease(
                 scope=fence.scope,
-                lease_nonce=f"empty-bootstrap-lease:{uuid4().hex}",
+                lease_nonce=random_id("bootstrap"),
                 source=AdoptedBaseLeaseSource(
                     writer_guard=self._writer_guard,
                     adoption_confirmation=fence.confirmation,
@@ -2209,7 +2213,7 @@ class HostProviderInputContinuityOwner:
     ) -> _Slot:
         lease = AuthorizedEmptyBootstrapLease(
             scope=scope,
-            lease_nonce=f"empty-bootstrap-lease:{uuid4().hex}",
+            lease_nonce=random_id("bootstrap"),
             source=source,
             _seal=_BOOTSTRAP_LEASE_SEAL,
         )
@@ -2275,7 +2279,7 @@ def _planning_input_from_predecessor(
             # the full rematerialization input and never repairs a rewrite.
             delta = canonical_frontier.ordered_item_fingerprints
     return FrozenProviderInputAppendPlanningInput(
-        planning_nonce=f"provider-input-planning:{uuid4().hex}",
+        planning_nonce=random_id("planning"),
         scope=scope,
         predecessor=predecessor,
         predecessor_view=predecessor_view,

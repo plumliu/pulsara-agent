@@ -133,7 +133,7 @@ def test_periodic_refresh_reuses_connection_and_keeps_old_lease_stale(
         mcp_fixture._FakeMcpClient.instances.clear()
         supervisor = McpHostSupervisor(
             credential_boundary=mcp_fixture._TEST_API_KEY_BOUNDARY,
-            session_id="periodic",
+            session_id='session:vnh4no4gzzlg65dvr5ahakfjjy',
             workspace_root=tmp_path,
             configs=(
                 mcp_fixture._config(tmp_path, catalog_refresh_interval_ms=300000),
@@ -207,7 +207,7 @@ def test_relist_drains_bounded_calls_and_retries_notification_race(tmp_path):
 
         supervisor = McpHostSupervisor(
             credential_boundary=mcp_fixture._TEST_API_KEY_BOUNDARY,
-            session_id="drain",
+            session_id='session:ocwp3creyxly6owzia2d4mmwry',
             workspace_root=tmp_path,
             configs=(mcp_fixture._config(tmp_path),),
             client_factory=Client,
@@ -220,7 +220,7 @@ def test_relist_drains_bounded_calls_and_retries_notification_race(tmp_path):
         try:
             executor = next(iter(first.executors.values()))
             permit = executor.admit(
-                session_id="drain",
+                session_id='session:ocwp3creyxly6owzia2d4mmwry',
                 scope_kind=mcp_fixture.ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
                 turn_id="turn",
@@ -272,7 +272,7 @@ def test_late_session_id_fences_parallel_slot_but_accepted_call_settles(tmp_path
 
         supervisor = McpHostSupervisor(
             credential_boundary=mcp_fixture._TEST_API_KEY_BOUNDARY,
-            session_id="late",
+            session_id='session:rj2civto2ncqpon3mgaczd47qe',
             workspace_root=tmp_path,
             configs=(mcp_fixture._config(tmp_path),),
             client_factory=Client,
@@ -283,7 +283,7 @@ def test_late_session_id_fences_parallel_slot_but_accepted_call_settles(tmp_path
         try:
             executor = next(iter(runtime.executors.values()))
             permit = executor.admit(
-                session_id="late",
+                session_id='session:rj2civto2ncqpon3mgaczd47qe',
                 scope_kind=mcp_fixture.ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
                 turn_id="turn",
@@ -293,7 +293,7 @@ def test_late_session_id_fences_parallel_slot_but_accepted_call_settles(tmp_path
             assert (await executor.invoke(permit, {})).state == "SUCCESS"
             with pytest.raises(mcp_fixture.McpSnapshotStale):
                 executor.admit(
-                    session_id="late",
+                    session_id='session:rj2civto2ncqpon3mgaczd47qe',
                     scope_kind=mcp_fixture.ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
                     turn_id="turn",
@@ -527,7 +527,7 @@ def test_safe_point_defers_other_server_while_dirty_call_drains(tmp_path):
             for name in ("a", "b")
         )
         supervisor = McpHostSupervisor(
-            session_id="two",
+            session_id='session:x5zpk2fafojmxbcidjy5vm3twe',
             workspace_root=tmp_path,
             configs=configs,
             credential_boundary=mcp_fixture._TEST_API_KEY_BOUNDARY,
@@ -541,7 +541,7 @@ def test_safe_point_defers_other_server_while_dirty_call_drains(tmp_path):
             item for item in first.executors.values() if item.semantic.server_id == "a"
         )
         permit = executor.admit(
-            session_id="two",
+            session_id='session:x5zpk2fafojmxbcidjy5vm3twe',
             scope_kind=mcp_fixture.ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
             turn_id="turn",

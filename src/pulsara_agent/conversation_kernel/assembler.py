@@ -1,9 +1,10 @@
 """Single process-local assembler for the formal provider live stream."""
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
+
 
 from dataclasses import dataclass
-from hashlib import sha256
 import json
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live import LiveBlockKind
@@ -224,8 +225,12 @@ class ProviderStreamAssembler:
     ) -> None:
         if identity in self._seen:
             raise RuntimeError("provider block identity was reused")
-        self._seen.add(identity)
         canonical_id = _canonical_block_id(self._draft_identity, kind, identity)
+        if any(block.canonical_block_id == canonical_id for block in self._open.values()) or any(
+            block.block_id == canonical_id for block in self._completed.values()
+        ):
+            raise RuntimeError("IDENTITY_CONFLICT: assistant block identity is occupied")
+        self._seen.add(identity)
         block = _OpenBlock(
             kind,
             name_or_media,
@@ -389,7 +394,7 @@ class ProviderStreamAssembler:
             scope_kind=self._scope_kind,
             scope_subagent_task_id=self._scope_subagent_task_id,
             channel_kind=LiveChannelKind.MODEL_OUTPUT,
-            generation_id=f"model-output:{self._draft_identity}",
+            generation_id=derive_id("generation", "draft", self._draft_identity),
             proposed_entry_id=self._draft_identity,
             block_id=block.canonical_block_id,
             block_ordinal=block.ordinal,
@@ -403,8 +408,7 @@ class ProviderStreamAssembler:
 
 
 def _canonical_block_id(entry_id: str, kind: str, provider_identity: str) -> str:
-    digest = sha256(f"{entry_id}\0{kind}\0{provider_identity}".encode()).hexdigest()
-    return f"block:{digest}"
+    return derive_id("block", "message", entry_id, kind, provider_identity)
 
 
 __all__ = [

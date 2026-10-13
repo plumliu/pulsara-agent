@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import Any, Mapping
 
 from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.identity import require_id
 
 ALLOWED_IMAGE_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
 MAXIMUM_PROMPT_IMAGE_PIXELS = 16_777_216
@@ -61,6 +62,7 @@ class LLMImagePart:
     immutable_bytes: bytes = field(repr=False)
     width: int
     height: int
+    image_ref: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -82,6 +84,9 @@ class LLMImagePart:
             or self.width * self.height > MAXIMUM_PROMPT_IMAGE_PIXELS
         ):
             raise ValueError("model image dimensions are outside the validated range")
+
+        if self.image_ref is not None:
+            require_id(self.image_ref, "image")
 
     @property
     def content_digest(self) -> str:
@@ -180,11 +185,11 @@ PromptContentPart = LLMTextPart | PromptImagePart | PromptAnnotationPart
 HISTORICAL_IMAGE_MARKER = "[历史图片；此处未包含图像内容]"
 
 
-def image_reference_text(*, digest: str, media_type: str, width: int, height: int) -> str:
+def image_reference_text(*, image_ref: str, media_type: str, width: int, height: int) -> str:
     """Render neutral metadata from an already validated image or descriptor."""
     return (
         "[历史图片引用；此处未包含图像内容]\n"
-        f"image_ref: {digest}\n"
+        f"image_ref: {require_id(image_ref, 'image')}\n"
         f"media_type: {media_type}; width: {width}; height: {height}"
     )
 
@@ -345,6 +350,7 @@ def llm_content_identity_value(
                 {
                     "type": "image",
                     "digest": part.content_digest,
+                    "image_ref": part.image_ref,
                     "encoded_bytes": len(part.immutable_bytes),
                     "media_type": part.media_type,
                     "width": part.width,
@@ -379,6 +385,7 @@ def frozen_prompt_content_canonical_value(
                 {
                     "type": "image",
                     "digest": part.content_digest,
+                    "image_ref": part.image_ref,
                     "encoded_bytes": len(part.immutable_bytes),
                     "media_type": part.media_type,
                     "width": part.width,
@@ -387,7 +394,7 @@ def frozen_prompt_content_canonical_value(
             )
         else:  # pragma: no cover - FrozenPromptContent closes this union.
             raise TypeError("canonical prompt value requires typed parts")
-    return {"schema": "pulsara.prompt/v1", "parts": tuple(parts)}
+    return {"schema": "pulsara.prompt/v2", "parts": tuple(parts)}
 
 
 def llm_content_logical_bytes(parts: tuple[LLMContentPart, ...]) -> int:

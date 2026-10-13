@@ -4,6 +4,7 @@ The unknown-effect fixture admits a real root intent and exact tool attempt with
 normal owners. The probe performs its harmless local effect, deliberately omits
 the result, then interrupts the turn. It fabricates no provider-native replay.
 """
+from pulsara_agent.identity import derive_id
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,15 +32,15 @@ async def seed_unknown_local_append(session, workspace: Path) -> dict[str, str]:
         raise ValueError("unknown-effect fixture requires a fresh marker path")
     command = f"printf 'DONE_ONCE\\n' >> {shlex.quote(str(marker))}"
     suffix = uuid4().hex
-    turn_id = f"turn:prompt-unknown:{suffix}"
+    turn_id = derive_id("turn", "test-fixture", f"turn:prompt-unknown:{suffix}")
     guard, repository = session._lease.guard, session.repository
     intent = build_prepared_root_turn_intent(
         session_id=session.session_id,
-        command_id=f"command:prompt-unknown:{suffix}",
+        command_id=derive_id("command", "test-fixture", f"command:prompt-unknown:{suffix}"),
         turn_id=turn_id,
-        entry_id=f"entry:prompt-unknown:user:{suffix}",
-        context_binding_revision_id=f"revision:prompt-unknown:{suffix}",
-        permission_snapshot_id=f"permission:prompt-unknown:{suffix}",
+        entry_id=derive_id("entry", "test-fixture", f"entry:prompt-unknown:user:{suffix}"),
+        context_binding_revision_id=derive_id("binding", "test-fixture", f"revision:prompt-unknown:{suffix}"),
+        permission_snapshot_id=derive_id("permission", "test-fixture", f"permission:prompt-unknown:{suffix}"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text(
             f"Run {command!r} once to append one DONE_ONCE line, then verify completion."
@@ -67,12 +68,12 @@ async def seed_unknown_local_append(session, workspace: Path) -> dict[str, str]:
     cut = repository.prepare_provider_input_cut(
         guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30,
     )
-    entry_id, call_id = f"entry:prompt-unknown:assistant:{suffix}", f"call:prompt-unknown:{suffix}"
+    entry_id, call_id = derive_id("entry", "test-fixture", f"entry:prompt-unknown:assistant:{suffix}"), f"call:prompt-unknown:{suffix}"
     repository.commit_assistant_message(
         guard, cut=cut, entry_id=entry_id,
         parent_content=InlineContent.from_bytes(b""),
         blocks=(AssistantToolCallBlock(
-            f"block:prompt-unknown:{suffix}", call_id, "terminal",
+            derive_id("block", "test-fixture", f"block:prompt-unknown:{suffix}"), call_id, "terminal",
             freeze_json({"command": command}),
         ),),
         occurred_at=datetime.now(timezone.utc), actor_id="prompt-cognitive-fixture",
@@ -86,7 +87,7 @@ async def seed_unknown_local_append(session, workspace: Path) -> dict[str, str]:
             "WHERE session_id=%s AND id=%s", (session.session_id, turn_id),
         ).fetchone()[0])
     repository.accept_tool_attempt(
-        guard, attempt_id=f"attempt:prompt-unknown:{suffix}",
+        guard, attempt_id=derive_id("attempt", "test-fixture", f"attempt:prompt-unknown:{suffix}"),
         assistant_entry_id=entry_id, tool_call_id=call_id,
         authorization_kind="policy", authorization_reference="allow",
         actor_kind="runtime", actor_id="prompt-cognitive-fixture",

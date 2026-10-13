@@ -7,6 +7,7 @@ model API-key values.
 """
 
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.llm.input import PromptContent
 import argparse
@@ -218,7 +219,7 @@ async def _run(model_id: str) -> dict[str, object]:
                 ):
                     outcome = await session.run_turn(
                         PromptContent.text(prompt),
-                        command_id=f"command:content-revision-dogfood:{ordinal}",
+                        command_id=derive_id("command", "test-fixture", f"command:content-revision-dogfood:{ordinal}"),
                         requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                     )
                     replies.append(outcome.final_text)
@@ -229,7 +230,7 @@ async def _run(model_id: str) -> dict[str, object]:
                 ):
                     outcome = await session.run_turn(
                         PromptContent.text(prompt),
-                        command_id=f"command:content-revision-dogfood:{ordinal}",
+                        command_id=derive_id("command", "test-fixture", f"command:content-revision-dogfood:{ordinal}"),
                         requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                     )
                     replies.append(outcome.final_text)

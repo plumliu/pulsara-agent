@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.llm.input import PromptContent
 import asyncio
@@ -414,7 +415,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("Make a plan before editing."),
-                command_id="command:round4-plan",
+                command_id='command:sxoqk2ilnlrszpfj6i47qge33u',
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
         )
@@ -450,7 +451,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
         workflow_id = str(question["plan_workflow_id"])
         assert int(question["workflow_revision"]) == 2
         await session.resolve_plan_question(
-            command_id="command:round4-answer",
+            command_id='command:bksg34ixdxmlcrrrjqyljxmhmu',
             workflow_id=workflow_id,
             expected_workflow_revision=2,
             interaction_id=opened.interaction_id,
@@ -482,7 +483,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
         assert int(draft["workflow_revision"]) == 4
 
         approved = await session.resolve_plan_draft_review(
-            command_id="command:round4-approve",
+            command_id='command:aoqobn3uzzf5rldcj6mn23grfu',
             workflow_id=workflow_id,
             expected_workflow_revision=4,
             interaction_id=draft_run.pending_plan_interaction_id,
@@ -532,7 +533,7 @@ def test_round4_queued_root_turn_runs_automatic_plan_successor(
             monkeypatch=monkeypatch,
         )
         accepted = await session.submit_prompt(
-            command_id="command:queued-plan-chain",
+            command_id='command:wrlpqzmssdyfr24hczvci4pxwm',
             content=PromptContent.text("Plan this queued request."),
         )
         assert accepted.status == "PENDING"
@@ -575,14 +576,14 @@ def test_round4_detached_waiter_cannot_strand_root_slot_before_plan_review(
             monkeypatch=monkeypatch,
         )
         entered = await session.enter_plan(
-            command_id="command:detached-enter",
+            command_id='command:xvmfuqrzeyxnjmngwmq6hnx6sa',
             entry_reason="prepare detached review",
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("Draft the plan."),
-                command_id="command:detached-origin",
+                command_id='command:lk5pmfotchgugdrpgzbeuaag74',
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
         )
@@ -614,7 +615,7 @@ def test_round4_detached_waiter_cannot_strand_root_slot_before_plan_review(
             ).fetchone()
         assert draft is not None
         approved = await session.resolve_plan_draft_review(
-            command_id="command:detached-approve",
+            command_id='command:i4unsmhggqu6ko5alb2bx6zo7a',
             workflow_id=entered.target_id,
             expected_workflow_revision=int(draft["workflow_revision"]),
             interaction_id=str(draft["id"]),
@@ -670,7 +671,7 @@ def test_round4_force_exit_fences_full_automatic_continuation_before_bind(
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("Enter Plan while force-exit races."),
-                command_id="command:force-race-origin",
+                command_id='command:yicudqxalprq6bpetytvtuwa54',
             )
         )
         await asyncio.wait_for(winner_ready.wait(), timeout=5)
@@ -696,7 +697,7 @@ def test_round4_force_exit_fences_full_automatic_continuation_before_bind(
         assert successor is not None
         exiting = asyncio.create_task(
             session.force_exit_plan(
-                command_id="command:force-race-exit",
+                command_id='command:p2g5zrg4xhgszmle5oujw4dbny',
                 workflow_id=str(workflow["id"]),
                 expected_workflow_revision=int(workflow["workflow_revision"]),
             )
@@ -761,7 +762,7 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("Enter Plan and wait at the ownership handoff."),
-                command_id="command:round7-pending-plan-stop",
+                command_id='command:zgmtm6hm7qiube4algyfcyevae',
             )
         )
         await asyncio.wait_for(handoff_reached.wait(), timeout=5)
@@ -775,8 +776,8 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
 
         if operation == "stop":
             command_id = (
-                f"command:control:{session.control_admission_deadline_ms()}:"
-                f"{uuid4()}"
+                derive_id("command", "test-fixture", f"command:control:{session.control_admission_deadline_ms()}:"
+                f"{uuid4()}")
             )
             accepted = await asyncio.wait_for(
                 session.request_stop_turn(
@@ -784,7 +785,7 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
                     expected_session_id=session.session_id,
                     expected_host_session_id=session.host_session_id,
                     target_turn_id=pending.origin_turn_id,
-                ),
+                 admission_deadline_ms=session.control_admission_deadline_ms()),
                 timeout=5,
             )
             assert accepted.status == "PENDING"
@@ -838,21 +839,21 @@ def test_round4_stale_force_exit_does_not_cancel_valid_root_turn(
             monkeypatch=monkeypatch,
         )
         entered = await session.enter_plan(
-            command_id="command:stale-force-enter",
+            command_id='command:lkhkapvefg7cn5vpcgi7ggdz7i',
             entry_reason="validate before cancelling",
             resume_permission_mode=PermissionMode.READ_ONLY,
         )
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("Keep this exact turn alive."),
-                command_id="command:stale-force-origin",
+                command_id='command:zngiz6o6oniqp6cz3gsbbng56y',
             )
         )
         await asyncio.wait_for(model.started.wait(), timeout=5)
         with pytest.raises(ConversationKernelConflict, match="target drifted"):
             await session.force_exit_plan(
-                command_id="command:stale-force",
-                workflow_id="workflow:stale",
+                command_id='command:gduj36krcv5ht7uvabkc4qq3oq',
+                workflow_id='plan:exe6aubs2ra65q6wrb3vc5yvx4',
                 expected_workflow_revision=entered.plan_workflow_revision,
             )
         assert not running.done()
@@ -861,7 +862,7 @@ def test_round4_stale_force_exit_does_not_cancel_valid_root_turn(
         result = await asyncio.wait_for(running, timeout=5)
         assert result.final_text == "PLAN_TURN_REMAINED_LIVE"
         cancelled = await session.cancel_plan(
-            command_id="command:stale-force-cleanup",
+            command_id='command:2cnwd7gdysyp2hxr4j3eou6iye',
             workflow_id=entered.target_id,
             expected_workflow_revision=entered.plan_workflow_revision,
         )
@@ -887,14 +888,14 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
             monkeypatch=monkeypatch,
         )
         entered = await session.enter_plan(
-            command_id="command:terminalize-enter",
+            command_id='command:scry7cudtekborsan7kpgs6uqq',
             entry_reason="exercise terminalization retry",
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         running = asyncio.create_task(
             session.run_turn(
                 PromptContent.text("Draft a bounded plan."),
-                command_id="command:terminalize-origin",
+                command_id='command:d5b4wigb4wy6mx2uui3zj3x5ne',
             )
         )
         await asyncio.wait_for(model.started.wait(), timeout=5)
@@ -931,7 +932,7 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
         monkeypatch.setattr(session.repository, "interrupt_turn", flaky_interrupt)
         approved = await asyncio.wait_for(
             session.resolve_plan_draft_review(
-                command_id="command:terminalize-approve",
+                command_id='command:tw2yikvynynbh63vxu3kemqeqq',
                 workflow_id=entered.target_id,
                 expected_workflow_revision=int(workflow["workflow_revision"]),
                 interaction_id=origin.pending_plan_interaction_id,

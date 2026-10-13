@@ -8,11 +8,12 @@ read, so a lost response cannot advance server-side authority.
 
 from __future__ import annotations
 
+from pulsara_agent.identity import random_id
+
 from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import RLock
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 
@@ -105,7 +106,9 @@ class SessionLiveControlOwner:
                 raise RuntimeError("live-control owner is closed")
             if len(self._subscribers) >= STAGE2_LIMITS.live_observer_hard_count:
                 raise RuntimeError("live-control observer capacity is exhausted")
-            subscriber_id = f"live-control-subscriber:{uuid4().hex}"
+            subscriber_id = random_id("subscription")
+            while subscriber_id in self._subscribers:
+                subscriber_id = random_id("subscription")
             self._subscribers[subscriber_id] = _Subscriber(self._owner_epoch)
             return subscriber_id, self._snapshot()
 

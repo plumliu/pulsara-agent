@@ -241,7 +241,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                 )[0]["result_entry_id"]
                 compact = await asyncio.wait_for(
                     source.compact_context(
-                        command_id="command:tool-history:compact", force=True
+                        command_id='command:cfrvsdxgcpzsazkdccnnzpslma', force=True
                     ),
                     600,
                 )
