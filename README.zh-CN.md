@@ -158,7 +158,3 @@ Pulsara 会启动本地服务并打开浏览器工作台。在界面中选择工
 基于带类型约束的 Python 运行时、React 工作台和 PostgreSQL 构建，提供持久会话与记忆，以及 ripgrep 驱动的文件搜索。
 
 [分享想法或反馈问题](https://github.com/plumliu/pulsara-agent/issues) · [参与贡献](https://github.com/plumliu/pulsara-agent/pulls)
-
-本地历史检索默认开启，与普通记忆共用 pg_search BM25 和现有可选重排；独立开关位于“设置 → 模型 → 记忆检索”。PostgreSQL 需要 pg_search **0.26.1** 与 pgvector。compose 镜像固定 PostgreSQL 17；已有本地服务器须先安装扩展二进制并配置预加载，再重建 clean-v0。详见[实施与部署说明](archived_docs/PULSARA_LOCAL_HISTORY_RECALL_PG_SEARCH_IMPLEMENTATION_DISCUSSION.zh.md)。
-
-开发版切换说明：业务对象已统一为带类型的128-bit Base32身份，要求新版 LocalSettings v5、重建可丢弃的 clean-v0 数据库和 terminal 协议 major 5；不接受旧身份或旧 schema，也不会自动改写现有 home。切换已有开发环境前请阅读[实施规格](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)和[验证记录](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_VALIDATION.zh.md)。 后续 major 5 协议与工作区共享读图语义见[统一展示规格](archived_docs/PULSARA_UNIFIED_VISUALIZATION_PRESENTATION_SPEC.zh.md)。
