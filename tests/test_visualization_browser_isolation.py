@@ -166,7 +166,7 @@ def test_automatic_main_requires_complete_unambiguous_visible_content() -> None:
             browser.close()
 
 
-def test_automatic_crop_stays_in_page_mode_after_interaction_overflow_or_animation() -> None:
+def test_automatic_crop_stays_in_page_mode_after_real_interaction_overflow() -> None:
     root = Path(__file__).resolve().parents[1]
     selector = (root / "src/pulsara_agent/conversation_kernel/visualization_root.js").read_text().replace("export default ", "", 1)
     source = (root / "frontend/lib/visualization-frame.ts").read_text()
@@ -208,14 +208,124 @@ def test_automatic_crop_stays_in_page_mode_after_interaction_overflow_or_animati
             page.wait_for_function("()=>window.layouts.at(-1)?.mode==='page'")
             page.wait_for_timeout(100)
             assert page.evaluate("()=>window.layouts.at(-1).mode") == 'page'
-            # Delayed animations are detected on initial measurement, before animationstart.
+            # A pending animation alone does not expand the frame; actual overflow does.
             animated = '''<!doctype html><style>main{width:250px;height:100px}
                 span{display:block;animation:move .1s 1s forwards}
                 @keyframes move{to{transform:translateY(150px)}}</style><main><span>detail</span></main>'''
             page.evaluate('()=>window.layouts=[]')
             page.locator('iframe').evaluate('(frame,html)=>frame.srcdoc=html', animated + script)
-            page.wait_for_function("()=>window.layouts.length>0")
-            assert not page.evaluate("()=>window.layouts.some(x=>x.mode==='root')")
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root'")
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='page'")
+            assert page.frames[1].locator('span').is_visible()
+        finally:
+            browser.close()
+
+
+
+def test_color_and_contained_hover_transitions_keep_crop_throughout_interaction() -> None:
+    root = Path(__file__).resolve().parents[1]
+    selector = (root / "src/pulsara_agent/conversation_kernel/visualization_root.js").read_text().replace("export default ", "", 1)
+    source = (root / "frontend/lib/visualization-frame.ts").read_text()
+    script = re.search(r"export const visualizationFrameMeasurementScript = `(<script>.*?</script>)`;", source, re.DOTALL).group(1).replace("${visualizationRoot.toString()}", selector)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 800, "height": 700})
+            page.set_content('<div id="stage" style="overflow:hidden;width:600px;height:500px"><iframe sandbox="allow-scripts" style="border:0;width:600px;height:500px"></iframe></div>')
+            page.evaluate('''() => {
+                window.layouts=[];
+                addEventListener('message',e=>{
+                    const d=e.data;window.layouts.push(d);
+                    document.querySelector('#stage').style.height=(d.mode==='root'?d.rect.height:500)+'px';
+                });
+            }''')
+            html = '''<!doctype html><style>
+                body{margin:0}main{height:100px;background:white;transition:background-color .15s}
+                main.dark{background:black}
+                button{margin:10px;transition:transform .15s,box-shadow .15s}
+                button:hover{transform:translateY(-2px);box-shadow:0 1px 4px #888}
+                </style><main><button onclick="this.parentElement.classList.toggle('dark')">Theme</button></main>'''
+            page.locator('iframe').evaluate('(frame,html)=>frame.srcdoc=html', html + script)
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root'")
+            frame = page.frames[1]
+            frame.locator('button').evaluate("el=>el.dataset.kept='yes'")
+            def assert_stable_height() -> None:
+                # Drain animation completion and geometry reports, checking the
+                # entire trace so a temporary expand/shrink cannot pass.
+                frame.evaluate("""async () => {
+                    await Promise.allSettled(document.getAnimations().map(a=>a.finished));
+                    await new Promise(requestAnimationFrame);
+                }""")
+                page.evaluate("() => new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))")
+                assert page.evaluate("()=>window.layouts.every(d=>d.mode==='root' && d.rect.height===100)")
+                assert page.locator('#stage').evaluate('el=>el.clientHeight') == 100
+                assert frame.locator('button').get_attribute('data-kept') == 'yes'
+
+            for _ in range(3):
+                frame.locator('button').hover()
+                frame.wait_for_function("()=>document.getAnimations().some(a=>a.playState==='running')")
+                assert_stable_height()
+                frame.locator('button').click()
+                frame.wait_for_function("()=>document.getAnimations().some(a=>a.playState==='running')")
+                assert_stable_height()
+                page.mouse.move(750, 550)
+                assert_stable_height()
+            # Cancellation must also leave the host height unchanged.
+            frame.locator('main').evaluate("el=>el.style.transitionDuration='10s'")
+            frame.locator('button').click()
+            frame.wait_for_function("()=>document.getAnimations().some(a=>a.playState==='running')")
+            frame.locator('main').evaluate("el=>el.style.transition='none'")
+            assert_stable_height()
+            # Genuine in-flow expansion still updates the measured height.
+            frame.locator('main').evaluate("""el=>{
+                el.style.height='auto';el.style.minHeight='100px';
+                const detail=document.createElement('div');
+                detail.style.height='180px';detail.textContent='Expanded details';
+                el.append(detail);
+            }""")
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root' && window.layouts.at(-1).rect.height>180")
+            assert page.locator('#stage').evaluate('el=>el.clientHeight') > 180
+        finally:
+            browser.close()
+
+
+def test_crop_recovers_after_zoom_viewport_and_retained_gallery_switch() -> None:
+    root = Path(__file__).resolve().parents[1]
+    selector = (root / "src/pulsara_agent/conversation_kernel/visualization_root.js").read_text().replace("export default ", "", 1)
+    source = (root / "frontend/lib/visualization-frame.ts").read_text()
+    script = re.search(r"export const visualizationFrameMeasurementScript = `(<script>.*?</script>)`;", source, re.DOTALL).group(1).replace("${visualizationRoot.toString()}", selector)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1000, "height": 800})
+            page.set_content('<div id="gallery"><iframe style="border:0;width:600px;height:500px"></iframe></div>')
+            page.evaluate("() => {window.layouts=[];addEventListener('message',e=>window.layouts.push(e.data));}")
+            html = '<!doctype html><style>body{margin:0}main{height:300px}button{margin-top:240px}</style><main><input value="saved interaction"><button>Bottom</button></main>'
+            page.locator('iframe').evaluate('(el,html)=>el.srcdoc=html', html + script)
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root'")
+            frame = page.frames[1]
+            original_frame = frame
+            frame.locator('input').fill('edited before zoom')
+            # Fullscreen uses a different, sometimes shorter viewport. Interacting
+            # with its bottom control legitimately scrolls this document.
+            page.locator('iframe').evaluate("el=>{el.style.width='800px';el.style.height='200px';}")
+            frame.locator('button').click()
+            frame.wait_for_function('()=>scrollY>0')
+            page.wait_for_function("""()=>{
+                const d=window.layouts.at(-1);
+                return d?.viewport.height===200 && (d.mode==='page' || d.rect.y<0 || d.rect.y+d.rect.height>200);
+            }""")
+            page.locator('iframe').evaluate("el=>{el.style.width='600px';el.style.height='500px';}")
+            frame.wait_for_function('()=>innerWidth===600 && innerHeight===500 && scrollY===0')
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root' && window.layouts.at(-1).rect.height===300", timeout=2000)
+            # Thumbnail selection retains the same iframe and author state.
+            page.locator('#gallery').evaluate('el=>el.hidden=true')
+            page.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+            page.evaluate('()=>window.layouts=[]')
+            page.locator('#gallery').evaluate('el=>el.hidden=false')
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root' && window.layouts.at(-1).rect.height===300", timeout=2000)
+            assert page.frames[1] == original_frame
+            assert frame.locator('input').input_value() == 'edited before zoom'
         finally:
             browser.close()
 

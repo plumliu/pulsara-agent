@@ -173,6 +173,39 @@ def test_search_pages_all_matches_across_workspaces_and_lifecycle(repo, search_c
     assert len(search("needle")[0]) == 4
 
 
+def test_search_hits_preserve_latest_root_status_for_web_summary(repo, search_context):
+    from pulsara_agent.conversation_kernel.host import _kernel_session_summary
+    from pulsara_agent.web_app.session_controller import LocalSessionController
+
+    domain, new, search = search_context
+    lease = new()
+    sid = lease.guard.session_id
+    repo.rename_session(
+        session_id=sid,
+        memory_domain_id=domain,
+        title="HTML title needle",
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    def summary(query, kind, expected_turn):
+        found, _ = search(query)
+        assert len(found) == 1 and found[0]["match_kind"] == kind
+        payload = LocalSessionController._summary_payload(
+            _kernel_session_summary(found[0]), False
+        )
+        assert payload["id"] == sid
+        assert payload["latest_root_turn"] == expected_turn
+
+    summary("HTML", "title", None)
+    completed, _, _ = turn(repo, lease.guard, "user needle", answer="assistant needle")
+    expected = {"turn_id": completed, "status": "COMPLETED"}
+    for query, kind in (("", "recent"), ("HTML", "title"), ("user", "user"), ("assistant", "assistant")):
+        summary(query, kind, expected)
+    # An older content hit must still carry the current session status.
+    active, _, _ = turn(repo, lease.guard, "ongoing request", finish=False)
+    summary("assistant", "assistant", {"turn_id": active, "status": "RUNNING"})
+
+
 def test_fork_search_uses_child_history_ownership(repo, search_context):
     domain, new, search = search_context
     source = new()

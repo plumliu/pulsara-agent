@@ -4,7 +4,7 @@ Choose text or tables for simple results, Markdown image links for saved figures
 
 ## Create and publish
 
-Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. Inline all scripts, styles, fonts and data: network and companion resources cannot load. Relative paths resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access.
+Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. For simple visuals, consider a single HTML file. Local image paths may be absolute or relative to the file that references them. Use inline SVG for icons such as Lucide. Network resources are unavailable. Paths in publication fences resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access. Resources inside HTML/CSS resolve relative to the declaring file.
 
 In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing HTML paths, one per line:
 
@@ -19,7 +19,7 @@ Compare the costs:
 
 Each fence creates an independent gallery. One path shows one figure; multiple paths share host-provided thumbnail navigation. Group alternatives together; use separate fences to show figures together. Views with shared controls belong in one file. Keep actual display fences outside lists and blockquotes; wrap syntax examples in a longer outer fence as above.
 
-Publication freezes each file. Later edits or deletion leave earlier replies unchanged; publishing the path again captures its current contents. Missing or unreadable files show an error at their display position.
+Publication freezes each HTML together with its supported local resources. Later edits or deletion leave earlier replies unchanged; publishing the path again captures its current contents. Missing or unreadable files show an error at their display position.
 
 ## Layout and review
 

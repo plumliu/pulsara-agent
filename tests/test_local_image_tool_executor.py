@@ -717,7 +717,7 @@ def test_cancelling_concurrent_view_segment_drains_started_calls() -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('mode', ['success', 'png_budget', 'deadline', 'missing', 'text_only'])
+@pytest.mark.parametrize('mode', ['success', 'dependencies', 'dependency_missing', 'preparation_deadline', 'png_budget', 'deadline', 'missing', 'text_only'])
 def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkeypatch, mode):
     from io import BytesIO
     from PIL import Image
@@ -727,7 +727,17 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
     async def scenario():
         path = tmp_path / 'chart.html'
         path.write_text('<h1>' + 'x' * 10000 + '</h1>')
+        if mode in {'dependencies', 'dependency_missing', 'preparation_deadline'}:
+            path.write_text('<link rel="stylesheet" href="app.css"><img src="image.png"><script src="app.js"></script>')
+            (tmp_path / 'app.css').write_text('body{background:url(image.png)}')
+            (tmp_path / 'app.js').write_text('window.loaded=true')
+            if mode != 'dependency_missing':
+                from tests.test_html_local_resources import png
+                (tmp_path / 'image.png').write_bytes(png())
         validator = HostPromptImageValidator()
+        if mode == 'preparation_deadline':
+            from unittest.mock import AsyncMock
+            monkeypatch.setattr(validator, 'freeze_local_image', AsyncMock(side_effect=TimeoutError('preparation deadline')))
         port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:hi4pnm7cfz5jwlcsfvvcx4rpjq', session_id='session:eghkqizzionnli27oxvk6kkcgu',
             live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy(), image_validator=validator)
         borrow, context = direct_tool_invocation_context(port, session_id='session:eghkqizzionnli27oxvk6kkcgu', tool_name='view_image',
@@ -755,20 +765,25 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
             result = await port.invoke(tool_name='view_image', arguments={'path':'missing.html' if mode == 'missing' else 'chart.html'},
                 tool_call_id='call:html',attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm',turn_id='turn:4s6voic575fjaadstkw7z4cttq',assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=replace(context,input_modalities=('text',) if mode=='text_only' else ('text','image'),image_resource_allowance=allowance))
-            if mode == 'success':
+            if mode in {'success', 'dependencies'}:
                 assert result.state == 'SUCCESS'
-                assert len(rendered[0]) > allowance.canonical_bytes
+                if mode == 'success':
+                    assert len(rendered[0]) > allowance.canonical_bytes
+                else:
+                    assert b'data:image/png;base64,' in rendered[0]
+                    assert b'data:text/css;charset=utf-8;base64,' in rendered[0]
+                    assert b'data:text/javascript;charset=utf-8;base64,' in rendered[0]
                 assert isinstance(result.content, FrozenPromptContent)
                 assert any(isinstance(part, LLMImagePart) for part in result.content.parts)
                 assert quoted[0]['source'].value == 'chart.html'
                 assert quoted[0]['source'].kind is ViewImageSourceKind.PATH
             else:
-                assert result.state == 'APPLICATION_ERROR'
+                assert result.state == ('SYSTEM_ERROR' if mode == 'preparation_deadline' else 'APPLICATION_ERROR')
                 assert not quoted
-                assert {'png_budget':'IMAGE_RESOURCE_EXCEEDED','deadline':'PREVIEW_DEADLINE_EXPIRED','missing':'HTML_NOT_FOUND','text_only':'MODEL_IMAGE_INPUT_UNSUPPORTED'}[mode] in result.content.decode()
-            if mode == 'deadline':
+                assert {'dependency_missing':'RESOURCE_READ_FAILED', 'preparation_deadline':'HTML_PREPARATION_DEADLINE_EXPIRED', 'png_budget':'IMAGE_RESOURCE_EXCEEDED','deadline':'PREVIEW_DEADLINE_EXPIRED','missing':'HTML_NOT_FOUND','text_only':'MODEL_IMAGE_INPUT_UNSUPPORTED'}[mode] in result.content.decode()
+            if mode in {'deadline', 'preparation_deadline'}:
                 assert result.physical_timing == 'LATE_AFTER_WATCHDOG'
-            if mode in {'missing','text_only'}:
+            if mode in {'missing','text_only','dependency_missing','preparation_deadline'}:
                 assert not rendered
         finally:
             borrow.close()

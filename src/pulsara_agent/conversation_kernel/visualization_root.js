@@ -1,11 +1,11 @@
 // Shared by the sandboxed display and screenshot worker. Browser layout owns
 // geometry; this is a content-layout heuristic, not a painted-pixel guarantee.
-export default function visualizationRoot() {
+export default function visualizationRoot(includeAnimating = false) {
   const visible = element => element.checkVisibility({checkOpacity: true, checkVisibilityCSS: true});
   const marked = document.querySelectorAll('[data-pulsara-visualization-root]');
   // An explicit but invalid selection must not silently select another root.
   if (marked.length) return marked.length === 1 && visible(marked[0]) ? marked[0] : null;
-  if (document.getAnimations().some(animation => animation.pending || animation.playState === 'running')) return null;
+  if (!includeAnimating && document.getAnimations().some(animation => animation.pending || animation.playState === 'running')) return null;
   const mains = Array.from(document.querySelectorAll('main')).filter(visible);
   if (mains.length !== 1 || !document.body?.contains(mains[0])) return null;
   const root = mains[0];

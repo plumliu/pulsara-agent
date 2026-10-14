@@ -168,7 +168,7 @@ def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
 
 @pytest.mark.postgres
 def test_visualization_publication_fork_and_reference(
-    stage2_migrated_postgres_database,
+    stage2_migrated_postgres_database, tmp_path,
 ) -> None:
     filename = "客户结构 <完整 & 复核>.html"
     from tests.test_conversation_fork import fork, rows
@@ -206,7 +206,20 @@ def test_visualization_publication_fork_and_reference(
     )
     final_cut = cut
     final_id = _id("entry")
-    html = b"<!doctype html><html><body>canonical chart</body></html>"
+    from tests.test_html_local_resources import prepare, png
+    path = tmp_path / "index.html"
+    image_path = tmp_path / "image.png"
+    css_path = tmp_path / "style.css"
+    js_path = tmp_path / "app.js"
+    image_path.write_bytes(png())
+    css_path.write_text("body{background:url(image.png)}")
+    js_path.write_text("document.body.dataset.loaded='yes'")
+    path.write_text('<link rel="stylesheet" href="style.css"><img src="image.png"><script src="app.js"></script>')
+    html = asyncio.run(prepare(path))
+    # Acceptance and all subsequent reads use the frozen value, even if every
+    # source disappears before commit. Fork/GC must not acquire new owners.
+    for source in (path, image_path, css_path, js_path):
+        source.unlink()
     repo.commit_assistant_message(
         lease.guard,
         cut=final_cut,
@@ -388,10 +401,10 @@ def test_freeze_duplicate_paths_failures_and_edits(tmp_path, monkeypatch):
 def test_html_source_limits_are_independent_of_image_allowance(tmp_path):
     from pulsara_agent.tools.builtins.filesystem import (
         ViewImageTool,
-        LocalImageReadCandidate,
     )
     from pulsara_agent.ports.tool_execution import ToolCall
     from pulsara_agent.conversation_kernel.tool_runtime import _read_html_candidate
+    from pulsara_agent.conversation_kernel.html_resources import LocalHtmlReadCandidate
 
     path = tmp_path / "chart.html"
     path.write_text("<h1>" + "x" * 10000 + "</h1>")
@@ -402,5 +415,5 @@ def test_html_source_limits_are_independent_of_image_allowance(tmp_path):
         100,
         deadline_monotonic=monotonic() + 10,
     )
-    assert isinstance(candidate, LocalImageReadCandidate)
+    assert isinstance(candidate, LocalHtmlReadCandidate)
     assert len(candidate.payload) > 100

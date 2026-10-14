@@ -89,6 +89,10 @@ class WorkspaceTool:
         return resolved
 
     def _resolve_read_path(self, raw_path: str | None) -> Path:
+        return self._read_access_path(raw_path).resolve()
+
+    def _read_access_path(self, raw_path: str | None) -> Path:
+        """Expand a tool path without losing its pre-symlink resource base."""
         if not raw_path or not raw_path.strip():
             raise ValueError("path is required")
         raw = raw_path.strip()
@@ -104,7 +108,7 @@ class WorkspaceTool:
             if base is None:  # pragma: no cover - closed resolution invariant
                 raise RuntimeError("Pulsara home binding has no path")
             suffix = raw[len(_PULSARA_HOME_READ_PREFIX) :].lstrip("/")
-            return (base / suffix).resolve()
+            return base / suffix
         if raw == "~" or raw.startswith("~/"):
             resolution = self.user_home_resolution
             if resolution is None:  # pragma: no cover - frozen in post-init
@@ -114,15 +118,15 @@ class WorkspaceTool:
             if resolution.path is None:  # pragma: no cover - closed invariant
                 raise RuntimeError("user home binding has no path")
             suffix = raw.removeprefix("~").lstrip("/")
-            return (resolution.path / suffix).resolve()
+            return resolution.path / suffix
         if raw.startswith("~"):
-            return Path(raw).expanduser().resolve()
+            return Path(raw).expanduser().absolute()
         path = Path(raw)
         if path.is_absolute():
-            return path.expanduser().resolve()
+            return path.expanduser()
         # Read-only tools accept the same host-local target regardless of whether
         # callers spell it as an absolute path or relative to the workspace.
-        return (self.workspace_root / path).resolve()
+        return self.workspace_root / path
 
     def _result(
         self,

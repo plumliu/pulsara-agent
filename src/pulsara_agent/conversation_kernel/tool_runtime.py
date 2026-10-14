@@ -121,6 +121,10 @@ from pulsara_agent.tools.builtins.filesystem import (
     WriteFileTool,
     parse_view_image_source,
 )
+from pulsara_agent.conversation_kernel.html_resources import (
+    LocalHtmlReadCandidate,
+    freeze_html_resources,
+)
 from pulsara_agent.conversation_kernel.visualization import (
     FrozenVisualizationOccurrence, materialize_visualizations, read_visualization_file, validate_html_path,
 )
@@ -833,7 +837,7 @@ class DirectKernelToolPort:
     async def prepare_visualizations(self, body: str, *, io: KernelSessionIO,
                                      workspace_id: str, deadline_monotonic: float) -> tuple[FrozenVisualizationOccurrence, ...]:
         return await materialize_visualizations(
-            body, self._tools["view_image"]._resolve_read_path, io=io,
+            body, self._tools["view_image"]._read_access_path, io=io,
             validator=self._image_validator, image_reader=self._image_reference_read_port,
             session_id=self._session_id, workspace_id=workspace_id,
             deadline_monotonic=deadline_monotonic,
@@ -3518,14 +3522,25 @@ class DirectKernelToolPort:
                     ),
                 )
             if source.kind is ViewImageSourceKind.PATH:
-                if not isinstance(candidate, LocalImageReadCandidate):
+                if not isinstance(candidate, LocalHtmlReadCandidate if html_source else LocalImageReadCandidate):
                     raise TypeError(
                         "view_image path read returned an invalid candidate"
                     )
                 if html_source:
                     try:
-                        png = await self._visualization_screenshots.render(candidate.payload, deadline_monotonic=deadline)
-                    except VisualizationScreenshotError as exc:
+                        html = await freeze_html_resources(
+                            candidate.payload, candidate.access_path,
+                            io=self._physical_io, validator=self._image_validator,
+                            deadline_monotonic=deadline,
+                        )
+                        png = await self._visualization_screenshots.render(html, deadline_monotonic=deadline)
+                    except TimeoutError:
+                        return KernelToolResult(
+                            state="SYSTEM_ERROR", content=b'{"error":"HTML_PREPARATION_DEADLINE_EXPIRED"}',
+                            physical_timing=PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value,
+                            effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
+                        )
+                    except (VisualizationScreenshotError, ValueError, OSError) as exc:
                         return KernelToolResult(
                             state="APPLICATION_ERROR", content=json.dumps({"error": str(exc)}).encode(),
                             physical_timing=(PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value if monotonic() >= deadline else physical.timing.value),
@@ -3535,7 +3550,7 @@ class DirectKernelToolPort:
                         return KernelToolResult(state="APPLICATION_ERROR", content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',
                             physical_timing=(PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value if monotonic() >= deadline else physical.timing.value),
                             effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin))
-                    candidate = LocalImageReadCandidate(png, candidate.resolved_path, candidate.requested_path)
+                    candidate = LocalImageReadCandidate(png, candidate.access_path, candidate.requested_path)
                 assert self._image_validator is not None
                 try:
                     image = await self._image_validator.freeze_local_image(
@@ -4252,17 +4267,17 @@ def _execute_tool_call(
     return tool.execute(call)
 
 
-def _read_html_candidate(tool: ViewImageTool, call: ToolCall, maximum_bytes: int, *, deadline_monotonic: float) -> LocalImageReadCandidate | ToolExecutionResult:
+def _read_html_candidate(tool: ViewImageTool, call: ToolCall, maximum_bytes: int, *, deadline_monotonic: float) -> LocalHtmlReadCandidate | ToolExecutionResult:
     # HTML is bounded by MAXIMUM_BLOB_BYTES in the reader; maximum_bytes is
     # the separate PNG budget and must not constrain source text.
     source = parse_view_image_source(dict(call.arguments))
     try:
         validate_html_path(source.value)
-        path = tool._resolve_read_path(source.value)
-        body = read_visualization_file(path)
+        path = tool._read_access_path(source.value)
+        body = read_visualization_file(path.resolve())
         if body is None:
             raise ValueError("HTML_NOT_FOUND")
-        return LocalImageReadCandidate(body, path, source.value)
+        return LocalHtmlReadCandidate(body, path, source.value)
     except (ValueError, OSError) as exc:
         return tool._error(call, str(exc) if isinstance(exc, ValueError) else "HTML_READ_FAILED", source.value)
 

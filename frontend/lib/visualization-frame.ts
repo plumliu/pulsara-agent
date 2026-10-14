@@ -18,6 +18,7 @@ export const visualizationFrameMeasurementScript = `<script>
   let interactionPending = false;
   let hadAutomaticCrop = false;
   let automaticPage = false;
+  let measuredViewport = null;
   let observedRoot = null;
   const resize = new ResizeObserver(schedule);
   const observeRoot = (root) => {
@@ -29,14 +30,25 @@ export const visualizationFrameMeasurementScript = `<script>
   const report = () => {
     pending = false;
     const viewport = {width: innerWidth, height: innerHeight};
+    // Overflow protection belongs to the viewport that produced it. A retained
+    // iframe must reconsider cropping after zoom or responsive layout changes.
+    if (!measuredViewport || measuredViewport.width !== viewport.width
+      || measuredViewport.height !== viewport.height) {
+      automaticPage = false;
+      hadAutomaticCrop = false;
+      interactionPending = false;
+      measuredViewport = viewport;
+    }
     const explicit = document.querySelector('[data-pulsara-visualization-root]');
-    const candidate = (${visualizationRoot.toString()})();
+    // Live layout follows actual bounds, not animation presence. Color and
+    // contained hover effects must not expand the host's display window.
+    const candidate = (${visualizationRoot.toString()})(true);
     const box = candidate?.getBoundingClientRect();
     const fits = box && box.width >= 1 && box.height >= 1 && box.x >= 0 && box.y >= 0
       && box.right <= viewport.width && box.bottom <= viewport.height;
-    if (!explicit) {
-      if (document.getAnimations().some(animation => animation.pending || animation.playState === 'running')
-          || (interactionPending && hadAutomaticCrop && !fits)) automaticPage = true;
+    // A hidden gallery page has no visible candidate; that is not overflow.
+    if (!explicit && document.documentElement.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) {
+      if (interactionPending && hadAutomaticCrop && !fits) automaticPage = true;
       if (fits) hadAutomaticCrop = true;
     }
     interactionPending = false;

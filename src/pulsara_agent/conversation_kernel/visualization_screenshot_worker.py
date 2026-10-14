@@ -6,17 +6,10 @@ import sys
 from pathlib import Path
 from io import BytesIO
 from math import isfinite
-import re
 
 from playwright.sync_api import sync_playwright
 
 
-_CSP = (
-    "default-src 'none'; script-src 'unsafe-inline'; "
-    "style-src 'unsafe-inline'; img-src data:; font-src data:; "
-    "connect-src 'none'; worker-src 'none'; frame-src 'none'; "
-    "media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
-)
 _VIEWPORT_WIDTH = 1200
 _VIEWPORT_HEIGHT = 800
 
@@ -38,11 +31,19 @@ def _usable_root_box(box: dict[str, float] | None) -> bool:
 
 def main() -> None:
     html = sys.stdin.buffer.read().decode("utf-8")
-    # Keep standards mode while placing the restrictive CSP before author markup.
-    html = re.sub(r"^\s*<!doctype[^>]*>", "", html, count=1, flags=re.IGNORECASE)
-    bootstrap = Path(__file__).with_name('visualization_environment.js').read_text().removeprefix('export default ')
-    environment = '<script>(' + bootstrap + ')(null)</script>'
-    html = f'<!doctype html><meta http-equiv="Content-Security-Policy" content="{_CSP}">' + environment + html
+    bootstrap = (
+        Path(__file__)
+        .with_name("visualization_environment.js")
+        .read_text()
+        .removeprefix("export default ")
+    )
+    environment = "<script>(" + bootstrap + ")(null)</script>"
+    shell = (
+        Path(__file__)
+        .with_name("visualization_shell.js")
+        .read_text()
+        .replace("export default ", "", 1)
+    )
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
@@ -57,19 +58,31 @@ def main() -> None:
             context.route("**/*", lambda route: route.abort())
             page = context.new_page()
             page.set_default_timeout(10_000)
-            page.set_content(html, wait_until="domcontentloaded", timeout=10_000)
-            page.evaluate(
+            document = page.evaluate(
+                "args => {" + shell + "; return visualizationShell(args); }",
+                {"html": html, "bootstrap": environment},
+            )
+            page.set_content(document, wait_until="load", timeout=10_000)
+            frame = page.locator("#content").element_handle().content_frame()
+            if frame is None or frame.url != "about:srcdoc":
+                raise RuntimeError("HTML preview document is unavailable")
+            frame.wait_for_load_state("load", timeout=10_000)
+            frame.evaluate(
                 "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
             )
             selector = Path(__file__).with_name("visualization_root.js").read_text()
             # The shared selector includes comments before the export.
             selector = selector.replace("export default ", "", 1)
-            root_handle = page.evaluate_handle("() => {" + selector + "; return visualizationRoot(); }")
+            root_handle = frame.evaluate_handle(
+                "() => {" + selector + "; return visualizationRoot(); }"
+            )
             root = root_handle.as_element()
             if root is not None and _usable_root_box(root.bounding_box()):
                 screenshot = root.screenshot(type="png", timeout=10_000)
             else:
-                screenshot = page.screenshot(type="png", full_page=False, timeout=10_000)
+                screenshot = page.screenshot(
+                    type="png", full_page=False, timeout=10_000
+                )
             root_handle.dispose()
             if "--thumbnail" in sys.argv:
                 from PIL import Image

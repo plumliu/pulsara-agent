@@ -4,7 +4,7 @@ import { visualizationFrameMeasurementScript, visualizationLayoutMessageType } f
 
 import { environmentBootstrap, environmentMessageType, type VisualizationEnvironment } from '../lib/visualization-environment';
 
-const isolatedPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; worker-src 'none'; frame-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+import visualizationShell from '../../src/pulsara_agent/conversation_kernel/visualization_shell.js';
 const scriptValue = (value: string) => JSON.stringify(value).replace(/</g, '\\u003c');
 
 type HtmlPreviewSource = { html: string; measure?: boolean; allowTextSelection?: boolean; environment?: VisualizationEnvironment } | { url: string };
@@ -31,10 +31,9 @@ export function htmlPreviewShell(source: HtmlPreviewSource): string {
     throw new Error('预览地址不属于当前本地文件。');
   }
   const prefix = url ? `${url.origin}${url.pathname.split('/resources/')[0]}/resources/` : undefined;
-  const policy = prefix ? isolatedPolicy.replace("frame-src 'none'", `frame-src ${prefix}`) : isolatedPolicy;
-  const inner = local ? source.url : `<!doctype html><meta http-equiv="Content-Security-Policy" content="${isolatedPolicy}">${source.environment ? environmentBootstrap(source.environment) : ''}${source.allowTextSelection === false ? nonselectableContent : ''}${source.html.replace(/^\s*<!doctype[^>]*>/i, '')}${source.measure ? visualizationFrameMeasurementScript : ''}`;
-  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}"><style>html,body,iframe{margin:0;width:100%;height:100%;border:0;display:block;overflow:hidden}</style><iframe id="content" sandbox="allow-scripts" referrerpolicy="no-referrer" title="预览内容"></iframe><script>
-const frame=document.getElementById('content');
+  const html = local ? '' : `${source.html}${source.measure ? visualizationFrameMeasurementScript : ''}`;
+  const bootstrap = local ? '' : `${source.environment ? environmentBootstrap(source.environment) : ''}${source.allowTextSelection === false ? nonselectableContent : ''}`;
+  const setup = `
 const report=type=>parent.postMessage({type},'*');
 let environment=${scriptValue(!local && source.environment ? JSON.stringify(source.environment) : 'null')};
 environment=JSON.parse(environment);
@@ -60,8 +59,8 @@ addEventListener('message',event=>{
   }
 });
 frame.addEventListener('load',()=>{sendEnvironment();report('pulsara-preview-ready');});
-frame.${local ? 'src' : 'srcdoc'}=${scriptValue(inner)};
-</script>`;
+`;
+  return visualizationShell({ html, bootstrap, setup, sourceUrl: local ? source.url : undefined, resourcePrefix: prefix });
 }
 
 export function SandboxedHtmlPreview({ source, title, frameRef, style, onStatus }: {

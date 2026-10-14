@@ -149,7 +149,11 @@ def validate_html_path(value: str) -> None:
 
 
 def read_visualization_file(path: Path) -> bytes | None:
-    """Return None only for a reliable not-found; every other failure is typed."""
+    return read_visualization_text(path, kind="HTML", allow_empty=False)
+
+
+def read_visualization_text(path: Path, *, kind: str, allow_empty: bool) -> bytes | None:
+    """Bounded UTF-8 sources; None means only a reliable not-found."""
     descriptor: int | None = None
     try:
         descriptor = os.open(
@@ -158,9 +162,9 @@ def read_visualization_file(path: Path) -> bytes | None:
         )
         facts = os.fstat(descriptor)
         if not stat.S_ISREG(facts.st_mode):
-            raise ValueError("HTML_NOT_REGULAR")
+            raise ValueError(f"{kind}_NOT_REGULAR")
         if facts.st_size > MAXIMUM_BLOB_BYTES:
-            raise ValueError("HTML_TOO_LARGE")
+            raise ValueError(f"{kind}_TOO_LARGE")
         remaining = MAXIMUM_BLOB_BYTES + 1
         chunks: list[bytes] = []
         while remaining:
@@ -171,13 +175,13 @@ def read_visualization_file(path: Path) -> bytes | None:
             remaining -= len(chunk)
         body = b"".join(chunks)
         if len(body) > MAXIMUM_BLOB_BYTES:
-            raise ValueError("HTML_TOO_LARGE")
-        if not body:
-            raise ValueError("HTML_EMPTY")
+            raise ValueError(f"{kind}_TOO_LARGE")
+        if not body and not allow_empty:
+            raise ValueError(f"{kind}_EMPTY")
         try:
             body.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ValueError("HTML_NOT_UTF8") from exc
+            raise ValueError(f"{kind}_NOT_UTF8") from exc
         return body
     except FileNotFoundError:
         return None
@@ -209,6 +213,7 @@ async def materialize_visualizations(
         PromptImageValidationError,
     )
     from pulsara_agent.llm.input import FrozenPromptContent
+    from pulsara_agent.conversation_kernel.html_resources import freeze_html_resources
 
     results = []
     cache = {}
@@ -263,6 +268,10 @@ async def materialize_visualizations(
                     deadline_monotonic=deadline_monotonic,
                 )
                 if html_source:
+                    payload = await freeze_html_resources(
+                        payload, path, io=io, validator=validator,
+                        deadline_monotonic=deadline_monotonic,
+                    )
                     item = FrozenVisualizationOccurrence(
                         name, VisualizationOccurrenceState.READY, html=payload
                     )

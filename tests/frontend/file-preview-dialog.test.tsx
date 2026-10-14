@@ -78,6 +78,9 @@ it('shares a restricted HTML shell without letting content break into its truste
   expect(parsed.querySelectorAll('script')).toHaveLength(1);
   expect(parsed.querySelector('iframe')?.getAttribute('sandbox')).toBe('allow-scripts');
   expect(parsed.querySelector('meta')?.getAttribute('content')).toContain("frame-src 'none'");
+  expect(parsed.querySelector('meta')?.getAttribute('content')).toContain("script-src 'unsafe-inline' data:");
+  const local = new DOMParser().parseFromString(htmlPreviewShell({ url: '/api/file-previews/test/resources/index.html' }), 'text/html');
+  expect(local.querySelector('meta')?.getAttribute('content')).not.toContain("script-src 'unsafe-inline' data:");
   expect(() => htmlPreviewShell({ url: 'https://evil.example/a' })).toThrow();
 });
 

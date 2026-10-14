@@ -202,6 +202,7 @@ def search_session_page(
                                 "writer_generation",
                                 "latest_entry_sequence",
                                 "model_call_binding",
+                                "latest_root_turn",
                                 "workspace_kind",
                                 "workspace_root",
                                 "workspace_label",
