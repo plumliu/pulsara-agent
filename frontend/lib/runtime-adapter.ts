@@ -2,6 +2,7 @@ import { randomIdentity, isCanonicalIdentity } from './identity';
 import type { FilePreviewApi } from './file-preview';
 import { LocalMemoryApi } from './memory-api';
 import type {
+  VisualizationOccurrence,
   PluginImportOptions,
   PluginImportDiscovery,
   AgentTask,
@@ -705,6 +706,7 @@ export interface AgentTaskGroupPage {
 }
 
 export interface AgentTaskActivityRecord {
+  visualizations?: VisualizationOccurrence[];
   entryId: string;
   turnId: string;
   turnStatus?: string;
@@ -796,6 +798,7 @@ export function projectAgentTaskConversation(
         entrySequence: record.entrySequence,
         role: 'assistant',
         assistantKind: record.entryKind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
+        visualizations: record.visualizations ?? projected?.visualizations,
         time: formatTime(record.acceptedAt),
         body: projected?.body ?? (record.blocks.filter(block => block.kind === 'TEXT').sort((a, b) => a.ordinal - b.ordinal).map(block => block.text ?? '').filter(Boolean).join('\n\n') || taskAssistantBody(record.entryKind, body)),
         reasoning: projected?.reasoning?.map((block) => ({ ...block })),
@@ -929,7 +932,8 @@ export interface RuntimeConnection {
   readBackgroundProcessLog(processId: string, outputCursor?: string): Promise<BackgroundProcessLog>;
   readCanonicalEntryContent(entryId: string, digest: string, size: number): Promise<string>;
   readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string>;
-  readVisualizationHtml(entryId: string, ordinal: number, digest: string, size: number): Promise<string>;
+  readVisualizationContent(entryId: string, ordinal: number, digest: string, size: number, item?: VisualizationOccurrence, signal?: AbortSignal): Promise<string | Uint8Array>;
+  readImageReference(imageRef: string, signal?: AbortSignal): Promise<SavedImageData>;
   readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
   readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent>;
   compactContext(targetTurnId?: string): Promise<CommandReceipt>;
@@ -1037,9 +1041,9 @@ interface ProtocolEntry {
   input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string };
   scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string; trigger_source: 'TIMER' | 'RUN_ONCE' };
   visualizations?: Array<{
-    ordinal: string | number; state: string; visualization_ref?: string;
+    ordinal: string | number; state: string; content_digest?: string;
     content_size?: string | number; failure_code?: string; failure_detail?: string;
-    source_filename?: string;
+    source_filename?: string; media_type?: string; codec?: string; image_ref?: string; width?: number; height?: number;
   }>;
 }
 
@@ -1658,6 +1662,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         objective: string;
         content: { kind: 'INLINE' | 'CANONICAL_BLOB'; inline_content?: string; digest: string; size: string | number; media_type?: string; codec?: string };
         blocks?: Array<{ block_id: string; ordinal: string | number; kind: string; text?: string | null; tool_call_id?: string | null; tool_name?: string | null; attempt_id?: string | null }>;
+        visualizations?: ProtocolEntry["visualizations"];
         tool_results?: Array<{ attempt_id?: string | null; assistant_entry_id: string; tool_call_id: string; result_entry_id: string; result_state: string }>;
       }>;
       inherited_context?: { source_label: string; materials: Array<{ label: string; body: string }> } | null;
@@ -1677,6 +1682,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         turnStatus: activity.turn_status,
         entrySequence: numeric(activity.entry_sequence),
         entryKind: activity.entry_kind,
+        visualizations: projectVisualizations(activity.visualizations),
         inherited: activity.inherited,
         sourceTaskLabel: activity.source_task_label,
         acceptedAt: activity.accepted_at,
@@ -2184,21 +2190,32 @@ abstract class CanonicalHistoryReader {
     return result.image;
   }
 
-  async readVisualizationHtml(
-    entryId: string, ordinal: number, digest: string, size: number,
-  ): Promise<string> {
+  async readVisualizationContent(
+    entryId: string, ordinal: number, digest: string, size: number, item?: VisualizationOccurrence, signal?: AbortSignal,
+  ): Promise<string | Uint8Array> {
     if (!entryId || !Number.isSafeInteger(ordinal) || ordinal < 0
-      || !/^sha256:[0-9a-f]{64}$/.test(digest)
-      || !Number.isSafeInteger(size) || size < 1) {
-      throw new RuntimeApiError(
-        'VISUALIZATION_REFERENCE_INVALID', '可视化内容缺少精确身份。', false,
-      );
+      || !/^sha256:[0-9a-f]{64}$/.test(digest) || !Number.isSafeInteger(size) || size < 1) {
+      throw new RuntimeApiError('VISUALIZATION_REFERENCE_INVALID', '可视化内容缺少精确身份。', false);
     }
+    const image = Boolean(item?.imageRef);
+    const expected: ContentMedia = image
+      ? { media_type: item?.mediaType, codec: 'binary', image_ref: item?.imageRef, width: item?.width, height: item?.height }
+      : { media_type: 'text/html', codec: 'utf-8' };
     const bytes = await this.readExactContentBytes(
-      { entry_id: entryId, visualization_ordinal: ordinal },
-      digest, size, '可视化内容暂时无法读取。', true,
+      { entry_id: entryId, visualization_ordinal: ordinal }, digest, size,
+      '可视化内容暂时无法读取。', !image, signal, expected,
     );
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return image ? bytes : new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  }
+
+  async readImageReference(imageRef: string, signal?: AbortSignal): Promise<SavedImageData> {
+    if (!isCanonicalIdentity(imageRef, 'image')) throw new Error('图片引用无效。');
+    let metadata: ContentMedia | undefined;
+    const bytes = await this.readExactContentBytes(
+      { image_ref: imageRef }, undefined, undefined, '图片暂时无法读取。', false, signal,
+      { image_ref: imageRef }, value => { metadata = value; },
+    );
+    return { bytes, mediaType: metadata!.media_type!, width: metadata!.width!, height: metadata!.height! };
   }
 
   async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
@@ -2367,21 +2384,25 @@ abstract class CanonicalHistoryReader {
     target: (
       | { entry_id: string; block_id?: string }
       | { queue_item_id: string }
+      | { image_ref: string }
     ) & { image_ref_ordinal?: number; visualization_ordinal?: number },
-    expectedDigest: string,
-    expectedSize: number,
+    expectedDigest: string | undefined,
+    expectedSize: number | undefined,
     publicMessage: string,
     requireUtf8: boolean,
     signal?: AbortSignal,
+    expectedMedia?: ContentMedia,
+    onMetadata?: (value: ContentMedia) => void,
   ): Promise<Uint8Array> {
     const chunks: Uint8Array[] = [];
     let offset = 0;
+    let frozenMedia: ContentMedia | undefined;
     while (true) {
       signal?.throwIfAborted();
       const frame = await this.post<{
         content?: {
           digest?: string; complete_size?: string | number; offset_bytes?: string | number;
-          content?: string; complete?: boolean;
+          content?: string; complete?: boolean; media_type?: string; codec?: string; image_ref?: string; width?: number; height?: number;
         };
         error?: ProtocolError;
       }>('read-content', {
@@ -2392,6 +2413,27 @@ abstract class CanonicalHistoryReader {
       signal?.throwIfAborted();
       assertProtocolFrame(frame);
       const chunk = frame.content;
+      if (chunk && offset === 0) {
+        expectedDigest ??= chunk.digest;
+        expectedSize ??= numeric(chunk.complete_size);
+      }
+      if (!expectedDigest || !/^sha256:[0-9a-f]{64}$/.test(expectedDigest) || !Number.isSafeInteger(expectedSize) || expectedSize! < 0) {
+        throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+      }
+      if (expectedMedia && chunk) {
+        const media: ContentMedia = { media_type: chunk.media_type, codec: chunk.codec,
+          image_ref: chunk.image_ref, width: chunk.width === undefined ? undefined : numeric(chunk.width), height: chunk.height === undefined ? undefined : numeric(chunk.height) };
+        // Match MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES: existing per-read physical image bound.
+        const image = Boolean(expectedMedia.image_ref);
+        if ((image && (!isCanonicalIdentity(media.image_ref, 'image') || !['image/png', 'image/jpeg', 'image/webp'].includes(media.media_type ?? '') || media.codec !== 'binary' || !Number.isSafeInteger(media.width) || media.width! < 1 || !Number.isSafeInteger(media.height) || media.height! < 1 || expectedSize! < 1 || expectedSize! > (16 << 20)))
+          || (!image && (media.image_ref !== undefined || media.width !== undefined || media.height !== undefined))
+          || Object.entries(expectedMedia).some(([key, value]) => value !== undefined && media[key as keyof ContentMedia] !== value)
+          || (frozenMedia && Object.keys(media).some(key => media[key as keyof ContentMedia] !== frozenMedia![key as keyof ContentMedia]))) {
+          throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+        }
+        frozenMedia = media;
+        onMetadata?.(media);
+      }
       if (
         !chunk || chunk.digest !== expectedDigest
         || numeric(chunk.complete_size) !== expectedSize
@@ -2403,14 +2445,14 @@ abstract class CanonicalHistoryReader {
       chunks.push(bytes);
       offset += bytes.length;
       if (chunk.complete) break;
-      if (bytes.length === 0 || offset >= expectedSize) {
+      if (bytes.length === 0 || offset >= expectedSize!) {
         throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
       }
     }
     if (offset !== expectedSize) {
       throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
     }
-    const complete = new Uint8Array(expectedSize);
+    const complete = new Uint8Array(expectedSize!);
     let cursor = 0;
     for (const chunk of chunks) {
       complete.set(chunk, cursor);
@@ -4300,15 +4342,7 @@ function projectEntries(
         reasoning: reasoning.length ? reasoning : undefined,
         status: 'completed',
         traces: traces.length ? traces : undefined,
-        visualizations: (entry.visualizations ?? []).map((item) => ({
-          ordinal: numeric(item.ordinal),
-          sourceFilename: item.source_filename || undefined,
-          state: item.state === 'READY' ? 'READY' as const : 'FAILED' as const,
-          visualizationRef: item.visualization_ref || undefined,
-          contentSize: item.state === 'READY' ? numeric(item.content_size) : undefined,
-          failureCode: item.failure_code || undefined,
-          failureDetail: item.failure_detail || undefined,
-        })),
+        visualizations: projectVisualizations(entry.visualizations),
       });
       continue;
     }
@@ -4480,6 +4514,7 @@ function projectSubagentRuns(
         time: formatTime(entry.accepted_at_utc),
         body,
         reasoning: reasoning.length ? reasoning : undefined,
+        visualizations: projectVisualizations(entry.visualizations),
         status: 'completed',
         traces: traces.length ? traces : undefined,
       });
@@ -5413,3 +5448,17 @@ function isTerminalTaskStatus(status: AgentTask['status'] | SubagentRun['status'
     || status === 'blocked'
     || status === 'ended';
 }
+
+function projectVisualizations(items: ProtocolEntry['visualizations']): VisualizationOccurrence[] {
+  return (items ?? []).map(item => ({
+    ordinal: numeric(item.ordinal), state: item.state === 'READY' ? 'READY' : 'FAILED',
+    sourceFilename: item.source_filename || undefined, contentDigest: item.content_digest || undefined,
+    contentSize: item.state === 'READY' ? numeric(item.content_size) : undefined,
+    mediaType: item.media_type, codec: item.codec, imageRef: item.image_ref,
+    width: item.width === undefined ? undefined : numeric(item.width), height: item.height === undefined ? undefined : numeric(item.height),
+    failureCode: item.failure_code, failureDetail: item.failure_detail,
+  }));
+}
+
+export interface SavedImageData { bytes: Uint8Array; mediaType: string; width: number; height: number }
+interface ContentMedia { media_type?: string; codec?: string; image_ref?: string; width?: number; height?: number }

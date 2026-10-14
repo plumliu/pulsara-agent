@@ -6,6 +6,7 @@ import {
   LocalHttpRuntimeAdapter,
   CanonicalHistoryView,
   mergeRuntimeTaskInventory,
+  projectAgentTaskConversation,
   type RuntimeProjection,
 } from '../../frontend/lib/runtime-adapter';
 import type { AgentTask } from '../../frontend/lib/pulsara-types';
@@ -2433,6 +2434,7 @@ describe('source text fidelity hard cut', () => {
   });
 
   it('preserves task inventory, dependencies, progress, TODOs, results, and child activities', async () => {
+    const visualizations = [{ordinal:0,state:'READY',content_digest:'sha256:'+'a'.repeat(64),content_size:16,media_type:'image/png',codec:'binary',image_ref:'image:'+'a'.repeat(26),width:7,height:5}];
     const task = {
       id: 'task-1', parent_turn_id: 'turn-root', batch_id: 'batch-1', task_key: 'source-task',
       label: SOURCE_FIDELITY_TEXT, profile: 'research_worker', display_role: SOURCE_FIDELITY_TEXT,
@@ -2460,7 +2462,7 @@ describe('source text fidelity hard cut', () => {
       entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
       scope_subagent_task_id: 'task-1', content: inlineContent(SOURCE_FIDELITY_TEXT),
     }, {
-      entry_id: 'child-answer', turn_id: 'turn-child', entry_sequence: '3',
+      visualizations, entry_id: 'child-answer', turn_id: 'turn-child', entry_sequence: '3',
       entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
       scope_subagent_task_id: 'task-1',
       blocks: [{ block_id: 'child-text', block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT) }],
@@ -2494,7 +2496,7 @@ describe('source text fidelity hard cut', () => {
     );
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
       String(input).includes('/activities?')
-        ? { activities: [{ entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2', entry_kind: 'INTER_AGENT_MESSAGE', accepted_at: '2026-09-01T00:00:00Z', objective: SOURCE_FIDELITY_TEXT, content: inlineContent(SOURCE_FIDELITY_TEXT) }] }
+        ? { activities: [{ entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2', entry_kind: 'INTER_AGENT_MESSAGE', accepted_at: '2026-09-01T00:00:00Z', objective: SOURCE_FIDELITY_TEXT, content: inlineContent(SOURCE_FIDELITY_TEXT) }, {...childEntries[1], content:inlineContent(SOURCE_FIDELITY_TEXT), accepted_at:'2026-09-01T00:00:00Z', inherited:true, turn_status:'COMPLETED'}] }
         : String(input).includes('/tasks?')
           ? { session_id: 'session-1', tasks: [task], total_count: 1, remaining_count: 0 }
           : connect,
@@ -2519,6 +2521,9 @@ describe('source text fidelity hard cut', () => {
       terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
     });
     expect(activityPage.activities[0]).toMatchObject({ body: SOURCE_FIDELITY_TEXT, entryKind: 'INTER_AGENT_MESSAGE' });
+    expect(run?.activities.find(item => item.id === 'child-answer')?.visualizations).toMatchObject([{imageRef:visualizations[0].image_ref}]);
+    const cold = projectAgentTaskConversation(activityPage.activities);
+    expect(cold.find(item => item.id === 'child-answer')).toMatchObject({visualizations:[{imageRef:visualizations[0].image_ref,width:7,height:5}]});
     expect(projection.todo?.items).toEqual([{
       id: 'todo-root:0', label: SOURCE_FIDELITY_TEXT, status: 'in-progress',
     }]);
@@ -2969,4 +2974,24 @@ it('reads ROOT compaction progress on connect and every observation without inve
     expect(projection.contextCompaction).toBeUndefined();
   }
   expect(fetch).toHaveBeenCalledTimes(4);
+});
+
+it('reads a cold image reference from first-chunk metadata and rejects changed facts', async () => {
+  vi.stubGlobal('crypto',webcrypto);
+  const imageRef='image:'+'a'.repeat(26);
+  const bytes=Buffer.from('canonical image bytes');
+  const digest='sha256:'+createHash('sha256').update(bytes).digest('hex');
+  const metadata={digest,complete_size:bytes.length,media_type:'image/png',codec:'binary',image_ref:imageRef,width:7,height:5};
+  const frames=[
+    {content:{...metadata,offset_bytes:0,content:bytes.subarray(0,5).toString('base64'),complete:false}},
+    {content:{...metadata,offset_bytes:5,content:bytes.subarray(5).toString('base64'),complete:true}},
+  ];
+  const fetcher=vi.fn(async()=>new Response(JSON.stringify(frames.shift()),{status:200}));vi.stubGlobal('fetch',fetcher);
+  const view=new CanonicalHistoryView('cold',{path:'/missing',outcome:'MISSING',reason:null},{session_id:'cold',event_sequence_cut:'0',entries:[],control:{}});
+  const result=await view.readImageReference(imageRef);
+  expect([...result.bytes]).toEqual([...bytes]);expect(result.mediaType).toBe('image/png');expect(result.width).toBe(7);
+  expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({image_ref:imageRef,offset_bytes:0,limit_bytes:1<<20});
+  frames.push({content:{...metadata,offset_bytes:0,content:bytes.subarray(0,5).toString('base64'),complete:false}},
+    {content:{...metadata,width:8,offset_bytes:5,content:bytes.subarray(5).toString('base64'),complete:true}});
+  await expect(view.readImageReference(imageRef)).rejects.toThrow('图片暂时无法读取');
 });

@@ -20,6 +20,8 @@ import { MermaidBlock } from './mermaid-block';
 import { DiagramBlock } from './diagram-block';
 import { CodeBlock } from './code-block';
 import { renderSvg, startsWithSvg } from '../lib/svg-renderer';
+import { isCanonicalIdentity } from '../lib/identity';
+import { SavedImage } from './saved-image';
 import { FileLinkContext } from './file-link-context';
 import { classifyFileLink, markdownImageUrl } from '../lib/file-preview';
 
@@ -35,6 +37,7 @@ interface MarkdownProps {
   streaming?: boolean;
   annotationSource?: boolean;
   visualization?: InlineVisualizationContext;
+  assistantChat?: boolean;
 }
 
 interface PointerOrigin {
@@ -246,11 +249,23 @@ function markdownUrl(url: string, key: string, node: HastElement) {
 }
 
 const MarkdownAnchorContext = createContext(false);
+const AssistantChatContext = createContext(false);
+function ImageReference({ reference, title, children }: { reference: string; title: string; children?: ReactNode }) {
+  const context = useContext(FileLinkContext);
+  const readImageReference = context?.readImageReference;
+  const read = useCallback((signal: AbortSignal) => {
+    if (!readImageReference) return Promise.reject(new Error('此内容没有可用的会话图片连接。'));
+    return readImageReference(reference, signal);
+  }, [reference, readImageReference]);
+  return <SavedImage key={context?.imageOwnerKey} read={read} title={title}>{children}</SavedImage>;
+}
 
 function MarkdownLink({ href = '', children, onNotify }: { href?: string; children?: ReactNode; onNotify: MarkdownNotify }) {
   const context = useContext(FileLinkContext);
+  const assistantChat = useContext(AssistantChatContext);
   const kind = classifyFileLink(href);
   const content = <MarkdownAnchorContext.Provider value={true}>{children}</MarkdownAnchorContext.Provider>;
+  if (assistantChat && isCanonicalIdentity(href, 'image')) return <ImageReference reference={href} title={typeof children === 'string' ? children : '图片'}>{content}</ImageReference>;
   if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer">{content}</a>;
   if (kind === 'anchor') return <a href={href}>{content}</a>;
   return <a href={kind === 'local' ? href : undefined} role="link" tabIndex={0}
@@ -266,8 +281,10 @@ function MarkdownLink({ href = '', children, onNotify }: { href?: string; childr
 function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob; alt?: string; onNotify: MarkdownNotify; selectable?: boolean }) {
   const context = useContext(FileLinkContext);
   const linked = useContext(MarkdownAnchorContext);
+  const assistantChat = useContext(AssistantChatContext);
   const [failed, setFailed] = useState<string>();
   if (typeof src !== 'string') return <span>{alt ?? '图片'}</span>;
+  if (assistantChat && isCanonicalIdentity(src, 'image')) return linked ? <span>{alt || '图片'}</span> : <ImageReference reference={src} title={alt || '图片'}><ImageIcon size={14}/>{alt || '图片'}</ImageReference>;
   const kind = classifyFileLink(src);
   const url = kind === 'external' ? src : context?.imagesUrl ? markdownImageUrl(src, context.imagesUrl) : undefined;
   const thumbnail = Boolean(url && failed !== url);
@@ -291,7 +308,7 @@ function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob
 
 const VisualizationContext = createContext<InlineVisualizationContext | undefined>(undefined);
 
-export function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false, visualization }: MarkdownProps) {
+export function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false, visualization, assistantChat = false }: MarkdownProps) {
   const normalized = useMemo(() => normalizeMathWithSource(body), [body]);
   const sourceMapping = useMemo(() => () => annotationSource ? rehypeSourceMapping(normalized) : () => {}, [normalized, annotationSource]);
   const components = useMemo<Components>(() => ({
@@ -330,10 +347,10 @@ export function MarkdownBody({ body, onNotify, streaming = false, annotationSour
     },
   }), [onNotify, streaming, annotationSource]);
   return (
-    <VisualizationContext.Provider value={visualization}>
+    <AssistantChatContext.Provider value={assistantChat}><VisualizationContext.Provider value={visualization}>
     <MarkdownCopySurface onNotify={onNotify} annotationSource={annotationSource}>
       <ReactMarkdown
-        urlTransform={markdownUrl}
+        urlTransform={(url, key, node) => assistantChat && isCanonicalIdentity(url, 'image') ? url : markdownUrl(url, key, node)}
         remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkCjkStrikethrough, remarkSvgBlocks, [remarkMath, { singleDollarTextMath: true }], remarkVisualizationMarkers]}
         rehypePlugins={[rehypeCopyableMath, sourceMapping, [rehypeKatex, { strict: false }]]}
         components={components}
@@ -341,7 +358,7 @@ export function MarkdownBody({ body, onNotify, streaming = false, annotationSour
         {normalized.text}
       </ReactMarkdown>
     </MarkdownCopySurface>
-    </VisualizationContext.Provider>
+    </VisualizationContext.Provider></AssistantChatContext.Provider>
   );
 }
 

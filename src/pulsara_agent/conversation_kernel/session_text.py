@@ -20,7 +20,7 @@ from pulsara_agent.llm.input import (
 def prompt_history_text(parts, *, image_references: bool | None):
     """Project typed parts, keeping generated image spans out of lexical fields.
 
-    None is the caller-neutral search display; bool selects same/other-session
+    None is the caller-neutral search display; bool selects same/other-workspace
     exact reading. Spans belong to this view, not to a stored authorization.
     """
     shown, segments, bounds = [], [], []
@@ -39,8 +39,8 @@ def prompt_history_text(parts, *, image_references: bool | None):
                 )
             else:
                 text = (
-                    f"[另一会话的历史图片；{part.media_type}；"
-                    "此处未包含图像内容，未授予当前会话读图权限]"
+                    f"[另一工作区的历史图片；{part.media_type}；"
+                    "此处未包含图像内容，不属于当前工作区的图片读取范围]"
                 )
         elif isinstance(part, LLMTextPart):
             text = part.text
@@ -123,3 +123,18 @@ def match_position(patterns, segments):
             return None
         positions.append(match)
     return min(positions) if positions else 0
+
+
+def visualization_history_text(connection, entry, *, image_references):
+    """Metadata-only, neutral image recovery for existing message owners."""
+    from pulsara_agent.conversation_kernel.visualization import saved_visualizations
+    if entry["entry_kind"] != "ASSISTANT_MESSAGE":
+        return ()
+    result = []
+    for item in saved_visualizations(connection, entry["session_id"], entry["id"]):
+        if "image_ref" not in item:
+            continue
+        descriptor = CanonicalPromptImageDescriptor(item["image_ref"], item["content_digest"], item["content_size"], item["media_type"], item["width"], item["height"])
+        description, _, _ = prompt_history_text((descriptor,), image_references=image_references)
+        result.append(f"已保存展示项 {item['ordinal'] + 1}：{description}")
+    return tuple(result)

@@ -223,7 +223,7 @@ class SessionContentQuery:
             cursor = _decode(_string(arguments["cursor"], "cursor"), operation)
         with self.reader._connection(deadline_monotonic) as connection:
             # Also reject queries from a deleted or out-of-domain caller.
-            self._authorized(connection, self.session_id)
+            caller = self._authorized(connection, self.session_id)
             if operation == "search_sessions":
                 payload = self._sessions(
                     connection,
@@ -255,6 +255,7 @@ class SessionContentQuery:
                     maximum,
                     tool_call_id,
                     deadline_monotonic,
+                    caller["workspace_id"],
                 )
             if not _fits(payload, tool_call_id):
                 raise _resource_error()
@@ -418,6 +419,7 @@ class SessionContentQuery:
         maximum,
         call_id,
         deadline,
+        caller_workspace_id,
     ):
         if cursor is None:
             target = _string(arguments.get("session_id", self.session_id), "session_id")
@@ -567,9 +569,10 @@ class SessionContentQuery:
                 call_id,
                 deadline,
                 tools,
+                caller_workspace_id,
             )
 
-    def _document(self, connection, entry, event_cut, deadline, include_tools):
+    def _document(self, connection, entry, event_cut, deadline, include_tools, caller_workspace_id):
         if monotonic() >= deadline:
             raise TimeoutError("session content query deadline exceeded")
         kind = entry["entry_kind"]
@@ -615,13 +618,19 @@ class SessionContentQuery:
                 ORDER BY a.block_ordinal""",
                 (entry["session_id"], entry["id"], include_tools),
             ).fetchall()
-            text, segments, bounds = _assistant_document(blocks)
+            text, segments, _ = _assistant_document(blocks)
+            bounds = ()
+            from pulsara_agent.conversation_kernel.session_text import visualization_history_text
+            for description in visualization_history_text(connection, entry, image_references=entry["workspace_id"] == caller_workspace_id):
+                start = len(text) + (1 if text else 0)
+                text += ("\n" if text else "") + description
+                bounds += ((start, len(text)),)
         elif entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
             decoded = validate_canonical_prompt_owner_metadata(
                 connection, row=entry, transcript_entry_id=entry["id"]
             )
             text, segments, bounds = prompt_history_text(
-                decoded.parts, image_references=entry["session_id"] == self.session_id
+                decoded.parts, image_references=entry["workspace_id"] == caller_workspace_id
             )
         else:
             content = entry["inline_content"]
@@ -843,6 +852,7 @@ class SessionContentQuery:
         call_id,
         deadline,
         include_tools,
+        caller_workspace_id,
     ):
         items = []
         remaining = maximum
@@ -854,10 +864,10 @@ class SessionContentQuery:
             )
         while entry is not None:
             item, text, _, bounds = self._document(
-                connection, entry, event_cut, deadline, include_tools
+                connection, entry, event_cut, deadline, include_tools, caller_workspace_id
             )
-            # Assistant bounds describe tool arguments, not generated image spans.
-            image_bounds = bounds if item["role"] != "assistant" else ()
+            # Generated image descriptions stay atomic for every message role.
+            image_bounds = bounds
             if any(a < offset < b for a, b in image_bounds):
                 raise SessionQueryError(
                     "CURSOR_INVALID", "Text cursor splits an image placeholder."

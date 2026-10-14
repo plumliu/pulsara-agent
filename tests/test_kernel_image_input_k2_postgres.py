@@ -277,7 +277,7 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
         )
 
 
-def test_known_image_reference_requires_one_committed_owner_in_the_bound_session(
+def test_known_image_reference_requires_one_committed_owner_in_the_workspace(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -305,6 +305,7 @@ def test_known_image_reference_requires_one_committed_owner_in_the_bound_session
     )
     assert reread == image
     exact_reads = 0
+    original_read = PostgresCanonicalBlobStore.read_exact_in_connection
 
     def unexpected_payload_read(*_args, **_kwargs):
         nonlocal exact_reads
@@ -334,14 +335,14 @@ def test_known_image_reference_requires_one_committed_owner_in_the_bound_session
         session_id=other_lease.guard.session_id,
         workspace_id=workspace_id,
     )
-    with pytest.raises(CanonicalImageReferenceUnavailable):
-        other_reader.read_image(
+    monkeypatch.setattr(PostgresCanonicalBlobStore, "read_exact_in_connection", staticmethod(original_read))
+    assert other_reader.read_image(
             session_id=other_lease.guard.session_id,
             workspace_id=workspace_id,
             image_ref=image.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
-        )
+    ) == image
 
     orphan = _image(_png(size=(8, 6)), workspace_id=_workspace(repository, lease))
     with repository.connection_provider.connection(

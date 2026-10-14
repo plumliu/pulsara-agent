@@ -31,7 +31,7 @@ describe('visualization occurrence layout', () => {
     vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
     const read = vi.fn(async () => '<h1>Chart</h1>');
     const visualizations = [0, 1].map(ordinal => ({
-      ordinal, state: 'READY' as const, visualizationRef: `sha256:${String(ordinal).repeat(64)}`, contentSize: 14,
+      ordinal, state: 'READY' as const, contentDigest: `sha256:${String(ordinal).repeat(64)}`, contentSize: 14,
     }));
     const view = render(<ConversationMessages canFork={true}
       messages={[{ id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
@@ -40,7 +40,7 @@ describe('visualization occurrence layout', () => {
     expect(screen.getAllByRole('region', { name: '可视化图集' })).toHaveLength(1);
     await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
     expect(read).toHaveBeenCalledOnce();
-    expect(read).toHaveBeenCalledWith('chart-answer', 0, visualizations[0].visualizationRef, 14);
+    expect(read).toHaveBeenCalledWith('chart-answer', 0, visualizations[0].contentDigest, 14, expect.objectContaining({ contentDigest: expect.any(String) }), expect.any(AbortSignal));
     const frame = view.container.querySelector('iframe');
     const gallery = screen.getByRole('region', { name: '可视化图集' });
     expect(screen.getByText('图表如下。').compareDocumentPosition(gallery) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -49,7 +49,7 @@ describe('visualization occurrence layout', () => {
     expect(screen.getByRole('button', { name: '查看可视化 2' }).getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: '查看可视化 2' }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    expect(read).toHaveBeenLastCalledWith('chart-answer', 1, visualizations[1].visualizationRef, 14);
+    expect(read).toHaveBeenLastCalledWith('chart-answer', 1, visualizations[1].contentDigest, 14, expect.objectContaining({ contentDigest: expect.any(String) }), expect.any(AbortSignal));
     expect(view.container.querySelector('[data-visualization-ordinal="0"]')?.hasAttribute('hidden')).toBe(true);
     expect(view.container.querySelector('[data-visualization-ordinal="0"]')?.hasAttribute('inert')).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '查看可视化 1' }));
@@ -62,7 +62,7 @@ describe('visualization occurrence layout', () => {
     const view = render(<ConversationMessages canFork={true}
       messages={[{ id: 'unmarked-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
         time: '13:04', body: '只有文字说明。', visualizations: [{
-          ordinal: 0, state: 'READY', visualizationRef: `sha256:${'a'.repeat(64)}`, contentSize: 14,
+          ordinal: 0, state: 'READY', contentDigest: `sha256:${'a'.repeat(64)}`, contentSize: 14,
         }] }]}
       artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
     expect(screen.getByText('只有文字说明。')).toBeTruthy();
@@ -1361,4 +1361,21 @@ describe('ROOT context compaction progress', () => {
     expect(screen.queryByRole('status', { name: '上下文正在压缩' })).toBeNull();
     expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
   });
+});
+
+
+it('binds only real worker messages to visualizations, never the repeated result summary', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('matchMedia', () => ({matches:false,addEventListener(){},removeEventListener(){}}));
+  const body = '```pulsara-visualization\nchart.html\n```';
+  const read = vi.fn(async () => '<h1>worker</h1>');
+  const view = render(<ConversationMessages messages={[{id:'parent-call',role:'assistant',status:'completed',time:'now',body:'',subagentRuns:[{
+    id:'task-1',label:'worker',role:'worker',color:'sage',status:'running',summary:'结果\n'+body,
+    activities:[{id:'worker-real-entry',kind:'assistant',status:'completed',body,visualizations:[{ordinal:0,state:'READY',contentDigest:'sha256:'+'a'.repeat(64),contentSize:15,mediaType:'text/html',codec:'utf-8'}]}],
+  }]}]} artifactOwnerKey="session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read}/>);
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  expect(read.mock.calls[0][0]).toBe('worker-real-entry');
+  expect(view.container.querySelectorAll('.inline-visualization')).toHaveLength(1);
+  expect(view.container.querySelector('.subagent-summary .inline-visualization')).toBeNull();
 });

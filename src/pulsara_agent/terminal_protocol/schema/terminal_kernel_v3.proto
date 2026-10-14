@@ -197,11 +197,16 @@ message CanonicalInputSource {
 message CanonicalVisualization {
   uint32 ordinal = 1;
   string state = 2;
-  string visualization_ref = 3;
+  string content_digest = 3;
   uint64 content_size = 4;
   string failure_code = 5;
   string failure_detail = 6;
   string source_filename = 7;
+  string media_type = 8;
+  string codec = 9;
+  optional string image_ref = 10;
+  optional uint32 width = 11;
+  optional uint32 height = 12;
 }
 
 message ScheduledInputProvenance {
@@ -1084,6 +1089,7 @@ message ReadContentRequest {
   oneof target {
     string entry_id = 4;
     string queue_item_id = 8;
+    string image_ref = 11;
   }
   string block_id = 5;
   uint64 offset_bytes = 6;
@@ -1194,6 +1200,11 @@ message CanonicalContentChunk {
   uint64 offset_bytes = 4;
   bytes content = 5;
   bool complete = 6;
+  string media_type = 7;
+  string codec = 8;
+  optional string image_ref = 9;
+  optional uint32 width = 10;
+  optional uint32 height = 11;
 }
 
 message HeartbeatRequest {

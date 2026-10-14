@@ -883,3 +883,12 @@
   .inline-visualization dialog:not(.is-maximized) .inline-visualization__strip { flex: none; flex-direction: column; width: 72px; max-height: min(60dvh, 400px); overflow-x: hidden; overflow-y: auto; }
   .inline-visualization dialog:not(.is-maximized) .inline-visualization__strip > button { flex: 0 0 50px; width: 68px; }
 }
+
+/* Canonical saved images use their own pixels; transparency stays legible. */
+.saved-image { display: block; width: 100%; }
+.saved-image__open { display: block; width: 100%; border: 0; padding: 0; cursor: zoom-in;
+  background-color: var(--background, #fff);
+  background-image: conic-gradient(#8882 25%, transparent 0 50%, #8882 0 75%, transparent 0);
+  background-size: 20px 20px; }
+.saved-image__open img { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; }
+.saved-image-reference { display: inline; }

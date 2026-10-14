@@ -2425,25 +2425,28 @@ class _ConversationOperations:
             for ordinal, item in enumerate(visualizations):
                 blob_id = None
                 if item.state is VisualizationOccurrenceState.READY:
-                    assert item.html is not None
+                    assert item.html is not None or item.image is not None
                     blob_id = PostgresCanonicalBlobStore.publish_in_connection(
                         connection,
                         workspace_id=str(turn["workspace_id"]),
-                        content=item.html,
-                        media_type=VISUALIZATION_MEDIA_TYPE,
-                        codec=VISUALIZATION_CODEC,
+                        content=item.html if item.image is None else item.image.immutable_bytes,
+                        media_type=VISUALIZATION_MEDIA_TYPE if item.image is None else item.image.media_type,
+                        codec=VISUALIZATION_CODEC if item.image is None else "binary",
+                        validated_image=item.image,
                     ).blob_id
                 connection.execute(
                     """INSERT INTO pulsara_v3.assistant_visualizations (
                            session_id, workspace_id, assistant_entry_id,
                            ordinal, turn_id, source_filename,
-                           state, blob_id, failure_code, failure_detail
-                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                           state, blob_id, failure_code, failure_detail, width, height
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         guard.session_id, str(turn["workspace_id"]), entry_id,
                         ordinal, cut.turn_id, item.source_filename,
                         item.state.value, blob_id, item.failure_code,
                         item.failure_detail,
+                        None if item.image is None else item.image.width,
+                        None if item.image is None else item.image.height,
                     ),
                 )
             if provider_replay is not None:
@@ -2847,7 +2850,7 @@ class _ConversationOperations:
                 )
             visualization_rows = connection.execute(
                 """SELECT ordinal, turn_id, source_filename,
-                          state, blob_id, failure_code, failure_detail
+                          state, blob_id, failure_code, failure_detail, width, height
                    FROM pulsara_v3.assistant_visualizations
                    WHERE session_id = %s AND assistant_entry_id = %s
                    ORDER BY ordinal""",
@@ -2868,24 +2871,29 @@ class _ConversationOperations:
                     or str(visualization_row["state"]) != item.state.value
                     or visualization_row["failure_code"] != item.failure_code
                     or visualization_row["failure_detail"] != item.failure_detail
+                    or visualization_row["width"] != (None if item.image is None else item.image.width)
+                    or visualization_row["height"] != (None if item.image is None else item.image.height)
                 ):
                     raise ConversationKernelConflict(
                         "assistant visualization differs from stable candidate"
                     )
                 if item.state is VisualizationOccurrenceState.READY:
-                    assert item.html is not None
+                    assert item.html is not None or item.image is not None
                     blob_id = visualization_row["blob_id"]
+                    payload = item.html if item.image is None else item.image.immutable_bytes
+                    if item.image is not None and blob_id != item.image.image_ref:
+                        raise ConversationKernelConflict("assistant visualization image identity differs")
                     if blob_id is None or PostgresCanonicalBlobStore.read_exact_in_connection(
                         connection,
                         blob_id=str(blob_id),
-                        expected_digest="sha256:" + sha256(item.html).hexdigest(),
-                        expected_size=len(item.html),
+                        expected_digest="sha256:" + sha256(payload).hexdigest(),
+                        expected_size=len(payload),
                         expected_workspace_id=str(row["workspace_id"]),
-                        expected_media_type=VISUALIZATION_MEDIA_TYPE,
-                        expected_codec=VISUALIZATION_CODEC,
-                    ) != item.html:
+                        expected_media_type=VISUALIZATION_MEDIA_TYPE if item.image is None else item.image.media_type,
+                        expected_codec=VISUALIZATION_CODEC if item.image is None else "binary",
+                    ) != payload:
                         raise ConversationKernelConflict(
-                            "assistant visualization HTML differs"
+                            "assistant visualization content differs"
                         )
                 elif visualization_row["blob_id"] is not None:
                     raise ConversationKernelConflict(

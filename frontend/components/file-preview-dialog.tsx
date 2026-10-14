@@ -1,6 +1,7 @@
 'use client';
 import { Code2, Copy, Download, ExternalLink, FolderOpen, LoaderCircle, RotateCcw, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import type { SavedImageData } from '../lib/runtime-adapter';
 import { createPortal } from 'react-dom';
 import type { FilePreview, FilePreviewApi, FilePreviewPage } from '../lib/file-preview';
 import { FileLinkContext } from './file-link-context';
@@ -12,13 +13,13 @@ type View = { intent: Intent; file?: FilePreview; error?: string };
 const detail = (error: unknown) => error instanceof Error ? error.message : '文件暂时无法读取。';
 
 type OpenFile = (path: string, opener: HTMLElement, base?: string) => void;
-export function FilePreviewProvider({ api, children, onNotify, ownerKey }: { api?: FilePreviewApi; children: ReactNode; onNotify: MarkdownNotify; ownerKey: string }) {
+export function FilePreviewProvider({ api, children, onNotify, ownerKey, readImageReference, imageOwnerKey }: { imageOwnerKey?: string; readImageReference?: (ref: string, signal: AbortSignal) => Promise<SavedImageData>; api?: FilePreviewApi; children: ReactNode; onNotify: MarkdownNotify; ownerKey: string }) {
   const delegateRef = useRef<OpenFile | null>(null);
   const open = useCallback<OpenFile>((...args) => {
     if (delegateRef.current) delegateRef.current(...args);
     else onNotify('无法打开文件', '会话尚未连接，请连接后重新打开。', 'warning');
   }, [onNotify]);
-  return <FileLinkContext.Provider value={{ open }}>
+  return <FileLinkContext.Provider value={{ open, readImageReference, imageOwnerKey }}>
     {children}
     {api && <FilePreviewHost key={ownerKey} api={api} onNotify={onNotify} delegateRef={delegateRef} />}
   </FileLinkContext.Provider>;

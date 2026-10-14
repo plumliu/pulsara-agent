@@ -32,10 +32,6 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
-from pulsara_agent.conversation_kernel.visualization import (
-    VISUALIZATION_CODEC,
-    VISUALIZATION_MEDIA_TYPE,
-)
 from pulsara_agent.llm.provider_replay import (
     ProviderAssistantReplayCodecKind,
     ProviderVisibleReasoningBlock,
@@ -628,10 +624,13 @@ class CanonicalProtocolReader:
         block_id: str | None = None,
         image_ref_ordinal: int | None = None,
         visualization_ordinal: int | None = None,
+        image_ref: str | None = None,
     ) -> Mapping[str, object]:
         """Re-authorize an exact entry/block content edge before blob hydration."""
-        if (entry_id is None) == (queue_item_id is None):
+        if sum(value is not None for value in (entry_id, queue_item_id, image_ref)) != 1:
             raise ValueError("exactly one content target is required")
+        if image_ref is not None and any(value is not None for value in (block_id, image_ref_ordinal, visualization_ordinal)):
+            raise ValueError("image reference content target is invalid")
         if image_ref_ordinal is not None and (
             isinstance(image_ref_ordinal, bool) or image_ref_ordinal < 0
         ):
@@ -649,31 +648,34 @@ class CanonicalProtocolReader:
         ):
             raise ValueError("visualization content target is invalid")
         with self._connection(deadline_monotonic) as connection:
-            self._session(connection, session_id)
+            session = self._session(connection, session_id)
+            if image_ref is not None:
+                from pulsara_agent.conversation_kernel.prompt_storage import read_image_reference_in_connection
+                from pulsara_agent.conversation_kernel.prompt_content import MAXIMUM_PROMPT_MULTIPART_BYTES
+                image = read_image_reference_in_connection(
+                    connection, session_id=session_id, workspace_id=str(session["workspace_id"]),
+                    image_ref=image_ref, maximum_encoded_bytes=MAXIMUM_PROMPT_MULTIPART_BYTES,
+                )
+                return {"validated_image": image, "inline_content": None,
+                        "blob_id": image.image_ref, "content_digest": "sha256:" + sha256(image.immutable_bytes).hexdigest(),
+                        "content_size": len(image.immutable_bytes), "content_media_type": image.media_type,
+                        "content_codec": "binary", "image_ref": image.image_ref, "width": image.width, "height": image.height}
             if visualization_ordinal is not None:
+                from pulsara_agent.conversation_kernel.visualization import saved_visualizations
+                items = saved_visualizations(connection, session_id, entry_id)
+                if visualization_ordinal >= len(items) or items[visualization_ordinal]["state"] != "READY":
+                    raise KeyError(entry_id)
+                facts = items[visualization_ordinal]
                 row = connection.execute(
-                    """SELECT v.session_id, v.workspace_id,
-                              NULL::bytea AS inline_content, v.blob_id,
-                              b.logical_digest AS content_digest,
-                              b.logical_size AS content_size,
-                              b.media_type AS content_media_type,
-                              b.codec AS content_codec
-                       FROM pulsara_v3.assistant_visualizations AS v
-                       JOIN pulsara_v3.transcript_entries AS e
-                         ON e.session_id = v.session_id
-                        AND e.id = v.assistant_entry_id
-                        AND e.entry_kind = 'ASSISTANT_MESSAGE'
-                       JOIN pulsara_v3.blobs AS b
-                         ON b.id = v.blob_id
-                        AND b.workspace_id = v.workspace_id
-                       WHERE v.session_id = %s AND v.assistant_entry_id = %s
-                         AND v.ordinal = %s AND v.state = 'READY'
-                         AND b.media_type = %s AND b.codec = %s""",
-                    (
-                        session_id, entry_id, visualization_ordinal,
-                        VISUALIZATION_MEDIA_TYPE, VISUALIZATION_CODEC,
-                    ),
+                    """SELECT session_id, workspace_id, NULL::bytea AS inline_content, blob_id
+                       FROM pulsara_v3.assistant_visualizations
+                       WHERE session_id=%s AND assistant_entry_id=%s AND ordinal=%s""",
+                    (session_id, entry_id, visualization_ordinal),
                 ).fetchone()
+                row.update(content_digest=facts["content_digest"], content_size=facts["content_size"],
+                           content_media_type=facts["media_type"], content_codec=facts["codec"])
+                if "image_ref" in facts:
+                    row.update({key: facts[key] for key in ("image_ref", "width", "height")})
             elif queue_item_id is not None:
                 row = connection.execute(
                     """
@@ -981,40 +983,9 @@ class CanonicalProtocolReader:
             if block["block_kind"] in ("TEXT", "DATA"):
                 item.content.CopyFrom(_content_reference(block))
         if row["entry_kind"] == "ASSISTANT_MESSAGE":
-            visualizations = connection.execute(
-                """SELECT v.ordinal, v.state, v.blob_id,
-                          v.failure_code, v.failure_detail,
-                          b.logical_digest, b.logical_size, b.media_type, b.codec,
-                          v.source_filename
-                   FROM pulsara_v3.assistant_visualizations AS v
-                   LEFT JOIN pulsara_v3.blobs AS b
-                     ON b.id = v.blob_id AND b.workspace_id = v.workspace_id
-                   WHERE v.session_id = %s AND v.assistant_entry_id = %s
-                   ORDER BY v.ordinal""",
-                (row["session_id"], entry_id),
-            ).fetchall()
-            for ordinal, visualization in enumerate(visualizations):
-                if int(visualization["ordinal"]) != ordinal:
-                    raise ValueError("assistant visualization ordinal drifted")
-                target = result.visualizations.add(
-                    ordinal=ordinal,
-                    state=str(visualization["state"]),
-                    source_filename=visualization["source_filename"],
-                )
-                if visualization["state"] == "READY":
-                    if (
-                        visualization["blob_id"] is None
-                        or visualization["media_type"] != VISUALIZATION_MEDIA_TYPE
-                        or visualization["codec"] != VISUALIZATION_CODEC
-                    ):
-                        raise ValueError("assistant visualization blob drifted")
-                    target.visualization_ref = str(visualization["logical_digest"])
-                    target.content_size = int(visualization["logical_size"])
-                elif visualization["state"] == "FAILED":
-                    target.failure_code = str(visualization["failure_code"])
-                    target.failure_detail = str(visualization["failure_detail"])
-                else:
-                    raise ValueError("assistant visualization state drifted")
+            from pulsara_agent.conversation_kernel.visualization import saved_visualizations
+            for facts in saved_visualizations(connection, str(row["session_id"]), entry_id):
+                result.visualizations.add(**facts)
         return result
 
     @staticmethod

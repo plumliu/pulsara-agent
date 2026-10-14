@@ -408,7 +408,7 @@ class FakeConnection implements RuntimeConnection {
     throw new Error('No canonical task activity fixture');
   }
 
-  async readVisualizationHtml(): Promise<string> {
+  async readVisualizationContent(): Promise<string> {
     throw new Error('No visualization fixture');
   }
 

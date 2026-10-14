@@ -168,7 +168,7 @@ interface WorkbenchViewProps {
   artifactOwnerKey: string;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
-  onReadVisualization?: (entryId: string, ordinal: number, digest: string, size: number) => Promise<string>;
+  onReadVisualization?: import("./inline-visualization").ReadVisualization;
   onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   promptDraftStore: PromptDraftStore;
   onNotify: MarkdownNotify;
@@ -839,6 +839,8 @@ function SubagentRunCard({
   artifactOwnerKey,
   onReadToolArtifact,
   onReadPromptImage,
+  onReadVisualization,
+  onReadVisualizationThumbnail,
   onNotify,
 }: {
   run: SubagentRun;
@@ -848,6 +850,8 @@ function SubagentRunCard({
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
+  onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
+  onReadVisualizationThumbnail: WorkbenchViewProps['onReadVisualizationThumbnail'];
   onNotify: MarkdownNotify;
 }) {
   const [expanded, setExpanded] = useState(
@@ -887,7 +891,7 @@ function SubagentRunCard({
                   <span><CornerDownRight size={11} /> 主 Agent 补充</span>
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
                 </div>
-              ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
+              ) : <div className="assistant-markdown"><MarkdownBody assistantChat visualization={activity.visualizations ? {entryId: activity.id, items: activity.visualizations, onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail} : undefined} body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
               {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
             </section>
           ))}
@@ -910,6 +914,8 @@ function SubagentGroup({
   artifactOwnerKey,
   onReadToolArtifact,
   onReadPromptImage,
+  onReadVisualization,
+  onReadVisualizationThumbnail,
   onNotify,
 }: {
   runs: SubagentRun[];
@@ -921,6 +927,8 @@ function SubagentGroup({
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
+  onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
+  onReadVisualizationThumbnail: WorkbenchViewProps['onReadVisualizationThumbnail'];
   onNotify: MarkdownNotify;
 }) {
   const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
@@ -940,6 +948,7 @@ function SubagentGroup({
           artifactOwnerKey={artifactOwnerKey}
           onReadToolArtifact={onReadToolArtifact}
           onReadPromptImage={onReadPromptImage}
+          onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
           onNotify={onNotify}
         />
       ))}</div>
@@ -1139,7 +1148,7 @@ function AssistantMessage({
           <div className="assistant-copy">
             <div className={`assistant-markdown${isStreaming ? '' : ' assistant-markdown--pretty'}`}>
               <AnnotationBody entryId={message.assistantKind !== 'live' && !isStreaming ? message.id : undefined} body={message.body}>
-                <MarkdownBody visualization={{ entryId: message.id, items: message.visualizations ?? [], onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail }} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
+                <MarkdownBody assistantChat visualization={message.visualizations ? { entryId: message.id, items: message.visualizations ?? [], onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail } : undefined} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
               </AnnotationBody>
             </div>
             {(canCopyResponse || message.forkEligible) && (
@@ -1176,7 +1185,7 @@ function AssistantMessage({
 
       {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
       {message.subagentRuns?.length ? (
-        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
+        <SubagentGroup onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
       ) : null}
 
     </article>

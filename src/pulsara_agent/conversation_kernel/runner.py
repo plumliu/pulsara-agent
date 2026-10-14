@@ -932,7 +932,7 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
 class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Protocol):
     """Require one Tool owner to satisfy the runner's two narrow consumers."""
 
-    def prepare_visualizations(self, body: str, *, deadline_monotonic: float) -> tuple[FrozenVisualizationOccurrence, ...]: ...
+    async def prepare_visualizations(self, body: str, *, io: KernelSessionIO, workspace_id: str, deadline_monotonic: float) -> tuple[FrozenVisualizationOccurrence, ...]: ...
 
 
 class ConversationKernelRunner:
@@ -2462,9 +2462,9 @@ class ConversationKernelRunner:
                         )
                     frozen_visualizations = ()
                     if not calls:
-                        frozen_visualizations = await self._io.run(
-                            self._tools.prepare_visualizations,
+                        frozen_visualizations = await self._tools.prepare_visualizations(
                             assistant_display_body(block.text for block in completed.blocks if isinstance(block, CompletedTextBlock)),
+                            io=self._io, workspace_id=await self._resolved_workspace_id(),
                             deadline_monotonic=self._canonical_deadline(),
                         )
                     settlement = PreparedAssistantMessageSettlement(

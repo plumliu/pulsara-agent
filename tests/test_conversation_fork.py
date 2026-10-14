@@ -1266,7 +1266,7 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
     assert provider_input_item_text(snapshot.items[-1]) == "continue child"
 
 
-def test_fork_cannot_reread_image_outside_its_anchor_cut(repo):
+def test_fork_can_read_known_workspace_image_outside_its_history_cut(repo):
     lease = new_session(repo)
     _, _, anchor = turn(repo, lease.guard, "before image")
     assert anchor is not None
@@ -1305,14 +1305,15 @@ def test_fork_cannot_reread_image_outside_its_anchor_cut(repo):
         session_id=child,
         workspace_id=workspace_id,
     )
+    assert child_reader.read_image(
+        session_id=child, workspace_id=workspace_id, image_ref=image.image_ref,
+        maximum_encoded_bytes=1 << 20, deadline_monotonic=monotonic() + 30,
+    ) == image
+    assert rows(repo, "SELECT * FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND blob_id=%s", (child, image.image_ref)) == []
+    assert_session_aggregate_deleted(repo, lease.guard)
     with pytest.raises(CanonicalImageReferenceUnavailable):
-        child_reader.read_image(
-            session_id=child,
-            workspace_id=workspace_id,
-            image_ref=image.image_ref,
-            maximum_encoded_bytes=1 << 20,
-            deadline_monotonic=monotonic() + 30,
-        )
+        child_reader.read_image(session_id=child, workspace_id=workspace_id, image_ref=image.image_ref,
+            maximum_encoded_bytes=1 << 20, deadline_monotonic=monotonic() + 30)
 
 
 def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_delete(

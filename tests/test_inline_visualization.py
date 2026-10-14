@@ -350,7 +350,18 @@ def test_freeze_duplicate_paths_failures_and_edits(tmp_path, monkeypatch):
     monkeypatch.setattr(
         v, "read_visualization_file", lambda p: (reads.append(p), read(p))[1]
     )
-    frozen = v.materialize_visualizations(
+    def materialize(body, resolve):
+        from pulsara_agent.conversation_kernel.io import KernelSessionIO
+        async def run():
+            io = KernelSessionIO()
+            try:
+                return await v.materialize_visualizations(body, resolve, io=io, validator=None,
+                    image_reader=None, session_id=_id("session"), workspace_id=_id("workspace"),
+                    deadline_monotonic=monotonic() + 20)
+            finally:
+                await io.aclose(deadline_monotonic=monotonic() + 20)
+        return asyncio.run(run())
+    frozen = materialize(
         marker("bad.png\n图表.html") + "\n\n" + marker("./图表.html\nmissing.html"),
         lambda p: (tmp_path / p).resolve(),
     )
@@ -359,7 +370,7 @@ def test_freeze_duplicate_paths_failures_and_edits(tmp_path, monkeypatch):
     assert frozen[1].html is frozen[2].html
     path.write_text("<h1>new</h1>")
     assert (
-        v.materialize_visualizations(marker("图表.html"), lambda p: tmp_path / p)[
+        materialize(marker("图表.html"), lambda p: tmp_path / p)[
             0
         ].html
         == b"<h1>new</h1>"
@@ -367,7 +378,7 @@ def test_freeze_duplicate_paths_failures_and_edits(tmp_path, monkeypatch):
     path.unlink()
     assert frozen[1].html == b"<h1>original</h1>"
     assert (
-        v.materialize_visualizations(marker("图表.html"), lambda p: tmp_path / p)[
+        materialize(marker("图表.html"), lambda p: tmp_path / p)[
             0
         ].failure_code
         == "HTML_NOT_FOUND"

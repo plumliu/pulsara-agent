@@ -396,6 +396,8 @@ class _ForkOperations:
                             "blob_id": visualization["blob_id"],
                             "failure_code": visualization["failure_code"],
                             "failure_detail": visualization["failure_detail"],
+                            "width": visualization["width"],
+                            "height": visualization["height"],
                         },
                     )
                 for closure in material.required_tool_closures:

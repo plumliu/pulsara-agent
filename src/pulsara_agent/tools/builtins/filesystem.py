@@ -277,42 +277,16 @@ class ViewImageTool(WorkspaceTool):
     ) -> LocalImageReadCandidate | ToolExecutionResult:
         requested_path = str_arg(call.arguments, "path")
         path = self._resolve_read_path(requested_path)
-        if maximum_bytes < 1:
-            return self._error(call, "IMAGE_RESOURCE_EXCEEDED", requested_path)
-        descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
-                os.O_RDONLY
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+            return LocalImageReadCandidate(
+                read_image_file_bounded(path, maximum_bytes=maximum_bytes), path, requested_path
             )
-            facts = os.fstat(descriptor)
-            if not stat.S_ISREG(facts.st_mode):
-                return self._error(call, "IMAGE_PATH_NOT_REGULAR", requested_path)
-            if facts.st_size < 1:
-                return self._error(call, "IMAGE_DECODE_FAILED", requested_path)
-            if facts.st_size > maximum_bytes:
-                return self._error(call, "IMAGE_RESOURCE_EXCEEDED", requested_path)
-            remaining = maximum_bytes + 1
-            chunks: list[bytes] = []
-            while remaining:
-                chunk = os.read(descriptor, min(remaining, 1 << 20))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            payload = b"".join(chunks)
-            if not payload:
-                return self._error(call, "IMAGE_DECODE_FAILED", requested_path)
-            if len(payload) > maximum_bytes:
-                return self._error(call, "IMAGE_RESOURCE_EXCEEDED", requested_path)
-            return LocalImageReadCandidate(payload, path, requested_path)
-        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+        except TimeoutError:
+            raise
+        except ValueError as exc:
+            return self._error(call, str(exc), requested_path)
+        except OSError:
             return self._error(call, "IMAGE_READ_FAILED", requested_path)
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         raise RuntimeError("view_image requires the Host image validation owner")
@@ -1648,3 +1622,41 @@ def _unified_diff(before: str, after: str, filename: str) -> str:
             tofile=f"b/{filename}",
         )
     )
+
+
+def read_image_file_bounded(path: Path, *, maximum_bytes: int) -> bytes:
+    """Shared physical reader; callers own authorization and image validation."""
+    if maximum_bytes < 1:
+        raise ValueError("IMAGE_RESOURCE_EXCEEDED")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode):
+            raise ValueError("IMAGE_PATH_NOT_REGULAR")
+        if facts.st_size < 1:
+            raise ValueError("IMAGE_DECODE_FAILED")
+        if facts.st_size > maximum_bytes:
+            raise ValueError("IMAGE_RESOURCE_EXCEEDED")
+        remaining = maximum_bytes + 1
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if not payload:
+            raise ValueError("IMAGE_DECODE_FAILED")
+        if len(payload) > maximum_bytes:
+            raise ValueError("IMAGE_RESOURCE_EXCEEDED")
+        return payload
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)

@@ -35,10 +35,6 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 )
 from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
-from pulsara_agent.conversation_kernel.visualization import (
-    VISUALIZATION_CODEC,
-    VISUALIZATION_MEDIA_TYPE,
-)
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
@@ -407,7 +403,7 @@ def read_fork_historical_material(
             (source_session_id, ids),
         ).fetchall()
         page_visualizations = connection.execute(
-            """SELECT v.*, b.logical_digest, b.logical_size
+            """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec
                FROM pulsara_v3.assistant_visualizations AS v
                LEFT JOIN pulsara_v3.blobs AS b
                  ON b.id = v.blob_id AND b.workspace_id = v.workspace_id
@@ -424,6 +420,8 @@ def read_fork_historical_material(
                     "Fork visualization ordinals are not contiguous"
                 )
             next_ordinal[owner] = ordinal + 1
+            from pulsara_agent.conversation_kernel.visualization import visualization_metadata
+            visualization_metadata(row)
             if row["state"] == "READY":
                 if row["logical_digest"] is None or row["logical_size"] is None:
                     raise ConversationKernelConflict(
@@ -435,8 +433,8 @@ def read_fork_historical_material(
                     expected_digest=str(row["logical_digest"]),
                     expected_size=int(row["logical_size"]),
                     expected_workspace_id=str(session["workspace_id"]),
-                    expected_media_type=VISUALIZATION_MEDIA_TYPE,
-                    expected_codec=VISUALIZATION_CODEC,
+                    expected_media_type=str(row["media_type"]),
+                    expected_codec=str(row["codec"]),
                 )
             visualizations.append(MappingProxyType(dict(row)))
         for block in page_blocks:

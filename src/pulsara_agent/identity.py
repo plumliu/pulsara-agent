@@ -1,7 +1,7 @@
 """Canonical Pulsara IDs; allocation and conflict ownership stay with callers.
 
-See PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md. These
-functions encode identities, never resolve objects or grant access.
+See archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md.
+These functions encode identities, never resolve objects or grant access.
 """
 
 from __future__ import annotations

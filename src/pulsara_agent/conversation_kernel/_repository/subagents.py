@@ -2669,6 +2669,9 @@ class _SubagentOperations:
             for row in selected:
                 value = dict(row)
                 value["inherited"] = str(row["scope_subagent_task_id"]) != task_id
+                if row["entry_kind"] == "ASSISTANT_MESSAGE":
+                    from pulsara_agent.conversation_kernel.visualization import saved_visualizations
+                    value["visualizations"] = saved_visualizations(connection, session_id, str(row["id"]))
                 enriched.append(value)
             return (
                 tuple(enriched),

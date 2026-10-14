@@ -818,6 +818,7 @@ class LocalSessionController:
                     "source_task_label": entry.get("source_task_label"),
                     "content": content,
                     "blocks": blocks_by_entry.get(entry_id, []),
+                    "visualizations": entry.get("visualizations", ()) ,
                     "tool_results": results_by_entry.get(entry_id, []),
                 }
             )

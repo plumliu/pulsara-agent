@@ -20,6 +20,7 @@ from tests.support.postgres import verified_postgres_provider
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     AssistantToolCallBlock,
+    AssistantTextBlock,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
@@ -47,6 +48,7 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
 
     async def exercise():
         session = _id("session")
+        workspace = _id("workspace")
         attempts = [_id("attempt") for _ in range(4)]
         ids = [_round10_id("task", a, "0") for a in attempts]
         args = [
@@ -64,7 +66,7 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
         lease, contexts = _prepare_root_tool_batch(
             repo,
             session_id=session,
-            workspace_id=_id("workspace"),
+            workspace_id=workspace,
             calls=tuple(
                 ("spawn_agent", _id("call"), a, arg)
                 for a, arg in zip(attempts, args, strict=True)
@@ -80,6 +82,7 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
             todo_owner=TodoRunStateOwner(session_id=session, owner_epoch=_id("todo-run")),
         )
         sources, started = {}, []
+        visual_entries = {}
 
         class Worker(_CompletingChildRunner):
             async def run_admitted_subagent_turn(self, *, launch, cancellation_intent):
@@ -96,6 +99,30 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
                         initial["entry_sequence"],
                         summary="A summary",
                     )
+                from tests.test_kernel_image_input_k2_postgres import _image
+                from pulsara_agent.conversation_kernel.visualization import (
+                    FrozenVisualizationOccurrence, VisualizationOccurrenceState,
+                )
+                image = _image(workspace_id=workspace)
+                visual_entry = _id("entry")
+                visual_entries[launch.task_start.task_id] = visual_entry
+                content = InlineContent.from_bytes(
+                    f"```pulsara-visualization\n{image.image_ref}\n```".encode()
+                )
+                repo.commit_assistant_message(
+                    lease.guard,
+                    cut=repo.prepare_provider_input_cut(
+                        lease.guard, turn_id=launch.child_turn_id,
+                        deadline_monotonic=monotonic() + 30,
+                    ),
+                    entry_id=visual_entry, parent_content=content,
+                    blocks=(AssistantTextBlock(_id("block"), content),),
+                    visualizations=(FrozenVisualizationOccurrence(
+                        "图片", VisualizationOccurrenceState.READY, image=image,
+                    ),),
+                    complete_turn=False, occurred_at=datetime.now(timezone.utc),
+                    actor_id="model:worker-visualization", deadline_monotonic=monotonic() + 30,
+                )
                 return await super().run_admitted_subagent_turn(
                     launch=launch, cancellation_intent=cancellation_intent
                 )
@@ -248,6 +275,18 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
                     break
                 after_sequence = entries[-1]["entry_sequence"]
             assert context is not None
+            visual_rows = [row for row in page_rows if row.get("visualizations")]
+            expected_tasks = {ids[3]} if compact_source else {ids[0], ids[1], ids[3]}
+            assert {row["scope_subagent_task_id"] for row in visual_rows} == expected_tasks
+            for row in visual_rows:
+                assert row["id"] == visual_entries[row["scope_subagent_task_id"]]
+                assert row["visualizations"][0]["image_ref"].startswith("image:")
+            from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
+            online = CanonicalProtocolReader(provider).snapshot(
+                session_id=session, maximum_entries=100, maximum_control_items=100,
+                deadline_monotonic=monotonic() + 30,
+            )
+            assert {entry.entry_id for entry in online.entries if entry.visualizations} == set(visual_entries.values())
             assert not any(row["scope_subagent_task_id"] == ids[2] for row in page_rows)
             assert any(not row["inherited"] and row["scope_subagent_task_id"] == ids[3] for row in page_rows)
             if compact_source:

@@ -1182,6 +1182,9 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
     source_filename text NOT NULL,
     state text NOT NULL CHECK (state IN ('READY', 'FAILED')),
     blob_id text,
+    width integer,
+    height integer,
+    CHECK ((width IS NULL AND height IS NULL) OR (width > 0 AND height > 0 AND width IS NOT NULL AND height IS NOT NULL)),
     failure_code text,
     failure_detail text,
     PRIMARY KEY (session_id, assistant_entry_id, ordinal),
@@ -1208,7 +1211,7 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
         (state = 'READY' AND blob_id IS NOT NULL
             AND failure_code IS NULL AND failure_detail IS NULL)
         OR
-        (state = 'FAILED' AND blob_id IS NULL
+        (state = 'FAILED' AND blob_id IS NULL AND width IS NULL AND height IS NULL
             AND failure_code IS NOT NULL AND failure_detail IS NOT NULL)
     )
 );

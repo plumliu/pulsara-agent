@@ -229,6 +229,15 @@ def canonical_history_message(connection, entry, *, include_tools=False):
                 (entry["session_id"], entry["id"], entry["session_id"], entry["id"]),
             ).fetchone()
             label = "助手回答" if final is not None else "助手进展"
+    from pulsara_agent.conversation_kernel.session_text import visualization_history_text
+    descriptions = visualization_history_text(connection, entry, image_references=None)
+    if descriptions:
+        if body_ranges is None:
+            body_ranges = [[0, len("\n".join(shown))]]
+        for description in descriptions:
+            start = len("\n".join(shown)) + (1 if shown else 0)
+            shown.append(description)
+            atomic_ranges.append([start, start + len(description)])
     return {
         "entry_id": entry["id"],
         "origin_entry_id": entry["origin_entry_id"],

@@ -2525,8 +2525,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return image;
   }, []);
 
+  const readImageReference = useCallback(async (ref: string, signal: AbortSignal) => {
+    const active = connectionRef.current ?? historyRef.current;
+    if (!active) throw new Error('本地服务未连接。');
+    const image = await active.readImageReference(ref, signal);
+    if (!ownsHistoryReader(active)) throw new Error('图片所属工作区已经改变。');
+    return image;
+  }, []);
+
   const readVisualization = useCallback(async (
-    entryId: string, ordinal: number, digest: string, size: number,
+    entryId: string, ordinal: number, digest: string, size: number, item?: import('../lib/pulsara-types').VisualizationOccurrence, signal?: AbortSignal,
   ) => {
     const active = connectionRef.current ?? historyRef.current;
     if (!active) {
@@ -2534,7 +2542,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         'LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true,
       );
     }
-    const html = await active.readVisualizationHtml(entryId, ordinal, digest, size);
+    const html = await active.readVisualizationContent(entryId, ordinal, digest, size, item, signal);
     if (!ownsHistoryReader(active)) {
       throw new RuntimeApiError(
         'VISUALIZATION_OWNER_CHANGED', '可视化所属的会话已经改变。', true,
@@ -2598,7 +2606,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       )}
       {activeView === 'workbench' && !databaseBlocked && (
         <div className="session-connected-views" hidden={Boolean(openingSession)}>
-        <FilePreviewProvider ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
+        <FilePreviewProvider imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
         <WorkbenchView
           onCompletePaths={(prefix, cursor, signal) => adapter.completeWorkspacePaths(activeSession.id, prefix, cursor, signal)}
           workspace={activeWorkspace}
@@ -2717,6 +2725,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           taskActivities={taskActivities}
           taskArtifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
           onReadToolArtifact={readToolArtifact}
+          onReadVisualization={readVisualization} onReadVisualizationThumbnail={readVisualizationThumbnail}
           onLoadTaskActivities={loadTaskActivities}
           loading={taskInventoryLoading}
           canControl={canControl}

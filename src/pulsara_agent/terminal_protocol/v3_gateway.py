@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.prompt_storage import CanonicalImageReferenceUnavailable
+
 from pulsara_agent.identity import is_valid_id
 
 from pulsara_agent.identity import random_id
@@ -109,10 +111,10 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 from pulsara_agent.terminal_process.models import TerminalProcessInfo
 
 
-PROTOCOL_MAJOR = 4
+PROTOCOL_MAJOR = 5
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:53e210ee1ee5aa5955bd321283e2a0e7b1cf08cf3e901f0161a426cea8077a8b"
+    "sha256:167a0cf9cfa3ab29d7ec9077d79bd0e8c929ef13914861b8a017139900801921"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -1235,7 +1237,7 @@ class TerminalKernelProtocolServer:
         if not 1 <= request.limit_bytes <= 1 << 20:
             return _error(request.request_id, "CONTENT_RANGE_INVALID")
         target = request.WhichOneof("target")
-        if target is None or (target == "queue_item_id" and request.block_id) or (
+        if target is None or (target == "image_ref" and (request.block_id or request.HasField("image_ref_ordinal") or request.HasField("visualization_ordinal"))) or (target == "queue_item_id" and request.block_id) or (
             request.HasField("image_ref_ordinal") and request.block_id
         ) or (
             request.HasField("visualization_ordinal")
@@ -1245,6 +1247,10 @@ class TerminalKernelProtocolServer:
             )
         ):
             return _error(request.request_id, "CONTENT_TARGET_INVALID")
+        if target == "image_ref":
+            from pulsara_agent.identity import is_valid_id
+            if not is_valid_id(request.image_ref, "image"):
+                return _error(request.request_id, "CONTENT_TARGET_INVALID")
         try:
             reference = await asyncio.to_thread(
                 protocol_reader.resolve_content_reference,
@@ -1253,6 +1259,7 @@ class TerminalKernelProtocolServer:
                 queue_item_id=(
                     request.queue_item_id if target == "queue_item_id" else None
                 ),
+                image_ref=request.image_ref if target == "image_ref" else None,
                 block_id=request.block_id or None,
                 image_ref_ordinal=(
                     request.image_ref_ordinal
@@ -1266,6 +1273,8 @@ class TerminalKernelProtocolServer:
                 ),
                 deadline_monotonic=monotonic() + 10.0,
             )
+        except CanonicalImageReferenceUnavailable:
+            return _error(request.request_id, "CONTENT_REFERENCE_MISSING")
         except CanonicalQueueContentNotPending:
             return _error(request.request_id, "CONTENT_QUEUE_NOT_PENDING")
         except KeyError:
@@ -1274,6 +1283,17 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
         except ValueError:
             return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
+        metadata = {"media_type": str(reference["content_media_type"]), "codec": str(reference["content_codec"])}
+        metadata.update({key: reference[key] for key in ("image_ref", "width", "height") if key in reference})
+        image = reference.get("validated_image")
+        if image is not None:
+            payload = image.immutable_bytes
+            if request.offset_bytes > len(payload):
+                return _error(request.request_id, "CONTENT_RANGE_INVALID")
+            chunk = payload[request.offset_bytes:request.offset_bytes + request.limit_bytes]
+            return wire.ServerFrame(content=wire.CanonicalContentChunk(
+                request_id=request.request_id, digest=str(reference["content_digest"]), complete_size=len(payload),
+                offset_bytes=request.offset_bytes, content=chunk, complete=request.offset_bytes + len(chunk) == len(payload), **metadata))
         inline = reference["inline_content"]
         if inline is not None:
             value = bytes(inline)
@@ -1299,6 +1319,7 @@ class TerminalKernelProtocolServer:
                     offset_bytes=request.offset_bytes,
                     content=chunk,
                     complete=request.offset_bytes + len(chunk) == len(value),
+                    **metadata,
                 )
             )
         if not reference["blob_id"]:
@@ -1332,6 +1353,7 @@ class TerminalKernelProtocolServer:
                 offset_bytes=value.offset,
                 content=value.content,
                 complete=not value.has_more,
+                **metadata,
             )
         )
 

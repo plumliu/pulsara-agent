@@ -809,12 +809,11 @@ class LocalBrowserBridge:
         self, connection_id: str, body: dict[str, object]
     ) -> dict[str, object]:
         connection = await self._connection(connection_id)
-        entry_id = body.get("entry_id")
-        queue_item_id = body.get("queue_item_id")
-        if (isinstance(entry_id, str) and bool(entry_id)) == (
-            isinstance(queue_item_id, str) and bool(queue_item_id)
-        ):
+        targets = [key for key in ("entry_id", "queue_item_id", "image_ref") if key in body]
+        if len(targets) != 1 or not isinstance(body[targets[0]], str) or not body[targets[0]]:
             raise ValueError("exactly one content target is required")
+        if targets[0] == "image_ref" and any(key in body for key in ("block_id", "image_ref_ordinal", "visualization_ordinal")):
+            raise ValueError("image reference content target is invalid")
         request = wire.ReadContentRequest(
             block_id=str(body.get("block_id", "")),
             offset_bytes=_uint(body.get("offset_bytes", 0), "offset_bytes"),
@@ -833,10 +832,7 @@ class LocalBrowserBridge:
             request.visualization_ordinal = _uint(
                 body["visualization_ordinal"], "visualization_ordinal"
             )
-        if isinstance(entry_id, str) and entry_id:
-            request.entry_id = entry_id
-        else:
-            request.queue_item_id = str(queue_item_id)
+        setattr(request, targets[0], body[targets[0]])
         return protobuf_json(
             await connection.controller.request("read_content", request)
         )

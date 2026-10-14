@@ -848,7 +848,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "View one PNG, JPEG or static WebP image, or screenshot a local .html/.htm file. "
             "Provide exactly one of path or image_ref. Use image_ref only to reread an "
             "exact reference already shown beside an image or in a historical image "
-            "placeholder in this session; copy it "
+            "placeholder within the current workspace; copy it "
             "unchanged. HTML screenshots use an isolated 1200×800 browser with light "
             "theme, reduced motion and network access blocked. They inspect the current "
             "file without publishing it or checking every interaction; edits require "
@@ -1115,8 +1115,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "partial means this page is a slice. include_tools adds saved calls as historical names/arguments and results; "
             "public results and retained artifact output form labeled sections; "
             "coverage/display/disposition describe saved source availability, and cursors cannot recover missing output. "
-            "Images appear as neutral text placeholders, not visual content. This session's placeholders include image_ref; "
-            "other sessions do not grant image access. Complete image placeholders require sufficient max_chars. "
+            "Images appear as neutral text placeholders, not visual content. Same-workspace placeholders include image_ref; "
+            "cross-workspace text history does not grant image access. Complete image placeholders require sufficient max_chars. "
             "When existing information suffices, no historical lookup or image reread is needed."
         ),
         input_schema=session_query_input_schema(

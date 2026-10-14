@@ -81,6 +81,8 @@ interface InspectorPanelProps {
   onLoadTask?: (taskId: string) => Promise<AgentTask>;
   onLoadTaskActivities: (taskId: string, cursor?: string) => ReturnType<import('../lib/runtime-adapter').RuntimeAdapter['listSessionTaskActivities']>;
   taskArtifactOwnerKey: string;
+  onReadVisualization?: import("./inline-visualization").ReadVisualization;
+  onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onCancelTask: (task: AgentTask) => Promise<void>;
   backgroundOwnerKey: string;
@@ -484,6 +486,8 @@ export function InspectorPanel({
   onLoadTaskActivities,
   taskArtifactOwnerKey,
   onReadToolArtifact,
+  onReadVisualization,
+  onReadVisualizationThumbnail,
   onCancelTask,
   backgroundOwnerKey,
   backgroundHostSessionId,
@@ -550,7 +554,7 @@ export function InspectorPanel({
             loadBackgroundProcesses={onLoadBackgroundProcesses}
             skills={(capabilities?.skills.items ?? []).filter((skill) => skill.enabled && skill.effective)}
             artifactOwnerKey={taskArtifactOwnerKey}
-            onReadToolArtifact={onReadToolArtifact}
+            onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
           />
         ) : view === 'background' ? (
           <BackgroundTerminalPanel

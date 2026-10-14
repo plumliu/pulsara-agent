@@ -976,7 +976,7 @@ class StructuredToolPort:
             for scope in ModelInputScopeKind
         }
 
-    def prepare_visualizations(self, body: str, *, deadline_monotonic: float):
+    async def prepare_visualizations(self, body: str, *, io, workspace_id: str, deadline_monotonic: float):
         return ()
 
     def sealed_builtin_capability_snapshot(

@@ -456,6 +456,14 @@ async def _exercise_typed_prompt_and_image_read(monkeypatch) -> None:
     assert response["content"]["content"] == base64.b64encode(
         b"exact-image-bytes"
     ).decode("ascii")
+    image_ref = "image:" + "a" * 26
+    await bridge.read_content(connection_id, {"image_ref": image_ref, "limit_bytes": 256})
+    kind, request = connection.requests[-1]
+    assert kind == "read_content" and request.WhichOneof("target") == "image_ref"
+    assert request.image_ref == image_ref
+    for extra in ({"entry_id": "entry:" + "a"*26}, {"image_ref_ordinal": 0}, {"visualization_ordinal": 0}, {"block_id": ""}):
+        with pytest.raises(ValueError):
+            await bridge.read_content(connection_id, {"image_ref": image_ref, **extra})
     await bridge.aclose()
 
 

@@ -259,6 +259,8 @@ function TaskGraphDialog({
   skills,
   artifactOwnerKey,
   onReadToolArtifact,
+  onReadVisualization,
+  onReadVisualizationThumbnail,
   onClose,
   opener,
 }: {
@@ -273,6 +275,8 @@ function TaskGraphDialog({
   loadBackgroundProcesses: (cursor?: string) => Promise<BackgroundProcessPage>;
   skills: SkillCapability[];
   artifactOwnerKey: string;
+  onReadVisualization?: import("./inline-visualization").ReadVisualization;
+  onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onClose: () => void;
   opener: HTMLElement | null;
@@ -644,7 +648,7 @@ function TaskGraphDialog({
                     <ConversationMessages messages={projectAgentTaskConversation(group.records)} isRunning={false}
                       taskFinalAnswerId={[...group.records].reverse().find(record => record.entryKind === 'ASSISTANT_MESSAGE' && record.turnStatus === 'COMPLETED')?.entryId}
                       skills={skills} artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
-                      onReadToolArtifact={onReadToolArtifact} onNotify={onNotify}
+                      onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} onNotify={onNotify}
                       userLabel="主 Agent" userSenderKind="agent" assistantLabel={group.label} />
                   </div>)}
                   {!inheritedGroups.length && !inheritedContext.materials.length && <p>继承的上下文没有可显示的对话。</p>}
@@ -663,7 +667,7 @@ function TaskGraphDialog({
                       ))?.id : undefined}
                       skills={skills}
                       artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
-                      onReadToolArtifact={onReadToolArtifact}
+                      onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
                       onNotify={onNotify}
                       userLabel="主 Agent"
                       userSenderKind="agent"
@@ -715,6 +719,8 @@ export function TaskWorkspace({
   skills = [],
   artifactOwnerKey = 'task-activity',
   onReadToolArtifact = async () => { throw new Error('完整工具输出暂时无法读取。'); },
+  onReadVisualization,
+  onReadVisualizationThumbnail,
 }: {
   tasks: AgentTask[];
   loadTask?: (taskId: string) => Promise<AgentTask>;
@@ -737,6 +743,8 @@ export function TaskWorkspace({
   loadBackgroundProcesses: (cursor?: string) => Promise<BackgroundProcessPage>;
   skills?: SkillCapability[];
   artifactOwnerKey?: string;
+  onReadVisualization?: import("./inline-visualization").ReadVisualization;
+  onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   onReadToolArtifact?: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
 }) {
   const [openGroup, setOpenGroup] = useState<string>();
@@ -805,6 +813,6 @@ export function TaskWorkspace({
     {onLoadMoreGroups && groups.length < (totalGroupCount ?? groups.length) && <button type="button" onClick={() => void onLoadMoreGroups()}>加载更多任务组</button>}
     {groupError && <p role="alert">{groupError}</p>}
     {loadingGroup && <p>正在读取任务组…</p>}
-    {selected && (!loadedGroupIds || loadedGroupIds.has(openGroup!)) && <TaskGraphDialog key={`${artifactOwnerKey}:${openGroup}`} tasks={selected} loadTask={loadTask} modelConfigurations={modelConfigurations} canControl={canControl} onCancel={onCancel} onNotify={onNotify} activities={activities} loadActivities={loadActivities} loadBackgroundProcesses={loadBackgroundProcesses} skills={skills} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} opener={opener} onClose={() => setOpenGroup(undefined)} />}
+    {selected && (!loadedGroupIds || loadedGroupIds.has(openGroup!)) && <TaskGraphDialog key={`${artifactOwnerKey}:${openGroup}`} tasks={selected} loadTask={loadTask} modelConfigurations={modelConfigurations} canControl={canControl} onCancel={onCancel} onNotify={onNotify} activities={activities} loadActivities={loadActivities} loadBackgroundProcesses={loadBackgroundProcesses} skills={skills} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} opener={opener} onClose={() => setOpenGroup(undefined)} />}
   </div>;
 }

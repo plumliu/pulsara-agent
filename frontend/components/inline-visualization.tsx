@@ -1,12 +1,13 @@
 'use client';
 import { Images, Maximize2, Minimize2, ImageOff, RotateCcw } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { VisualizationOccurrence } from '../lib/pulsara-types';
 import { visualizationEnvironment, type VisualizationEnvironment } from '../lib/visualization-environment';
 import { usableVisualizationRootRect, visualizationLayoutMessageType, type VisualizationRootRect } from '../lib/visualization-frame';
+import { SavedImage, useSavedImage } from './saved-image';
 import { SandboxedHtmlPreview } from './sandboxed-html-preview';
 
-export type ReadVisualization = (entry: string, ordinal: number, digest: string, size: number) => Promise<string>;
+export type ReadVisualization = (entry: string, ordinal: number, digest: string, size: number, item?: VisualizationOccurrence, signal?: AbortSignal) => Promise<string | Uint8Array>;
 export type ReadVisualizationThumbnail = (entry: string, ordinal: number, digest: string, size: number, signal: AbortSignal) => Promise<string>;
 export interface InlineVisualizationContext { entryId: string; items: VisualizationOccurrence[]; onRead: ReadVisualization; onReadThumbnail?: ReadVisualizationThumbnail }
 
@@ -19,16 +20,17 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
   const page = useRef<HTMLDivElement>(null);
   const probe = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
-  const pending = useRef<{args: unknown[]; promise: Promise<string>} | undefined>(undefined);
-  const {ordinal, visualizationRef: digest, contentSize, state} = item;
+  const pending = useRef<{args: unknown[]; promise: Promise<string | Uint8Array>} | undefined>(undefined);
+  const {ordinal, contentDigest: digest, contentSize, state, mediaType, codec} = item;
   useEffect(() => {
     if (state !== 'READY' || !digest || !contentSize) return;
     let live = true;
+    const controller = new AbortController();
     const args = [entryId, ordinal, digest, contentSize, onRead, attempt];
-    if (!pending.current || args.some((v, i) => v !== pending.current!.args[i])) pending.current = {args, promise: onRead(entryId, ordinal, digest, contentSize)};
-    void pending.current.promise.then(html => {if (live) setResult({html});}, () => {if (live) setResult({error: '已保存的可视化暂时无法读取。'});});
-    return () => {live = false;};
-  }, [entryId, ordinal, digest, contentSize, state, onRead, attempt]);
+    if (!pending.current || args.some((v, i) => v !== pending.current!.args[i])) pending.current = {args, promise: onRead(entryId, ordinal, digest, contentSize, {ordinal, contentDigest: digest, contentSize, state, mediaType, codec}, controller.signal)};
+    void pending.current.promise.then(html => {if (live) setResult(typeof html === "string" ? {html} : {error: "可视化类型不匹配。"});}, () => {if (live) setResult({error: '已保存的可视化暂时无法读取。'});});
+    return () => {live = false; controller.abort(); pending.current = undefined;};
+  }, [entryId, ordinal, digest, contentSize, state, mediaType, codec, onRead, attempt]);
   useLayoutEffect(() => {
     if (!probe.current) return;
     const measure = () => {
@@ -84,6 +86,33 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
   </div>;
 }
 
+function useVisualizationImageReader(entryId: string, item: VisualizationOccurrence, onRead: ReadVisualization) {
+  const { ordinal, state, contentDigest, contentSize, mediaType, codec, imageRef, width, height } = item;
+  // Runtime projections rebuild item objects even when saved content is unchanged.
+  // Keep the read stable across those projections, including while bytes are pending.
+  return useCallback(async (signal: AbortSignal) => {
+    const expected = { ordinal, state, contentDigest, contentSize, mediaType, codec, imageRef, width, height };
+    const bytes = await onRead(entryId, ordinal, contentDigest!, contentSize!, expected, signal);
+    if (!(bytes instanceof Uint8Array)) throw new Error('图片内容类型不匹配。');
+    return { bytes, mediaType: mediaType!, width: width!, height: height! };
+  }, [entryId, ordinal, state, contentDigest, contentSize, mediaType, codec, imageRef, width, height, onRead]);
+}
+
+function ImagePage({ entryId, item, onRead }: { entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization }) {
+  const read = useVisualizationImageReader(entryId, item, onRead);
+  return <div className="inline-visualization__page" data-visualization-ordinal={item.ordinal}>
+    <SavedImage read={read} title={item.sourceFilename || '图片'} inline />
+  </div>;
+}
+
+function ImageThumbnail({ entryId, item, enabled, onRead }: { entryId: string; item: VisualizationOccurrence; enabled: boolean; onRead: ReadVisualization }) {
+  const read = useVisualizationImageReader(entryId, item, onRead);
+  const image = useSavedImage(read, enabled);
+  // Saved immutable blob URLs must not go through an image optimizer.
+  // eslint-disable-next-line @next/next/no-img-element
+  return <span className="inline-visualization__thumbnail-image" aria-hidden="true">{image.url ? <img src={image.url} alt="" draggable={false} /> : image.error ? <ImageOff size={19}/> : <Images size={19}/>}</span>;
+}
+
 // UI browser residency, not an artifact count limit: the current page and two
 // recent pages retain arbitrary script state. Older pages can always reopen.
 const residentFrames = 3;
@@ -100,7 +129,7 @@ function Thumbnail({ item, entryId, enabled, onRead }: {
 }) {
   const [image, setImage] = useState<string>();
   const [failed, setFailed] = useState(false);
-  const { ordinal, visualizationRef: digest, contentSize: size, state } = item;
+  const { ordinal, contentDigest: digest, contentSize: size, state } = item;
   useEffect(() => {
     if (!enabled || image || failed || !onRead || state !== 'READY' || !digest || !size) return;
     const controller = new AbortController();
@@ -132,7 +161,8 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
     const item = items[next];
     if (!item) return;
     setSelected(item.ordinal);
-    setResident(old => [...old.filter(value => value !== item.ordinal), item.ordinal].slice(-residentFrames));
+    if (item.imageRef) setMaximized(false);
+    else setResident(old => [...old.filter(value => value !== item.ordinal), item.ordinal].slice(-residentFrames));
   };
   useEffect(() => {
     if (!strip.current) return;
@@ -178,14 +208,15 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
         if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) setMaximized(false);
       }}>
       <div className="inline-visualization__figure">
-        {items.filter(item => resident.includes(item.ordinal)).map(item => <GalleryPage
-          key={`${entryId}:${item.ordinal}:${item.visualizationRef ?? item.state}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} maximized={maximized} zoomControl={
+        {items.filter(item => !item.imageRef && resident.includes(item.ordinal)).map(item => <GalleryPage
+          key={`${entryId}:${item.ordinal}:${item.contentDigest ?? item.state}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} maximized={maximized} zoomControl={
         <button ref={control} className="inline-visualization__zoom" title={visualizationName(current)}
           aria-label={maximized ? '退出放大' : '放大可视化'} onClick={() => setMaximized(v => !v)}>
           {maximized ? <Minimize2 size={16}/> : <Maximize2 size={16}/>}
         </button>
         }/>)}
 
+        {current.imageRef && <ImagePage key={`${entryId}:${current.ordinal}:${current.contentDigest}`} entryId={entryId} item={current} onRead={onRead}/>}
       </div>
       {items.length > 1 && <aside className="inline-visualization__controls">
       <div ref={strip} className="inline-visualization__strip" role="group" aria-label="可视化缩略图"
@@ -199,10 +230,10 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
           event.preventDefault(); select(next);
           (strip.current?.children[next] as HTMLElement)?.focus({preventScroll: true});
         }}>
-        {items.map((item, at) => <button key={`${item.ordinal}:${item.visualizationRef ?? item.state}`} data-ordinal={item.ordinal}
+        {items.map((item, at) => <button key={`${item.ordinal}:${item.contentDigest ?? item.state}`} data-ordinal={item.ordinal}
           aria-label={`查看可视化 ${at + 1}${item.state === 'FAILED' ? '（无法显示）' : ''}`} title={visualizationName(item)}
           aria-pressed={item.ordinal === current.ordinal} onClick={() => select(at)}>
-          <Thumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onReadThumbnail}/>
+          <>{item.imageRef ? <ImageThumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onRead}/> : <Thumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onReadThumbnail}/>}</>
         </button>)}
       </div>
       </aside>}

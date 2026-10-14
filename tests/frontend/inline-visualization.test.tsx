@@ -11,7 +11,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', () => ({matches: false, addEventListener() {}, removeEventListener() {}}));
 });
 afterEach(() => {cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks();});
-const item = {ordinal: 0, state: 'READY' as const, visualizationRef: 'sha256:'+'a'.repeat(64), contentSize: 16, sourceFilename: 'chart.html'};
+const item = {ordinal: 0, state: 'READY' as const, contentDigest: 'sha256:'+'a'.repeat(64), contentSize: 16, sourceFilename: 'chart.html'};
 const marker = '```pulsara-visualization\nchart.html\n```';
 
 it('agrees with the backend marker corpus', () => {
@@ -37,7 +37,7 @@ it('renders only bound top-level assistant markers in place, including failures'
   expect(screen.getByText('between').compareDocumentPosition(chart) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(chart.compareDocumentPosition(screen.getByText('after')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(view.container.querySelector('button[title="chart.html"]')).toBeTruthy();
-  expect(read).toHaveBeenCalledWith('a',1,item.visualizationRef,16);
+  expect(read).toHaveBeenCalledWith('a',1,item.contentDigest,16, expect.objectContaining({ contentDigest: expect.any(String) }), expect.any(AbortSignal));
   expect(view.container.querySelectorAll('iframe')).toHaveLength(1);
 });
 it('keeps user and completed unbound markers ordinary and never reads during streaming', () => {
@@ -55,7 +55,7 @@ it('displays repeated paths independently and retries the saved occurrence', asy
   await waitFor(() => expect(screen.getByText('已保存的可视化暂时无法读取。')).toBeTruthy());
   fireEvent.click(screen.getByRole('button',{name:'重试'}));
   await waitFor(() => expect(view.container.querySelectorAll('iframe')).toHaveLength(2));
-  expect(read).toHaveBeenLastCalledWith('a',0,item.visualizationRef,16);
+  expect(read).toHaveBeenLastCalledWith('a',0,item.contentDigest,16, expect.objectContaining({ contentDigest: expect.any(String) }), expect.any(AbortSignal));
 });
 it('updates environment without replacing srcdoc and rejects stale viewport reports', async () => {
   vi.spyOn(HTMLElement.prototype,'clientWidth','get').mockReturnValue(800);
@@ -119,7 +119,7 @@ it('keeps failures selectable and keyboard navigation uses gallery-local positio
   expect(screen.getByRole('button',{name:'查看可视化 2'}).getAttribute('aria-pressed')).toBe('true');
   fireEvent.keyDown(document.activeElement!,{key:'ArrowUp'});
   expect(document.activeElement).toBe(first);
-  expect(read).toHaveBeenCalledWith('a',6,item.visualizationRef,16);
+  expect(read).toHaveBeenCalledWith('a',6,item.contentDigest,16, expect.objectContaining({ contentDigest: expect.any(String) }), expect.any(AbortSignal));
 });
 
 it('limits retained frames per gallery without limiting navigable items', async () => {
@@ -166,7 +166,7 @@ it('lazily loads actual PNG thumbnails and keeps thumbnail failures independent 
   act(()=>strip.callback(strip.elements.map(target=>({target,isIntersecting:true} as IntersectionObserverEntry)),{} as IntersectionObserver));
   await waitFor(()=>expect(thumb).toHaveBeenCalledTimes(2));
   await waitFor(()=>expect(view.container.querySelectorAll('.inline-visualization__thumbnail-image img')).toHaveLength(1));
-  expect(thumb).toHaveBeenNthCalledWith(1,'a',0,item.visualizationRef,16,expect.any(AbortSignal));
+  expect(thumb).toHaveBeenNthCalledWith(1,'a',0,item.contentDigest,16,expect.any(AbortSignal));
   fireEvent.click(screen.getByRole('button',{name:'查看可视化 2'}));
   await waitFor(()=>expect(view.container.querySelector('[data-visualization-ordinal="1"] iframe')).toBeTruthy());
 });
@@ -226,4 +226,98 @@ it('keeps maximized exit available when switching to a short gallery page', asyn
   fireEvent.click(screen.getByRole('button',{name:'退出放大'}));
   expect(view.container.querySelector('dialog')?.classList.contains('is-maximized')).toBe(false);
   expect(screen.queryByRole('button',{name:'放大可视化'})).toBeNull();
+});
+
+it('mixes direct saved images and HTML without screenshotting images and releases URLs', async () => {
+  const create = vi.fn(() => 'blob:saved-image');
+  const revoke = vi.fn();
+  vi.stubGlobal('URL', Object.assign(URL, {createObjectURL: create, revokeObjectURL: revoke}));
+  const picture = {...item, ordinal: 1, sourceFilename:'plot.png', mediaType:'image/png', codec:'binary', imageRef:'image:'+'a'.repeat(26), width:7,height:5};
+  const read = vi.fn(async (_entry, ordinal) => ordinal === 0 ? '<h1>interactive</h1>' : new Uint8Array([1,2,3]));
+  const thumbnail = vi.fn();
+  const view=render(<InlineVisualization entryId="entry:owner" items={[item,picture,{ordinal:2,state:'FAILED',failureDetail:'图片不可用'}]} onRead={read} onReadThumbnail={thumbnail}/>);
+  await waitFor(()=>expect(view.container.querySelector('iframe')).toBeTruthy());
+  fireEvent.click(screen.getByRole('button',{name:'查看可视化 2'}));
+  await waitFor(()=>expect(view.container.querySelector('img[alt="plot.png"]')?.getAttribute('src')).toBe('blob:saved-image'));
+  expect(thumbnail).not.toHaveBeenCalled();
+  expect(read).toHaveBeenCalledWith('entry:owner',1,item.contentDigest,16,expect.objectContaining({imageRef:picture.imageRef,width:7,height:5}),expect.any(AbortSignal));
+  fireEvent.click(screen.getByRole('button',{name:'查看可视化 3（无法显示）'}));
+  expect(screen.getByText('图片不可用')).toBeTruthy();
+  expect(revoke).toHaveBeenCalledWith('blob:saved-image');
+  view.unmount();
+});
+
+it('permits image references only in explicit assistant chat and does not fetch before clicking', async () => {
+  const {FileLinkContext}=await import('../../frontend/components/file-link-context');
+  const read=vi.fn(async()=>({bytes:new Uint8Array([1]),mediaType:'image/png',width:1,height:1}));
+  const body='![之前上传的图片](image:'+'a'.repeat(26)+')';
+  const view=render(<FileLinkContext.Provider value={{open:vi.fn(),readImageReference:read}}><MarkdownBody body={body} onNotify={()=>{}} assistantChat/></FileLinkContext.Provider>);
+  expect(screen.getByRole('button',{name:'查看图片：之前上传的图片'})).toBeTruthy();
+  expect(read).not.toHaveBeenCalled();
+  view.rerender(<FileLinkContext.Provider value={{open:vi.fn(),readImageReference:read,basePreview:'file-token'}}><MarkdownBody body={body} onNotify={()=>{}}/></FileLinkContext.Provider>);
+  expect(screen.queryByRole('button',{name:'查看图片：之前上传的图片'})).toBeNull();
+  expect(read).not.toHaveBeenCalled();
+});
+
+
+it('keeps in-flight and loaded images stable across equivalent runtime projections', async () => {
+  const create = vi.fn(() => 'blob:stable-image');
+  const revoke = vi.fn();
+  vi.stubGlobal('URL', Object.assign(URL, {createObjectURL: create, revokeObjectURL: revoke}));
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) { this.callback([{target,isIntersecting:true} as IntersectionObserverEntry], this as unknown as IntersectionObserver); }
+    disconnect() {}
+  });
+  const picture = {...item, sourceFilename:'plot.png', mediaType:'image/png', codec:'binary', imageRef:'image:'+'a'.repeat(26), width:7,height:5};
+  let resolve!: (bytes: Uint8Array) => void;
+  const pending = new Promise<Uint8Array>(done => {resolve = done;});
+  const read = vi.fn((_entry, _ordinal, _digest, _size, _item, _signal) => pending);
+  const renderGallery = () => <InlineVisualization entryId="entry:owner" items={[{...picture},{ordinal:1,state:'FAILED',failureDetail:'missing'}]} onRead={read}/>;
+  const view = render(renderGallery());
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  view.rerender(renderGallery());
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(read.mock.calls.every(call => !call[5].aborted)).toBe(true);
+  await act(async () => {resolve(new Uint8Array([1]));});
+  await waitFor(() => expect(view.container.querySelectorAll('img')).toHaveLength(2));
+  view.rerender(renderGallery());
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(revoke).not.toHaveBeenCalled();
+  view.unmount();
+  expect(revoke).toHaveBeenCalledTimes(2);
+});
+
+it('wraps a linked image reference in only one image opener', async () => {
+  const ref = 'image:'+'a'.repeat(26);
+  const {FileLinkContext} = await import('../../frontend/components/file-link-context');
+  const read = vi.fn(async () => ({bytes:new Uint8Array([1]),mediaType:'image/png',width:1,height:1}));
+  const view = render(<FileLinkContext.Provider value={{open:vi.fn(),readImageReference:read}}><MarkdownBody body={`[![图](${ref})](${ref})`} onNotify={()=>{}} assistantChat/></FileLinkContext.Provider>);
+  expect(view.container.querySelectorAll('button')).toHaveLength(1);
+  expect(view.container.querySelector('button button')).toBeNull();
+  fireEvent.click(screen.getByRole('button', {name:'查看图片：图片'}));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+});
+
+
+it('cancels only the image viewer when its session owner changes', async () => {
+  const {FileLinkContext} = await import('../../frontend/components/file-link-context');
+  const create = vi.fn(() => 'blob:late');
+  vi.stubGlobal('URL', Object.assign(URL, {createObjectURL:create,revokeObjectURL:vi.fn()}));
+  let resolve!: (image: {bytes:Uint8Array;mediaType:string;width:number;height:number}) => void;
+  const read = vi.fn((_ref: string, _signal: AbortSignal) => new Promise<{bytes:Uint8Array;mediaType:string;width:number;height:number}>(done => {resolve=done;}));
+  const notify = vi.fn();
+  const renderOwner = (owner: string) => <FileLinkContext.Provider value={{imageOwnerKey:owner,open:vi.fn(),readImageReference:read}}><MarkdownBody body={'![图](image:'+'a'.repeat(26)+')'} onNotify={notify} assistantChat/></FileLinkContext.Provider>;
+  const view = render(renderOwner('session-A'));
+  fireEvent.click(screen.getByRole('button',{name:'查看图片：图'}));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  view.rerender(renderOwner('session-A'));
+  expect(read.mock.calls[0][1].aborted).toBe(false);
+  expect(read).toHaveBeenCalledTimes(1);
+  view.rerender(renderOwner('session-B'));
+  expect(read.mock.calls[0][1].aborted).toBe(true);
+  expect(view.container.querySelector('.yarl__root')).toBeNull();
+  await act(async () => {resolve({bytes:new Uint8Array([1]),mediaType:'image/png',width:1,height:1});});
+  expect(create).not.toHaveBeenCalled();
+  expect(read).toHaveBeenCalledTimes(1);
 });

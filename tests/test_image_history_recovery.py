@@ -193,7 +193,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
         tool_call_id="call:h",
         deadline_monotonic=monotonic() + 30,
     )
-    assert "未授予当前会话读图权限" in str(page)
+    assert "不属于当前工作区的图片读取范围" in str(page)
     assert image.content_digest not in str(page)
 
 
@@ -369,6 +369,7 @@ def test_image_marker_is_atomic_when_result_packaging_budget_binds(monkeypatch):
         "call:test",
         monotonic() + 30,
         False,
+        "workspace:" + "a" * 26,
     )
     assert page == {
         "items": [{**item, "text": "前\n", "partial": True}],
@@ -396,5 +397,6 @@ def test_image_marker_is_atomic_when_result_packaging_budget_binds(monkeypatch):
             "call:test",
             monotonic() + 30,
             False,
+            "workspace:" + "a" * 26,
         )
     assert exc.value.code == "RESULT_BUDGET_EXCEEDED"

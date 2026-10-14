@@ -830,12 +830,14 @@ class DirectKernelToolPort:
         self._mcp_meta_refs = ProcessLocalNewMcpToolRefOwner()
         self._installed_epoch_by_borrow: dict[str, _InstalledBorrowEpoch] = {}
 
-    def prepare_visualizations(self, body: str, *, deadline_monotonic: float) -> tuple[FrozenVisualizationOccurrence, ...]:
-        # Called by the runner's physical IO owner with this runtime's frozen
-        # path resolver. No synthetic tool call, subscription, or extra permit.
-        if monotonic() >= deadline_monotonic:
-            raise TimeoutError("visualization publication deadline expired")
-        return materialize_visualizations(body, self._tools["view_image"]._resolve_read_path, deadline_monotonic=deadline_monotonic)
+    async def prepare_visualizations(self, body: str, *, io: KernelSessionIO,
+                                     workspace_id: str, deadline_monotonic: float) -> tuple[FrozenVisualizationOccurrence, ...]:
+        return await materialize_visualizations(
+            body, self._tools["view_image"]._resolve_read_path, io=io,
+            validator=self._image_validator, image_reader=self._image_reference_read_port,
+            session_id=self._session_id, workspace_id=workspace_id,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def bind_subagent_port(self, port: KernelSubagentToolPort) -> None:
         with self._surface_lock:

@@ -349,6 +349,7 @@ export interface ToolTrace {
 }
 
 export interface SubagentActivity {
+  visualizations?: VisualizationOccurrence[];
   id: string;
   time: string;
   body: string;
@@ -408,10 +409,15 @@ export interface Message {
 }
 
 export interface VisualizationOccurrence {
+  mediaType?: string;
+  codec?: string;
+  imageRef?: string;
+  width?: number;
+  height?: number;
   ordinal: number;
   state: 'READY' | 'FAILED';
   sourceFilename?: string;
-  visualizationRef?: string;
+  contentDigest?: string;
   contentSize?: number;
   failureCode?: string;
   failureDetail?: string;
