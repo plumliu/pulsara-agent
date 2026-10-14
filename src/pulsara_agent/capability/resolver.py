@@ -58,8 +58,8 @@ from pulsara_agent.capability.types import (
 )
 
 
-_EXPLICIT_DOLLAR = re.compile(
-    r"(?<![A-Za-z0-9_-])\$([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])"
+_EXPLICIT_SLASH = re.compile(
+    r"(?<![\w/@.$:\\-])/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w./\\-])"
 )
 _EXPLICIT_PREFIX = re.compile(
     r"(?<![A-Za-z0-9_-])skill:([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])",
@@ -511,7 +511,7 @@ def _active_injections(
 
 def _explicit_skill_names(user_input: str) -> tuple[str, ...]:
     values = {
-        *(_match.group(1) for _match in _EXPLICIT_DOLLAR.finditer(user_input)),
+        *(_match.group(1) for _match in _EXPLICIT_SLASH.finditer(user_input)),
         *(_match.group(1).lower() for _match in _EXPLICIT_PREFIX.finditer(user_input)),
     }
     return tuple(sorted(values))

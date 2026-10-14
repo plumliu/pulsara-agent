@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from pulsara_agent.identity import random_id, require_id
 
 import asyncio
@@ -1086,6 +1088,264 @@ class LocalSessionController:
         finally:
             if isinstance(plugins, PluginInspectionOutcome):
                 plugins.close()
+
+    def _user_hook_provider(self):
+        from pulsara_agent.hooks.source import LocalHookSourceProvider
+
+        return LocalHookSourceProvider(
+            workspace_root=None, workspace_kind=None, workspace_state_key=None
+        )
+
+    @contextmanager
+    def _user_hook_sources(self, deadline, *, local_only=False):
+        from pulsara_agent.hooks.contracts import FrozenHookDefinitionView
+        from pulsara_agent.plugins.contracts import (
+            EnabledPluginViewDisposition,
+            NeverCancelPluginOperation,
+        )
+        from pulsara_agent.plugins.view import EnabledPluginViewOwner
+        from pulsara_agent.plugins.package_core import (
+            PluginPackageCancelled,
+            PluginPackageTimedOut,
+        )
+        from pulsara_agent.plugins.hook_adapter import compose_hook_definition_view
+
+        provider = self._user_hook_provider()
+        local = provider.discover(deadline_monotonic=deadline)
+        if local_only:
+            yield local.source_snapshots, []
+            return
+        plugins = self.core._plugin_management()
+        store = plugins._store()
+        if store is None:
+            yield local.source_snapshots, ["插件 Hook 来源当前不可读取。"]
+            return
+        try:
+            view = EnabledPluginViewOwner(
+                store=store, credential_boundary=self.core._credential_boundary
+            ).observe(
+                workspace_root=None,
+                deadline_monotonic=deadline,
+                cancellation=NeverCancelPluginOperation(),
+            )
+        except (PluginPackageCancelled, PluginPackageTimedOut, TimeoutError):
+            yield local.source_snapshots, ["插件 Hook 来源当前不可读取。"]
+            return
+        composed = FrozenHookDefinitionView(())
+        try:
+            composed = compose_hook_definition_view(
+                local_view=local, plugin_view=view, trust_store=provider.trust_store
+            )
+            details = (
+                ["插件 Hook 来源当前不可读取。"]
+                if view.disposition is EnabledPluginViewDisposition.UNAVAILABLE
+                else []
+            )
+            yield composed.source_snapshots, details
+        finally:
+            # Hooks own duplicate anchors in addition to the instance anchor.
+            anchors = [
+                s.provenance.physical_lifetime_anchor for s in composed.source_snapshots
+            ]
+            anchors.extend(
+                i.hooks.parsed.provenance.physical_lifetime_anchor
+                for i in view.instances
+                if i.hooks.parsed is not None
+            )
+            for anchor in {id(a): a for a in anchors if a is not None}.values():
+                anchor.close()
+            view.close()
+
+    def _hook_public(self, snapshot, *, inspect):
+        from pulsara_agent.hooks.presentation import hook_snapshot_public
+
+        value = hook_snapshot_public(snapshot, inspect=inspect)
+        current, trusted = (
+            snapshot.trust.current_definition_digest,
+            snapshot.trust.trusted_definition_digest,
+        )
+        value["trust_state"] = (
+            "UNAVAILABLE"
+            if current is None or snapshot.trust.disposition.value == "UNAVAILABLE"
+            else "UNTRUSTED"
+            if trusted is None
+            else "TRUSTED"
+            if current == trusted
+            else "MODIFIED"
+        )
+        value["definition_count"] = len(snapshot.definitions)
+        value["can_trust"] = (
+            snapshot.disposition.value == "COMPLETE"
+            and snapshot.trust.disposition.value != "UNAVAILABLE"
+            and bool(snapshot.definitions)
+        )
+        return value
+
+    @staticmethod
+    def _select_user_hook(snapshots, plugin_id):
+        from pulsara_agent.hooks.contracts import PluginHookSourceIdentity
+
+        for snapshot in snapshots:
+            identity = snapshot.provenance.identity
+            if isinstance(identity, PluginHookSourceIdentity):
+                if plugin_id == identity.plugin_id:
+                    return snapshot
+            elif plugin_id is None:
+                return snapshot
+        from pulsara_agent.hooks.source import HookSourceConflict
+
+        raise HookSourceConflict("Hook 来源已关闭、替换或不可读取，请重新审阅。")
+
+    async def read_user_hooks(self):
+        deadline = self.core._canonical_deadline()
+
+        def read():
+            # Freeze these independent local observations before plugin I/O can
+            # consume the operation deadline; a failed plugin view is partial UI.
+            scrub = self.core._plugin_management()._capture_scrub_set(
+                _hook_inspection_request(deadline)
+            )
+            try:
+                local_info = {
+                    "exists": self._user_hook_provider()
+                    .read_user_config(deadline_monotonic=deadline)
+                    .exists
+                }
+            except (OSError, ValueError):
+                local_info = {"editable": False}
+            with self._user_hook_sources(deadline) as (sources, details):
+                payload = {
+                    "sources": [self._hook_public(s, inspect=True) for s in sources],
+                    "details": details,
+                }
+                payload["sources"][0].update(local_info)
+                return scrub.scrub_json(payload)
+
+        return await asyncio.to_thread(read)
+
+    async def read_user_hook_review(self, plugin_id=None):
+        deadline = self.core._canonical_deadline()
+
+        def read():
+            scrub = self.core._plugin_management()._capture_scrub_set(
+                _hook_inspection_request(deadline)
+            )
+            with self._user_hook_sources(deadline, local_only=plugin_id is None) as (
+                sources,
+                _,
+            ):
+                snapshot = self._select_user_hook(sources, plugin_id)
+                value = self._hook_public(snapshot, inspect=True)
+                if not value["can_trust"]:
+                    from pulsara_agent.hooks.source import HookSourceConflict
+
+                    raise HookSourceConflict(
+                        "需要可读取且非空的完整 Hook 定义才能审阅批准。"
+                    )
+                return scrub.scrub_json(value)
+
+        return await asyncio.to_thread(read)
+
+    async def read_user_hook_config(self):
+        deadline = self.core._canonical_deadline()
+        provider = self._user_hook_provider()
+        observation = await asyncio.to_thread(
+            provider.read_user_config, deadline_monotonic=deadline
+        )
+        return {
+            "exists": observation.exists,
+            "text": observation.text,
+            "path": str(provider.user_config_path),
+        }
+
+    async def hook_error_message(self, error):
+        scrub = await asyncio.to_thread(
+            self.core._plugin_management()._capture_scrub_set,
+            _hook_inspection_request(self.core._canonical_deadline()),
+        )
+        return scrub.scrub_text(str(error))
+
+    async def _mutate_user_hook(self, operation):
+        from pulsara_agent.hooks.trust import HookMutationPublishedError
+
+        async def settle():
+            message = None
+            try:
+                await asyncio.to_thread(operation)
+            except HookMutationPublishedError as exc:
+                message = str(exc)
+            try:
+                pending = await self._mark_capability_refresh()
+            except Exception:
+                pending = 0
+                message = message or "已写入，但会话刷新通知未完成，请刷新确认。"
+            return {
+                "status": "ATTENTION" if message else "APPLIED",
+                "message": message,
+                "pending_sessions": pending,
+            }
+
+        async with self._capability_mutation_lock:
+            return await _settle_capability_io(settle())
+
+    async def save_user_hook_config(self, *, exists, expected_text, text):
+        from pulsara_agent.hooks.source import LocalHookConfigText
+
+        provider = self._user_hook_provider()
+        deadline = self.core._canonical_deadline()
+        return await self._mutate_user_hook(
+            lambda: provider.save_user_config(
+                expected=LocalHookConfigText(exists, expected_text),
+                text=text,
+                deadline_monotonic=deadline,
+            )
+        )
+
+    async def trust_user_hook(self, *, plugin_id, definition_digest, trust, accepted):
+        from pulsara_agent.hooks.contracts import (
+            HookSourceKind,
+            HookVisibilityScope,
+            PluginHookTrustSubject,
+        )
+        from pulsara_agent.hooks.source import HookSourceConflict
+
+        if accepted is not True:
+            raise ValueError("请先审阅并勾选信任这些 Hook 定义。")
+        provider = self._user_hook_provider()
+        subject = (
+            provider.source_subject(HookSourceKind.USER_FILE)
+            if plugin_id is None
+            else PluginHookTrustSubject(HookVisibilityScope.USER, plugin_id)
+        )
+        deadline = self.core._canonical_deadline()
+
+        def current():
+            with self._user_hook_sources(deadline, local_only=plugin_id is None) as (
+                sources,
+                _,
+            ):
+                snapshot = self._select_user_hook(sources, plugin_id)
+                value = self._hook_public(snapshot, inspect=False)
+                actual = {
+                    k: value[k]
+                    for k in ("enabled", "trusted_definition_digest", "trusted_at")
+                }
+                if (
+                    not value["can_trust"]
+                    or actual != trust
+                    or value["definition_digest"] != definition_digest
+                ):
+                    raise HookSourceConflict("Hook 定义或信任状态已改变，请重新审阅。")
+                return value["definition_digest"]
+
+        return await self._mutate_user_hook(
+            lambda: provider.trust_store.trust_after_revalidation(
+                subject,
+                expected_digest=definition_digest,
+                current_digest_reader=current,
+                deadline_monotonic=deadline,
+            )
+        )
 
     async def refresh_user_capabilities(
         self, *, active_session_id: str | None = None
@@ -3729,3 +3989,9 @@ __all__ = [
     "LocalSessionController",
     "SessionWorkspaceKind",
 ]
+
+
+def _hook_inspection_request(deadline):
+    from pulsara_agent.plugins.contracts import InspectLocalPluginsRequest
+
+    return InspectLocalPluginsRequest(deadline)

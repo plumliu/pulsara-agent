@@ -3,10 +3,11 @@ export interface SkillReference {
   raw: string;
 }
 
-// Match the existing $name contract in capability/resolver.py. A reference is
+// Match the /name contract in capability/resolver.py. A reference is
 // display syntax, not proof that a skill is installed, enabled, or already read.
+// Exclude path/URL segments and extensions; files use the @ entry point.
 export function splitSkillReferences(text: string): Array<string | SkillReference> {
-  const pattern = /(?<![A-Za-z0-9_-])\$([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])/g;
+  const pattern = /(?<![\p{L}\p{N}_\/@.$:\\-])\/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\p{L}\p{N}_.\/\\-])/gu;
   const parts: Array<string | SkillReference> = [];
   let offset = 0;
   for (const match of text.matchAll(pattern)) {

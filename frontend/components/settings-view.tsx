@@ -530,7 +530,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     <header className="page-header"><div><span className="page-kicker">本机设置</span><h1>设置</h1><p>配置模型、记忆检索与本机 PostgreSQL。访问密钥保存在权限受限的本机设置文件中。</p></div></header>
     <div className="settings-layout">
       <aside className="settings-nav">
-        <div className="settings-profile"><UserAvatar /><div><strong>本机用户</strong><small>无需账号登录</small></div></div>
+        <div className="settings-profile"><UserAvatar /><div><strong>用户</strong><small>偏好与设置</small></div></div>
         {navItems.map(({ id, label, icon: Icon }) => <button className={section === id ? 'is-active' : ''} key={id} onClick={() => setSection(id)}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
         <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span></div>
       </aside>

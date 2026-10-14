@@ -73,7 +73,7 @@ it('requires a full Hook source review and submits only private user acceptance'
   expect(screen.getByText("printf 'original  bytes'", {normalizer: value => value})).toBeTruthy();
   expect(screen.getByText('Write-Output original')).toBeTruthy();
   expect(screen.getByText(/读取文件、搜索内容/)).toBeTruthy();
-  expect(screen.getByText(/该项目的对话/)).toBeTruthy();
+  expect(screen.getByText(/当前项目/)).toBeTruthy();
   expect(screen.getByText(/当前远端工具目录尚不完整/)).toBeTruthy();
   expect(screen.getByText(/上下文阈值：300/)).toBeTruthy();
   expect(screen.getByText(/PLUGIN_ROOT/)).toBeTruthy();

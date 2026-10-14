@@ -207,19 +207,24 @@ it('configured channels expand on enable, hide on disable and retain their confi
   expect(saved().embedding).toEqual(conn('embedding'));
 });
 
-it('enabling with only Rerank configured uses it; selecting missing Decision disables the previous path', async () => {
-  const { saved, setRanking } = setup({ ...empty, rerank: conn('rerank') });
+it.each([
+  ['rerank', 'Rerank', 'Jev-like Decision'],
+  ['decision', 'Jev-like Decision', 'Rerank'],
+] as const)('selecting an unconfigured alternative to %s shows its warning and configuration entry', async (configured, currentLabel, missingLabel) => {
+  const { saved, setRanking, notify } = setup({ ...empty, [configured]: conn(configured) });
   fireEvent.click(screen.getByRole('switch', { name: '启用重排' }));
-  await waitFor(() => expect(saved().ranking_mode).toBe('rerank'));
-  expect(setRanking).toHaveBeenCalledExactlyOnceWith('rerank');
+  await waitFor(() => expect(saved().ranking_mode).toBe(configured));
+  expect(setRanking).toHaveBeenCalledExactlyOnceWith(configured);
   expect(screen.queryByRole('dialog')).toBeNull();
-  expect((screen.getByRole('radio', { name: 'Rerank' }) as HTMLInputElement).checked).toBe(true);
-  fireEvent.click(screen.getByRole('radio', { name: 'Jev-like Decision' }));
+  expect((screen.getByRole('radio', { name: currentLabel }) as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(screen.getByRole('radio', { name: missingLabel }));
   await waitFor(() => expect(saved().ranking_mode).toBe('off'));
   expect(screen.queryByRole('dialog')).toBeNull();
-  expect((screen.getByRole('radio', { name: 'Jev-like Decision' }) as HTMLInputElement).checked).toBe(true);
+  expect((screen.getByRole('radio', { name: missingLabel }) as HTMLInputElement).checked).toBe(true);
   expect(screen.getByRole('button', { name: '重排 配置不完整' })).toBeTruthy();
-  expect(saved().rerank).toEqual(conn('rerank'));
+  expect(screen.getByRole('button', { name: `配置 ${missingLabel}` })).toBeTruthy();
+  expect(saved()[configured]).toEqual(conn(configured));
+  expect(notify).not.toHaveBeenCalled();
 });
 
 it('an empty Embedding drawer warns on hover and keyboard focus, saves and enables atomically', async () => {

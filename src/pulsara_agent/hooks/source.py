@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import stat
 from time import monotonic
+from uuid import uuid4
 
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.hooks.config_parser import (
@@ -28,7 +30,14 @@ from pulsara_agent.hooks.contracts import (
     LocalFileHookSourceIdentity,
     LocalFileHookTrustSubject,
 )
-from pulsara_agent.hooks.trust import HookTrustStore, normalized_definition_digest
+from pulsara_agent.hooks.trust import (
+    HookMutationPublishedError,
+    HookTrustStore,
+    normalized_definition_digest,
+)
+from pulsara_agent.local_source_binding import (
+    open_or_create_absolute_directory_nofollow,
+)
 
 
 MAXIMUM_HOOK_PATH_BYTES = 4 * 1024
@@ -40,6 +49,16 @@ class _MissingSource(FileNotFoundError):
 
 class _SourceDiscoveryRaced(OSError):
     pass
+
+
+class HookSourceConflict(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class LocalHookConfigText:
+    exists: bool
+    text: str
 
 
 class LocalHookSourceProvider:
@@ -75,6 +94,10 @@ class LocalHookSourceProvider:
     @property
     def trust_store(self) -> HookTrustStore:
         return self._trust
+
+    @property
+    def user_config_path(self) -> Path:
+        return self._pulsara_home / "hooks.json"
 
     def discover(
         self,
@@ -116,6 +139,73 @@ class LocalHookSourceProvider:
         if self._workspace_kind != "project":
             raise ValueError("transient workspaces have no WORKSPACE Hook source")
         return LocalFileHookTrustSubject(kind, self._workspace_state_key)
+
+    def read_user_config(self, *, deadline_monotonic: float) -> LocalHookConfigText:
+        try:
+            raw = _read_regular_file_no_follow(
+                self.user_config_path,
+                allowed_root=self._pulsara_home,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except _MissingSource:
+            return LocalHookConfigText(False, "")
+        return LocalHookConfigText(True, raw.decode("utf-8"))
+
+    def save_user_config(
+        self, *, expected: LocalHookConfigText, text: str, deadline_monotonic: float
+    ) -> None:
+        raw = text.encode("utf-8")
+        path = self.user_config_path
+        subject = self.source_subject(HookSourceKind.USER_FILE)
+        provenance = FrozenHookSourceProvenance(
+            LocalFileHookSourceIdentity(
+                HookSourceKind.USER_FILE, path, HookVisibilityScope.USER
+            ),
+            subject,
+            None,
+            "USER",
+        )
+        parse_hook_config(raw, provenance=provenance)
+        with self._trust.source_lock(subject, deadline_monotonic=deadline_monotonic):
+            if self.read_user_config(deadline_monotonic=deadline_monotonic) != expected:
+                raise HookSourceConflict("配置已在其他位置修改，请重新读取后保存。")
+            parent = open_or_create_absolute_directory_nofollow(
+                self._pulsara_home.resolve()
+            )
+            temporary = f".hooks-{uuid4().hex}.tmp"
+            fd = None
+            replaced = False
+            try:
+                _require_deadline(deadline_monotonic)
+                fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent,
+                )
+                with os.fdopen(fd, "wb") as stream:
+                    fd = None
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                _require_deadline(deadline_monotonic)
+                os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+                replaced = True
+                os.fsync(parent)
+            except OSError as exc:
+                if replaced:
+                    raise HookMutationPublishedError(
+                        "配置已写入，但文件系统确认失败，请刷新确认。"
+                    ) from exc
+                raise
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                os.close(parent)
 
     def _read_source(
         self,
@@ -206,6 +296,21 @@ class LocalHookSourceProvider:
                 HookDiagnostic(
                     "HOOK_TRUST_STATE_INVALID",
                     "Hook trust state is invalid; command execution is disabled",
+                    source_label=parsed.provenance.display_label,
+                )
+            )
+        except OSError as exc:
+            trust = HookSourceTrustAssessment(
+                HookTrustDisposition.UNAVAILABLE,
+                digest,
+                None,
+                True,
+                None,
+            )
+            diagnostics.append(
+                HookDiagnostic(
+                    "HOOK_TRUST_STATE_UNAVAILABLE",
+                    type(exc).__name__,
                     source_label=parsed.provenance.display_label,
                 )
             )

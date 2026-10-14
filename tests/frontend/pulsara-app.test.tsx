@@ -495,6 +495,7 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  hooks = {list: vi.fn(async () => ({sources: [], details: []})), config: vi.fn(), save: vi.fn(), review: vi.fn(), trust: vi.fn()};
   userAvatar = vi.fn(async () => ({ configured: false }));
   uploadUserAvatar = vi.fn(async (_file: File) => ({ configured: true }));
   clearUserAvatar = vi.fn(async () => ({ configured: false }));
@@ -1102,15 +1103,15 @@ describe('PulsaraApp', () => {
     fireEvent.click(await screen.findByRole('button', { name: '添加文件、技能或规划' }));
     const skillButton = await screen.findByRole('button', { name: '选择技能' });
     fireEvent.click(skillButton);
-    fireEvent.click(screen.getByRole('button', { name: /\$pdf/ }));
-    expect((await screen.findByLabelText('技能：pdf')).getAttribute('data-skill-reference')).toBe('$pdf');
+    fireEvent.click(screen.getByRole('button', { name: /\/pdf/ }));
+    expect((await screen.findByLabelText('技能：pdf')).getAttribute('data-skill-reference')).toBe('/pdf');
     expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('pdf ');
 
     fireEvent.click(screen.getByRole('button', { name: '能力' }));
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
     expect(await screen.findByText('Personal Tools')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '查看 Personal Tools' }));
-    expect(screen.getByText('钩子').textContent).toBe('3 钩子');
+    expect(within(screen.getByText('Personal Tools').closest('article')!).getByText('钩子').textContent).toBe('3 钩子');
     expect(screen.queryByText('已启用；会话将在安全时机采用')).toBeNull();
     expect(screen.getByRole('switch', { name: '关闭 Personal Tools' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.queryByText('已用于当前打开的会话')).toBeNull();
@@ -4690,7 +4691,7 @@ describe('PR04 atomic queue action ownership', () => {
     fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
     await waitFor(() => expect((screen.getByRole('button', { name: '选择技能' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(await screen.findByRole('button', { name: '选择技能' }));
-    const skill = screen.getByRole('button', { name: /\$pdf/ });
+    const skill = screen.getByRole('button', { name: /\/pdf/ });
     fireEvent.click(screen.getByRole('button', { name: '编辑' }));
     // Even an already-open menu must not bypass the composer reservation.
     fireEvent.click(skill);

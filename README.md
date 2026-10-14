@@ -127,6 +127,8 @@ Bring your research services, specialist workflows, and project tools into the s
 
 Keep capabilities available across your work or scope them to a project. Manage them in the interface, or ask the agent to inspect and configure them. Built-in installer Skills guide the agent through adding Skills, MCP servers, and plugins.
 
+In the composer, type `/` to select a Skill for your message, or `@` to reference a file or directory.
+
 ## Choose the right model for the job
 
 Choose a model for a quick lookup, another for a complex implementation, and a third for independent review. Each delegated task can use its own model and reasoning settings.

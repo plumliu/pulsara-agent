@@ -384,9 +384,9 @@ function ProjectCapabilityPanel({
   };
 
   return (
-    <div className="project-capability-panel">
+    <div className="project-capability-panel" aria-busy={loading}>
       <section className="inspector-section project-capability-overview">
-        <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{kind === 'skills' && <SkillPrecedenceInfo onOpenHomeSettings={onOpenHomeSettings} />}{loading && <small><LoaderCircle size={10} /> 正在同步</small>}</div>
+        <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{kind === 'skills' && <SkillPrecedenceInfo onOpenHomeSettings={onOpenHomeSettings} />}{loading && !snapshot && <small><LoaderCircle size={10} /> 正在同步</small>}</div>
         <p>这里的修改会应用到同一目录的所有会话。</p>
         {snapshot?.adoption.attention && !snapshot.adoption.pending && (
           <div className="task-inventory-notice task-inventory-notice--error">
@@ -426,7 +426,7 @@ function ProjectCapabilityPanel({
         </div>
       )}
       {!error && loading && !snapshot && <div className="task-inventory-notice"><LoaderCircle size={15} /><span><strong>正在读取项目能力</strong><small>整理这个目录中的技能和连接…</small></span></div>}
-      {!loading && !error && rows === 0 && <div className="inspector-empty"><Blocks size={18} /><span>这个目录还没有{kind === 'skills' ? '技能' : ' MCP'}</span></div>}
+      {(!loading || snapshot) && !error && rows === 0 && (kind !== 'skills' || snapshot?.skills.status !== 'attention') && <div className="inspector-empty"><Blocks size={18} /><span>这个目录还没有{kind === 'skills' ? '技能' : ' MCP'}</span></div>}
 
       {snapshot && rows > 0 && (
         <section className="inspector-section project-capability-list">

@@ -3107,14 +3107,14 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
     collected = _collect_context_sources(
         collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
-        activation_text="$skill demo",
+        activation_text="/skill demo",
         tool_surface=surface,
         canonical_facts=_canonical_facts(),
     )
     assert clock_calls == 1
     # Round 9 Skill discovery is independent from the startup Tool allowlist;
     # Tool capability routing is owned by the sibling Tool view.
-    assert capability.inputs == [("$skill demo", frozenset())]
+    assert capability.inputs == [("/skill demo", frozenset())]
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     environment = by_kind[ContextSourceKind.RUNTIME_ENVIRONMENT].variants[0].text
     clock_text = by_kind[ContextSourceKind.RUNTIME_CLOCK].variants[0].text
@@ -4372,7 +4372,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
 def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
     compiler = StructuredModelInputCompiler()
     owner = new_test_provider_input_continuity_owner()
-    initial = _user("$skill:alpha", sequence=1)
+    initial = _user("/alpha", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial),
         _sources(_candidate(ContextSourceKind.ACTIVE_SKILL, ("skill=alpha", ""))),

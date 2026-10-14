@@ -25,6 +25,8 @@ import { SkillImporter } from './skill-importer';
 import { McpImporter } from './mcp-importer';
 import { PluginConnectionEditor } from './plugin-connection-editor';
 import { PluginImporter } from './plugin-importer';
+import { HooksPanel } from './hooks-panel';
+import type { UserHooksApi } from '../lib/hooks-api';
 import type {
   PluginImportOptions,
   PluginImportDiscovery,
@@ -44,10 +46,11 @@ import type {
   UserSkillCapability,
 } from '../lib/pulsara-types';
 
-type CapabilityTab = 'plugins' | 'mcp' | 'skills';
+type CapabilityTab = 'plugins' | 'mcp' | 'skills' | 'hooks';
 type AddKind = 'plugin' | 'mcp' | 'skill' | 'mcp-import';
 
 interface CapabilityViewProps {
+  hooks: UserHooksApi;
   onNotify: MarkdownNotify;
   snapshot?: UserCapabilitySnapshot;
   loading: boolean;
@@ -120,6 +123,7 @@ function CapabilityDrawer({ open, children }: { open: boolean; children: React.R
 
 
 export function CapabilityView({
+  hooks,
   onNotify,
   snapshot,
   loading,
@@ -146,6 +150,8 @@ export function CapabilityView({
   onPluginMcpAuthorization,
 }: CapabilityViewProps) {
   const [tab, setTab] = useState<CapabilityTab>('plugins');
+  const [hooksRefresh, setHooksRefresh] = useState(0);
+  const [hookCount, setHookCount] = useState<number>();
   const [query, setQuery] = useState('');
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [rootMenuOpen, setRootMenuOpen] = useState(false);
@@ -209,9 +215,10 @@ export function CapabilityView({
             <button className={tab === 'plugins' ? 'is-active' : ''} onClick={() => setTab('plugins')} role="tab">插件 <span>{snapshot?.plugins.items.length ?? 0}</span></button>
             <button className={tab === 'mcp' ? 'is-active' : ''} onClick={() => setTab('mcp')} role="tab">MCP <span>{(snapshot?.mcp.servers.length ?? 0) + (snapshot?.plugins.items ?? []).reduce((total, plugin) => total + (plugin.mcpConnections?.length ?? 0), 0)}</span></button>
             <button className={tab === 'skills' ? 'is-active' : ''} onClick={() => setTab('skills')} role="tab">技能 <span>{snapshot?.skills.items.length ?? 0}</span></button>
+            <button className={tab === 'hooks' ? 'is-active' : ''} onClick={() => setTab('hooks')} role="tab" title="当前已启用且受信任的可执行钩子">钩子 <span>{hookCount ?? '—'}</span></button>
           </div>
-          <div className="capability-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${tab === 'plugins' ? '插件' : tab === 'mcp' ? ' MCP' : '技能'}`} /></div>
-          <button className="capability-refresh" onClick={() => void onRefresh()} disabled={loading} aria-label="刷新能力">{loading ? <LoaderCircle size={14} /> : <RefreshCw size={14} />}</button>
+          <div className="capability-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${tab === 'plugins' ? '插件' : tab === 'mcp' ? ' MCP' : tab === 'hooks' ? '钩子' : '技能'}`} /></div>
+          <button className="capability-refresh" onClick={() => {setHooksRefresh(value => value + 1); void onRefresh();}} disabled={loading} aria-label="刷新能力">{loading ? <LoaderCircle size={14} /> : <RefreshCw size={14} />}</button>
         </div>
 
         {error && <div className="capability-page-notice"><CircleAlert size={15} /><span>{error}</span></div>}
@@ -219,7 +226,8 @@ export function CapabilityView({
         {snapshot?.adoption && snapshot.adoption.pendingSessions > 0 && <div className="capability-page-notice"><CircleAlert size={15} /><span>配置已保存，{snapshot.adoption.pendingSessions} 个会话将在下次模型请求前的安全时机载入。</span></div>}
 
         <div className="capability-page-list">
-          {loading && !snapshot ? <EmptyState>正在读取这台设备上的能力…</EmptyState> : tab === 'plugins' ? (
+          <div hidden={tab !== 'hooks'}><HooksPanel api={hooks} query={query} refresh={hooksRefresh} inventory={snapshot} onCountChange={setHookCount} onNotify={onNotify}/></div>
+          {tab === 'hooks' ? null : loading && !snapshot ? <EmptyState>正在读取这台设备上的能力…</EmptyState> : tab === 'plugins' ? (
             plugins.length ? plugins.map((plugin) => {
               const open = expanded === `plugin:${plugin.id}`;
               return <article className={`capability-list-item capability-list-item--plugin${open ? ' is-expanded' : ''}`} key={plugin.id}>

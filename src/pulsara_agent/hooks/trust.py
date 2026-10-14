@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import stat
+from time import monotonic, sleep
 from typing import Callable, Iterator
 from uuid import uuid4
 
@@ -59,6 +60,10 @@ class HookSourceTrustState:
     enabled: bool = True
     trusted_definition_digest: str | None = None
     trusted_at: str | None = None
+
+
+class HookMutationPublishedError(OSError):
+    """Replacement happened, but its final filesystem confirmation failed."""
 
 
 def normalized_definition_digest(
@@ -228,7 +233,7 @@ class HookTrustStore:
         )
 
     def trust(self, subject: HookTrustSubject, *, expected_digest: str) -> None:
-        with self._locked(subject):
+        with self.source_lock(subject):
             state = self._read_for_mutation(subject)
             self._write(
                 HookSourceTrustState(
@@ -245,7 +250,7 @@ class HookTrustStore:
         *,
         require_current: Callable[[], object] | None = None,
     ) -> None:
-        with self._locked(subject):
+        with self.source_lock(subject):
             if require_current is not None:
                 require_current()
             state = self._read_for_mutation(subject)
@@ -265,7 +270,7 @@ class HookTrustStore:
         enabled: bool,
         require_current: Callable[[], object] | None = None,
     ) -> None:
-        with self._locked(subject):
+        with self.source_lock(subject):
             if require_current is not None:
                 require_current()
             state = self._read_for_mutation(subject)
@@ -295,8 +300,9 @@ class HookTrustStore:
         *,
         expected_digest: str,
         current_digest_reader: Callable[[], str],
+        deadline_monotonic: float | None = None,
     ) -> None:
-        with self._locked(subject):
+        with self.source_lock(subject, deadline_monotonic=deadline_monotonic):
             current_digest = current_digest_reader()
             if current_digest != expected_digest:
                 raise ValueError(
@@ -335,6 +341,7 @@ class HookTrustStore:
         parent = open_or_create_absolute_directory_nofollow(path.parent)
         temporary = f".trust-{uuid4().hex}"
         fd: int | None = None
+        replaced = False
         try:
             fd = os.open(temporary, _WRITE_FLAGS, 0o600, dir_fd=parent)
             os.fchmod(fd, 0o600)
@@ -349,7 +356,14 @@ class HookTrustStore:
                 src_dir_fd=parent,
                 dst_dir_fd=parent,
             )
+            replaced = True
             os.fsync(parent)
+        except OSError as exc:
+            if replaced:
+                raise HookMutationPublishedError(
+                    "Hook 信任已写入，但文件系统确认失败，请刷新确认。"
+                ) from exc
+            raise
         finally:
             try:
                 os.unlink(temporary, dir_fd=parent)
@@ -360,7 +374,9 @@ class HookTrustStore:
             os.close(parent)
 
     @contextmanager
-    def _locked(self, subject: HookTrustSubject) -> Iterator[None]:
+    def source_lock(
+        self, subject: HookTrustSubject, *, deadline_monotonic: float | None = None
+    ) -> Iterator[None]:
         path = self._lock_path(subject)
         parent = open_or_create_absolute_directory_nofollow(path.parent)
         descriptor: int | None = None
@@ -378,7 +394,20 @@ class HookTrustStore:
             if not stat.S_ISREG(metadata.st_mode):
                 raise OSError("Hook trust lock is not a regular file")
             if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                if deadline_monotonic is None:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                else:
+                    # Same bounded flock wait as the package owner, using the
+                    # caller's operation deadline, never a retry/lifetime cap.
+                    while True:
+                        remaining = deadline_monotonic - monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("Hook source lock deadline exceeded")
+                        try:
+                            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            sleep(min(0.01, remaining))
             try:
                 yield
             finally:

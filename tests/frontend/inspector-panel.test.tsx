@@ -171,6 +171,41 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
 }
 
 describe('InspectorPanel PR03 production navigation', () => {
+  it('keeps the empty skills panel and warning stable during background capability refreshes', () => {
+    const snapshot: CapabilitySnapshot = {
+      ...capabilitySnapshot,
+      skills: { ...capabilitySnapshot.skills, items: [], details: ['Plugin Skill definitions are unavailable'] },
+    };
+    const base = props({ capabilities: snapshot, capabilityLoading: false });
+    const view = render(<InspectorPanel {...base} />);
+    const empty = screen.getByText('这个目录还没有技能');
+    const warning = screen.getByText('部分技能目录暂时无法完整读取');
+    for (const loading of [true, false, true, false]) {
+      view.rerender(<InspectorPanel {...base} capabilityLoading={loading} />);
+      expect(screen.getByText('这个目录还没有技能')).toBe(empty);
+      expect(screen.getByText('部分技能目录暂时无法完整读取')).toBe(warning);
+      expect(screen.queryByText('正在同步')).toBeNull();
+      expect(screen.queryByText('正在读取项目能力')).toBeNull();
+      expect(view.container.querySelector('.project-capability-panel')?.getAttribute('aria-busy')).toBe(String(loading));
+    }
+  });
+
+  it('shows loading rather than an empty result before the first capability snapshot arrives', () => {
+    render(<InspectorPanel {...props()} />);
+    expect(screen.getByText('正在读取项目能力')).toBeTruthy();
+    expect(screen.queryByText('这个目录还没有技能')).toBeNull();
+  });
+
+  it('does not describe an unavailable skill catalog as having no installed skills', () => {
+    const snapshot: CapabilitySnapshot = {
+      ...capabilitySnapshot,
+      skills: { ...capabilitySnapshot.skills, status: 'attention', items: [], details: ['Plugin Skill definitions are unavailable'] },
+    };
+    render(<InspectorPanel {...props({ capabilities: snapshot, capabilityLoading: false })} />);
+    expect(screen.getByText('部分技能目录暂时无法完整读取')).toBeTruthy();
+    expect(screen.queryByText('这个目录还没有技能')).toBeNull();
+  });
+
   it('closes capability editing on control loss and keeps it closed after control returns', () => {
     const base = props({ capabilities: capabilitySnapshot, capabilityLoading: false, canControl: true });
     const view = render(<InspectorPanel {...base} />);

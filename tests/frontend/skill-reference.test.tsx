@@ -10,28 +10,33 @@ const stores: PromptDraftStore[] = [];
 const store = () => { const value = new PromptDraftStore(); stores.push(value); return value; };
 afterEach(() => { cleanup(); stores.splice(0).forEach(value => value.destroy()); });
 
-it('uses the existing dollar skill syntax and retains all surrounding text', () => {
-  const text = '使用 $huggingface-best、$pdf。\n$HOME $bad_name a$pdf $Bad $bad--name';
+it('uses the slash skill syntax and retains all surrounding text', () => {
+  const text = '使用 /huggingface-best、/pdf。\n$HOME $bad_name a/pdf $Bad $bad--name';
   const parts = splitSkillReferences(text);
   expect(parts.filter(part => typeof part !== 'string')).toEqual([
-    { name: 'huggingface-best', raw: '$huggingface-best' }, { name: 'pdf', raw: '$pdf' },
+    { name: 'huggingface-best', raw: '/huggingface-best' }, { name: 'pdf', raw: '/pdf' },
   ]);
   expect(parts.map(part => typeof part === 'string' ? part : part.raw).join('')).toBe(text);
-  expect(skillReference('$hf-cli')).toEqual({ name: 'hf-cli', raw: '$hf-cli' });
-  expect(skillReference('$hf-cli trailing')).toBeUndefined();
+  expect(skillReference('/hf-cli')).toEqual({ name: 'hf-cli', raw: '/hf-cli' });
+  expect(skillReference('/hf-cli trailing')).toBeUndefined();
 });
 
-it('keeps exact Text/Image order, file paths, and dollar markers on capture and restore', async () => {
+it.each(['$pdf', '$hf-cli', '@/pdf', '/pdf/file.txt', '/pdf.png', 'https://example.com/pdf', 'folder/pdf', 'C:/pdf', 'C:\\pdf', '/中文/pdf', '/pdf_unsafe', '/bad--name'])('keeps %s as ordinary text instead of a skill reference', raw => {
+  expect(skillReference(raw)).toBeUndefined();
+  expect(splitSkillReferences(raw)).toEqual([raw]);
+});
+
+it('keeps exact Text/Image order, file paths, and slash markers on capture and restore', async () => {
   const value = store();
   const file = '【本地文件（只读副本，12 bytes）："/tmp/$hf-cli.pdf"】';
   const content = { parts: [
-    { type: 'text' as const, text: `  $hf-cli ${file}\n` },
+    { type: 'text' as const, text: `  /hf-cli ${file}\n` },
     { type: 'image' as const, source: 'local' as const, bytes: new Uint8Array([1, 2]), declaredMediaType: 'image/png' },
-    { type: 'text' as const, text: ' $huggingface-best  ' },
+    { type: 'text' as const, text: ' /huggingface-best  ' },
   ] };
   value.restoreIfEmpty('s', content);
   expect(value.getEditor('s').getJSON().content?.[0].content?.filter(node => node.type === 'skillReference')).toHaveLength(2);
-  expect(value.summary('s').text).toBe(`  $hf-cli ${file}\n $huggingface-best  `);
+  expect(value.summary('s').text).toBe(`  /hf-cli ${file}\n /huggingface-best  `);
   const snapshot = await value.capture('s');
   expect(snapshot.content).toEqual(content);
   value.restoreIfEmpty('queue-edit', snapshot.content);
@@ -42,7 +47,7 @@ it('deletes and undoes a selected skill atom and pastes it through the actual ed
   const value = store();
   render(<PromptComposer store={value} sessionId="s" disabled={false} placeholder="input" onSubmit={() => {}} onNotify={() => {}} />);
   const editor = value.getEditor('s');
-  await act(async () => value.insertText('s', '$hf-cli ', true));
+  await act(async () => value.insertText('s', '/hf-cli ', true));
   expect(await screen.findByLabelText('技能：hf-cli')).toBeTruthy();
   const snapshot = await value.capture('s');
   await act(async () => {
@@ -52,19 +57,19 @@ it('deletes and undoes a selected skill atom and pastes it through the actual ed
   expect(screen.queryByLabelText('技能：hf-cli')).toBeNull();
   await act(async () => { editor.commands.undo(); });
   expect((await value.capture('s')).content).toEqual(snapshot.content);
-  expect(editor.getText()).toBe('$hf-cli ');
+  expect(editor.getText()).toBe('/hf-cli ');
   const html = editor.getHTML();
   await act(async () => { editor.commands.selectAll(); editor.commands.deleteSelection(); });
   fireEvent.paste(screen.getByLabelText('发送给 Pulsara'), { clipboardData: {
     files: [], items: [], types: ['text/html', 'text/plain'],
-    getData: (type: string) => type === 'text/html' ? html : '$hf-cli ',
+    getData: (type: string) => type === 'text/html' ? html : '/hf-cli ',
   } });
   expect(await screen.findByLabelText('技能：hf-cli')).toBeTruthy();
   expect((await value.capture('s')).content).toEqual(snapshot.content);
 });
 
 it.each(['message', 'queue'] as const)('shows the same skill card in %s and copies its original marker', variant => {
-  const raw = '先用 $huggingface-best 再用 $pdf。';
+  const raw = '先用 /huggingface-best 再用 /pdf。';
   const view = render(<PromptContentView variant={variant} content={{ parts: [{ type: 'text', text: raw }] }} onReadImage={vi.fn()} />);
   expect(screen.getByLabelText('技能：huggingface-best').textContent).toBe('huggingface-best');
   expect(screen.getByLabelText('技能：pdf')).toBeTruthy();

@@ -192,7 +192,7 @@ describe('annotation drafts', () => {
   it('keeps annotation-first order, undo, restoration and snapshot ownership', async () => {
     const store = new PromptDraftStore(); const editor = store.getEditor('s');
     store.insertText('s', '正文');
-    const annotation = { type: 'annotation' as const, quote: '$skill ![a](a.png)', source: { entry_id: 'entry:a', start: 0, end: 18 }, comment: '解释' };
+    const annotation = { type: 'annotation' as const, quote: '/skill ![a](a.png)', source: { entry_id: 'entry:a', start: 0, end: 18 }, comment: '解释' };
     store.addAnnotation('s', annotation);
     const captured = await store.capture('s');
     expect(captured.content.parts).toEqual([annotation, { type: 'text', text: '正文' }]);

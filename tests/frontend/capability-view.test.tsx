@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { CapabilityView } from '../../frontend/components/capability-view';
 import type { UserCapabilitySnapshot, UserMcpServerCapability } from '../../frontend/lib/pulsara-types';
+import type {HookSource} from '../../frontend/lib/hooks-api';
 
 afterEach(cleanup);
 
@@ -16,6 +17,7 @@ const snapshot: UserCapabilitySnapshot = {
   plugins: { status: 'ready', items: [], details: [] }, mcp: { configPath: '', servers: [server] },
 };
 const callbacks = {
+  hooks: {list: vi.fn().mockResolvedValue({sources: [], details: []}), config: vi.fn(), save: vi.fn(), review: vi.fn(), trust: vi.fn()},
   onNotify: vi.fn(), onRefresh: vi.fn(), onOpenRoot: vi.fn(), onInstallSkill: vi.fn(),
   onPreviewSkills: vi.fn(), onInstallPlugin: vi.fn(), onPreviewPlugin: vi.fn(),
   onCreateMcp: vi.fn(), onTestMcp: vi.fn(), onPreviewMcpImport: vi.fn(), onImportMcp: vi.fn(),
@@ -45,4 +47,73 @@ it('shows tool counts and tool descriptions from the connected session', () => {
   expect(screen.getByText('mcp__docs__search')).toBeTruthy();
   expect(screen.getByText('搜索文档')).toBeTruthy();
   expect(within(screen.getByRole('tablist')).getByRole('tab', { name: 'MCP 1' })).toBeTruthy();
+});
+
+it('places Hooks directly after skills and uses the same list and dialog styles', async () => {
+  callbacks.hooks.list.mockResolvedValueOnce({sources: [{path: '/home/hooks.json', source_disposition: 'COMPLETE', trust_state: 'UNTRUSTED', enabled: true, definition_count: 0, can_trust: false, exists: false, diagnostics: []}], details: []});
+  callbacks.hooks.config.mockResolvedValue({exists: false, text: '', path: '/home/hooks.json'});
+  const view = render(<CapabilityView {...callbacks} loading={false} snapshot={snapshot}/>);
+  await screen.findByRole('tab', {name: '钩子 0'});
+  expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['插件 0', 'MCP 1', '技能 0', '钩子 0']);
+  fireEvent.click(screen.getByRole('tab', {name: '钩子 0'}));
+  fireEvent.click(await screen.findByText('本地 Hooks'));
+  expect(view.container.querySelector('.capability-page-list .capability-list-item .capability-list-row')).toBeTruthy();
+  await waitFor(() => expect((screen.getByRole('button', {name: '添加配置'}) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole('button', {name: '添加配置'}));
+  const modal = await screen.findByRole('dialog');
+  expect(modal.classList.contains('capability-add-panel')).toBe(true);
+  expect(modal.querySelector('.capability-dialog-body .capability-field')).toBeTruthy();
+});
+
+const hookSource: HookSource = {path:'/home/hooks.json', source_disposition:'COMPLETE', trust_state:'TRUSTED', enabled:true,
+  definition_digest:'current', trusted_definition_digest:'current', trusted_at:'approved', definition_count:2, can_trust:true, exists:true, diagnostics:[]};
+
+it('counts all runnable user Hooks before opening the tab and keeps the count independent of search', async () => {
+  const hooks = {...callbacks.hooks, list:vi.fn().mockResolvedValue({sources:[hookSource,
+    {...hookSource, plugin_id:'active', definition_count:3},
+    {...hookSource, plugin_id:'untrusted', trust_state:'UNTRUSTED', definition_count:4},
+    {...hookSource, plugin_id:'modified', trust_state:'MODIFIED', definition_count:5},
+    {...hookSource, plugin_id:'disabled', enabled:false, definition_count:6},
+    {...hookSource, plugin_id:'unavailable', source_disposition:'UNAVAILABLE', definition_count:7}],details:[]})};
+  const view = render(<CapabilityView {...callbacks} hooks={hooks} loading={false} snapshot={snapshot}/>);
+  const tab = await screen.findByRole('tab', {name:'钩子 5'});
+  expect(screen.queryByRole('button', {name:'查看 本地 Hooks'})).toBeNull();
+  fireEvent.click(tab);
+  fireEvent.change(screen.getByPlaceholderText('搜索钩子'), {target:{value:'no match'}});
+  expect(screen.getByRole('tab', {name:'钩子 5'})).toBeTruthy();
+  expect(screen.getByText('没有匹配的 Hook 来源。')).toBeTruthy();
+  hooks.list.mockResolvedValue({sources:[hookSource],details:[]});
+  view.rerender(<CapabilityView {...callbacks} hooks={hooks} loading={false} snapshot={{...snapshot}}/>);
+  await screen.findByRole('tab', {name:'钩子 2'});
+});
+
+it('does not present a partial or failed Hook observation as a zero active count', async () => {
+  const hooks = {...callbacks.hooks, list:vi.fn().mockResolvedValue({sources:[hookSource],details:[]})};
+  render(<CapabilityView {...callbacks} hooks={hooks} loading={false} snapshot={snapshot}/>);
+  await screen.findByRole('tab', {name:'钩子 2'});
+  hooks.list.mockResolvedValueOnce({sources:[hookSource],details:['插件来源暂时不可读']});
+  fireEvent.click(screen.getByRole('button', {name:'刷新能力'}));
+  await screen.findByRole('tab', {name:'钩子 —'});
+  hooks.list.mockRejectedValueOnce(new Error('读取失败'));
+  fireEvent.click(screen.getByRole('button', {name:'刷新能力'}));
+  fireEvent.click(screen.getByRole('tab', {name:'钩子 —'}));
+  await screen.findByText('读取失败');
+  expect(screen.getByRole('tab', {name:'钩子 —'})).toBeTruthy();
+});
+
+it('updates the active count after a complete source is trusted', async () => {
+  const source = {...hookSource, trust_state:'UNTRUSTED', definitions:[{event:'SessionStart', command:'echo first', matcher:'', async:false},{event:'Stop', command:'echo second', matcher:'', async:false}]};
+  const hooks = {...callbacks.hooks, list:vi.fn().mockResolvedValue({sources:[source],details:[]}),
+    config:vi.fn().mockResolvedValue({exists:false,text:'',path:source.path}), review:vi.fn().mockResolvedValue(source),
+    trust:vi.fn().mockResolvedValue({status:'APPLIED',message:null,pending_sessions:0})};
+  render(<CapabilityView {...callbacks} hooks={hooks} loading={false} snapshot={snapshot}/>);
+  fireEvent.click(await screen.findByRole('tab', {name:'钩子 0'}));
+  fireEvent.click(screen.getByText('本地 Hooks'));
+  fireEvent.click(screen.getByRole('button', {name:'审阅并信任'}));
+  const confirm = await screen.findByRole('button', {name:'确认并信任'});
+  hooks.list.mockResolvedValue({sources:[{...source,trust_state:'TRUSTED'}],details:[]});
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(confirm);
+  await screen.findByRole('tab', {name:'钩子 2'});
+  expect(hooks.trust).toHaveBeenCalledWith(source);
 });

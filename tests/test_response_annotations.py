@@ -45,7 +45,7 @@ from pulsara_agent.model_input.lowering import (
 )
 
 
-def annotation(quote="中文😀 &amp;", comment="$pulsara-docs 解释一下"):
+def annotation(quote="中文😀 &amp;", comment="/pulsara-docs 解释一下"):
     return PromptAnnotationPart(
         quote,
         PromptAnnotationSource('entry:4g4gwnnvee2tosb7zkrcv7tz3e', 0, len(quote.encode("utf-16-le")) // 2),
@@ -63,8 +63,8 @@ def test_codec_provider_intent_and_protocol_roundtrip():
     assert _prompt_content_from_wire(_prompt_content_from_json(raw)) == PromptContent(
         content.parts
     )
-    assert prompt_text_projection(content) == "$pulsara-docs 解释一下\n原文不变"
-    inert = FrozenPromptContent((annotation("$skill 不使用记忆", None),))
+    assert prompt_text_projection(content) == "/pulsara-docs 解释一下\n原文不变"
+    inert = FrozenPromptContent((annotation("/skill 不使用记忆", None),))
     assert prompt_text_projection(inert) == ""
     parts = prompt_provider_parts(content.parts)
     assert parts[-1].text == "原文不变"
@@ -157,7 +157,7 @@ def test_dispatch_anchor_uses_comment_intent_and_excludes_quote(origin):
         source_entry_sequence=2,
         source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
         input_origin=origin,
-        content=(annotation("$quoted-skill 使用记忆", "$pulsara-docs 不使用记忆"),),
+        content=(annotation("/quoted-skill 使用记忆", "/pulsara-docs 不使用记忆"),),
     )
     snapshot = _snapshot(
         item,
@@ -168,9 +168,9 @@ def test_dispatch_anchor_uses_comment_intent_and_excludes_quote(origin):
     anchor = _append_anchor(SimpleNamespace(canonical_input=snapshot))
     assert _activation_subject_for_anchor(snapshot, anchor) == (
         CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
-        "$pulsara-docs 不使用记忆",
+        "/pulsara-docs 不使用记忆",
     )
-    item = replace(item, content=(annotation("$quoted-skill 不使用记忆", None),))
+    item = replace(item, content=(annotation("/quoted-skill 不使用记忆", None),))
     snapshot = _snapshot(
         item,
         canonical_expanded_bytes=freeze_canonical_prompt(

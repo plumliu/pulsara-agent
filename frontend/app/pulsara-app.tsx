@@ -2794,6 +2794,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       )}
       {activeView === 'capabilities' && (
         <CapabilityView
+          hooks={adapter.hooks}
           onNotify={notify}
           snapshot={userCapabilities}
           loading={userCapabilityLoading}

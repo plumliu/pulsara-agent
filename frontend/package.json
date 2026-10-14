@@ -30,6 +30,7 @@
     "@tiptap/suggestion": "3.31.3",
     "dompurify": "3.4.16",
     "hast-util-to-text": "4.0.2",
+    "jsonc-parser": "3.3.1",
     "katex": "0.16.47",
     "lucide-react": "^1.37.0",
     "mermaid": "12.0.0",

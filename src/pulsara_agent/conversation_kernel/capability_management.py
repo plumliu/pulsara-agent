@@ -514,6 +514,7 @@ class CapabilityManagementPreparation:
         if intent.action is Action.TRUST_HOOK_SOURCE and (
             snapshot.disposition is not HookSourceSnapshotDisposition.COMPLETE
             or snapshot.trust.disposition is HookTrustDisposition.UNAVAILABLE
+            or not snapshot.definitions
         ):
             raise ValueError("complete current Hook definitions are required for trust")
         prefill = {

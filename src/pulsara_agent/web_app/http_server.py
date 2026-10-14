@@ -461,6 +461,19 @@ class LocalHttpServer:
         self._app.router.add_delete("/api/local-settings/memory-retrieval/{slot}", self._delete_memory_model)
         self._app.router.add_post("/api/local-settings/memory-retrieval/{slot}/test", self._test_memory_model)
         self._app.router.add_get("/api/capabilities", self._inspect_user_capabilities)
+        self._app.router.add_get("/api/capabilities/hooks", self._read_user_hooks)
+        self._app.router.add_get(
+            "/api/capabilities/hooks/local", self._read_user_hook_config
+        )
+        self._app.router.add_put(
+            "/api/capabilities/hooks/local", self._save_user_hook_config
+        )
+        self._app.router.add_get(
+            "/api/capabilities/hooks/review", self._read_user_hook_review
+        )
+        self._app.router.add_post(
+            "/api/capabilities/hooks/trust", self._trust_user_hook
+        )
         self._app.router.add_post(
             "/api/capabilities/refresh", self._refresh_user_capabilities
         )
@@ -1836,6 +1849,74 @@ class LocalHttpServer:
                 session_id=request.match_info.get("session_id"),
             )
         )
+
+    async def _hook_response(self, operation):
+        from pulsara_agent.hooks.source import HookSourceConflict
+
+        try:
+            return web.json_response(await operation)
+        except HookSourceConflict as exc:
+            raise HttpPublicError("HOOK_SOURCE_CHANGED", str(exc), status=409) from exc
+        except TimeoutError as exc:
+            raise HttpPublicError(
+                "HOOK_OPERATION_TIMEOUT",
+                "Hook 操作超时，请刷新确认后重试。",
+                status=503,
+                retryable=True,
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise HttpPublicError(
+                "HOOK_CONFIG_INVALID",
+                await self.sessions.hook_error_message(exc),
+                status=400,
+            ) from exc
+
+    async def _read_user_hooks(self, _request):
+        return await self._hook_response(self.sessions.read_user_hooks())
+
+    async def _read_user_hook_config(self, _request):
+        return await self._hook_response(self.sessions.read_user_hook_config())
+
+    async def _save_user_hook_config(self, request):
+        body = await self._json_body(request)
+        if (
+            set(body) != {"exists", "expected_text", "text"}
+            or type(body["exists"]) is not bool
+            or not all(isinstance(body[k], str) for k in ("expected_text", "text"))
+        ):
+            raise ValueError("invalid Hook config submission")
+        return await self._hook_response(self.sessions.save_user_hook_config(**body))
+
+    async def _read_user_hook_review(self, request):
+        if set(request.query) - {"plugin_id"}:
+            raise ValueError("invalid Hook selector")
+        plugin_id = request.query.get("plugin_id")
+        if plugin_id == "":
+            raise ValueError("empty Plugin Hook selector")
+        return await self._hook_response(self.sessions.read_user_hook_review(plugin_id))
+
+    async def _trust_user_hook(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"plugin_id", "definition_digest", "trust", "accepted"}:
+            raise ValueError("invalid Hook review submission")
+        trust = body["trust"]
+        if (
+            (body["plugin_id"] is not None and not isinstance(body["plugin_id"], str))
+            or type(body["accepted"]) is not bool
+            or not isinstance(body["definition_digest"], str)
+        ):
+            raise ValueError("invalid Hook review values")
+        if (
+            not isinstance(trust, dict)
+            or set(trust) != {"enabled", "trusted_definition_digest", "trusted_at"}
+            or type(trust["enabled"]) is not bool
+            or any(
+                trust[k] is not None and not isinstance(trust[k], str)
+                for k in ("trusted_definition_digest", "trusted_at")
+            )
+        ):
+            raise ValueError("invalid Hook trust observation")
+        return await self._hook_response(self.sessions.trust_user_hook(**body))
 
     async def _install_user_plugin(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

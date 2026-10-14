@@ -1,5 +1,7 @@
 'use client';
 
+import { splitSkillReferences } from '../lib/skill-reference';
+
 import { createPortal } from 'react-dom';
 import { usePromptHover } from '../lib/prompt-hover';
 import { AgentInputAvatar, UserAvatar } from './user-avatar';
@@ -1976,8 +1978,8 @@ export function WorkbenchView({
 
   const insertSkill = useCallback((name: string) => {
     if (editingQueue || queueClicks.current.has('composer-edit')) return;
-    const marker = `$${name}`;
-    if (new RegExp(`(^|\\s)\\$${name}(?=\\s|$)`).test(draft.text)) return;
+    const marker = `/${name}`;
+    if (splitSkillReferences(draft.text).some(reference => typeof reference !== 'string' && reference.name === name)) return;
     draftStore.insertText(session.id, `${marker} `, true);
     setSkillOpen(false);
     setAddOpen(false);
@@ -2451,10 +2453,10 @@ export function WorkbenchView({
                         <span className="menu-label">用于本轮</span>
                         <div className="skill-menu__list">
                           {skills.map((skill) => {
-                            const selected = skill.configured || new RegExp(`(^|\\s)\\$${skill.name}(?=\\s|$)`).test(draft.text);
+                            const selected = skill.configured || splitSkillReferences(draft.text).some(reference => typeof reference !== 'string' && reference.name === skill.name);
                             return (
                               <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured || editingQueue}>
-                                <span><strong>${skill.name}</strong><small>{skill.description}</small></span>
+                                <span><strong>/{skill.name}</strong><small>{skill.description}</small></span>
                                 {selected && <Check size={13} />}
                               </button>
                             );

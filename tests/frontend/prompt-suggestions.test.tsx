@@ -29,11 +29,29 @@ const directory = { kind: 'directory' as const, name: '文档 folder', path: '/w
 const document = { kind: 'file' as const, name: 'draft.pdf', path: '/workspace/文档 folder/draft.pdf', relative_path: '文档 folder/draft.pdf' };
 const page = (items: WorkspacePathPage['items'], next_cursor: string | null = null): WorkspacePathPage => ({ directory: '/workspace', items, next_cursor });
 
+it('opens skill candidates with a bare slash and never requests file completion', async () => {
+  const lookup = vi.fn<CompleteWorkspacePaths>();
+  const {type, key, store} = setup(lookup);
+  type('/');
+  await screen.findByRole('option', {name:'find-skills'});
+  expect(screen.getByRole('option', {name:'pdf'})).toBeTruthy();
+  key('Enter');
+  expect(store.summary('one').text).toBe('/find-skills ');
+  expect(lookup).not.toHaveBeenCalled();
+});
+
+it.each(['$find', 'folder/pdf', 'https://example.com/pdf', 'C:/pdf', '/中文/pdf', '/pdf.txt', '@/pdf'])('does not offer skill completion inside %s', async raw => {
+  const {type, store} = setup();
+  await act(async () => {type(raw);});
+  expect(screen.queryByRole('listbox', {name:'技能候选'})).toBeNull();
+  expect(store.summary('one').text).toBe(raw);
+});
+
 it('matches only skill name prefixes and replaces the active range, preserving undo and surrounding text', async () => {
   const { editor, type, key, onSubmit, store } = setup();
   type('前文  后文');
   act(() => editor.commands.setTextSelection(4));
-  type('$find');
+  type('/find');
   await screen.findByRole('option', { name: 'find-skills' });
   expect(screen.queryByRole('option', { name: 'pdf' })).toBeNull();
   act(() => editor.view.dispatch(closeHistory(editor.state.tr)));
@@ -41,10 +59,10 @@ it('matches only skill name prefixes and replaces the active range, preserving u
   key('Enter');
   await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
   expect(onSubmit).not.toHaveBeenCalled();
-  expect(store.summary('one').text).toBe('前文 $find-files 后文');
+  expect(store.summary('one').text).toBe('前文 /find-files 后文');
   expect(screen.getByLabelText('技能：find-files')).toBeTruthy();
   act(() => editor.commands.undo());
-  expect(store.summary('one').text).toBe('前文 $find 后文');
+  expect(store.summary('one').text).toBe('前文 /find 后文');
   key('Escape');
   key('Enter');
   expect(onSubmit).toHaveBeenCalledOnce();
@@ -106,17 +124,17 @@ it('discards stale queries and cancels current requests on disable and session s
 
 it('keeps IME Enter and Shift+Enter from selecting or submitting', async () => {
   const { type, key, store, onSubmit } = setup();
-  type('$find');
+  type('/find');
   await screen.findByRole('option', { name: 'find-skills' });
   fireEvent.compositionStart(screen.getByRole('textbox'));
   key('Enter', { isComposing: true, keyCode: 229 });
-  expect(store.summary('one').text).toBe('$find');
+  expect(store.summary('one').text).toBe('/find');
   expect(onSubmit).not.toHaveBeenCalled();
   fireEvent.compositionEnd(screen.getByRole('textbox'));
   // ProseMirror suppresses Safari's immediate post-composition Enter for 500 ms.
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 510)); });
   key('Enter', { shiftKey: true });
-  expect(store.summary('one').text).toBe('$find\n');
+  expect(store.summary('one').text).toBe('/find\n');
   expect(onSubmit).not.toHaveBeenCalled();
 });
 
@@ -138,17 +156,17 @@ it('keeps errors retryable, hides empty results, and does not interpret email te
 
 it('restores skill candidates after editing an unmatched prefix without swallowing Enter while hidden', async () => {
   const { editor, type, key, onSubmit, store } = setup();
-  type('$findzzz');
+  type('/findzzz');
   await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
   expect(screen.queryByRole('status')).toBeNull();
   key('Enter');
   expect(onSubmit).toHaveBeenCalledOnce();
-  expect(store.summary('one').text).toBe('$findzzz');
+  expect(store.summary('one').text).toBe('/findzzz');
   act(() => editor.commands.deleteRange({ from: 6, to: 9 }));
   await screen.findByRole('option', { name: 'find-skills' });
   key('Enter');
   expect(onSubmit).toHaveBeenCalledOnce();
-  expect(store.summary('one').text).toBe('$find-skills ');
+  expect(store.summary('one').text).toBe('/find-skills ');
 });
 
 it('aborts pagination when the query changes and ignores a late page', async () => {

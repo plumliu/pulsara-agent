@@ -612,7 +612,7 @@ def test_local_skill_capability_provider_activates_explicit_mentions_and_preserv
     resolved = _resolve_skill_projection(
         _producer(tmp_path / "user"),
         tmp_path,
-        user_input="$review-pr please inspect this",
+        user_input="/review-pr please inspect this",
     )
     assert {item.name for item in resolved.catalog_entries} == {
         "review-pr",
@@ -620,6 +620,19 @@ def test_local_skill_capability_provider_activates_explicit_mentions_and_preserv
     }
     assert [item.name for item in resolved.active_injections] == ["review-pr"]
     assert resolved.active_injections[0].body == "# Review PR\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["$review-pr", "@/review-pr", "/review-pr/file.txt", "/review-pr.md",
+     "https://example.com/review-pr", "folder/review-pr", "C:/review-pr",
+     r"C:\review-pr", "/中文/review-pr", "/review-pr_unsafe"],
+)
+def test_old_dollar_markers_and_paths_do_not_activate_skills(tmp_path: Path, text: str) -> None:
+    _write_skill(tmp_path, "review-pr", _document("review-pr", "Review pull requests."))
+    resolved = _resolve_skill_projection(_producer(tmp_path / "user"), tmp_path, user_input=text)
+    assert not resolved.active_injections
+    assert not any(item.code is SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND for item in resolved.diagnostics)
 
 
 def test_local_skill_cli_hints_do_not_generate_callable_cli_descriptors(
@@ -635,7 +648,7 @@ def test_local_skill_cli_hints_do_not_generate_callable_cli_descriptors(
         ),
     )
     resolved = _resolve_skill_projection(
-        _producer(tmp_path / "user"), tmp_path, user_input="$firecrawl-search"
+        _producer(tmp_path / "user"), tmp_path, user_input="/firecrawl-search"
     )
     assert not hasattr(resolved, "descriptors")
     assert [item.name for item in resolved.active_injections] == ["firecrawl-search"]
@@ -654,7 +667,7 @@ def test_local_skill_capability_provider_reports_active_skill_health_diagnostics
         ),
     )
     resolved = _resolve_skill_projection(
-        _producer(tmp_path / "user"), tmp_path, user_input="$hf-cli"
+        _producer(tmp_path / "user"), tmp_path, user_input="/hf-cli"
     )
     assert [item.name for item in resolved.active_injections] == ["hf-cli"]
     assert {item.code for item in resolved.diagnostics} == {
@@ -669,8 +682,8 @@ def test_skill_health_checks_only_active_skills_and_uses_ttl(tmp_path: Path) -> 
         _document("active-skill", "Active.", extra="required_binaries: [missing]\n"),
     )
     producer = _producer(tmp_path / "user")
-    first = _resolve_skill_projection(producer, tmp_path, user_input="$active-skill")
-    second = _resolve_skill_projection(producer, tmp_path, user_input="$active-skill")
+    first = _resolve_skill_projection(producer, tmp_path, user_input="/active-skill")
+    second = _resolve_skill_projection(producer, tmp_path, user_input="/active-skill")
     assert first.active_skill_prompt == second.active_skill_prompt
     assert all("binary" not in item.code.value for item in first.diagnostics)
 
@@ -684,7 +697,7 @@ def test_skill_health_uses_supplied_terminal_path_for_binary_lookup(
         _document("terminal-cli", "CLI.", extra="required_binaries: [missing]\n"),
     )
     resolved = _resolve_skill_projection(
-        _producer(tmp_path / "user"), tmp_path, user_input="$terminal-cli"
+        _producer(tmp_path / "user"), tmp_path, user_input="/terminal-cli"
     )
     assert [item.name for item in resolved.active_injections] == ["terminal-cli"]
     assert all(
@@ -722,7 +735,7 @@ def test_local_skill_capability_provider_does_not_activate_oversized_skill_body(
     resolved = _resolve_skill_projection(
         _producer(tmp_path / "user", max_skill_file_bytes=64),
         tmp_path,
-        user_input="$big",
+        user_input="/big",
     )
     assert resolved.active_injections == ()
     assert resolved.active_skill_prompt is None

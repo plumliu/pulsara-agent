@@ -137,7 +137,7 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
         }
       };
       const plugin = Suggestion<Page, Selection>({
-        editor, pluginKey: key, char: kind === 'skill' ? '$' : '@',
+        editor, pluginKey: key, char: kind === 'skill' ? '/' : '@',
         allowSpaces: kind === 'path', allowedPrefixes: null,
         debounce: kind === 'path' ? 100 : 0,
         placement: 'top-start', offset: { mainAxis: 6 },
@@ -146,9 +146,9 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
         allow: ({ state, range }) => {
           if (!editor.isEditable || (kind === 'path' && !current.current.completePaths)) return false;
           const before = state.doc.textBetween(Math.max(0, range.from - 1), range.from, '\n', '\ufffc');
-          if (/[A-Za-z0-9_/@.$-]/.test(before)) return false;
+          if ((kind === 'skill' ? /[\p{L}\p{N}_\/@.$:\\-]/u : /[A-Za-z0-9_/@.$-]/).test(before)) return false;
           const query = state.doc.textBetween(range.from + 1, range.to);
-          return kind === 'skill' ? /^[a-z0-9-]*$/i.test(query) : !/(?:^|\s)\$|[\u0000-\u001f\u007f]/.test(query);
+          return kind === 'skill' ? /^[a-z0-9-]*$/i.test(query) : !/[\u0000-\u001f\u007f]/.test(query);
         },
         items: async ({ query, signal }) => [await load(query, null, signal)],
         command: ({ editor, range, props: { item, browse } }) => {
@@ -158,7 +158,7 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
             return;
           }
           const node = item.kind === 'skill'
-            ? { type: 'skillReference', attrs: { raw: `$${item.name}` } }
+            ? { type: 'skillReference', attrs: { raw: `/${item.name}` } }
             : { type: 'fileReference', attrs: { raw: formatWorkspaceReference(item), name: item.name, kind: item.kind, state: 'ready' } };
           const suffix = editor.state.doc.textBetween(range.to, Math.min(range.to + 1, editor.state.doc.content.size), '\n', '\ufffc');
           editor.chain().focus().insertContentAt(range, [node, ...(/^\s/.test(suffix) ? [] : [{ type: 'text', text: ' ' }])]).run();

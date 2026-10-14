@@ -1,6 +1,7 @@
 import { randomIdentity, isCanonicalIdentity } from './identity';
 import type { FilePreviewApi } from './file-preview';
 import { LocalMemoryApi } from './memory-api';
+import type { UserHooksApi } from './hooks-api';
 import type {
   VisualizationOccurrence,
   PluginImportOptions,
@@ -550,6 +551,7 @@ export interface RuntimeAdapter {
   restoreWorkspace(sessionId: string): Promise<WorkspaceAvailability>;
   searchSessions(query: string, lifecycle: 'ALL' | 'OPEN' | 'ARCHIVED', cursor?: string, signal?: AbortSignal): Promise<SessionSearchPage>;
   readonly memory: LocalMemoryApi;
+  readonly hooks: UserHooksApi;
   bootstrap(): Promise<RuntimeBootstrap>;
   modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
   localSettings(): Promise<LocalSettingsReadModel>;
@@ -1391,6 +1393,14 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   private sessionTitleRevision = 0;
   readonly memory = new LocalMemoryApi();
+  readonly hooks: UserHooksApi = {
+    list: (signal) => apiRequest('/api/capabilities/hooks', {signal}),
+    config: (signal) => apiRequest('/api/capabilities/hooks/local', {signal}),
+    save: (config, text) => apiRequest('/api/capabilities/hooks/local', {method: 'PUT', body: JSON.stringify({exists: config.exists, expected_text: config.text, text})}),
+    review: (pluginId, signal) => apiRequest(`/api/capabilities/hooks/review${pluginId ? `?plugin_id=${encodeURIComponent(pluginId)}` : ''}`, {signal}),
+    trust: (source) => apiRequest('/api/capabilities/hooks/trust', {method: 'POST', body: JSON.stringify({plugin_id: source.plugin_id ?? null, definition_digest: source.definition_digest,
+      trust: {enabled: source.enabled, trusted_definition_digest: source.trusted_definition_digest, trusted_at: source.trusted_at}, accepted: true})}),
+  };
   private readonly browserInstanceId: string;
 
   constructor(browserInstanceId = resolveBrowserInstanceId()) {

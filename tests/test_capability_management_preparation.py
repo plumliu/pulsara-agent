@@ -310,3 +310,25 @@ def test_stdio_plugin_connection_draft_keeps_immutable_executable_definition(tmp
         await owner.mcp.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("config", [{"hooks": {}}, {"hooks": {"Unsupported": []}}])
+def test_hook_approval_requires_nonempty_normalized_definitions(tmp_path, config):
+    async def run():
+        owner = preparation(tmp_path)
+        path = owner.hooks.user_config_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config))
+        try:
+            with pytest.raises(ValueError, match="complete current Hook definitions"):
+                await owner.prepare(
+                    {
+                        "action": "TRUST_HOOK_SOURCE",
+                        "scope": "USER",
+                        "source_kind": "LOCAL",
+                    }
+                )
+        finally:
+            await owner.mcp.aclose()
+
+    asyncio.run(run())

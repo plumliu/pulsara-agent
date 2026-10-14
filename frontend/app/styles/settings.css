@@ -1,4 +1,4 @@
-.settings-view { min-height: 0; overflow-y: auto; padding-bottom: 32px; }
+.settings-view { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
 .settings-layout { display: grid; grid-template-columns: 210px minmax(480px,720px); gap: 24px; max-width: 1000px; margin: 22px auto 0; padding: 0 32px; }
 .settings-nav { align-self: start; padding: 11px; border: 1px solid var(--line); border-radius: 13px; background: color-mix(in srgb,var(--paper-raised) 86%,transparent); box-shadow: var(--shadow-sm); }
 .settings-profile { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 9px; align-items: center; padding: 7px 6px 14px; border-bottom: 1px solid var(--line); margin-bottom: 7px; }
