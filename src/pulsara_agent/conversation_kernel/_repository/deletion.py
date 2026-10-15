@@ -99,7 +99,8 @@ class _SessionDeletionOperations:
         memory_domain_id: str,
         closed_writer: HostWriterGuard | None,
         deadline_monotonic: float,
-    ) -> Literal["DELETED", "ABSENT"]:
+        required_lifecycle: Literal["ARCHIVED"] | None,
+    ) -> Literal["DELETED", "ABSENT", "NOT_ARCHIVED"]:
         if closed_writer is not None and closed_writer.session_id != session_id:
             raise ValueError("closed writer belongs to another session")
         while monotonic() < deadline_monotonic:
@@ -113,7 +114,7 @@ class _SessionDeletionOperations:
                     # Every replan starts here: a prior physical close does not
                     # authorize deleting a writer that took over after rollback.
                     row = connection.execute(
-                        """SELECT workspace_id, writer_generation, writer_lease_owner_id,
+                        """SELECT workspace_id, lifecycle, writer_generation, writer_lease_owner_id,
                                   writer_lease_expires_at > clock_timestamp() AS lease_live
                            FROM pulsara_v3.sessions
                            WHERE id=%s AND memory_domain_id=%s FOR UPDATE""",
@@ -121,6 +122,10 @@ class _SessionDeletionOperations:
                     ).fetchone()
                     if row is None:
                         return "ABSENT"
+                    # Recheck on every replan under the same row lock used by
+                    # unarchive; a UI snapshot never authorizes deleting OPEN.
+                    if required_lifecycle is not None and row["lifecycle"] != required_lifecycle:
+                        return "NOT_ARCHIVED"
                     if closed_writer is not None:
                         if row[
                             "writer_generation"

@@ -30,6 +30,8 @@ interface SettingsViewProps {
   sessionRevision: number;
   onSessionsChanged: () => Promise<void>;
   onDeleteSession: (session: SessionSummary) => void;
+  onDeleteArchivedSessions: (sessions: SessionSummary[]) => void;
+  sessionDeletionBusy: boolean;
   theme: 'light' | 'dark';
   bootstrap?: RuntimeBootstrap;
   runtimeStatus: RuntimeStatus;
@@ -176,7 +178,7 @@ function ModelFormContainer({ editing, busy, onClose, children }: {
   return <dialog ref={dialog} className="model-config-dialog" aria-label={editing ? '修改模型配置' : '添加模型配置'} onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); else onClose(); }}>{content}</dialog>;
 }
 
-export function SettingsView({ initialSection, highlightHome, theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession }: SettingsViewProps) {
+export function SettingsView({ initialSection, highlightHome, theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession, onDeleteArchivedSessions, sessionDeletionBusy }: SettingsViewProps) {
   const { showBuiltinToolResults, onChange: onToolResultDisplayChange } = useContext(ToolResultDisplayContext);
   const [section, setSection] = useState<SettingsSection>(initialSection ?? (bootstrap?.database_state === 'ready' ? 'general' : 'service'));
   const homeSetting = useRef<HTMLElement>(null);
@@ -535,7 +537,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
         <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span></div>
       </aside>
       <div className="settings-content">
-        {section === 'archived' && <ArchivedSessions adapter={adapter} revision={sessionRevision} onRestored={onSessionsChanged} onDelete={onDeleteSession} />}
+        {section === 'archived' && <ArchivedSessions adapter={adapter} revision={sessionRevision} onRestored={onSessionsChanged} onDelete={onDeleteSession} onDeleteAll={onDeleteArchivedSessions} deletionBusy={sessionDeletionBusy} />}
         {error && <div className="settings-alert"><CircleAlert size={15} /><span>{error}</span><button onClick={() => void load()}>重试</button></div>}
         {loading && <div className="settings-loading"><LoaderCircle size={15} />正在读取本机设置…</div>}
         {section === 'general' && <section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>

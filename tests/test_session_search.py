@@ -166,6 +166,7 @@ def test_search_pages_all_matches_across_workspaces_and_lifecycle(repo, search_c
             session_id=leases[1].guard.session_id,
             memory_domain_id=domain,
             closed_writer=leases[1].guard,
+            required_lifecycle=None,
             deadline_monotonic=monotonic() + 30,
         )
         == "DELETED"

@@ -102,7 +102,7 @@ def test_usage_archive_keeps_and_permanent_session_deletion_cascades(repo):
     args = dict(session_id=lease.guard.session_id, memory_domain_id='u_local', closed_writer=lease.guard, deadline_monotonic=monotonic()+30)
     assert repo.archive_session(**args) == 'ARCHIVED'
     assert page(repo, lease.guard.session_id).usages[0]['resolved_model_call_id'] == value.resolved_model_call_id
-    assert repo.delete_session(**args) == 'DELETED'
+    assert repo.delete_session(**args, required_lifecycle=None) == 'DELETED'
     assert rows(repo, 'SELECT * FROM pulsara_v3.provider_call_usage WHERE resolved_model_call_id=%s', (value.resolved_model_call_id,)) == []
 
 

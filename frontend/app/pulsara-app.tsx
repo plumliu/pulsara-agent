@@ -50,6 +50,7 @@ import { promptContentTextProjection } from '../lib/prompt-content';
 import type {
   PluginImportOptions,
   AgentTask,
+  ArchivedSessionDeletionItem,
   AppView,
   CapabilitySnapshot,
   McpEditInput,
@@ -204,6 +205,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
   const deletingSession = useRef<string | undefined>(undefined);
+  const [bulkDeleteTarget, setBulkDeleteTarget] = useState<SessionSummary[]>();
+  const [bulkDeletion, setBulkDeletion] = useState<{ items: ArchivedSessionDeletionItem[]; running: boolean; refreshError?: string }>();
+  const [bulkResultsOpen, setBulkResultsOpen] = useState(false);
+  const bulkDeletionOwner = useRef<{ active: boolean; running: boolean; items: ArchivedSessionDeletionItem[] } | undefined>(undefined);
+  useEffect(() => () => {
+    if (bulkDeletionOwner.current) bulkDeletionOwner.current.active = false;
+    bulkDeletionOwner.current = undefined;
+  }, [adapter]);
   const requestedSession = useRef('');
   const [activeSessionId, setActiveSessionId] = useState('');
   const [activeSchedule, setActiveSchedule] = useState<{ sessionId: string; taskId: string }>();
@@ -725,7 +734,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [promptDraftStore]);
 
   const confirmSessionDelete = async () => {
-    if (!deleteTarget || deletingSession.current) return;
+    if (!deleteTarget || deletingSession.current || bulkDeletionOwner.current?.running) return;
     const target = deleteTarget;
     deletingSession.current = target.id;
     setDeleteBusy(true);
@@ -738,7 +747,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       forgetSession(target.id);
       setSessionRevision(value => value + 1);
       setDeleteTarget(undefined);
-      notify('会话已删除', '记忆、其他分支会话和工作目录已保留。', 'success');
+      notify('会话已删除', '记忆和工作目录已保留。', 'success');
       try { setSessionList(await adapter.listSessions()); } catch { /* deletion is already confirmed */ }
     } catch (error) {
       setDeleteError(productMessage(error instanceof Error ? error.message : undefined, '暂时无法确认删除结果，请重试确认。'));
@@ -748,8 +757,62 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   };
 
+  const requestSessionDelete = (session: SessionSummary) => {
+    if (deletingSession.current || bulkDeletionOwner.current?.running || bulkDeleteTarget) return;
+    setDeleteTarget(session); setDeleteError(undefined);
+  };
+  const requestBulkDelete = (sessions: readonly SessionSummary[]) => {
+    if (deletingSession.current || bulkDeletionOwner.current?.running || deleteTarget) return;
+    const targets = [...new Map(sessions.map(session => [session.id, { ...session }])).values()];
+    if (targets.length) { setBulkResultsOpen(false); setBulkDeleteTarget(targets); }
+  };
+  const confirmBulkDelete = async () => {
+    if (!bulkDeleteTarget?.length || deletingSession.current || bulkDeletionOwner.current?.running) return;
+    const owner: NonNullable<typeof bulkDeletionOwner.current> = { active: true, running: true, items: bulkDeleteTarget.map(session => ({ session, status: 'pending' })) };
+    bulkDeletionOwner.current = owner;
+    setBulkDeleteTarget(undefined);
+    const ownsBatch = () => owner.active && bulkDeletionOwner.current === owner;
+    const publish = () => { if (ownsBatch()) setBulkDeletion({ items: [...owner.items], running: owner.running }); };
+    const update = (index: number, status: ArchivedSessionDeletionItem['status'], detail?: string) => {
+      owner.items[index] = { ...owner.items[index], status, detail }; publish();
+    };
+    publish();
+    let next = 0;
+    // This request concurrency is the physical admission policy in spec §7.2,
+    // not a limit on logical targets, batch duration or session history.
+    await Promise.all(Array.from({ length: Math.min(3, owner.items.length) }, async () => {
+      while (ownsBatch() && next < owner.items.length) {
+        const index = next++; const session = owner.items[index].session;
+        update(index, 'running');
+        try {
+          const outcome = await adapter.deleteArchivedSession(session.id);
+          if (!ownsBatch()) return;
+          if (outcome.session_id !== session.id || !['DELETED', 'ABSENT', 'NOT_ARCHIVED'].includes(outcome.status)
+              || (outcome.cleanup_warning !== null && (outcome.cleanup_warning?.code !== 'SESSION_DELETE_QUARANTINED' || typeof outcome.cleanup_warning?.message !== 'string'))) {
+            throw new RuntimeApiError('SESSION_DELETE_UNCONFIRMED', '服务器尚未确认本条结果，请重试确认。', true);
+          }
+          update(index, outcome.status, outcome.cleanup_warning?.message);
+          if (outcome.status !== 'NOT_ARCHIVED') forgetSession(session.id);
+        } catch (error) {
+          if (!ownsBatch()) return;
+          const unknown = !(error instanceof RuntimeApiError) || ['LOCAL_TRANSPORT_UNAVAILABLE', 'SESSION_DELETE_UNCONFIRMED'].includes(error.code) || error.code.startsWith('HTTP_');
+          update(index, unknown ? 'unknown' : 'failed', productMessage(error instanceof Error ? error.message : undefined, '尚未确认删除结果，请重试确认。'));
+        }
+      }
+    }));
+    if (!ownsBatch()) return;
+    let refreshError: string | undefined;
+    try { const sessions = await adapter.listSessions(); if (ownsBatch()) setSessionList(sessions); }
+    catch { refreshError = '操作结果已保留，但会话列表暂时无法刷新，请稍后刷新查看。'; }
+    if (!ownsBatch()) return;
+    owner.running = false;
+    setSessionRevision(value => value + 1);
+    setBulkDeletion({ items: [...owner.items], running: false, refreshError });
+    notify('归档会话已处理', `已处理 ${owner.items.length} 条，点击删除结果查看详情。`, 'neutral');
+  };
+
   const archiveSession = async (target: SessionSummary) => {
-    if (archivingSession.current) return;
+    if (archivingSession.current || bulkDeletionOwner.current?.running || bulkDeleteTarget) return;
     archivingSession.current = target.id;
     try {
       const result = await adapter.archiveSession(target.id);
@@ -2567,7 +2630,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
           onSelectSession={openSession}
-          onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}
+          onDeleteSession={requestSessionDelete}
           onArchiveSession={session => void archiveSession(session)}
           onRenameSession={setRenameTarget}
           onRefreshSessions={() => { void adapter.listSessions().then(setSessionList).catch(() => {}); }}
@@ -2827,7 +2890,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           highlightHome={settingsHighlightHome}
           sessionRevision={sessionRevision}
           onSessionsChanged={async () => { setSessionList(await adapter.listSessions()); }}
-          onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}
+          onDeleteSession={requestSessionDelete}
+          onDeleteArchivedSessions={requestBulkDelete}
+          sessionDeletionBusy={deleteBusy || Boolean(bulkDeletion?.running)}
           theme={theme}
           bootstrap={bootstrap}
           runtimeStatus={runtimeStatus}
@@ -2868,6 +2933,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         }} />}
       {deleteTarget && <SessionDeletionDialog session={deleteTarget} busy={deleteBusy} error={deleteError}
         onConfirm={() => void confirmSessionDelete()} onClose={() => { if (!deleteBusy) setDeleteTarget(undefined); }} />}
+      {bulkDeleteTarget && <SessionDeletionDialog sessions={bulkDeleteTarget} busy={false}
+        onConfirm={() => void confirmBulkDelete()} onClose={() => setBulkDeleteTarget(undefined)} />}
+      {bulkDeletion && <button className="archive-deletion-progress" onClick={() => setBulkResultsOpen(true)}>
+        {bulkDeletion.running ? '正在删除归档会话' : '归档会话删除结果'} · 已处理 {bulkDeletion.items.filter(item => !['pending', 'running'].includes(item.status)).length} / {bulkDeletion.items.length}
+      </button>}
+      {bulkResultsOpen && bulkDeletion && <SessionDeletionDialog sessions={bulkDeletion.items.map(item => item.session)} results={bulkDeletion.items}
+        busy={bulkDeletion.running} error={bulkDeletion.refreshError} onConfirm={() => {}} onClose={() => setBulkResultsOpen(false)}
+        onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
     </main>
     </ToolResultDisplayContext.Provider>
     </UserAvatarProvider>

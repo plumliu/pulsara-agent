@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic
-from typing import Awaitable, Callable, Mapping
+from typing import Awaitable, Callable, Literal, Mapping
 
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
@@ -8651,7 +8651,10 @@ class KernelHostCore:
             operation.closed_writer = session._lease.guard
         operation.physical_full = True
 
-    async def commit_session_deletion(self, operation: KernelSessionRetirement) -> str:
+    async def commit_session_deletion(
+        self, operation: KernelSessionRetirement, *,
+        required_lifecycle: Literal["ARCHIVED"] | None = None,
+    ) -> str:
         if (operation.owner is not self or not operation.physical_full
             or operation.quarantined
             or self._session_retirements.get(operation.session_id) is not operation):
@@ -8662,6 +8665,7 @@ class KernelHostCore:
             repository.delete_session, session_id=operation.session_id,
             memory_domain_id=operation.memory_domain_id,
             closed_writer=operation.closed_writer, deadline_monotonic=deadline,
+            required_lifecycle=required_lifecycle,
         ))
         await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
         return worker.result()

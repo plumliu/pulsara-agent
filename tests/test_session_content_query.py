@@ -748,6 +748,7 @@ def test_archive_missing_directory_and_fork_are_cold_own_history_only(
     )
     assert (
         repo.delete_session(
+            required_lifecycle=None,
             session_id=target.guard.session_id,
             memory_domain_id=domain,
             closed_writer=target.guard,

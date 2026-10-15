@@ -22,6 +22,7 @@ from tests.test_conversation_fork import (
     rows,
     fork,
     child_lease,
+    identity,
 )
 from tests.test_direct_advisory_memory import _open_direct_memory_session
 
@@ -57,12 +58,13 @@ INDIRECT = {
 }
 
 
-def delete(repo, sid, guard=None, domain="u_local"):
+def delete(repo, sid, guard=None, domain="u_local", *, required_lifecycle=None):
     return repo.delete_session(
         session_id=sid,
         memory_domain_id=domain,
         closed_writer=guard,
         deadline_monotonic=monotonic() + 30,
+        required_lifecycle=required_lifecycle,
     )
 
 
@@ -70,6 +72,118 @@ def exists(repo, sid, domain="u_local"):
     return repo.canonical_session_exists(
         session_id=sid, memory_domain_id=domain, deadline_monotonic=monotonic() + 30
     )
+
+
+def test_archived_condition_preserves_open_writer_and_deletes_only_archived(repo):
+    from tests.test_session_archive import archive
+    lease = new_session(repo)
+    sid = lease.guard.session_id
+    turn(repo, lease.guard, 'keep OPEN data')
+    before = rows(repo, 'SELECT * FROM pulsara_v3.sessions WHERE id=%s', (sid,))
+    assert delete(repo, sid, required_lifecycle='ARCHIVED') == 'NOT_ARCHIVED'
+    assert rows(repo, 'SELECT * FROM pulsara_v3.sessions WHERE id=%s', (sid,)) == before
+    assert delete(repo, sid, domain='other-domain', required_lifecycle='ARCHIVED') == 'ABSENT'
+    assert archive(repo, lease) == 'ARCHIVED'
+    assert delete(repo, sid, required_lifecycle='ARCHIVED') == 'DELETED'
+    assert delete(repo, sid, required_lifecycle='ARCHIVED') == 'ABSENT'
+
+
+def test_condition_waiting_for_unarchive_observes_committed_open(repo, stage2_migrated_postgres_database):
+    from tests.test_session_archive import archive
+    from threading import Event
+    lease = new_session(repo)
+    sid = lease.guard.session_id
+    archive(repo, lease)
+    entered = Event()
+    def condition_delete():
+        entered.set()
+        return delete(repo, sid, required_lifecycle='ARCHIVED')
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+            connection.execute("UPDATE pulsara_v3.sessions SET lifecycle='OPEN' WHERE id=%s", (sid,))
+            future = pool.submit(condition_delete)
+            assert entered.wait(5)
+            with pytest.raises(FutureTimeout):
+                future.result(timeout=0.1)
+            connection.commit()
+        assert future.result(timeout=10) == 'NOT_ARCHIVED'
+    assert exists(repo, sid)
+
+
+def test_condition_keeps_existing_live_writer_boundary(repo, stage2_migrated_postgres_database):
+    from tests.test_session_archive import archive
+    lease = new_session(repo)
+    sid = lease.guard.session_id
+    archive(repo, lease)
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute("UPDATE pulsara_v3.sessions SET writer_lease_owner_id=%s,writer_lease_expires_at=clock_timestamp()+interval '30 seconds' WHERE id=%s", (identity('host'), sid))
+    with pytest.raises(SessionDeletionBusy, match='live writer'):
+        delete(repo, sid, required_lifecycle='ARCHIVED')
+    assert exists(repo, sid)
+
+
+def test_unarchive_waiting_for_condition_delete_cannot_resurrect(repo, monkeypatch):
+    from threading import Event
+    from tests.test_session_archive import archive
+    import pulsara_agent.conversation_kernel._repository.deletion as deletion
+    lease = new_session(repo)
+    sid = lease.guard.session_id
+    archive(repo, lease)
+    locked, release = Event(), Event()
+    original = deletion._sources
+    def pause_after_lock(connection, session_id, domain, workspace):
+        if session_id == sid:
+            locked.set()
+            assert release.wait(10)
+        return original(connection, session_id, domain, workspace)
+    monkeypatch.setattr(deletion, '_sources', pause_after_lock)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        deleting = pool.submit(delete, repo, sid, required_lifecycle='ARCHIVED')
+        assert locked.wait(5)
+        restoring = pool.submit(repo.unarchive_session, session_id=sid, memory_domain_id='u_local', deadline_monotonic=monotonic()+30)
+        try:
+            with pytest.raises(FutureTimeout):
+                restoring.result(timeout=0.1)
+        finally:
+            release.set()
+        assert deleting.result(timeout=10) == 'DELETED'
+        with pytest.raises(KeyError):
+            restoring.result(timeout=10)
+    assert not exists(repo, sid)
+
+
+def test_condition_replan_checks_new_lifecycle(repo, monkeypatch):
+    from contextlib import contextmanager
+    from tests.test_session_archive import archive
+    import pulsara_agent.conversation_kernel._repository.deletion as deletion
+    from dataclasses import replace
+    lease = new_session(repo)
+    sid = lease.guard.session_id
+    archive(repo, lease)
+    source_reads = 0
+    original_sources = deletion._sources
+    original_connection = repo.connection_provider.connection
+    def drift(*args):
+        nonlocal source_reads
+        source_reads += 1
+        plan = original_sources(*args)
+        return replace(plan, workspace_ids=()) if source_reads == 2 else plan
+    @contextmanager
+    def connection(**kwargs):
+        with original_connection(**kwargs) as current:
+            yield current
+        if source_reads == 2:
+            repo.unarchive_session(session_id=sid, memory_domain_id='u_local', deadline_monotonic=monotonic()+30)
+    monkeypatch.setattr(deletion, '_sources', drift)
+    # Unarchive uses the same provider, so only install the replan callback once.
+    @contextmanager
+    def once_connection(**kwargs):
+        with connection(**kwargs) as current:
+            monkeypatch.setattr(repo.connection_provider, 'connection', original_connection)
+            yield current
+    monkeypatch.setattr(repo.connection_provider, 'connection', once_connection)
+    assert delete(repo, sid, required_lifecycle='ARCHIVED') == 'NOT_ARCHIVED'
+    assert source_reads == 2 and exists(repo, sid)
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
@@ -140,12 +254,16 @@ def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
     )[0]["ok"]
 
 
-def test_deleted_parent_preserves_fork_and_existing_only_cannot_resurrect(repo):
+@pytest.mark.parametrize('archived_only', [False, True])
+def test_deleted_parent_preserves_fork_and_existing_only_cannot_resurrect(repo, archived_only):
     lease = new_session(repo)
     _, _, anchor = turn(repo, lease.guard, "parent history")
     child = fork(repo, lease.guard.session_id, anchor)
     assert child.created
-    assert delete(repo, lease.guard.session_id, lease.guard) == "DELETED"
+    if archived_only:
+        from tests.test_session_archive import archive
+        archive(repo, lease)
+    assert delete(repo, lease.guard.session_id, lease.guard, required_lifecycle='ARCHIVED' if archived_only else None) == "DELETED"
     assert delete(repo, lease.guard.session_id) == "ABSENT"
     assert not exists(repo, lease.guard.session_id)
     continued = child_lease(repo, child.child_session_id)
@@ -164,7 +282,9 @@ def test_deleted_parent_preserves_fork_and_existing_only_cannot_resurrect(repo):
         "SELECT id FROM pulsara_v3.workspaces WHERE id='ctx:workspace/nonexistent'",
     )
     assert not fork(repo, lease.guard.session_id, anchor).created
-    assert delete(repo, child.child_session_id, continued.guard) == "DELETED"
+    if archived_only:
+        archive(repo, continued)
+    assert delete(repo, child.child_session_id, continued.guard, required_lifecycle='ARCHIVED' if archived_only else None) == "DELETED"
 
 
 def test_cold_domain_lease_closed_existence_and_exact_release(
@@ -189,7 +309,8 @@ def test_cold_domain_lease_closed_existence_and_exact_release(
     assert delete(repo, sid) == "DELETED"
 
 
-def test_memory_graph_sources_and_project_survive_with_user_edit(repo, tmp_path):
+@pytest.mark.parametrize('archived_only', [False, True])
+def test_memory_graph_sources_and_project_survive_with_user_edit(repo, tmp_path, archived_only):
     project = tmp_path / "preserved-project"
     project.mkdir()
     lease, invoke, remember = _open_direct_memory_session(
@@ -227,7 +348,32 @@ def test_memory_graph_sources_and_project_survive_with_user_edit(repo, tmp_path)
         "SELECT * FROM pulsara_v3.memory_relations WHERE source_fact_id=ANY(%s) ORDER BY id",
         (ids,),
     )
-    assert delete(repo, lease.guard.session_id, lease.guard) == "DELETED"
+    if archived_only:
+        from tests.test_session_archive import archive
+        from datetime import datetime, timezone
+        from pulsara_agent.conversation_kernel.contracts import InlineContent
+        from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
+        sid = lease.guard.session_id
+        turn_id = rows(repo, "SELECT id FROM pulsara_v3.turns WHERE session_id=%s AND status='RUNNING'", (sid,))[0]['id']
+        repo.commit_assistant_message(lease.guard,
+            cut=repo.prepare_provider_input_cut(lease.guard, turn_id=turn_id, deadline_monotonic=monotonic()+30),
+            entry_id=identity('entry'), parent_content=InlineContent.from_bytes(b'done'),
+            blocks=(AssistantTextBlock(identity('block'), InlineContent.from_bytes(b'done')),),
+            complete_turn=True, occurred_at=datetime.now(timezone.utc), actor_id='model:test', deadline_monotonic=monotonic()+30)
+        archive(repo, lease)
+        workspace = rows(repo, 'SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s', (sid,))[0]['workspace_id']
+        targets = [sid]
+        for _ in range(5):
+            sibling = repo.acquire_host_writer(intent='NEW', session_id=identity('session'), workspace_id=workspace,
+                workspace_root=str(project), writer_owner_id=identity('host'), lease_seconds=30, deadline_monotonic=monotonic()+30)
+            archive(repo, sibling)
+            targets.append(sibling.guard.session_id)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            outcomes = list(pool.map(lambda target: delete(repo, target, required_lifecycle='ARCHIVED'), targets))
+        assert outcomes == ['DELETED'] * len(targets)
+        assert not rows(repo, 'SELECT id FROM pulsara_v3.sessions WHERE id=ANY(%s)', (targets,))
+    else:
+        assert delete(repo, lease.guard.session_id, lease.guard) == "DELETED"
     after = rows(
         repo,
         "SELECT * FROM pulsara_v3.memory_facts WHERE id=ANY(%s) ORDER BY id",

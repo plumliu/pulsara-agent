@@ -6,9 +6,10 @@ import type { SessionSummary } from '../lib/pulsara-types';
 // Match the model configuration list's display page size; all sessions remain reachable.
 const pageSize = 5;
 
-export function ArchivedSessions({ adapter, revision, onRestored, onDelete }: {
+export function ArchivedSessions({ adapter, revision, onRestored, onDelete, onDeleteAll, deletionBusy = false }: {
   adapter: RuntimeAdapter; revision: number;
   onRestored: () => Promise<void>; onDelete: (session: SessionSummary) => void;
+  onDeleteAll?: (sessions: SessionSummary[]) => void; deletionBusy?: boolean;
 }) {
   const [list, setList] = useState<{
     adapter: RuntimeAdapter; revision: number; items: SessionSummary[];
@@ -44,7 +45,7 @@ export function ArchivedSessions({ adapter, revision, onRestored, onDelete }: {
     await load();
   };
   const restore = async (session: SessionSummary) => {
-    if (busy) return;
+    if (busy || deletionBusy) return;
     setBusy(session.id); setList(current => ({ ...current, error: undefined }));
     try {
       const result = await adapter.unarchiveSession(session.id);
@@ -54,12 +55,17 @@ export function ArchivedSessions({ adapter, revision, onRestored, onDelete }: {
     finally { setBusy(undefined); }
   };
   return <section className="settings-group archived-sessions">
-    <header><Archive size={16} /><div><h2>已归档会话</h2><p>收起暂时不用的会话；取消归档后，可回到会话页继续。</p></div><button aria-label="刷新已归档会话" disabled={loading || Boolean(busy)} onClick={() => void refresh()}><RefreshCw size={14} /></button></header>
+    <header><Archive size={16} /><div><h2>已归档会话</h2><p>共 {loading ? '…' : items.length} 条已归档会话</p></div><div className="archived-header-actions">
+      {onDeleteAll && <button className="subtle-danger" disabled={loading || Boolean(error) || Boolean(busy) || deletionBusy || items.length === 0} onClick={() => {
+        if (!loading && !error && !busy && !deletionBusy && items.length) onDeleteAll([...items]);
+      }}><Trash2 size={14} />删除全部</button>}
+      <button aria-label="刷新已归档会话" disabled={loading || Boolean(busy) || deletionBusy} onClick={() => void refresh()}><RefreshCw size={14} /></button>
+    </div></header>
     {error && <p className="settings-alert" role="alert">{error}</p>}
     {loading ? <p className="archived-sessions-empty">正在读取…</p> : items.length === 0 ? <p className="archived-sessions-empty">还没有已归档会话</p> : <><ul>
       {visibleItems.map(session => <li key={session.id}><div><div className="archived-session-heading"><strong title={session.title}>{session.title}</strong><small>归档于 {session.updatedAt}</small></div><p title={session.workspace?.path}>{session.workspace?.path}</p></div><div className="archived-session-actions">
-        <button disabled={Boolean(busy)} onClick={() => void restore(session)}><ArchiveRestore size={14} />{busy === session.id ? '正在恢复…' : '取消归档'}</button>
-        <button className="subtle-danger" disabled={Boolean(busy)} onClick={() => onDelete(session)}><Trash2 size={14} />永久删除…</button>
+        <button disabled={Boolean(busy) || deletionBusy} onClick={() => void restore(session)}><ArchiveRestore size={14} />{busy === session.id ? '正在恢复…' : '取消归档'}</button>
+        <button className="subtle-danger" disabled={Boolean(busy) || deletionBusy} onClick={() => onDelete(session)}><Trash2 size={14} />永久删除…</button>
       </div></li>)}
     </ul>{pageCount > 1 && <nav className="model-pagination" aria-label="已归档会话分页">
       <span aria-live="polite">{pageStart + 1}–{pageStart + visibleItems.length} / 共 {items.length} 项</span>

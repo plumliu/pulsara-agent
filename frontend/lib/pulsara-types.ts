@@ -311,6 +311,12 @@ export interface SessionSummary {
   workspace?: Workspace;
 }
 
+export type ArchivedSessionDeletionItem = {
+  session: SessionSummary;
+  status: 'pending' | 'running' | 'DELETED' | 'ABSENT' | 'NOT_ARCHIVED' | 'failed' | 'unknown';
+  detail?: string;
+};
+
 export interface TodoItem {
   id: string;
   label: string;

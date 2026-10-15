@@ -177,6 +177,7 @@ def test_fork_exact_copy_folded_before_limit_parent_delete_and_rebuild(repo):
     assert len(search(repo, scope, "fork-original-keyword", automatic=True)[1]) == 1
     assert (
         repo.delete_session(
+            required_lifecycle=None,
             session_id=source.guard.session_id,
             memory_domain_id=domain,
             closed_writer=source.guard,

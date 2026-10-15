@@ -13,6 +13,17 @@ import type { AgentTask } from '../../frontend/lib/pulsara-types';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('conditionally deletes a cold archived session and retains cleanup warnings', async () => {
+  const payload = {status: 'NOT_ARCHIVED', session_id: 'session:cold/a', cleanup_warning: {code: 'SESSION_DELETE_QUARANTINED', message: '请重启 Pulsara'}};
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), {status: 200}));
+  vi.stubGlobal('fetch', fetchMock);
+  expect(await new LocalHttpRuntimeAdapter().deleteArchivedSession('session:cold/a')).toEqual(payload);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session%3Acold%2Fa/archived', expect.objectContaining({
+    method: 'DELETE', body: JSON.stringify({confirm_permanent_delete: true}), credentials: 'same-origin',
+  }));
+  expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty('X-Pulsara-Connection-Id');
+});
+
 it('reads a disposable context preview with cancellation and an encoded session identity', async () => {
   const payload = { state: 'ready', connection_id: 'selected-model', input_tokens: 1000, input_budget_tokens: 2000 };
   const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));

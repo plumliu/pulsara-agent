@@ -73,3 +73,21 @@ it('clamps the page after a deletion revision and retains a failed restore for r
   expect(screen.getByText('归档会话 1')).toBeTruthy();
   expect(within(row).getByRole('button', { name: '取消归档' })).toHaveProperty('disabled', false);
 });
+
+it('offers all pages as one snapshot and disables bulk deletion on stale or failed reads', async () => {
+  const state = setup(12);
+  const onDeleteAll = vi.fn();
+  state.rerender(<ArchivedSessions {...state.props} onDeleteAll={onDeleteAll} />);
+  await screen.findByText('归档会话 1');
+  fireEvent.click(screen.getByRole('button', {name: '下一页'}));
+  fireEvent.click(screen.getByRole('button', {name: '删除全部'}));
+  expect(onDeleteAll.mock.calls[0][0]).toHaveLength(12);
+  expect(onDeleteAll.mock.calls[0][0][0].id).toBe('session-1');
+  state.listArchivedSessions.mockRejectedValueOnce(new Error('清单读取失败'));
+  fireEvent.click(screen.getByRole('button', {name: '刷新已归档会话'}));
+  expect(screen.getByRole('button', {name: '删除全部'})).toHaveProperty('disabled', true);
+  await screen.findByText('清单读取失败');
+  expect(screen.getByRole('button', {name: '删除全部'})).toHaveProperty('disabled', true);
+  state.rerender(<ArchivedSessions {...state.props} onDeleteAll={onDeleteAll} deletionBusy />);
+  expect(screen.getAllByRole('button', {name: '取消归档'}).every(button => (button as HTMLButtonElement).disabled)).toBe(true);
+});

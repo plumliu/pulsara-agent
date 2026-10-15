@@ -586,6 +586,10 @@ export interface RuntimeAdapter {
   completeWorkspacePaths(sessionId: string, prefix: string, cursor: string | null, signal: AbortSignal): Promise<import('./file-reference').WorkspacePathPage>;
   forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome>;
   deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }>;
+  deleteArchivedSession(sessionId: string): Promise<{
+    status: 'DELETED' | 'ABSENT' | 'NOT_ARCHIVED'; session_id: string;
+    cleanup_warning: { code: 'SESSION_DELETE_QUARANTINED'; message: string } | null;
+  }>;
   listArchivedSessions(): Promise<SessionSummary[]>;
   renameSession(sessionId: string, title: string): Promise<{ session_id: string; title: string }>;
   archiveSession(sessionId: string): Promise<{ status: 'ARCHIVED'; session_id: string }>;
@@ -2053,6 +2057,15 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   async listArchivedSessions(): Promise<SessionSummary[]> {
     const result = await apiRequest<{ sessions: Record<string, unknown>[] }>('/api/sessions/archived');
     return result.sessions.map(projectSessionSummary);
+  }
+
+  async deleteArchivedSession(sessionId: string) {
+    return apiRequest<{
+      status: 'DELETED' | 'ABSENT' | 'NOT_ARCHIVED'; session_id: string;
+      cleanup_warning: { code: 'SESSION_DELETE_QUARANTINED'; message: string } | null;
+    }>(`/api/sessions/${encodeURIComponent(sessionId)}/archived`, {
+      method: 'DELETE', body: JSON.stringify({ confirm_permanent_delete: true }),
+    });
   }
 
   async renameSession(sessionId: string, title: string): Promise<{ session_id: string; title: string }> {

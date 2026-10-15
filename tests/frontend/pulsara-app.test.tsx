@@ -34,6 +34,7 @@ import type {
 } from '../../frontend/lib/pulsara-types';
 import { WELCOME_TYPEWRITER_PHRASES } from '../../frontend/components/welcome-typewriter';
 import PulsaraApp from '../../frontend/app/pulsara-app';
+import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 
 const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
 
@@ -523,6 +524,12 @@ class FakeAdapter implements RuntimeAdapter {
     this.sessions = this.sessions.filter(session => session.id !== sessionId);
     return { status: 'DELETED' as const, session_id: sessionId };
   });
+  deleteArchivedSession = vi.fn<RuntimeAdapter['deleteArchivedSession']>(async (sessionId: string) => {
+    if (this.sessions.some(session => session.id === sessionId)) return {status: 'NOT_ARCHIVED', session_id: sessionId, cleanup_warning: null};
+    const found = this.archived.some(session => session.id === sessionId);
+    this.archived = this.archived.filter(session => session.id !== sessionId);
+    return {status: found ? 'DELETED' : 'ABSENT', session_id: sessionId, cleanup_warning: null};
+  });
   forkConversation = vi.fn(async (_sessionId: string, _entryId: string): Promise<ForkOutcome> => {
     const childId = 'session:matqlubh75wb5jgabb4tqlneye';
     this.sessions = [{ ...initialSession, id: childId }, ...this.sessions];
@@ -865,6 +872,104 @@ function renderWorkbench(ui: Parameters<typeof render>[0]) {
 }
 
 describe('PulsaraApp', () => {
+  const archivedTargets = (count: number): SessionSummary[] => Array.from({length: count}, (_, index) => ({
+    ...initialSession, id: `archived-${index + 1}`, title: `归档批次 ${index + 1}`, lifecycle: 'ARCHIVED', live: false,
+  }));
+  async function openArchived(adapter: FakeAdapter) {
+    const view = renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    fireEvent.click(screen.getByRole('button', {name: '设置'}));
+    fireEvent.click(screen.getByRole('button', {name: '已归档会话', exact: true}));
+    await screen.findByText('归档批次 1');
+    return view;
+  }
+
+  it('bulk deletes every frozen page with three requests, keeps progress during navigation, and excludes new archives', async () => {
+    const adapter = new FakeAdapter();
+    adapter.archived = archivedTargets(12);
+    const held = new Map(adapter.archived.map(session => [session.id, deferred<Awaited<ReturnType<RuntimeAdapter['deleteArchivedSession']>>>()]));
+    adapter.deleteArchivedSession.mockImplementation(async id => {
+      const result = await held.get(id)!.promise;
+      adapter.archived = adapter.archived.filter(session => session.id !== id);
+      return result;
+    });
+    await openArchived(adapter);
+    fireEvent.click(screen.getByRole('button', {name: '删除全部'}));
+    expect(screen.getByRole('dialog').textContent).toContain('12 条已归档会话');
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '取消'}));
+    expect(adapter.deleteArchivedSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', {name: '删除全部'}));
+    adapter.archived = [...adapter.archived, {...initialSession, id: 'new-archive', title: '后来归档', lifecycle: 'ARCHIVED', live: false}];
+    const confirm = within(screen.getByRole('dialog')).getByRole('button', {name: '永久删除'});
+    fireEvent.click(confirm); fireEvent.click(confirm);
+    expect(adapter.deleteArchivedSession).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.querySelector<HTMLElement>('main.pulsara-shell')?.inert).toBeFalsy();
+    await act(async () => held.get('archived-1')!.resolve({status: 'DELETED', session_id: 'archived-1', cleanup_warning: null}));
+    await waitFor(() => expect(adapter.deleteArchivedSession).toHaveBeenCalledTimes(4));
+    fireEvent.click(screen.getByRole('button', {name: '会话', exact: true}));
+    expect(screen.getByRole('button', {name: /正在删除归档会话 · 已处理 1 \/ 12/})).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name: '设置'}));
+    fireEvent.click(screen.getByRole('button', {name: '已归档会话', exact: true}));
+    expect(screen.getByRole('button', {name: '删除全部'})).toHaveProperty('disabled', true);
+    await act(async () => { for (const [id, pending] of held) pending.resolve({status: 'DELETED', session_id: id, cleanup_warning: null}); });
+    await screen.findByRole('button', {name: /归档会话删除结果 · 已处理 12 \/ 12/});
+    expect(adapter.deleteArchivedSession.mock.calls.map(([id]) => id)).toEqual([...held.keys()]);
+    expect(adapter.deleteSession).not.toHaveBeenCalled();
+    await screen.findByText('后来归档');
+    expect(screen.queryByRole('navigation', {name: '已归档会话分页'})).toBeNull();
+    fireEvent.click(screen.getByRole('button', {name: /归档会话删除结果 ·/}));
+    expect(within(screen.getByRole('list', {name: '归档删除结果'})).getAllByRole('listitem')).toHaveLength(5);
+    fireEvent.click(within(screen.getByRole('navigation', {name: '归档删除结果分页'})).getByRole('button', {name: '下一页'}));
+    expect(screen.getByText('归档批次 6')).toBeTruthy();
+  });
+
+  it('keeps partial results and quarantine warnings, forgets only confirmed absence, and retries only incomplete targets', async () => {
+    const adapter = new FakeAdapter();
+    adapter.archived = archivedTargets(6);
+    const forget = vi.spyOn(PromptDraftStore.prototype, 'removeSession');
+    adapter.deleteArchivedSession.mockImplementation(async id => {
+      if (id === 'archived-4') throw new RuntimeApiError('SESSION_DELETE_BUSY', '会话正忙', true);
+      if (id === 'archived-6') throw new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', '网络断开', true);
+      if (id === 'archived-3') return {status: 'NOT_ARCHIVED', session_id: id, cleanup_warning: {code: 'SESSION_DELETE_QUARANTINED', message: '本条已跳过，请重启 Pulsara'}};
+      return {status: id === 'archived-2' ? 'ABSENT' : 'DELETED', session_id: id === 'archived-5' ? 'wrong-id' : id, cleanup_warning: null};
+    });
+    await openArchived(adapter);
+    fireEvent.click(screen.getByRole('button', {name: '删除全部'}));
+    adapter.listSessions.mockRejectedValueOnce(new Error('refresh failed'));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '永久删除'}));
+    await screen.findByRole('button', {name: /归档会话删除结果 · 已处理 6 \/ 6/});
+    expect(forget.mock.calls.map(([id]) => id)).toEqual(['archived-1', 'archived-2']);
+    fireEvent.click(screen.getByRole('button', {name: /归档会话删除结果 ·/}));
+    expect(screen.getByText('本条已跳过，请重启 Pulsara')).toBeTruthy();
+    expect(screen.getByText('会话正忙')).toBeTruthy();
+    expect(screen.getByText(/操作结果已保留，但会话列表/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name: '重试未完成项…'}));
+    expect(screen.getByRole('dialog').textContent).toContain('3 条已归档会话');
+    adapter.deleteArchivedSession.mockImplementation(async id => ({status: 'DELETED', session_id: id, cleanup_warning: null}));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '永久删除'}));
+    await screen.findByRole('button', {name: /归档会话删除结果 · 已处理 3 \/ 3/});
+    expect(adapter.deleteArchivedSession.mock.calls.slice(6).map(([id]) => id)).toEqual(['archived-4', 'archived-5', 'archived-6']);
+    forget.mockRestore();
+  });
+
+  it('stops claiming unsent bulk targets on root unmount and never resumes them in a new app', async () => {
+    const adapter = new FakeAdapter();
+    adapter.archived = archivedTargets(8);
+    const pending = deferred<Awaited<ReturnType<RuntimeAdapter['deleteArchivedSession']>>>();
+    adapter.deleteArchivedSession.mockImplementation(() => pending.promise);
+    const view = await openArchived(adapter);
+    fireEvent.click(screen.getByRole('button', {name: '删除全部'}));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '永久删除'}));
+    expect(adapter.deleteArchivedSession).toHaveBeenCalledTimes(3);
+    view.unmount();
+    await act(async () => pending.resolve({status: 'DELETED', session_id: 'archived-1', cleanup_warning: null}));
+    expect(adapter.deleteArchivedSession).toHaveBeenCalledTimes(3);
+    await openArchived(adapter);
+    expect(screen.queryByRole('button', {name: /删除结果 ·/})).toBeNull();
+    expect(adapter.deleteArchivedSession).toHaveBeenCalledTimes(3);
+  });
+
   it('stays on overview while restoring a saved live session and opens it only on navigation', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [{ ...initialSession, live: true }];
@@ -2412,7 +2517,7 @@ describe('PulsaraApp', () => {
     expect(dialog.getAttribute('aria-describedby')).toBe('session-delete-description');
     expect(dialog.textContent).toContain('会话、记录及绑定的定时任务将永久删除，无法撤销');
     const preserved = within(dialog).getByRole('list', { name: '仍会保留的内容' });
-    expect(within(preserved).getAllByRole('listitem').map(item => item.textContent)).toEqual(['已保存的记忆', '其他分支会话', '工作目录']);
+    expect(within(preserved).getAllByRole('listitem').map(item => item.textContent)).toEqual(['已保存的记忆', '工作目录']);
     fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
     expect(adapter.deleteSession).not.toHaveBeenCalled();
     fireEvent.click(menu);

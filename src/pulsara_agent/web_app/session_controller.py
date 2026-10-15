@@ -335,7 +335,7 @@ class SessionRetirementOperation:
     core_operation: KernelSessionRetirement | None = None
     detach: object | None = None
     unconfirmed: bool = False
-    action: Literal['delete', 'archive', 'unarchive'] = 'delete'
+    action: Literal['delete', 'delete_archived', 'archive', 'unarchive'] = 'delete'
     archive_ready: bool = False
 
 
@@ -2409,7 +2409,7 @@ class LocalSessionController:
             "reasoning_preference_reset": accepted != binding,
         }
 
-    async def delete_session(self, session_id: str, *, bridge, action: Literal['delete', 'archive'] = 'delete') -> dict[str, object]:
+    async def delete_session(self, session_id: str, *, bridge, action: Literal['delete', 'delete_archived', 'archive'] = 'delete') -> dict[str, object]:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Local Web application is draining")
@@ -2441,7 +2441,7 @@ class LocalSessionController:
             if operation.owner is not self or self._operations.get(operation.session_id) is not operation:
                 raise RuntimeError("session delete operation is stale")
 
-    async def _finish_session_delete(self, operation, bridge, *, quarantine: bool) -> None:
+    async def _finish_session_delete(self, operation, bridge, *, quarantine: bool) -> bool:
         from pulsara_agent.web_app.browser_bridge import BridgeSettlementFailed
         if operation.detach is not None:
             try:
@@ -2463,6 +2463,18 @@ class LocalSessionController:
                     self._operations[operation.session_id] = _Quarantined("SESSION_DELETE_QUARANTINED")
                 else:
                     self._operations.pop(operation.session_id)
+        return quarantine
+
+    @staticmethod
+    def _session_delete_result(operation, status: str, quarantine: bool) -> dict[str, object]:
+        result: dict[str, object] = {"status": status, "session_id": operation.session_id}
+        if operation.action == 'delete_archived':
+            descriptions = {"DELETED": "本条已删除", "ABSENT": "本条已不存在", "NOT_ARCHIVED": "本条已跳过"}
+            result["cleanup_warning"] = ({
+                "code": "SESSION_DELETE_QUARANTINED",
+                "message": descriptions[status] + "，但本地会话准入未能安全释放；请重启 Pulsara 后再操作此会话。",
+            } if quarantine else None)
+        return result
 
     async def _confirm_session_deletion(self, operation, bridge) -> dict[str, object]:
         try:
@@ -2482,14 +2494,15 @@ class LocalSessionController:
                 "暂时无法确认操作结果，请恢复数据库连接后重试确认。", 503,
             ) from exc
         operation.unconfirmed = False
-        await self._finish_session_delete(operation, bridge, quarantine=False)
+        quarantine = await self._finish_session_delete(operation, bridge, quarantine=False)
         if exists:
             raise SessionDeleteRejected('SESSION_ARCHIVE_FAILED' if operation.action == 'archive' else "SESSION_DELETE_FAILED", "操作未完成，可以重试。", 500)
-        return {"status": 'ARCHIVED' if operation.action == 'archive' else "ABSENT", "session_id": operation.session_id}
+        return self._session_delete_result(operation, 'ARCHIVED' if operation.action == 'archive' else "ABSENT", quarantine)
 
     async def _delete_session_owner(self, operation, bridge) -> dict[str, object]:
         from pulsara_agent.web_app.browser_bridge import BridgeDetachFull, BridgeDetachFailed
-        committed = False
+        confirmed_status = None
+        physical_started = False
         try:
             if operation.prior_resume is not None:
                 await asyncio.gather(asyncio.shield(operation.prior_resume), return_exceptions=True)
@@ -2500,21 +2513,37 @@ class LocalSessionController:
             if pending:
                 await asyncio.gather(*(asyncio.shield(t) for t in pending), return_exceptions=True)
             # Do not touch another domain's runtime even if an ID is guessed.
-            exists = await self.core.canonical_session_exists(
-                operation.session_id, self.memory_domain_id,
-            )
+            try:
+                exists = await self.core.canonical_session_exists(
+                    operation.session_id, self.memory_domain_id,
+                )
+            except Exception as exc:
+                if operation.action != 'delete_archived':
+                    raise
+                raise SessionDeleteRejected('SESSION_DELETE_PREFLIGHT_FAILED', '暂时无法读取会话，本次尚未执行删除，请恢复数据库连接后重试。', 503) from exc
             async with self._lock:
                 handle = self._by_session.get(operation.session_id)
             if not exists and handle is None:
-                await self._finish_session_delete(operation, bridge, quarantine=False)
                 if operation.action == 'archive':
+                    await self._finish_session_delete(operation, bridge, quarantine=False)
                     raise KeyError(operation.session_id)
-                return {"status": "ABSENT", "session_id": operation.session_id}
+                confirmed_status = 'ABSENT'
+                quarantine = await self._finish_session_delete(operation, bridge, quarantine=False)
+                return self._session_delete_result(operation, confirmed_status, quarantine)
             if handle is not None and handle.workspace_input.memory_domain_id != self.memory_domain_id:
                 raise RuntimeError("session delete domain mismatch")
             operation.core_operation = await self.core.begin_session_retirement(
                 operation.session_id, self.memory_domain_id,
             )
+            if operation.action == 'delete_archived':
+                try:
+                    lifecycle = await self.core.read_session_lifecycle(operation.session_id, self.memory_domain_id)
+                except Exception as exc:
+                    raise SessionDeleteRejected('SESSION_DELETE_PREFLIGHT_FAILED', '暂时无法读取会话，本次尚未执行删除，请恢复数据库连接后重试。', 503) from exc
+                if lifecycle != 'ARCHIVED':
+                    confirmed_status = 'ABSENT' if lifecycle is None else 'NOT_ARCHIVED'
+                    quarantine = await self._finish_session_delete(operation, bridge, quarantine=False)
+                    return self._session_delete_result(operation, confirmed_status, quarantine)
             if operation.action == 'archive':
                 try:
                     await self.core.prepare_session_archive(operation.core_operation)
@@ -2526,6 +2555,7 @@ class LocalSessionController:
                 except (SessionDeletionBusy, RuntimeError) as exc:
                     raise SessionDeleteRejected('SESSION_NOT_IDLE', '会话仍有任务、后台进程或待处理事项，暂时无法归档。') from exc
                 operation.archive_ready = True
+            physical_started = True
             detach = await bridge.detach_session_for_retirement(operation)
             if isinstance(detach, (BridgeDetachFull, BridgeDetachFailed)):
                 operation.detach = detach.token
@@ -2537,26 +2567,34 @@ class LocalSessionController:
                 if handle is not None:
                     self._by_host.pop(handle.host_session_id, None)
             try:
-                status = await (self.core.commit_session_archive(operation.core_operation)
-                                if operation.action == 'archive' else self.core.commit_session_deletion(operation.core_operation))
+                if operation.action == 'archive':
+                    status = await self.core.commit_session_archive(operation.core_operation)
+                elif operation.action == 'delete_archived':
+                    status = await self.core.commit_session_deletion(operation.core_operation, required_lifecycle='ARCHIVED')
+                else:
+                    status = await self.core.commit_session_deletion(operation.core_operation)
             except SessionDeletionBusy as exc:
                 raise SessionDeleteRejected("SESSION_ARCHIVE_BUSY" if operation.action == 'archive' else "SESSION_DELETE_BUSY", "会话的运行权已改变，或仍被另一进程使用，请稍后重试。") from exc
             except Exception:
                 logging.getLogger(__name__).exception("session deletion commit needs confirmation")
                 return await self._confirm_session_deletion(operation, bridge)
-            committed = True
-            await self._finish_session_delete(operation, bridge, quarantine=False)
-            return {"status": status, "session_id": operation.session_id}
+            confirmed_status = status
+            quarantine = await self._finish_session_delete(operation, bridge, quarantine=False)
+            return self._session_delete_result(operation, status, quarantine)
         except Exception as exc:
             if operation.unconfirmed:
                 raise
             if self._operations.get(operation.session_id) is operation:
                 quarantine = (operation.core_operation is not None and not operation.core_operation.physical_full
-                              and (operation.action != 'archive' or operation.archive_ready))
-                await self._finish_session_delete(operation, bridge, quarantine=quarantine)
-            if committed:
+                              and (operation.action != 'archive' or operation.archive_ready)
+                              and (operation.action != 'delete_archived' or physical_started))
+                quarantine = await self._finish_session_delete(operation, bridge, quarantine=quarantine)
+                if (quarantine and isinstance(exc, SessionDeleteRejected)
+                    and exc.public_code == 'SESSION_DELETE_PREFLIGHT_FAILED'):
+                    raise SessionDeleteRejected('SESSION_DELETE_QUARANTINED', '本次尚未删除，但会话准入未能安全释放；请重启 Pulsara 后重试。') from exc
+            if confirmed_status is not None:
                 logging.getLogger(__name__).exception("session deleted; local cleanup needs refresh")
-                return {"status": "ARCHIVED" if operation.action == 'archive' else "DELETED", "session_id": operation.session_id}
+                return self._session_delete_result(operation, confirmed_status, True)
             if isinstance(exc, (SessionDeleteRejected, KeyError)):
                 raise
             raise SessionDeleteRejected("SESSION_ARCHIVE_QUARANTINED" if operation.action == 'archive' else "SESSION_DELETE_QUARANTINED", "未能安全关闭运行时，操作尚未完成，请重启 Pulsara 后重试。") from exc

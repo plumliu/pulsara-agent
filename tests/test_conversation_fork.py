@@ -161,6 +161,7 @@ def rows(repo, query, args=()):
 def assert_session_aggregate_deleted(repo, guard):
     from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
     assert repo.delete_session(
+        required_lifecycle=None,
         session_id=guard.session_id, memory_domain_id='u_local', closed_writer=guard,
         deadline_monotonic=monotonic()+30,
     ) == 'DELETED'

@@ -640,6 +640,7 @@ class LocalHttpServer:
             self._remove_session_mcp_server,
         )
         self._app.router.add_delete("/api/sessions/{session_id}", self._delete_session)
+        self._app.router.add_delete("/api/sessions/{session_id}/archived", self._delete_archived_session)
         self._app.router.add_post("/api/sessions/{session_id}/close", self._close_session)
         self._app.router.add_post(
             "/api/sessions/{session_id}/runtime/reopen",
@@ -2218,7 +2219,7 @@ class LocalHttpServer:
         session_id = request.match_info.get("session_id")
         if session_id and request.method not in {"GET", "HEAD", "OPTIONS"}:
             suffix = request.path.split("/api/sessions/", 1)[-1].split("/", 1)[-1]
-            independent = {session_id, "title", "archive", "unarchive", "connections", "restore-workspace", "path-candidates"}
+            independent = {session_id, "title", "archive", "unarchive", "archived", "connections", "restore-workspace", "path-candidates"}
             if suffix not in independent and not suffix.startswith("history/"):
                 await self.bridge.require_chat_controller(
                     request.headers.get("X-Pulsara-Connection-Id", ""),
@@ -2345,12 +2346,24 @@ class LocalHttpServer:
         return web.json_response({"session": summary}, status=201)
 
     async def _delete_session(self, request: web.Request) -> web.Response:
+        return await self._delete_session_request(request, archived_only=False)
+
+    async def _delete_archived_session(self, request: web.Request) -> web.Response:
+        return await self._delete_session_request(request, archived_only=True)
+
+    async def _delete_session_request(self, request: web.Request, *, archived_only: bool) -> web.Response:
         body = await self._json_body(request)
         if set(body) != {"confirm_permanent_delete"} or body["confirm_permanent_delete"] is not True:
             raise HttpPublicError("SESSION_DELETE_CONFIRMATION_REQUIRED", "请先确认永久删除这条会话。", status=400)
-        return web.json_response(await self.sessions.delete_session(
-            request.match_info["session_id"], bridge=self.bridge,
-        ))
+        try:
+            kwargs = {'action': 'delete_archived'} if archived_only else {}
+            return web.json_response(await self.sessions.delete_session(
+                request.match_info["session_id"], bridge=self.bridge, **kwargs,
+            ))
+        except SessionControlRejected as exc:
+            if not archived_only:
+                raise
+            raise HttpPublicError(exc.public_code, str(exc), status=409, retryable=True) from exc
 
     async def _search_sessions(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

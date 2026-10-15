@@ -118,6 +118,8 @@ Built-in Skills give agents practical workflows for substantial deliverables:
 
 ## Make it your own
 
+Settings → Archived sessions includes “Delete all”. Confirmation covers every page of the current list; sessions restored before their deletion check are skipped. Progress and individual results remain available when navigating, and incomplete items can be retried. Saved memories and working directories are preserved. Closing or reloading the browser stops sending remaining items; deletions already accepted by the service still settle.
+
 Bring your research services, specialist workflows, and project tools into the same workbench.
 
 - **Skills** teach agents a repeatable way to handle specialist work. Install one for a new domain or ask the agent to create one for a recurring assignment.

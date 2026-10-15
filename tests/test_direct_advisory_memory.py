@@ -528,6 +528,7 @@ def test_project_memory_directory_survives_zero_sessions_and_pages_stably(
         created.append((lease.guard.session_id, workspace_id, fact["memory_id"]))
         repository.release_host_writer(lease.guard, deadline_monotonic=monotonic() + 30)
         assert repository.delete_session(
+            required_lifecycle=None,
             session_id=lease.guard.session_id, memory_domain_id="u_local",
             closed_writer=lease.guard, deadline_monotonic=monotonic() + 30,
         ) == "DELETED"
