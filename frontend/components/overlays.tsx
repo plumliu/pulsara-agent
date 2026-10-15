@@ -2,6 +2,7 @@
 
 import {
   Check,
+  ChevronRight,
   FolderOpen,
   FolderPlus,
   X,
@@ -124,7 +125,7 @@ function Toast({ toast, onDismiss }: { toast: ToastMessage; onDismiss: (id: numb
     ], { duration: 220, easing: 'ease-out' });
     return () => animation?.cancel();
   }, []);
-  return <button ref={button} className={`toast toast--${toast.tone ?? 'neutral'}`} onClick={() => onDismiss(toast.id)}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span><X size={11} /></button>;
+  return <button ref={button} className={`toast toast--${toast.tone ?? 'neutral'}`} onClick={toast.onClick ?? (() => onDismiss(toast.id))}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span>{toast.onClick ? <ChevronRight size={11} aria-hidden="true" /> : <X size={11} />}</button>;
 }
 
 export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDismiss: (id: number) => void }) {

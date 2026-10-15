@@ -484,6 +484,7 @@ export interface ToastMessage {
   title: string;
   detail?: string;
   tone?: 'neutral' | 'success' | 'warning';
+  onClick?: () => void;
 }
 
 export const permissionLabels: Record<PermissionMode, string> = {

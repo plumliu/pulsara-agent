@@ -149,7 +149,7 @@ session row FOR UPDATE，按同 memory domain 查找
 
 - 每条普通失败不终止其他消费循环。进度用“已处理 X / N”，同时区分已删除、已不存在、已跳过、失败、待确认；pending 与正在处理仍单独可见。确定结果附带的 cleanup warning 作为该条的额外提示，不改变计数分类、不抹掉数据结果；需要重启的提示不被统一刷新成功覆盖。错 ID/status 的响应不能更新另一个目标或触发 `forgetSession`。
 - 对已确认 DELETED/ABSENT 复用 `forgetSession`，清理草稿、选中态与相关本地索引；NOT_ARCHIVED、失败、待确认不清这些状态。不得为归档集合另写一个只过滤列表的成功路径。
-- 批次进行中禁用归档页恢复、单条删除、全部删除和会改变目标的页面操作；分页可以继续浏览，不影响集合。确认时同步登记根 busy admission 并关闭确认弹窗，恢复焦点与主界面 inert；执行过程不继续占用现有 busy modal，否则无法导航。以根 owner 的轻量常驻进度入口显示“已处理 X / N”，点击可查看分页结果；不新建通知中心。查看结果的弹层关闭仅隐藏展示，不能通过“取消”表达回滚。切到其他应用视图时根 owner 仍继续，进度入口仍可达。
+- 批次进行中禁用归档页恢复、单条删除、全部删除和会改变目标的页面操作；分页可以继续浏览，不影响集合。确认时同步登记根 busy admission 并关闭确认弹窗，恢复焦点与主界面 inert；执行过程不继续占用现有 busy modal，否则无法导航。根 owner 在右下角现有 toast 栈内显示“已处理 X / N”，点击可查看分页结果；不新建通知中心或独立悬浮入口。结果弹层打开时隐藏此 toast；处理中关闭弹层会恢复进度入口，最终结果未查看前保留提醒，查看完成结果后不再显示（包括查看期间完成、随后关闭弹层的情况）。重试或新批次重新提供提醒，不另发重复完成 toast。关闭结果弹层不停止执行，不能通过“取消”表达回滚。切到其他应用视图时根 owner 仍继续，未读结果与进行中进度仍可达。
 - 批次结束后统一刷新归档与普通列表、夹紧分页并提升 revision；不每删除一条就重新读取完整清单。刷新失败独立提示，保留已确认结果和原失败原因，不改报删除失败；下次可重试刷新。
 - 结果列表可分页，不截断失败详情，不设置归档数或错误数总上限。提供“重试未完成项”确认，只涵盖失败/待确认目标，不重发成功和已跳过项，不吸收新增归档。再次执行仍用条件路由。
 - 正常导航不会停止批次；浏览器刷新/关闭或 `PulsaraApp` 真正卸载时停止领取下一项。尚未发送项未执行；已被服务器接纳的单条由原 shield owner 结算。必须用根 owner 的有效性检查阻止卸载后循环继续发送或旧回调改写新实例状态。无需持久化队列，不承诺全部执行完。
@@ -210,4 +210,5 @@ session row FOR UPDATE，按同 memory domain 查找
 - PostgreSQL/controller/HTTP 聚焦、普通删除调用点及共享图片、孤儿 blob GC 回归：55 项通过。真实行锁竞争覆盖取消归档先提交与删除先提交；同 workspace 多条并发删除保留记忆和未入选分支。
 - 归档列表、adapter、设置页及完整 PulsaraApp 测试：260 项通过。当前 Node 25 的原生 Web Storage 与 jsdom 冲突，运行时使用 `NODE_OPTIONS=--no-experimental-webstorage`，未改测试断言或增加 skip/xfail。TypeScript、ESLint、Ruff、`git diff --check` 和 `build:local` 通过；构建仍有现有大 bundle 提示。
 - 真实本地应用 + Playwright：12 条、3 页归档；确认后用另一 HTTP 客户端取消归档 1 条，对另外 1 条注入明确事务回滚。首批结果为删除 10、跳过 1、未完成 1；移除测试触发器后，重试只发送那 1 条请求并成功，归档列表最终为 0。数据库确认留下被跳过的 OPEN 会话和未入选 fork；保存记忆保留、创建来源置空，工作目录文件保留。桌面与 390px 窄屏结果弹窗已视觉核验。
-- 可复用的隔离验收入口为 `tests/dogfood/run_archived_sessions_bulk_deletion_dogfood.py`，只读加载有效 Pulsara home 的生产设置，再注入临时 home 和经验证的 disposable 本地数据库；不发模型 turn。Ctrl-C 记录 canonical 结果、关闭应用并删除临时数据库。本次浏览器会话、应用和临时数据库均已清理。可检查本地 `output/playwright/archive-bulk/report.json`、`partial-results.png`、`retry-mobile.png`；输出目录不提交进仓库。
+- 可复用的隔离验收入口为 `tests/dogfood/run_archived_sessions_bulk_deletion_dogfood.py`，只读加载有效 Pulsara home 的生产设置，再注入临时 home 和经验证的 disposable 本地数据库；不发模型 turn。Ctrl-C 记录 canonical 结果、关闭应用并删除临时数据库。本次浏览器会话、应用和临时数据库均已清理。首轮部分失败及重试验收可检查本地 `output/playwright/archive-bulk/report.partial-retry.json`、`partial-results.png`、`retry-mobile.png`；输出目录不提交进仓库。
+- 2026-10-15 结果提醒调整：应用与 toast 组件测试共 160 项通过，类型检查、相关 ESLint 和本地构建通过。真实浏览器在隔离数据库删除 12 条归档，确认结果入口位于现有 toast 栈、距窗口右侧与底部各 18px；点击查看后关闭，再切换到总览，toast、旧悬浮入口和结果弹窗均为 0。运行报告为 `output/playwright/archive-bulk/report.json`，截图为 `result-toast-unread.png`；浏览器、应用与临时数据库均已清理。

@@ -208,6 +208,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [bulkDeleteTarget, setBulkDeleteTarget] = useState<SessionSummary[]>();
   const [bulkDeletion, setBulkDeletion] = useState<{ items: ArchivedSessionDeletionItem[]; running: boolean; refreshError?: string }>();
   const [bulkResultsOpen, setBulkResultsOpen] = useState(false);
+  const [bulkResultsViewed, setBulkResultsViewed] = useState(false);
   const bulkDeletionOwner = useRef<{ active: boolean; running: boolean; items: ArchivedSessionDeletionItem[] } | undefined>(undefined);
   useEffect(() => () => {
     if (bulkDeletionOwner.current) bulkDeletionOwner.current.active = false;
@@ -771,6 +772,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const owner: NonNullable<typeof bulkDeletionOwner.current> = { active: true, running: true, items: bulkDeleteTarget.map(session => ({ session, status: 'pending' })) };
     bulkDeletionOwner.current = owner;
     setBulkDeleteTarget(undefined);
+    setBulkResultsViewed(false);
     const ownsBatch = () => owner.active && bulkDeletionOwner.current === owner;
     const publish = () => { if (ownsBatch()) setBulkDeletion({ items: [...owner.items], running: owner.running }); };
     const update = (index: number, status: ArchivedSessionDeletionItem['status'], detail?: string) => {
@@ -808,7 +810,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     owner.running = false;
     setSessionRevision(value => value + 1);
     setBulkDeletion({ items: [...owner.items], running: false, refreshError });
-    notify('归档会话已处理', `已处理 ${owner.items.length} 条，点击删除结果查看详情。`, 'neutral');
   };
 
   const archiveSession = async (target: SessionSummary) => {
@@ -2921,7 +2922,15 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}
       />}
       <ToastStack
-        toasts={toasts}
+        toasts={[...toasts, ...(bulkDeletion && !bulkResultsOpen && !bulkDeleteTarget && !deleteTarget && (bulkDeletion.running || !bulkResultsViewed) ? [{
+          id: -1,
+          title: `${bulkDeletion.running ? '正在删除归档会话' : '归档会话删除结果'} · 已处理 ${bulkDeletion.items.filter(item => !['pending', 'running'].includes(item.status)).length} / ${bulkDeletion.items.length}`,
+          detail: '点击查看详情',
+          onClick: () => {
+            setBulkResultsOpen(true);
+            if (!bulkDeletion.running) setBulkResultsViewed(true);
+          },
+        }] : [])]}
         onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
       />
       {renameTarget && <SessionRenameDialog key={renameTarget.id} session={renameTarget}
@@ -2935,11 +2944,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         onConfirm={() => void confirmSessionDelete()} onClose={() => { if (!deleteBusy) setDeleteTarget(undefined); }} />}
       {bulkDeleteTarget && <SessionDeletionDialog sessions={bulkDeleteTarget} busy={false}
         onConfirm={() => void confirmBulkDelete()} onClose={() => setBulkDeleteTarget(undefined)} />}
-      {bulkDeletion && <button className="archive-deletion-progress" onClick={() => setBulkResultsOpen(true)}>
-        {bulkDeletion.running ? '正在删除归档会话' : '归档会话删除结果'} · 已处理 {bulkDeletion.items.filter(item => !['pending', 'running'].includes(item.status)).length} / {bulkDeletion.items.length}
-      </button>}
       {bulkResultsOpen && bulkDeletion && <SessionDeletionDialog sessions={bulkDeletion.items.map(item => item.session)} results={bulkDeletion.items}
-        busy={bulkDeletion.running} error={bulkDeletion.refreshError} onConfirm={() => {}} onClose={() => setBulkResultsOpen(false)}
+        busy={bulkDeletion.running} error={bulkDeletion.refreshError} onConfirm={() => {}} onClose={() => {
+          setBulkResultsOpen(false);
+          if (!bulkDeletion.running) setBulkResultsViewed(true);
+        }}
         onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
     </main>
     </ToolResultDisplayContext.Provider>

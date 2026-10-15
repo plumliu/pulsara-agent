@@ -179,7 +179,6 @@
 .archived-session-actions button, .archived-header-actions .subtle-danger { display: flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; font-size: var(--type-caption); white-space: nowrap; }
 .archived-session-actions .subtle-danger, .archived-header-actions .subtle-danger { color: var(--red); }
 .archived-sessions-empty { padding: 24px; color: var(--muted); font-size: var(--type-small); text-align: center; }
-.archive-deletion-progress { position: fixed; bottom: 18px; left: 80px; z-index: 40; max-width: calc(100vw - 100px); padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-raised); color: var(--ink); box-shadow: var(--shadow-sm); font-size: var(--type-small); }
 .memory-delete-dialog.session-delete-dialog.has-archive-results { width: min(680px,100%); }
 .has-archive-results .session-delete-icon { background: color-mix(in srgb,var(--blue-soft) 55%,var(--paper-solid)); color: var(--blue); }
 .has-archive-results .session-delete-heading p { font-size: var(--type-label); }

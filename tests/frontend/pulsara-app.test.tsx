@@ -78,13 +78,24 @@ beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
     configurable: true, value() { this.setAttribute('open', ''); },
   });
+  // jsdom hides popovers but does not implement opening them.
+  Object.defineProperty(HTMLElement.prototype, 'showPopover', {
+    configurable: true, value() { this.style.display = 'block'; },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'hidePopover', {
+    configurable: true, value() { this.style.display = 'none'; },
+  });
   // Each test starts with its own browser selection; remounts within a test
   // still exercise the production preference persistence.
   window.localStorage.removeItem('pulsara-active-session');
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  Reflect.deleteProperty(HTMLElement.prototype, 'showPopover');
+  Reflect.deleteProperty(HTMLElement.prototype, 'hidePopover');
+});
 
 const bootstrap: RuntimeBootstrap = {
   application: { name: 'Pulsara', version: '0.1.0', transport: 'local' },
@@ -913,7 +924,8 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', {name: '已归档会话', exact: true}));
     expect(screen.getByRole('button', {name: '删除全部'})).toHaveProperty('disabled', true);
     await act(async () => { for (const [id, pending] of held) pending.resolve({status: 'DELETED', session_id: id, cleanup_warning: null}); });
-    await screen.findByRole('button', {name: /归档会话删除结果 · 已处理 12 \/ 12/});
+    const resultToast = await screen.findByRole('button', {name: /归档会话删除结果 · 已处理 12 \/ 12/});
+    expect(resultToast.closest('.toast-stack')).not.toBeNull();
     expect(adapter.deleteArchivedSession.mock.calls.map(([id]) => id)).toEqual([...held.keys()]);
     expect(adapter.deleteSession).not.toHaveBeenCalled();
     await screen.findByText('后来归档');
@@ -922,6 +934,37 @@ describe('PulsaraApp', () => {
     expect(within(screen.getByRole('list', {name: '归档删除结果'})).getAllByRole('listitem')).toHaveLength(5);
     fireEvent.click(within(screen.getByRole('navigation', {name: '归档删除结果分页'})).getByRole('button', {name: '下一页'}));
     expect(screen.getByText('归档批次 6')).toBeTruthy();
+    expect(screen.queryByRole('button', {name: /归档会话删除结果 ·/})).toBeNull();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭', exact: true}));
+    fireEvent.click(screen.getByRole('button', {name: '会话', exact: true}));
+    expect(screen.queryByRole('button', {name: /归档会话删除结果 ·/})).toBeNull();
+  });
+
+  it.each([false, true])('consumes completed results once viewed, including completion during viewing (close while running: %s)', async closeWhileRunning => {
+    const adapter = new FakeAdapter();
+    adapter.archived = archivedTargets(1);
+    const pending = deferred<Awaited<ReturnType<RuntimeAdapter['deleteArchivedSession']>>>();
+    adapter.deleteArchivedSession.mockImplementation(() => pending.promise);
+    await openArchived(adapter);
+    fireEvent.click(screen.getByRole('button', {name: '删除全部'}));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '永久删除'}));
+    const progress = await screen.findByRole('button', {name: /正在删除归档会话 ·/});
+    expect(progress.closest('.toast-stack')).not.toBeNull();
+    fireEvent.click(progress);
+    expect(screen.queryByRole('button', {name: /正在删除归档会话 ·/})).toBeNull();
+    if (closeWhileRunning) {
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭', exact: true}));
+      expect(screen.getByRole('button', {name: /正在删除归档会话 ·/})).toBeTruthy();
+    }
+    await act(async () => pending.resolve({status: 'DELETED', session_id: 'archived-1', cleanup_warning: null}));
+    if (closeWhileRunning) {
+      fireEvent.click(await screen.findByRole('button', {name: /归档会话删除结果 · 已处理 1 \/ 1/}));
+    } else {
+      await screen.findByText('本次处理已结束');
+    }
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭', exact: true}));
+    expect(screen.queryByRole('button', {name: /归档会话删除结果 ·/})).toBeNull();
+    expect(screen.queryByText('归档会话已处理')).toBeNull();
   });
 
   it('keeps partial results and quarantine warnings, forgets only confirmed absence, and retries only incomplete targets', async () => {
