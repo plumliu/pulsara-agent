@@ -626,7 +626,8 @@ def test_local_skill_capability_provider_activates_explicit_mentions_and_preserv
     "text",
     ["$review-pr", "@/review-pr", "/review-pr/file.txt", "/review-pr.md",
      "https://example.com/review-pr", "folder/review-pr", "C:/review-pr",
-     r"C:\review-pr", "/中文/review-pr", "/review-pr_unsafe"],
+     r"C:\review-pr", "/中文/review-pr", "/review-pr_unsafe", "</review-pr>",
+     '```svg\n<svg><g><circle/></g><rect/><text>示例</text></svg>\n```'],
 )
 def test_old_dollar_markers_and_paths_do_not_activate_skills(tmp_path: Path, text: str) -> None:
     _write_skill(tmp_path, "review-pr", _document("review-pr", "Review pull requests."))

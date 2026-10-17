@@ -37,7 +37,12 @@ export async function renderSvg(source: string, signal: AbortSignal) {
   const svg = createDOMPurify(window).sanitize(root.outerHTML, {
     USE_PROFILES: { svg: true, svgFilters: true },
     NAMESPACE: svgNamespace,
-    PARSER_MEDIA_TYPE: 'application/xhtml+xml',
+    // Use DOMPurify's case-normalized SVG allowlists. XML mode compares the
+    // original case against lowercase lists and drops viewBox/animateTransform.
+    // SMIL stays inside an image; DOMPurify still filters scripts, event handlers
+    // and animation targets such as href rather than bypassing its checks.
+    ADD_TAGS: ['animate'],
+    ADD_ATTR: ['from', 'to'],
   });
   const clean = new DOMParser().parseFromString(svg, 'image/svg+xml');
   if (clean.documentElement.localName !== 'svg' || clean.querySelector('parsererror')) {

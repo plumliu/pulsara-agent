@@ -21,9 +21,22 @@ it('uses the slash skill syntax and retains all surrounding text', () => {
   expect(skillReference('/hf-cli trailing')).toBeUndefined();
 });
 
-it.each(['$pdf', '$hf-cli', '@/pdf', '/pdf/file.txt', '/pdf.png', 'https://example.com/pdf', 'folder/pdf', 'C:/pdf', 'C:\\pdf', '/中文/pdf', '/pdf_unsafe', '/bad--name'])('keeps %s as ordinary text instead of a skill reference', raw => {
+it.each(['$pdf', '$hf-cli', '@/pdf', '/pdf/file.txt', '/pdf.png', 'https://example.com/pdf', 'folder/pdf', 'C:/pdf', 'C:\\pdf', '/中文/pdf', '/pdf_unsafe', '/bad--name', '</g>', '</circle>', '</rect>', '</svg>', '</pdf>'])('keeps %s as ordinary text instead of a skill reference', raw => {
   expect(skillReference(raw)).toBeUndefined();
   expect(splitSkillReferences(raw)).toEqual([raw]);
+});
+
+it('keeps SVG source literal through composer capture and message display alongside real mentions', async () => {
+  const raw = '用 /pdf 看这段：\n```svg\n<svg><g><circle/></g><text>示例</text></svg>\n```';
+  const content = {parts: [{type: 'text' as const, text: raw}]};
+  const value = store();
+  value.restoreIfEmpty('svg', content);
+  expect(value.getEditor('svg').getJSON().content?.[0].content?.filter(node => node.type === 'skillReference')).toHaveLength(1);
+  expect((await value.capture('svg')).content).toEqual(content);
+  const view = render(<PromptContentView variant="message" content={content} onReadImage={vi.fn()}/>);
+  expect(view.container.querySelectorAll('[data-skill-reference]')).toHaveLength(1);
+  expect(screen.getByLabelText('技能：pdf')).toBeTruthy();
+  expect(view.container.textContent).toContain('<svg><g><circle/></g><text>示例</text></svg>');
 });
 
 it('keeps exact Text/Image order, file paths, and slash markers on capture and restore', async () => {

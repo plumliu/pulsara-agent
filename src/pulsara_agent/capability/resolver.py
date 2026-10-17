@@ -59,7 +59,7 @@ from pulsara_agent.capability.types import (
 
 
 _EXPLICIT_SLASH = re.compile(
-    r"(?<![\w/@.$:\\-])/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w./\\-])"
+    r"(?<![\w/@.$:<\\-])/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w./\\-])"
 )
 _EXPLICIT_PREFIX = re.compile(
     r"(?<![A-Za-z0-9_-])skill:([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])",

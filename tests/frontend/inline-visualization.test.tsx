@@ -85,6 +85,25 @@ it('preserves the iframe when its containing MarkdownBody receives equivalent ne
   expect(read).toHaveBeenCalledTimes(1);
 });
 
+it('encloses fractional root bounds without a fractional iframe translation or viewport resize', async () => {
+  vi.spyOn(HTMLElement.prototype,'clientWidth','get').mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype,'clientHeight','get').mockReturnValue(893);
+  const view = render(<InlineVisualization entryId="a" items={[item]} onRead={async () => '<h1>frozen</h1>'}/>);
+  await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
+  const frame = view.container.querySelector('iframe')!;
+  const source = frame.srcdoc;
+  for (const [y, height, top, cropHeight] of [[381.5,130,381,131], [381,130,381,130], [381.25,130.5,381,131]]) {
+    act(() => {window.dispatchEvent(new MessageEvent('message',{source:frame.contentWindow,data:{type:visualizationLayoutMessageType,mode:'root',viewport:{width:800,height:893},rect:{x:20,y,width:460,height}}}));});
+    expect(frame.style.transform).toBe(`translateY(${-top}px)`);
+    expect((view.container.querySelector('.inline-visualization__stage') as HTMLElement).style.height).toBe(`${cropHeight}px`);
+    expect((view.container.querySelector('.inline-visualization__crop') as HTMLElement).style.height).toBe(`${cropHeight}px`);
+    expect(top).toBeLessThanOrEqual(y);
+    expect(top + cropHeight).toBeGreaterThanOrEqual(y + height);
+    expect(frame.style.height).toBe('893px');
+    expect(frame.srcdoc).toBe(source);
+  }
+});
+
 it('renders independent galleries and switches pages without reloading retained frames', async () => {
   const read = vi.fn(async () => '<input value="keep me">');
   const items = Array.from({length: 3}, (_, ordinal) => ({...item,ordinal,sourceFilename:`${ordinal}.html`}));

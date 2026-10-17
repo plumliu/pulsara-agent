@@ -62,6 +62,10 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
   }, [active]);
   const selectedRoot = !maximized && measurement?.width === size.width && measurement?.height === size.height ? measurement.rect : null;
   const rect = selectedRoot && selectedRoot.y + selectedRoot.height <= size.height ? selectedRoot : null;
+  // Enclose the measured bounds in whole CSS pixels. A fractional iframe
+  // translation plus an exact-height clip can lose the bottom raster row.
+  const cropTop = rect ? Math.floor(rect.y) : 0;
+  const cropHeight = rect ? Math.ceil(rect.y + rect.height) - cropTop : undefined;
   // Below 8px + 30px button + 8px, omit inline zoom instead of padding the chart.
   // Maximized/page layouts have no cropped rect and always retain their control.
   const compact = Boolean(rect && rect.height < 46);
@@ -69,7 +73,7 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
   const errorText = item.failureCode === 'HTML_NOT_FOUND' ? '未找到 HTML 文件' : error;
   return <div ref={page} className="inline-visualization__page" hidden={!active} aria-hidden={!active} inert={!active} data-visualization-ordinal={ordinal}>
       <div className="inline-visualization__viewport-probe" ref={probe}/>
-      <div className="inline-visualization__stage" data-visualization-compact={compact || undefined} data-visualization-layout={rect ? 'root' : selectedRoot ? 'root-scroll' : 'page'} style={{height: error ? undefined : rect?.height ?? (size.height || 'var(--visualization-height)')}}>
+      <div className="inline-visualization__stage" data-visualization-compact={compact || undefined} data-visualization-layout={rect ? 'root' : selectedRoot ? 'root-scroll' : 'page'} style={{height: error ? undefined : cropHeight ?? (size.height || 'var(--visualization-height)')}}>
         {error ? <div className="inline-visualization__status" role="status" title={error}>
             <span className="inline-visualization__status-icon" aria-hidden="true"><ImageOff size={20}/></span>
             <div className="inline-visualization__status-copy"><strong>可视化无法显示</strong><p>{errorText}</p>
@@ -77,9 +81,9 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
             </div>
           </div>
           : result.html === undefined || !environment ? <div role="status">正在加载可视化…</div>
-          : <div className="inline-visualization__crop" style={rect ? {height: rect.height} : undefined}>
+          : <div className="inline-visualization__crop" style={rect ? {height: cropHeight} : undefined}>
             <SandboxedHtmlPreview frameRef={frame} title={item.sourceFilename || '可视化'} source={{html: result.html, measure: true, allowTextSelection: false, environment}}
-              style={{width: size.width || '100%', height: size.height || '100%', transform: rect ? `translateY(${-rect.y}px)` : undefined}}/>
+              style={{width: size.width || '100%', height: size.height || '100%', transform: rect ? `translateY(${-cropTop}px)` : undefined}}/>
           </div>}
         {active && !compact && <div className="inline-visualization__zoom-anchor">{zoomControl}</div>}
       </div>

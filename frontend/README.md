@@ -31,6 +31,12 @@ npm run build:local
 `build:local` 会把静态资源写入本地应用服务的资源目录。开发前端时可使用
 `npm run dev:local`，真实会话验证仍应通过完整本地应用完成。
 
+SVG 围栏经浏览器 XML 校验和 DOMPurify 净化后，以 SVG 图片展示，保留 SMIL
+动画及其大小写敏感属性；脚本、事件处理器和动画 URL 目标仍由净化器过滤。
+`/name` 技能引用不匹配 `</name>` 闭合标签，编辑器、消息展示与后端激活遵守同一边界。
+内嵌 HTML 的主体裁切向外取整到完整 CSS 像素，避免半像素 iframe 位移丢失边缘；
+取整不改变参考 iframe 的尺寸，放大和长页仍使用完整参考视口。
+
 产品与生命周期约束见仓库根目录的
 [`PULSARA_FRONTEND_APPLICATION_SPEC.zh.md`](../PULSARA_FRONTEND_APPLICATION_SPEC.zh.md)
 和
