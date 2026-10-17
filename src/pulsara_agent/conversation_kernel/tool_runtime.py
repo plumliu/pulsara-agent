@@ -3600,7 +3600,7 @@ class DirectKernelToolPort:
                     )
                 image = candidate
             content = FrozenPromptContent((LLMTextPart(
-                "HTML current-version screenshot; viewport 1200×800, light theme, visible, reduced motion. Publication reads the file again." if html_source else "Image loaded."
+                "Current HTML still screenshot; 1200×800 viewport, light theme, visible, reduced motion; capture may crop to content-root bounds. Playback unverified. Publication rereads the file." if html_source else "Image loaded."
             ), image))
             content = bind_prompt_images(content, workspace_id=invocation_context.workspace_id)
             increment = allowance.quote_owner.quote(

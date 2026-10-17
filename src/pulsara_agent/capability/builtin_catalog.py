@@ -852,10 +852,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "Provide exactly one of path or image_ref. Use image_ref only to reread an "
             "exact reference already shown beside an image or in a historical image "
             "placeholder within the current workspace; copy it "
-            "unchanged. HTML screenshots use an isolated 1200×800 browser with light "
-            "theme, reduced motion and network access blocked. They inspect the current "
-            "file without publishing it or checking every interaction; edits require "
-            "a new screenshot to review the changed content. URLs, directories, PDFs, "
+            "unchanged. HTML screenshots use an isolated 1200×800 browser viewport "
+            "(light theme, reduced motion, network blocked), capturing the content "
+            "root's bounds or the viewport. Root captures omit content outside those "
+            "bounds. They show the current file's rendered appearance without "
+            "publishing it or verifying playback or every interaction; edits require "
+            "a new screenshot to review changed content. URLs, directories, PDFs, "
             "animated or multi-frame images, resize and detail are unsupported."
         ),
         input_schema=object_schema(
