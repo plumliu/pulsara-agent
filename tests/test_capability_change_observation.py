@@ -24,6 +24,34 @@ def change(name="demo"):
     )
 
 
+def test_capability_snapshot_can_be_read_by_a_lock_owning_context_preview():
+    async def run():
+        host = SimpleNamespace(
+            _lock=asyncio.Lock(),
+            _require_open=lambda: None,
+            _pending_capability_change=None,
+            _capability_refresh_requested_revision=0,
+            _capability_refresh_applied_revision=0,
+            _capability_refresh_attention=None,
+            reload_capabilities=AsyncMock(return_value={"status": "RELOADED"}),
+        )
+        async with host._lock:
+            assert await asyncio.wait_for(
+                KernelHostSession.freeze_capability_change(host), timeout=1,
+            ) is None
+        await KernelHostSession.request_capability_refresh(host, change())
+        await KernelHostSession._adopt_capabilities_if_requested(host)
+        pending = host._pending_capability_change
+        async with host._lock:
+            frozen = await asyncio.wait_for(
+                KernelHostSession.freeze_capability_change(host), timeout=1,
+            )
+        assert frozen == pending
+        assert host._pending_capability_change is pending
+
+    asyncio.run(run())
+
+
 def test_pending_facts_fold_at_the_existing_refresh_cut_and_keep_newer_changes():
     async def run():
         host = SimpleNamespace(

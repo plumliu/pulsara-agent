@@ -69,7 +69,9 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
                     patch.setattr(support, 'classify_trigger', unexpected)
                     patch.setattr(support, 'freeze_response_preference_source', unexpected)
                     patch.setattr(type(session._runner._provider_dispatch._tools), 'prepare_tool_surface_safe_point', unexpected)
-                    return await session.read_context_usage()
+                    # Test watchdog: a Host callback must not strand the preview
+                    # while reacquiring the lock already owned by this read.
+                    return await asyncio.wait_for(session.read_context_usage(), timeout=30)
 
             await session.update_model_call_binding(test_model_binding(runtime))
             slots_before = dict(session._input_continuity._slots)
@@ -131,8 +133,74 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             assert after['state'] == 'ready' and after['budget_source'] == 'heuristic'
             assert after['compaction_expected'] is True
             assert len(requests) == 2
+
+            # An adopted capability notice still participates in the real
+            # read-only projection. Preview must not consume its one-shot fact.
+            from tests.test_capability_change_observation import change
+            from tests.test_capability_change_dispatch import _notices
+
+            await session.update_model_call_binding(test_model_binding(runtime))
+            await session.request_capability_refresh(change('preview-notice'))
+            await session._adopt_capabilities_if_requested()
+            pending = session._pending_capability_change
+            installed = session._input_continuity.current_cohort(scope)
+            dispatch = session._runner._provider_dispatch
+            prepare = dispatch.prepare_compaction_source
+            projections = []
+
+            async def observed_prepare(**kwargs):
+                projection = await prepare(**kwargs)
+                projections.append(projection)
+                return projection
+
+            monkeypatch.setattr(dispatch, 'prepare_compaction_source', observed_prepare)
+            assert (await read_preview())['state'] == 'ready'
+            assert projections[-1].sources.capability_change == pending
+            assert len(_notices(projections[-1].projection.projected_input)) == 1
+            assert session._pending_capability_change is pending
+            assert session._input_continuity.current_cohort(scope) is installed
+            assert len(requests) == 2
+
+            # Start close while the exact preview owns the preparation lane.
+            # Once the read completes, close must acquire the Host lock and
+            # physically settle; no timeout/fallback is added to production.
+            entered, release = asyncio.Event(), asyncio.Event()
+            snapshot = dispatch._capability_change_reader
+
+            async def paused_snapshot():
+                entered.set()
+                await release.wait()
+                return await snapshot()
+
+            close_entered = asyncio.Event()
+            aclose = session.aclose
+
+            async def observed_close(**kwargs):
+                close_entered.set()
+                await aclose(**kwargs)
+
+            monkeypatch.setattr(dispatch, '_capability_change_reader', paused_snapshot)
+            monkeypatch.setattr(session, 'aclose', observed_close)
+            preview = asyncio.create_task(read_preview())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=30)
+                close = asyncio.create_task(core.close_session(session.host_session_id))
+                await asyncio.wait_for(close_entered.wait(), timeout=30)
+                assert session._close_async_lock.locked()
+                assert not close.done()
+                release.set()
+                result, _ = await asyncio.wait_for(asyncio.gather(preview, close), timeout=30)
+                assert result['state'] == 'ready'
+                assert session._closed
+                assert session._pending_capability_change is pending
+                assert len(requests) == 2
+            finally:
+                release.set()
+                if not preview.done():
+                    preview.cancel()
+                await asyncio.gather(preview, return_exceptions=True)
         finally:
-            await core.close_session(session.host_session_id)
-            await core.shutdown()
+            await asyncio.wait_for(core.close_session(session.host_session_id), timeout=30)
+            await asyncio.wait_for(core.shutdown(), timeout=30)
 
     asyncio.run(scenario())

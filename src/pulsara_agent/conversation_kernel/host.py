@@ -1275,11 +1275,14 @@ class KernelHostSession:
             return revision
 
     async def freeze_capability_change(self) -> FrozenCapabilityChange | None:
-        async with self._lock:
-            pending = self._pending_capability_change
-            if pending is None or pending.revision > self._capability_refresh_applied_revision:
-                return None
-            return replace(pending, adoption_attention=self._capability_refresh_attention)
+        # These fields are owned by this event loop, and this immutable snapshot
+        # has no suspension point. Context preview already owns the Host lock
+        # while borrowing the ROOT preparation lane; reacquiring it from this
+        # dispatch callback would deadlock preview and every later Host close.
+        pending = self._pending_capability_change
+        if pending is None or pending.revision > self._capability_refresh_applied_revision:
+            return None
+        return replace(pending, adoption_attention=self._capability_refresh_attention)
 
     async def consume_capability_change(self, frozen: FrozenCapabilityChange) -> None:
         async with self._lock:
