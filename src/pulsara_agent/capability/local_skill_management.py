@@ -233,6 +233,27 @@ class LocalSkillManagementService:
         root, name, _ = self._removal_target(skill_path, scope, workspace_root)
         return observe_loose_skill_removal(root, name)
 
+    def inspect_loose_skill_directory(self, *, skill_path, workspace_root=None):
+        """Observe an exact removable directory, including one without SKILL.md.
+
+        None means this path is not a loose removal target. A recognized root
+        with no directory returns an absent identity, never a usable Skill.
+        """
+        scopes = [(LocalSkillInstallScope.USER, None)]
+        if workspace_root is not None:
+            scopes.append((LocalSkillInstallScope.WORKSPACE, workspace_root))
+        for scope, root in scopes:
+            try:
+                allowed, name, _ = self._removal_target(skill_path, scope, root)
+            except ValueError:
+                continue
+            try:
+                observed = observe_loose_skill_removal(allowed, name)
+            except FileNotFoundError:
+                observed = None
+            return scope, observed
+        return None
+
     def remove_loose_local_skill(
         self,
         *,

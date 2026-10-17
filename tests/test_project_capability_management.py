@@ -96,18 +96,22 @@ class _Session:
     def inspect_capability_catalog(self):
         return SimpleNamespace(mcp_configured_servers=())
 
-    async def request_capability_refresh(self) -> int:
+    async def request_capability_refresh(self, change=None) -> int:
         self.refresh_requests += 1
         return self.refresh_requests
 
 
 def _refresh_core(sessions=()):
+    from time import monotonic
+    from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     core = object.__new__(KernelHostCore)
     core._lock = asyncio.Lock()
     core._closing = False
     core._sessions = {session.host_session_id: session for session in sessions}
     core._extension_routes = {}
+    core._credential_boundary = ProcessCredentialBoundary()
+    core._canonical_deadline = lambda: monotonic() + 5
     core._workspace_capability_revisions = {session.workspace.workspace_root.resolve(): 0 for session in sessions}
     return core
 
@@ -774,7 +778,7 @@ def test_project_refresh_ignores_a_session_that_closes_during_marking(
         release = asyncio.Event()
         session = _Session('session:s4pxuqzriha7rb2rhmatcb6neu', workspace)
 
-        async def close_during_refresh() -> int:
+        async def close_during_refresh(change=None) -> int:
             entered.set()
             await release.wait()
             raise RuntimeError("kernel Host session is closing")

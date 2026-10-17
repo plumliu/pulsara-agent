@@ -1271,6 +1271,34 @@ describe('workbench file drop boundary', () => {
 });
 
 describe('shared workspace read-only dock', () => {
+  it.each([true, false])('shows and copies the full recovery path and keeps refresh separate from creation (clipboard available: %s)', async clipboardAvailable => {
+    const path = '/private/var/folders/example/temporary/pulsara-visualization-production-test/workspaces/quick-20261014-123544-461f6478';
+    const copy = vi.fn(async () => { if (!clipboardAvailable) throw new Error('denied'); });
+    stubClipboard(copy);
+    const notify = vi.fn(), restore = vi.fn(), recheck = vi.fn();
+    const base = props({canControl:false, isRunning:false,
+      workspaceAvailability:{outcome:'MISSING', path}, onNotify:notify,
+      onRestoreWorkspace:restore, onRecheckWorkspace:recheck});
+    const view = render(<WorkbenchView {...base} />);
+    const pathButton = screen.getByRole('button', {name:'复制工作目录路径'});
+    fireEvent.mouseEnter(pathButton);
+    expect(screen.getByRole('tooltip').textContent).toBe(path);
+    expect(pathButton.getAttribute('aria-describedby')).toBe(screen.getByRole('tooltip').id);
+    fireEvent.click(pathButton);
+    await waitFor(() => expect(notify).toHaveBeenCalledWith(
+      clipboardAvailable ? '路径已复制' : '无法复制路径',
+      clipboardAvailable ? undefined : '浏览器没有授予剪贴板权限',
+      clipboardAvailable ? 'success' : 'warning',
+    ));
+    expect(copy).toHaveBeenCalledExactlyOnceWith(path);
+    fireEvent.click(screen.getByRole('button', {name:'重新检查工作目录'}));
+    expect(recheck).toHaveBeenCalledOnce();
+    expect(restore).not.toHaveBeenCalled();
+    view.rerender(<WorkbenchView {...base} workspaceRecoveryBusy />);
+    expect(screen.getByRole('button', {name:'重新检查工作目录'})).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', {name:'正在创建…'})).toHaveProperty('disabled', true);
+  });
+
   it('retains historical text and drafts while blocking fork and chat writes', () => {
     promptDraftStore.restoreIfEmpty('session-one', textPrompt('keep my draft'));
     const restore = vi.fn();
@@ -1286,7 +1314,7 @@ describe('shared workspace read-only dock', () => {
     expect(screen.getByText('目录丢失')).toBeTruthy();
     expect(screen.queryByRole('button', {name:'从这里开始新对话'})).toBeNull();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
-    fireEvent.click(screen.getByRole('button', {name:'创建空目录并继续'}));
+    fireEvent.click(screen.getByRole('button', {name:'创建目录并继续'}));
     expect(restore).toHaveBeenCalledOnce();
     view.rerender(<WorkbenchView {...original} canControl={true} workspaceAvailability={{outcome:'AVAILABLE', path:'/tmp/pr03'}} />);
     expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('keep my draft');
@@ -1300,7 +1328,7 @@ describe('shared workspace read-only dock', () => {
     const view = render(<WorkbenchView {...base} />);
     expect(screen.getByText('观察中')).toBeTruthy();
     expect(screen.queryByText('目录丢失')).toBeNull();
-    expect(screen.queryByRole('button',{name:'创建空目录并继续'})).toBeNull();
+    expect(screen.queryByRole('button',{name:'创建目录并继续'})).toBeNull();
     fireEvent.click(screen.getByRole('button',{name:'在此窗口继续'}));
     expect(takeover).toHaveBeenCalledOnce();
     expect(restore).not.toHaveBeenCalled();
@@ -1308,8 +1336,8 @@ describe('shared workspace read-only dock', () => {
       workspaceAvailability={{outcome:'UNAVAILABLE', path:'/tmp/pr03', reason:'路径是文件'}} />);
     expect(screen.getByText('目录不可用')).toBeTruthy();
     expect(screen.getByText('路径是文件')).toBeTruthy();
-    expect(screen.queryByRole('button',{name:'创建空目录并继续'})).toBeNull();
-    fireEvent.click(screen.getByRole('button',{name:'重新检查'}));
+    expect(screen.queryByRole('button',{name:'创建目录并继续'})).toBeNull();
+    fireEvent.click(screen.getByRole('button',{name:'重新检查工作目录'}));
     expect(recheck).toHaveBeenCalledOnce();
     expect(restore).not.toHaveBeenCalled();
   });

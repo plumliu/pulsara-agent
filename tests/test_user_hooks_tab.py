@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from pulsara_agent.capability.change_observation import CapabilityUiChange
 from pulsara_agent.capability.pulsara_home import resolve_pulsara_home
 from pulsara_agent.hooks.config_parser import (
     HookConfigParseError,
@@ -41,6 +42,7 @@ CONFIG = json.dumps(
 
 @pytest.fixture
 def owners(tmp_path, monkeypatch):
+    from pulsara_agent.settings import LocalSettingsStore
     home = tmp_path / "home"
     monkeypatch.setenv("PULSARA_HOME", str(home))
     boundary = ProcessCredentialBoundary("private-test-credential")
@@ -49,7 +51,7 @@ def owners(tmp_path, monkeypatch):
         pulsara_home_resolution=resolve_pulsara_home(str(home)),
     )
     core = SimpleNamespace(
-        mcp_management=SimpleNamespace(lane=asyncio.Lock()),
+        mcp_management=SimpleNamespace(lane=asyncio.Lock(), settings=LocalSettingsStore(home / "local-settings.yaml")),
         _credential_boundary=boundary,
         _plugin_management=lambda: plugins,
         _canonical_deadline=lambda: monotonic() + 5,
@@ -273,7 +275,11 @@ def test_published_mutations_report_attention_and_still_mark_refresh(
         )
         assert outcome["status"] == "ATTENTION" and "已写入" in outcome["message"]
         assert provider.user_config_path.read_text() == CONFIG
-        controller.core.mark_capability_change.assert_awaited_once_with(None)
+        controller.core.mark_capability_change.assert_awaited_once_with(
+            None, change=CapabilityUiChange.settled(
+                "SAVE_HOOK_CONFIG", "USER", {"kind":"HOOK_SOURCE", "source_kind":"LOCAL"}, "CLEANUP_ATTENTION" if failure == "fsync" else "APPLIED"
+            )
+        )
 
     asyncio.run(run())
 
@@ -317,7 +323,11 @@ def test_started_write_settles_after_cancel_but_queued_cancel_does_not_write(
         release.set()
         assert (await task)["status"] == "APPLIED"
         assert provider.user_config_path.read_text() == CONFIG
-        controller.core.mark_capability_change.assert_awaited_once_with(None)
+        controller.core.mark_capability_change.assert_awaited_once_with(
+            None, change=CapabilityUiChange.settled(
+                "SAVE_HOOK_CONFIG", "USER", {"kind":"HOOK_SOURCE", "source_kind":"LOCAL"}, "APPLIED"
+            )
+        )
 
     try:
         asyncio.run(run())
@@ -601,7 +611,11 @@ def test_trust_replace_fsync_failure_reports_written_and_keeps_adoption(
             ).trusted_definition_digest
             == review["definition_digest"]
         )
-        controller.core.mark_capability_change.assert_awaited_once_with(None)
+        controller.core.mark_capability_change.assert_awaited_once_with(
+            None, change=CapabilityUiChange.settled(
+                "TRUST_HOOK_SOURCE", "USER", {"kind":"HOOK_SOURCE", "source_kind":"LOCAL"}, "CLEANUP_ATTENTION"
+            )
+        )
 
     asyncio.run(run())
 

@@ -89,6 +89,11 @@ class _ReadOnlySettingsStore:
     def read(self) -> LocalSettings:
         return self.value
 
+    # The injected snapshot cannot mutate; share only the native owner's
+    # operation-local projection scope used by the GUI adapter.
+    capture_credential_mutations = LocalSettingsStore.capture_credential_mutations
+    credential_mutation_scrub = LocalSettingsStore.credential_mutation_scrub
+
 
 @dataclass(slots=True)
 class _ForcedSourceSummaryProviderError:

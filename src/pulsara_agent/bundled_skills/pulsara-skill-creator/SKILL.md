@@ -51,3 +51,9 @@ do not describe authoring or a passed validation as installation.
 - Keep MCP, Hook, credential, and permission configuration outside a loose Skill instead of encoding installation authority in frontmatter.
 - Do not invent a `.system` root or graph entry for the skill.
 - Prefer ordinary files that `read_file` and `terminal` can inspect naturally.
+
+Capability-page changes may arrive as brief Runtime result notices; use their
+reported origin and outcome without repeating the action. Editing the authoring
+source does not update an installed copy. For a damaged installed copy, follow
+the installer’s diagnosis/replacement guidance; do not invent installation records
+or recreate missing files merely to make deletion possible.

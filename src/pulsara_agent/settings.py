@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import stat
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -34,6 +37,12 @@ from pulsara_agent.mcp_credentials import (
     binding_to_dict,
     owner_from_dict,
     owner_to_dict,
+)
+from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+
+
+_credential_mutation_scrub: ContextVar[tuple[object, ProcessCredentialScrubSet | None] | None] = ContextVar(
+    "local-settings-credential-mutation-scrub", default=None
 )
 
 
@@ -143,6 +152,32 @@ class LocalSettings:
         self, owner: McpCredentialOwner
     ) -> LocalMcpOAuthRecord | None:
         return next((item for item in self.mcp_oauth if item.owner == owner), None)
+
+    def credential_scrub_set(self) -> ProcessCredentialScrubSet:
+        """Exact saved secrets for an operation's public projection, never a store."""
+        scrub = ProcessCredentialScrubSet()
+        for item in self.model_api_keys + self.mcp_credentials:
+            scrub.observe(item.value)
+        for slot in ("embedding", "rerank", "decision"):
+            connection = getattr(self.memory_retrieval, slot)
+            if connection is not None:
+                scrub.observe(connection.api_key)
+
+        def observe_oauth(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in {"access_token", "refresh_token", "client_secret", "id_token"} and isinstance(child, str):
+                        scrub.observe(child)
+                    else:
+                        observe_oauth(child)
+            elif isinstance(value, list):
+                for child in value:
+                    observe_oauth(child)
+
+        for item in self.mcp_oauth:
+            for raw in (item.token_json, item.client_json, item.auth_json):
+                observe_oauth(json.loads(raw))
+        return scrub
 
 
 class ModelConnectionIdentityConflict(ValueError):
@@ -428,6 +463,20 @@ class LocalSettingsStore:
 
     def read(self) -> LocalSettings:
         return read_local_settings(self.path)
+
+    @contextmanager
+    def capture_credential_mutations(self, scrub: ProcessCredentialScrubSet | None):
+        """Observe this operation's native settings cuts without retaining history."""
+        token = _credential_mutation_scrub.set((self, scrub))
+        try:
+            yield
+        finally:
+            _credential_mutation_scrub.reset(token)
+
+    @property
+    def credential_mutation_scrub(self) -> ProcessCredentialScrubSet | None:
+        observation = _credential_mutation_scrub.get()
+        return observation[1] if observation is not None and observation[0] is self else None
 
     def resolve_mcp_secret(self, binding: McpCredentialBinding) -> str | None:
         return self.read().mcp_secret(binding)
@@ -818,6 +867,14 @@ class LocalSettingsStore:
                 self._read_for_explicit_repair if repair else self.read
             )
             updated, result = mutation(current)
+            scrub = self.credential_mutation_scrub
+            if scrub is not None:
+                # The canonical settings lock closes the queued-owner window:
+                # capture removed/rotated values before publication loses them.
+                # Both values already exist here; no extra settings reads.
+                for settings in (current, updated):
+                    for value in settings.credential_scrub_set().values:
+                        scrub.observe(value)
             if updated == current:
                 return current, result
             try:

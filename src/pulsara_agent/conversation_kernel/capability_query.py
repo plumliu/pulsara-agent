@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from yaml import YAMLError
 
 from pulsara_agent.capability.source_query import (
     CHILD_KINDS,
@@ -370,12 +371,15 @@ class CapabilitySourceQuery:
                 self.diagnostics.append(generic)
 
     def _hook_detail(self, snapshot, target, source):
+        from pulsara_agent.hooks.presentation import hook_model_enabled
+
         trust = snapshot.trust.disposition.value
         detail = {
             "target": target,
             "source": source,
             "config_path": str(snapshot.provenance.identity.canonical_path),
-            "enabled": snapshot.trust.enabled,
+            "enabled": hook_model_enabled(snapshot),
+            "source_disposition": snapshot.disposition.value,
             "authorization": trust,
             "diagnostics": public_diagnostics(snapshot.diagnostics),
             "definitions": [
@@ -645,12 +649,12 @@ class CapabilitySourceQuery:
                     configs = await self._native(
                         self.service.mcp.inspect_declarations, root
                     )
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, YAMLError) as exc:
                     self.unavailable_kinds.add("MCP_SERVER")
                     self.diagnostics.append(
                         {
                             "code": "MCP_CONFIG_UNAVAILABLE",
-                            "message": str(exc),
+                            "message": "MCP configuration cannot be parsed; entry presence and availability are unknown." if isinstance(exc, YAMLError) else str(exc),
                             "path": str(
                                 self.service.mcp.path(LocalMcpTarget("inventory", root))
                             ),
@@ -757,7 +761,28 @@ class CapabilitySourceQuery:
                 "SOURCE_OBSERVATION_UNAVAILABLE",
                 "No native source observation service is bound.",
             )
-        observed = await self._plugins(package_path=Path(target["skill_path"]))
+        path = Path(target["skill_path"])
+        try:
+            directory = await self._native(
+                self.service.skills.inspect_loose_skill_directory,
+                skill_path=path,
+                workspace_root=self.service.workspace_root if self.service.workspace_kind == "project" else None,
+            )
+        except OSError as exc:
+            raise CapabilityQueryError("SOURCE_OBSERVATION_UNAVAILABLE", "The Skill directory could not be observed.") from exc
+        if directory is not None and (directory[1] is None or not path.exists()):
+            scope, identity = directory
+            return await self._scrub({
+                "target": target,
+                "source": {"kind": "LOCAL", "scope": scope.value.upper()},
+                "skill_root": str(path.parent), "skill_path": str(path),
+                "directory_exists": identity is not None,
+                "enable_eligible": False,
+                "remove_eligible": identity is not None,
+                "selected": False, "enabled": None,
+                "diagnostics": [{"code": "SKILL_DOCUMENT_MISSING" if identity is not None else "SKILL_DIRECTORY_MISSING", "message": "Skill document is missing; the owned directory can still be removed." if identity is not None else "The exact Skill installation directory is absent."}],
+            })
+        observed = await self._plugins(package_path=path)
         if observed.disposition is not PluginInspectionDisposition.COMPLETE:
             raise CapabilityQueryError(
                 "SOURCE_OBSERVATION_UNAVAILABLE",
@@ -834,6 +859,30 @@ class CapabilitySourceQuery:
                     observed = await self._plugins(self.exact_plugin)
                     if inspect and target["kind"] == "PLUGIN":
                         if not observed.instances:
+                            root = self._root(target["scope"])
+                            identity = _request_identity(PluginScopeKind(target["scope"]), target["plugin_id"], root)
+                            try:
+                                state = await self._native(
+                                    self.service.plugins.observe_local_plugin_instance,
+                                    InspectLocalPluginsRequest(self.deadline, workspace_root=root, cancellation=self.cancellation),
+                                    identity=identity,
+                                )
+                            except (OSError, ValueError, RuntimeError):
+                                state = None
+                            if state is not None and state.current is not None:
+                                current = state.current
+                                layout = self.service.plugins._store().layout(identity)
+                                return await self._scrub({
+                                    "target": target,
+                                    "enabled": current.enabled,
+                                    "package_install_id": current.current_package_install_id,
+                                    "package_root": str(layout.plugin_package_parent / current.current_package_install_id),
+                                    "data_root": str(layout.data_root),
+                                    "status": "UNAVAILABLE",
+                                    "remove_eligible": True,
+                                    "components": {name: {"count": None} for name in ("skills", "mcp_servers", "hook_definitions")},
+                                    "diagnostics": self.diagnostics,
+                                })
                             raise CapabilityQueryError(
                                 "PLUGIN_NOT_FOUND"
                                 if observed.disposition

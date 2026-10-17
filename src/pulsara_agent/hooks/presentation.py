@@ -3,6 +3,17 @@
 from pulsara_agent.hooks.contracts import PluginHookSourceIdentity
 
 
+def hook_model_enabled(snapshot) -> bool | None:
+    """Unknown source/trust observations cannot prove the stored enablement."""
+    if (
+        snapshot.disposition.value != "COMPLETE"
+        or snapshot.trust.disposition.value == "UNAVAILABLE"
+        or any(item.code == "HOOK_TRUST_STATE_INVALID" for item in snapshot.diagnostics)
+    ):
+        return None
+    return snapshot.trust.enabled
+
+
 def hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
     value: dict[str, object] = {
         "scope": snapshot.provenance.identity.visibility_scope.value.lower(),
@@ -46,6 +57,7 @@ def hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
 def hook_snapshot_model_public(snapshot) -> dict[str, object]:
     """Closed model projection; trust proofs stay with the inspection owner."""
     public = hook_snapshot_public(snapshot, inspect=False)
+    public["enabled"] = hook_model_enabled(snapshot)
     result = {key: public[key] for key in (
         "scope", "path", "description", "source_disposition", "trust_disposition",
         "enabled", "trusted_at", "runnable_handler_count",

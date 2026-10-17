@@ -62,6 +62,7 @@ from pulsara_agent.plugins.contracts import (
     PluginInspectionOutcome,
     PluginInspectionDisposition,
     PluginInstanceInspection,
+    PreparedPluginInstanceObservation,
     PluginInstanceState,
     PluginMcpStdioSummary,
     PluginScopeKind,
@@ -94,6 +95,7 @@ class PreparedCapabilityManagementInvocation:
     expected_current: FrozenJsonObjectFact
     local_mutation: PreparedLocalMcpMutation | None = None
     plugin: PluginInstanceInspection | None = None
+    plugin_instance: PreparedPluginInstanceObservation | None = None
     plugin_connection_review: tuple[PluginConnectionReview, ...] = ()
     skill_target: LooseSkillTargetObservation | None = None
     skill_validation: LocalSkillValidationOutcome | None = None
@@ -228,6 +230,36 @@ class CapabilityManagementPreparation:
                 freeze_json({"plugin_id": validation.summary.manifest.name}),
                 plugin=current,
             )
+        if intent.action is Action.REMOVE_PLUGIN:
+            scope = PluginScopeKind(intent.scope.value)
+            identity = _request_identity(scope, fields["plugin_id"], root)
+            observed = await asyncio.to_thread(
+                self.plugins.observe_local_plugin_instance,
+                InspectLocalPluginsRequest(self.deadline(), workspace_root=root),
+                identity=identity,
+            )
+            current = observed.current
+            if current is None:
+                raise McpManagementConflict("Plugin is no longer installed in this scope")
+            self._exact(fields, "expected_package_install_id", current.current_package_install_id)
+            process = current.enabled
+            if process:
+                # Optional component observation refines effects for healthy packages;
+                # unavailable package contents never block instance removal.
+                try:
+                    component = await self._plugin(root, fields["plugin_id"])
+                except ValueError:
+                    pass
+                else:
+                    if component.package_install_id == current.current_package_install_id:
+                        process = self._has_process(component)
+            return PreparedCapabilityManagementInvocation(
+                intent,
+                ResolvedCapabilityEffectProjection(outside_workspace_write=True, destructive=True, process_control=process),
+                (), freeze_json(intent.to_dict()),
+                freeze_json({"expected_package_install_id": current.current_package_install_id}),
+                plugin_instance=observed,
+            )
         plugin = await self._plugin(root, fields["plugin_id"])
         assert plugin is not None
         self._exact(fields, "expected_package_install_id", plugin.package_install_id)
@@ -246,8 +278,6 @@ class CapabilityManagementPreparation:
                 servers=plugin.summary.mcp.mcp_servers,
                 identity=plugin.identity,
             )
-        elif intent.action is Action.REMOVE_PLUGIN:
-            process = plugin.enabled and self._has_process(plugin)
         else:
             server = next(
                 (

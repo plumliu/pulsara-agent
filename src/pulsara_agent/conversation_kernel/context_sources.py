@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.capability.change_observation import FrozenCapabilityChange
+
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
 import json
@@ -45,6 +47,7 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceCandidate,
     ContextSourceCollectionDiagnostic,
     ContextSourceKind,
+    ModelInputScopeKind,
     ContextSourceLifecycle,
     ContextTrustClass,
     FrozenModelToolSurface,
@@ -125,6 +128,7 @@ class ContextSourceCollectorPort(Protocol):
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        capability_change: FrozenCapabilityChange | None = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources: ...
@@ -138,6 +142,7 @@ class ContextSourceCollectorPort(Protocol):
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        capability_change: FrozenCapabilityChange | None = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> "FrozenNonTriggerContextSources": ...
@@ -217,6 +222,7 @@ class FrozenNonTriggerContextSources:
     skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot = field(
         repr=False, compare=False
     )
+    capability_change: FrozenCapabilityChange | None = field(default=None, repr=False)
     hook_context_reservation: HookContextReservation | None = field(
         default=None, repr=False, compare=False
     )
@@ -342,6 +348,18 @@ _BINDINGS = (
         (ContextRenderMode.FULL,),
         "pulsara.subagent-terminal-material-collector.v1",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    _SourceBinding(
+        ContextSourceKind.CAPABILITY_CHANGE,
+        "pulsara.capability-change.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.IMPORTANT,
+        49,
+        29,
+        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
+        "pulsara.capability-change-collector.v1",
+        ContextSourceLifecycle.ONE_SHOT,
     ),
     _SourceBinding(
         ContextSourceKind.SKILL_CATALOG,
@@ -560,6 +578,12 @@ class KernelContextSourceCollector:
             "describes capture provenance, not confidence: EXPLICIT means the child "
             "used report_agent_result; INFERRED means Runtime captured the child's "
             "terminal assistant text. Both are usable advisory dependency outputs.\n\n"
+            "CAPABILITY_CHANGE reports a settled management outcome, not an instruction "
+            "to repeat it; current catalogs and routes determine availability. If asked "
+            "whether you saw a capability-page action, answer from the notice's "
+            "source/action/result only; do not call tools to reconfirm it or propose "
+            "unrequested follow-up. Missing or malformed capability files alone "
+            "do not identify who changed them or how they became damaged.\n\n"
             "SKILL_CATALOG routes tasks to Skills; it is not a Skill body. If "
             "ACTIVE_SKILL already supplies a body applicable to the current task, "
             "use it as workflow guidance without rereading merely to activate it. "
@@ -729,6 +753,7 @@ class KernelContextSourceCollector:
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        capability_change: FrozenCapabilityChange | None = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources:
@@ -739,6 +764,7 @@ class KernelContextSourceCollector:
             skill_dispatch_view=skill_dispatch_view,
             skill_owner_snapshot=skill_owner_snapshot,
             mcp_catalog_snapshot=mcp_catalog_snapshot,
+            capability_change=capability_change,
             hook_context_estimator=hook_context_estimator,
             deadline_monotonic=deadline_monotonic,
         )
@@ -757,6 +783,7 @@ class KernelContextSourceCollector:
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        capability_change: FrozenCapabilityChange | None = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> FrozenNonTriggerContextSources:
@@ -968,6 +995,17 @@ class KernelContextSourceCollector:
                     )
                 )
         identity = canonical_facts.canonical_input.identity
+        if identity.conversation_scope_kind is ModelInputScopeKind.ROOT and capability_change is not None:
+            candidates.append(self._candidate(
+                ContextSourceKind.CAPABILITY_CHANGE,
+                (capability_change.render(), ""),
+                domain_identity={"revision": capability_change.revision},
+            ))
+        else:
+            capability_change = None
+            absent.append(self._absent(
+                ContextSourceKind.CAPABILITY_CHANGE, ContextSourceAbsenceKind.NOT_APPLICABLE
+            ))
         hook_source, hook_context_reservation = self.freeze_hook_context_source(
             scope_kind=identity.conversation_scope_kind.value,
             child_task_id=identity.scope_subagent_task_id,
@@ -986,6 +1024,7 @@ class KernelContextSourceCollector:
             skill_dispatch_view=skill_dispatch_view,
             skill_owner_snapshot=skill_owner_snapshot,
             hook_context_reservation=hook_context_reservation,
+            capability_change=capability_change,
         )
 
     def freeze_hook_context_source(
@@ -1163,6 +1202,7 @@ class KernelContextSourceCollector:
             absent_facts=tuple(absent),
             diagnostics=tuple(diagnostics),
             registry_fingerprint=self._registry.fingerprint,
+            capability_change=frozen.capability_change,
         )
 
     def freeze_compaction_active_skill_source(
@@ -1603,6 +1643,7 @@ def replace_subagent_context_sources(
         absent_facts=absent,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
+        capability_change=sources.capability_change,
     )
 
 
@@ -1620,6 +1661,7 @@ def replace_frozen_subagent_context_sources(
             absent_facts=sources.absent_facts,
             diagnostics=sources.diagnostics,
             registry_fingerprint=sources.registry_fingerprint,
+            capability_change=sources.capability_change,
         ),
         replacements,
     )
@@ -1642,12 +1684,14 @@ def replace_frozen_subagent_context_sources(
         absent_facts=collected.absent_facts,
         diagnostics=collected.diagnostics,
         registry_fingerprint=collected.registry_fingerprint,
+        capability_change=collected.capability_change,
     )
     return FrozenNonTriggerContextSources(
         candidates=collected.candidates,
         absent_facts=collected.absent_facts,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
+        capability_change=sources.capability_change,
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
@@ -1731,6 +1775,7 @@ def replace_memory_context_sources(
         absent_facts=absent,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
+        capability_change=sources.capability_change,
     )
 
 
@@ -1841,6 +1886,7 @@ def replace_compaction_context_sources(
         absent_facts=absent,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
+        capability_change=sources.capability_change,
     )
 
 
@@ -1871,6 +1917,7 @@ def replace_hook_context_source(
         absent_facts=absent,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
+        capability_change=sources.capability_change,
     )
 
 
@@ -1886,6 +1933,7 @@ def replace_frozen_hook_context_source(
             absent_facts=sources.absent_facts,
             diagnostics=sources.diagnostics,
             registry_fingerprint=sources.registry_fingerprint,
+            capability_change=sources.capability_change,
         ),
         replacement,
     )
@@ -1894,6 +1942,7 @@ def replace_frozen_hook_context_source(
         absent_facts=collected.absent_facts,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
+        capability_change=sources.capability_change,
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
@@ -1928,6 +1977,7 @@ def replace_frozen_compaction_context_sources(
         absent_facts=absent,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
+        capability_change=sources.capability_change,
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
@@ -1941,6 +1991,7 @@ def _collected(
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...],
     registry_fingerprint: str,
     absent_facts: tuple[ContextSourceAbsentFact, ...] = (),
+    capability_change: FrozenCapabilityChange | None = None,
 ) -> CollectedContextSources:
     fingerprint = context_fingerprint(
         "collected-context-sources:v1",
@@ -1974,6 +2025,7 @@ def _collected(
         registry_fingerprint=registry_fingerprint,
         collection_fingerprint=fingerprint,
         absent_facts=absent_facts,
+        capability_change=capability_change,
     )
 
 

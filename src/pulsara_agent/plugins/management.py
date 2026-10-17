@@ -52,6 +52,7 @@ from pulsara_agent.plugins.contracts import (
     PluginHookDefinitionSummary,
     PluginInstanceIdentity,
     PluginInstanceInspection,
+    PreparedPluginInstanceObservation,
     PluginManifest,
     PluginMcpHttpSummary,
     PluginMcpSseSummary,
@@ -518,6 +519,26 @@ class PluginManagementService:
                 result.state.enabled,
             )
         )
+
+    def observe_local_plugin_instance(self, request, *, identity):
+        """Read canonical instance identity without requiring a readable package.
+
+        The existing mutation owner rejoins this exact value under its instance
+        lock. This observation grants no permission and retains no package anchor.
+        """
+        from .package_core import _check_abort
+
+        _check_abort(request.deadline_monotonic, request.cancellation)
+        expected = _request_identity(identity.scope, identity.plugin_id, request.workspace_root)
+        if expected != identity:
+            raise ValueError("Plugin scope does not match instance observation")
+        store = self._store()
+        if store is None:
+            raise ValueError("Plugin store is unavailable")
+        layout = store.layout(identity)
+        state = store.read_state(layout)
+        _check_abort(request.deadline_monotonic, request.cancellation)
+        return PreparedPluginInstanceObservation(identity, state)
 
     async def remove_local_plugin(
         self, request: RemoveLocalPluginRequest, *, connections=None

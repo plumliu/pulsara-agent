@@ -47,6 +47,23 @@ Individual Skill/MCP declarations are managed through their Plugin owner.
 
 ## Verify or diagnose
 
+Capability-page actions may produce a brief Runtime result notice. Use its
+reported origin and outcome without repeating the action or inventing leftover
+installation records. Missing files alone do not prove uninstallation. For
+troubleshooting inspect the exact target; known-target management can proceed
+directly. Acknowledge a settled notice from its result; do not query or reload
+merely to confirm it. Diagnose reported damage using the exact public target
+and relevant files, without auditing Runtime implementation as a routine step.
+
+An unreadable package does not mean its instance was uninstalled. If the exact
+instance identity remains observable, requested removal uses REMOVE_PLUGIN.
+For a damaged package, check an available replacement source, then remove and
+install normally; INSTALL performs full validation. The two steps are not
+atomic. If instance identity is unavailable, report that limit rather than editing
+managed state or guessing credential ownership. Diagnosis alone does not
+authorize removal or reinstallation.
+
+
 For this package's capabilities, copy its target into `list_capabilities.parent`;
 Plugin is a source, not a list kind. Complete package inventory stays in the GUI.
 Read mutation and adoption separately: `APPLIED` means the source change settled,
@@ -66,6 +83,9 @@ For Hook diagnostics inspect a listed `HOOK_SOURCE` target. `TRUST_HOOK_SOURCE`
 requires full current GUI review even under full access; enabling a Hook does not
 grant trust or enable its Plugin. Hook management actions control trust and
 enablement, not definition editing.
+
+If trust state was unreadable, a native mutation may recreate it with defaults.
+Post-mutation enablement does not prove the prior state or another actor's actions.
 
 For user-requested **local** Hook authoring, use the resolved `config_path` with
 file tools. Use `manage_capability` for user-requested trust or enablement; editing

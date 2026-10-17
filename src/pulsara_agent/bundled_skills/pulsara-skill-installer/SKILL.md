@@ -48,6 +48,21 @@ resolve the failure without replaying a completed removal.
 
 ## Verify or diagnose
 
+Capability-page actions may produce a brief Runtime result notice. Use its
+reported origin and outcome without repeating the action or inventing leftover
+installation records. Missing files alone do not prove uninstallation. For
+troubleshooting inspect the exact target; known-target management can proceed
+directly. Acknowledge a settled notice from its result; do not query or reload
+merely to confirm it. Diagnose reported damage using the exact public target
+and relevant files, without auditing Runtime implementation as a routine step.
+
+An owned loose directory can be removed even if SKILL.md is missing or invalid;
+use REMOVE_LOOSE_SKILL rather than creating a document to make removal work.
+An absent directory can use ordinary installation from an available source.
+Keep other copies and source directories distinct; reinstalling does not promise
+enablement or remove all same-name Skills.
+
+
 Read mutation status and `adoption` separately. `APPLIED` means the source change
 settled, not that every consumer adopted it or that a user form appeared.
 First-party changes notify live sessions at their existing safe points; current

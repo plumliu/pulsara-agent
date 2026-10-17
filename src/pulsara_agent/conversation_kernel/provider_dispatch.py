@@ -10,7 +10,9 @@ from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 from threading import Lock
 from time import monotonic
-from typing import Literal, Protocol
+from typing import Awaitable, Callable, Literal, Protocol
+
+from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 
 
 from pulsara_agent.conversation_kernel.blob import (
@@ -191,6 +193,7 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceAbsenceKind,
     ContextSourceCandidate,
     ContextSourceKind,
+    ContextRenderMode,
     FrozenCanonicalCompileSnapshot,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
@@ -1776,6 +1779,8 @@ class ProviderDispatchCoordinator:
         workspace_resolver: SessionWorkspaceResolver,
         compaction_owner: HostCompactionRuntimeOwner | None,
         subagent_runtime: SubagentRuntimePort | None,
+        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]] | None = None,
+        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]] | None = None,
     ) -> None:
         self._repository = repository
         self._writer_lease = writer_lease
@@ -1802,6 +1807,8 @@ class ProviderDispatchCoordinator:
         )
         self._compaction_owner = compaction_owner
         self._subagent_runtime = subagent_runtime
+        self._capability_change_reader = capability_change_reader
+        self._capability_change_installed = capability_change_installed
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -3024,6 +3031,12 @@ class ProviderDispatchCoordinator:
                     retained_source,
                 )
             try:
+                capability_change = (
+                    await self._capability_change_reader()
+                    if self._capability_change_reader is not None
+                    and base_facts.canonical_input.identity.conversation_scope_kind is ModelInputScopeKind.ROOT
+                    else None
+                )
                 frozen_sources = await self._io.run(
                     self._context_source_collector.freeze_non_trigger_sources,
                     tool_surface=model_surface,
@@ -3032,6 +3045,7 @@ class ProviderDispatchCoordinator:
                     skill_dispatch_view=skill_view,
                     skill_owner_snapshot=skill_owner,
                     mcp_catalog_snapshot=mcp_owner.catalog_snapshot,
+                    capability_change=capability_change,
                     hook_context_estimator=(
                         None
                         if semantic_only or not include_hook_context
@@ -5628,6 +5642,21 @@ class ProviderDispatchCoordinator:
                 execution=execution,
             )
             installed = True
+            change = dispatch.sources.capability_change
+            if change is not None and self._capability_change_installed is not None and any(
+                decision.source_kind is ContextSourceKind.CAPABILITY_CHANGE
+                and decision.selected_mode is ContextRenderMode.FULL
+                for decision in compiled_input.source_decisions
+            ):
+                # Join this tiny process-local update even if transport is cancelled.
+                # No delivery acknowledgement or durable notification job is created.
+                task = asyncio.create_task(self._capability_change_installed(change))
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                task.result()
             self._tools.install_provider_input_tool_result_deliveries(
                 permit=permit,
                 canonical_facts=canonical_facts,

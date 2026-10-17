@@ -72,6 +72,8 @@ from .capability_management import (
 
 
 def _plugin_observation(prepared, root):
+    if prepared.plugin_instance is not None:
+        return prepared.plugin_instance
     plugin = prepared.plugin
     if plugin is None:
         return PreparedPluginInstanceObservation(
@@ -316,7 +318,7 @@ class CapabilityManagementCall:
             raise McpManagementConflict(
                 "Plugin connection review changed while the form was open"
             )
-        if candidate.plugin is not None or self.prepared.plugin is not None:
+        if candidate.plugin is not None or self.prepared.plugin is not None or candidate.plugin_instance is not None or self.prepared.plugin_instance is not None:
             root = self._root()
             if _plugin_observation(candidate, root) != _plugin_observation(
                 self.prepared, root
@@ -444,7 +446,7 @@ class CapabilityManagementCall:
                     scope,
                     fields["plugin_id"],
                     service.deadline(),
-                    prepared.plugin.package_install_id,
+                    observed.current.current_package_install_id,
                     workspace_root=root,
                     prepared_current=observed,
                 ),
@@ -665,7 +667,11 @@ class CapabilityManagementCall:
         return self._result(
             prepared,
             "APPLIED",
-            {"path": str(snapshot.provenance.identity.canonical_path)},
+            {
+                "path": str(snapshot.provenance.identity.canonical_path),
+                **({"enabled": fields["enabled"]} if action is Action.SET_HOOK_SOURCE_ENABLED else {}),
+                **({"trust_revoked": True} if action is Action.REVOKE_HOOK_TRUST else {}),
+            },
         )
 
     async def _authorization(self, prepared):

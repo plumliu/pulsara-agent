@@ -48,3 +48,11 @@ repository checkouts, private scripts or raw YAML writes to bypass its review an
 credential owners. If the installed launcher is missing, report the distribution
 problem instead of substituting a checkout runtime. Host tool availability is
 independent of the shell PATH.
+
+Missing config and malformed config are different. A confirmed missing file/entry
+can use ordinary ADD_LOCAL_MCP when recovery is requested; do not fabricate an old
+entry just to REMOVE it. If existing YAML/entry cannot be parsed, explain the
+specific boundary and discuss restoring valid config; do not raw-edit managed
+config to bypass review or credential owners. A missing entry does not prove
+private credentials or local OAuth grants were cleared. Read actual settlement,
+cleanup and adoption results; never promise revocation of remote tokens.

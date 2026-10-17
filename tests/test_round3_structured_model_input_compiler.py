@@ -455,6 +455,16 @@ _SOURCE_FACTS = {
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.TURN_APPEND,
     ),
+    ContextSourceKind.CAPABILITY_CHANGE: (
+        "pulsara.capability-change.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.IMPORTANT,
+        49,
+        29,
+        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
+        ContextSourceLifecycle.ONE_SHOT,
+    ),
     ContextSourceKind.SKILL_CATALOG: (
         "pulsara.skill-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -732,6 +742,7 @@ def _sources(
     default_absences = {
         ContextSourceKind.RUNTIME_CLOCK: ContextSourceAbsenceKind.UNAVAILABLE,
         ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
+        ContextSourceKind.CAPABILITY_CHANGE: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.SKILL_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
@@ -3811,15 +3822,15 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:7817597999d8607618dc44d98dc5526c5569c07c1ddac9f581fb2a22ec347b74"
+        "sha256:9cea8289efa485c2d4c38399f5213b209ee31f6970f16bbae0340656d66b0a53"
     )
     assert compiled.compile_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # Canonical session/turn/connection IDs change the complete semantic
-        # input identity; source content and budget decisions stay the same.
-        "sha256:90698405d53861d32c3ccf9e75d7bfeb5b67397058c708f2bbcea26a4ee2d25f"
+        # CAPABILITY_CHANGE adds an explicit absent source to the closed registry.
+        # Collection/semantic identity changes; actual budget decisions stay the same.
+        "sha256:d670d63a5726e92545e0c141f43e19e8273734e11e1c4005d48e4aacf2c77986"
     )
     assert not hasattr(compiled, "final_estimate")
 

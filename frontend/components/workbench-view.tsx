@@ -31,7 +31,6 @@ import {
   FileSearch,
   Upload,
   GitFork,
-  Eye,
   ListTodo,
   Menu,
   LoaderCircle,
@@ -63,6 +62,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { TurnInterruptionHistoryNotice } from './turn-interruption-notice';
+import { WorkspaceRecoveryDock } from './workspace-recovery-dock';
 import type { TurnInterruptionNotice } from '../lib/runtime-adapter';
 import { ContextUsageIndicator } from './context-usage-indicator';
 import type {
@@ -2551,24 +2551,8 @@ export function WorkbenchView({
       </div> : (
         <div className="observer-wrap composer-wrap" ref={composerWrapRef}>
           {composerQueue}
-          <div className={`observer-dock${isObserver ? " observer-dock--observer" : ""}`}>
-            <span className="observer-dock__icon"><Eye size={15} /></span>
-            <span className="readonly-dock__copy">
-              <strong>{isObserver ? '此窗口仅供查看' : directoryReadOnly && workspaceAvailability?.outcome === 'MISSING' ? '工作目录已丢失' : workspaceAvailability?.outcome === 'UNAVAILABLE' ? '工作目录不可用' : '暂时无法继续'}</strong>
-              {!isObserver && <>
-                {workspaceAvailability?.outcome === 'MISSING' && <small>历史对话仍可查看。继续时会在原路径创建空目录，原文件不会恢复。</small>}
-                <small className="readonly-dock__path">{workspaceAvailability?.path}</small>
-                {workspaceAvailability?.outcome === 'UNAVAILABLE' && <small>{workspaceAvailability.reason}</small>}
-              </>}
-              {workspaceRecoveryError && <small role="alert">{workspaceRecoveryError}</small>}
-            </span>
-            <button type="button" disabled={workspaceRecoveryBusy} onClick={() => {
-              if (isObserver) onTakeControl();
-              else if (workspaceAvailability?.outcome === 'MISSING') void onRestoreWorkspace?.();
-              else void onRecheckWorkspace?.();
-            }}>{workspaceRecoveryBusy ? '正在创建…' : isObserver ? '在此窗口继续' : workspaceAvailability?.outcome === 'MISSING' ? '创建空目录并继续' : '重新检查'}</button>
-            {!isObserver && workspaceAvailability?.outcome === 'MISSING' && <button type="button" disabled={workspaceRecoveryBusy} onClick={() => void onRecheckWorkspace?.()}>重新检查</button>}
-          </div>
+          <WorkspaceRecoveryDock isObserver={isObserver} availability={workspaceAvailability} busy={workspaceRecoveryBusy} error={workspaceRecoveryError}
+            onTakeControl={onTakeControl} onRestore={onRestoreWorkspace} onRecheck={onRecheckWorkspace} onNotify={onNotify} />
         </div>
       )}
     </section>

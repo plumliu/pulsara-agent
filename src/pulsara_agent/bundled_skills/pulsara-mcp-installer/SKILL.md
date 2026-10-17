@@ -39,6 +39,26 @@ public config or handling user-only import/out-of-band administration.
 
 ## Verify and recover
 
+Capability-page actions may produce a brief Runtime result notice. Use its
+reported origin and outcome without repeating the action or inventing leftover
+installation records. Missing files alone do not prove uninstallation. For
+troubleshooting inspect the exact target; known-target management can proceed
+directly. Acknowledge a settled notice from its result; do not query or reload
+merely to confirm it. Diagnose reported damage using the exact public target
+and relevant files, without auditing Runtime implementation as a routine step.
+
+Distinguish a missing executable or unreachable service from missing config.
+Valid config still uses UPDATE_LOCAL_MCP or REMOVE_LOCAL_MCP; confirmed absent
+config can be recreated with ADD_LOCAL_MCP. Unparseable existing config may block
+management: report the specific error; a parse failure does not prove that an
+entry is absent or a previous save failed. Do not infer who changed the file or
+how it became malformed. Do not propose clearing or rewriting managed YAML as
+a repair shortcut; explain that malformed existing config needs explicit
+configuration recovery outside this management path. Do not bypass the owner with raw YAML
+writes or claim private credentials were cleaned. Diagnosis alone does not
+authorize deleting or recreating a connection.
+
+
 Saving, authorizing, discovering tools and executing a tool are distinct outcomes.
 Read mutation status and `adoption` separately. `APPLIED` means the change settled;
 it does not prove availability or whether a form appeared. Managed changes adopt

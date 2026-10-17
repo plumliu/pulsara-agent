@@ -153,6 +153,16 @@ _SOURCE_POLICY = {
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.CAPABILITY_CHANGE: (
+        "pulsara.capability-change.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.IMPORTANT,
+        49,
+        29,
+        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
+        ContextSourceLifecycle.ONE_SHOT,
+    ),
     ContextSourceKind.SKILL_CATALOG: (
         "pulsara.skill-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -323,6 +333,9 @@ _SOURCE_ABSENCE_POLICY = {
     ),
     ContextSourceKind.PLAN_WORKFLOW: frozenset(
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
+    ),
+    ContextSourceKind.CAPABILITY_CHANGE: frozenset(
+        {ContextSourceAbsenceKind.NOT_APPLICABLE}
     ),
     ContextSourceKind.SKILL_CATALOG: frozenset(
         {
@@ -1446,9 +1459,9 @@ class StructuredModelInputCompiler:
                         or previous.semantic_fingerprint != semantic
                     )
             elif absence is not None:
-                if absence.source_kind is ContextSourceKind.HOOK_CONTEXT:
-                    # HOOK_CONTEXT is advisory ONE_SHOT data.  An empty future
-                    # slot has no provider-visible clearing semantics.
+                if absence.source_kind in {ContextSourceKind.HOOK_CONTEXT, ContextSourceKind.CAPABILITY_CHANGE}:
+                    # Advisory ONE_SHOT data has no provider-visible clearing
+                    # semantics when its future slot is empty.
                     continue
                 if _preserve_same_turn_retained_source(
                     previous,

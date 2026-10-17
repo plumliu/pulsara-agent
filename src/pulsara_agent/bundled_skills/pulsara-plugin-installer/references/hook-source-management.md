@@ -65,3 +65,23 @@ the mutation. Adopted definitions apply to future events. The management call's
 own Pre/Permission/Post use its captured predecessor view, so newly trusted Hooks
 cannot trigger their own trust call's PostTool. Inspection is read-only and never
 grants trust or activates an observed source merely because it was inspected.
+
+## Missing or damaged sources
+
+Distinguish the definition file, source enablement, trust state and command script.
+For a local missing/invalid definition, requested disable or revoke still uses the
+same source owner; it does not delete definitions or scripts. Requested deletion
+edits only the exact local rule/source and preserves other rules. Restore local
+definitions or scripts from a known source, then follow normal parsing/adoption
+and any required GUI trust review; recovery never grants trust automatically.
+Trust covers normalized definitions, not every script's bytes, so script failure
+need not change trust. Diagnose without executing Hooks merely as a health test.
+Plugin Hooks remain package-owned; if package inventory is unavailable, component
+management may be unavailable even when the instance can still be removed.
+
+When definitions or trust state are unavailable, enablement in the observed view may
+be unknown; use the exact disable/revoke settlement for that completed action.
+An explicit mutation may recreate unreadable trust state using the owner's
+defaults. Its resulting enablement cannot prove an earlier state or external re-enable.
+An unavailable view does not undo a successful mutation or require reloading to
+prove it. Observe again only for a concrete contradiction or requested diagnosis.

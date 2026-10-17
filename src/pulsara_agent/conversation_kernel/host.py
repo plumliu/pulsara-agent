@@ -7,6 +7,8 @@ acquires a new writer generation and rehydrates canonical rows only.
 
 from __future__ import annotations
 
+from pulsara_agent.capability.change_observation import CapabilityUiChange, FrozenCapabilityChange
+
 from pulsara_agent.conversation_kernel.repository_errors import UnpublishedIdentityCollision
 
 from pulsara_agent.identity import derive_id, random_id, is_valid_id
@@ -885,6 +887,8 @@ class KernelHostSession:
             live_bus=self.live_bus,
             workspace_gate=self.workspace_gate,
             before_provider_preparation=self._adopt_capabilities_if_requested,
+            capability_change_reader=self.freeze_capability_change,
+            capability_change_installed=self.consume_capability_change,
             root_control_preparation_barrier=(
                 self._await_user_control_feedback_before_root_provider
             ),
@@ -948,6 +952,7 @@ class KernelHostSession:
         self._capability_refresh_requested_revision = 0
         self._capability_refresh_applied_revision = 0
         self._capability_refresh_attention: str | None = None
+        self._pending_capability_change: FrozenCapabilityChange | None = None
         self._ingress_hook_attempts: dict[str, _IngressHookAttempt] = {}
         self._runtime_reopen_quiescence: KernelRuntimeReopenQuiescence | None = None
         self._compaction_write_reservations: dict[
@@ -1143,6 +1148,7 @@ class KernelHostSession:
         self, *, deadline_monotonic: float | None
     ) -> dict[str, object]:
         """Replace only the future-event USER/WORKSPACE Hook source slices."""
+        from pulsara_agent.hooks.presentation import hook_model_enabled
 
         async def publish_scanned_view(predecessor, replacement) -> bool:
             async with self._lock:
@@ -1162,7 +1168,7 @@ class KernelHostSession:
                     "path": str(snapshot.provenance.identity.canonical_path),
                     "scan": snapshot.disposition.value,
                     "trust": snapshot.trust.disposition.value,
-                    "enabled": snapshot.trust.enabled,
+                    "enabled": hook_model_enabled(snapshot),
                     "definitions": len(snapshot.definitions),
                 }
                 for snapshot in view.source_snapshots
@@ -1254,14 +1260,38 @@ class KernelHostSession:
             "attention": self.capability_refresh_attention,
         }
 
-    async def request_capability_refresh(self) -> int:
+    async def request_capability_refresh(self, change: CapabilityUiChange | None = None) -> int:
         """Mark the next unprepared dispatch; do not wake an otherwise idle turn."""
 
         async with self._lock:
             self._require_open()
             self._capability_refresh_requested_revision += 1
             revision = self._capability_refresh_requested_revision
+            if change is not None:
+                pending = self._pending_capability_change
+                self._pending_capability_change = FrozenCapabilityChange(
+                    change, revision, 1 if pending is None else pending.changes + 1
+                )
             return revision
+
+    async def freeze_capability_change(self) -> FrozenCapabilityChange | None:
+        async with self._lock:
+            pending = self._pending_capability_change
+            if pending is None or pending.revision > self._capability_refresh_applied_revision:
+                return None
+            return replace(pending, adoption_attention=self._capability_refresh_attention)
+
+    async def consume_capability_change(self, frozen: FrozenCapabilityChange) -> None:
+        async with self._lock:
+            pending = self._pending_capability_change
+            if pending is None:
+                return
+            if pending.revision == frozen.revision:
+                self._pending_capability_change = None
+            elif pending.revision > frozen.revision:
+                self._pending_capability_change = replace(
+                    pending, changes=pending.changes - frozen.changes
+                )
 
     @property
     def capability_refresh_pending(self) -> bool:
@@ -7260,6 +7290,8 @@ class KernelHostSession:
             live_bus=self.live_bus,
             workspace_gate=self.workspace_gate,
             before_provider_preparation=self._adopt_capabilities_if_requested,
+            capability_change_reader=self.freeze_capability_change,
+            capability_change_installed=self.consume_capability_change,
             io_owner=self._io,
             context_source_collector=self._context_sources,
             model_resolution_snapshot_provider=(
@@ -8309,7 +8341,7 @@ class KernelHostCore:
             raise cancelled
         return result
 
-    async def mark_capability_change(self, workspace_root: Path | None = None) -> int:
+    async def mark_capability_change(self, workspace_root: Path | None = None, *, change: CapabilityUiChange | None = None) -> int:
         canonical_root = (
             workspace_root.resolve(strict=False) if workspace_root is not None else None
         )
@@ -8332,7 +8364,7 @@ class KernelHostCore:
         marked = 0
         for session in sessions:
             try:
-                await session.request_capability_refresh()
+                await session.request_capability_refresh(change)
                 marked += 1
             except RuntimeError:
                 async with self._lock:

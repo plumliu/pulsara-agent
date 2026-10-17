@@ -716,6 +716,7 @@ class StaticContextSourceCollector:
         )
         present = {item.source_kind for item in candidates}
         absence_kinds = {
+            ContextSourceKind.CAPABILITY_CHANGE: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.RUNTIME_CLOCK: ContextSourceAbsenceKind.UNAVAILABLE,
             ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,

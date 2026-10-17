@@ -14,7 +14,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 from hashlib import sha256
-from typing import Literal, Mapping, Protocol
+from typing import TYPE_CHECKING, Literal, Mapping, Protocol
+
+if TYPE_CHECKING:
+    from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 
 from pulsara_agent.llm.estimator import FinalWireTokenEstimate
 from pulsara_agent.llm.input import (
@@ -109,6 +112,7 @@ class ContextSourceKind(StrEnum):
     RUN_PERMISSION = "RUN_PERMISSION"
     PLAN_HANDOFF = "PLAN_HANDOFF"
     PLAN_WORKFLOW = "PLAN_WORKFLOW"
+    CAPABILITY_CHANGE = "CAPABILITY_CHANGE"
     SKILL_CATALOG = "SKILL_CATALOG"
     MCP_CATALOG = "MCP_CATALOG"
     ACTIVE_SKILL = "ACTIVE_SKILL"
@@ -519,6 +523,7 @@ class ContextSourceCandidate:
                 or self.channel is not ContextChannel.RUNTIME_OBSERVATION
                 or self.source_kind
                 not in {
+                    ContextSourceKind.CAPABILITY_CHANGE,
                     ContextSourceKind.SKILL_CATALOG,
                     ContextSourceKind.ACTIVE_SKILL,
                 }
@@ -621,6 +626,7 @@ class CollectedContextSources:
     registry_fingerprint: str
     collection_fingerprint: str
     absent_facts: tuple[ContextSourceAbsentFact, ...] = ()
+    capability_change: FrozenCapabilityChange | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         identities = tuple(item.source_instance_id for item in self.candidates)

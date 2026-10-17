@@ -5,6 +5,8 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 """
 
 from __future__ import annotations
+
+from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
@@ -947,6 +949,8 @@ class ConversationKernelRunner:
         input_reader: CanonicalProviderInputReader | None = None,
         safe_point: ProviderSafePointCoordinator | None = None,
         before_provider_preparation: Callable[[], Awaitable[bool]] | None = None,
+        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]] | None = None,
+        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]] | None = None,
         workspace_gate: WorkspaceExecutionGate | None = None,
         root_control_preparation_barrier: (
             Callable[[str], Awaitable[None]] | None
@@ -1103,6 +1107,8 @@ class ConversationKernelRunner:
             workspace_resolver=self._workspace_resolver,
             compaction_owner=compaction_owner,
             subagent_runtime=subagent_runtime,
+            capability_change_reader=capability_change_reader,
+            capability_change_installed=capability_change_installed,
         )
         self.compaction = CompactionCoordinator(
             workspace_gate=workspace_gate,

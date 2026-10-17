@@ -513,7 +513,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "The runtime collects confirmation, connection inputs and reviews; READ_ONLY changes "
             "require user form submission, not a mode change. Never request or pass secret values; "
             "users enter them privately in the editor. Wait for completion; report mutation and "
-            "adoption separately. Do not replay a settled change or routinely reload."
+            "post-action adoption separately. Neither current nor adoption describes the prior state. "
+            "A mutation may rebuild unreadable Hook trust with defaults; resulting enabled=true "
+            "does not prove earlier enablement or an external re-enable. "
+            "Do not replay a settled change or routinely reload."
         ),
         input_schema=capability_management_input_schema(),
         is_read_only=False,
