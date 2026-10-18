@@ -1,3 +1,4 @@
+import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { ToolResultDisplayContext } from '../../frontend/lib/tool-result-display';
 import type { ReactElement, PropsWithChildren } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -73,6 +74,7 @@ describe('visualization occurrence layout', () => {
   });
 });
 afterEach(() => {
+  delete window.pulsaraDesktop;
   cleanup();
   promptDraftStore.destroy();
   vi.restoreAllMocks();
@@ -84,14 +86,7 @@ function textPrompt(text: string) {
 }
 
 function stubClipboard(writeText: (value: string) => Promise<void>) {
-  const current = navigator;
-  vi.stubGlobal('navigator', new Proxy(current, {
-    get(target, property) {
-      if (property === 'clipboard') return { writeText };
-      const value = Reflect.get(target, property, target) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }));
+  Object.defineProperty(window, 'pulsaraDesktop', { configurable: true, writable: true, value: { writeClipboardText: writeText } });
 }
 
 describe('PR04 composer queue hard cut', () => {
@@ -347,7 +342,6 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onFork: vi.fn(async () => undefined),
     onReconnect: vi.fn(),
     onTakeControl: vi.fn(),
-    onOpenSidebar: vi.fn(),
     onNewSession: vi.fn(),
     onToggleInspector: vi.fn(),
     onOpenModelSettings: vi.fn(),
@@ -1063,35 +1057,40 @@ describe('completed reply process disclosure', () => {
 
 describe('composer + menu', () => {
   it.each([false, true])('reserves queued edit against an open menu and late picker, directory=%s', async directory => {
-    const upload = vi.fn(async () => ({ path: '/tmp/imports/id/report.pdf', name: 'report.pdf', bytes: 1, file_count: 1 }));
+    const upload = vi.fn(async () => ({ path: '/tmp/imports/id/report.pdf', name: 'report.pdf', bytes: 1 }));
     promptDraftStore.setImporter(upload);
     const item: QueuedPrompt = { queueItemId: 'source', commandId: 'submitted', sequence: 1, status: 'pending', deliveryMode: 'new-turn', content: textPrompt('queued body'), permission: 'read-only' };
     const action: QueuedPromptAction = { commandId: 'edit-command', sessionId: 'session-one', connectionGeneration: 1, kind: 'edit', source: item, status: 'submitting', submittedAt: 'now' };
     const onNotify = vi.fn();
     const view = render(<WorkbenchView {...props({ queuedPrompts: [item], onNotify })} />);
     fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
-    const input = screen.getByLabelText(directory ? '选择文件夹' : '选择文件');
-    const pick = vi.spyOn(input, 'click');
+    let resolvePicker!: (value: string | string[]) => void;
+    const pick = vi.fn(() => new Promise<string | string[]>(resolve => { resolvePicker = resolve; }));
+    window.pulsaraDesktop = { chooseFiles: pick, chooseDirectory: pick } as unknown as PulsaraDesktop;
     view.rerender(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [action], onNotify })} />);
     expect(screen.getByLabelText('发送给 Pulsara').getAttribute('contenteditable')).toBe('false');
     const menuItem = screen.getByRole('button', { name: directory ? '添加文件夹' : '添加文件' }) as HTMLButtonElement;
     expect(menuItem.disabled).toBe(true);
     fireEvent.click(menuItem);
     expect(pick).not.toHaveBeenCalled();
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item], onNotify })} />);
+    fireEvent.click(screen.getByRole('button', { name: directory ? '添加文件夹' : '添加文件' }));
+    expect(pick).toHaveBeenCalledOnce();
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [action], onNotify })} />);
     const file = new File(['bytes'], 'report.pdf');
     Object.defineProperty(file, 'webkitRelativePath', { value: 'folder/report.pdf' });
     await act(async () => {
-      fireEvent.change(input, { target: { files: [file] } });
+      resolvePicker(directory ? '/tmp/folder' : ['/tmp/report.pdf']);
       fireEvent.paste(screen.getByLabelText('发送给 Pulsara'), { clipboardData: { files: [file] } });
       fireEvent.drop(screen.getByLabelText('发送给 Pulsara'), { dataTransfer: { files: [file] } });
     });
     expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
     expect(upload).not.toHaveBeenCalled();
-    expect(onNotify).toHaveBeenCalledWith('文件未加入草稿', expect.any(String));
+    expect(onNotify).toHaveBeenCalledWith('文件未加入草稿', expect.any(String), 'warning');
   });
 
   it('groups attachments, skills and planning and appends a picked file beyond the current cursor', async () => {
-    promptDraftStore.setImporter(async (_session, files) => ({ path: `/tmp/imports/id/${files[0].name}`, name: files[0].name, bytes: 1, file_count: 1 }));
+    window.pulsaraDesktop = { chooseFiles: vi.fn(async () => ['/tmp/original/report.pdf']) } as unknown as PulsaraDesktop;
     const onSend = vi.fn(async () => true);
     const view = render(<WorkbenchView {...props({ isRunning: false, onSend })} />);
     const editor = promptDraftStore.getEditor('session-one');
@@ -1102,9 +1101,10 @@ describe('composer + menu', () => {
     expect(screen.getByRole('button', { name: '选择技能' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '先规划' }));
     expect(view.container.querySelector('.composer-plan-status')?.textContent).toBe('本轮先规划');
-    await act(async () => { fireEvent.change(screen.getByLabelText('选择文件'), { target: { files: [new File(['x'], 'report.pdf')] } }); });
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加文件' })); });
     const content = (await promptDraftStore.capture('session-one')).content;
-    expect(content.parts[0]).toMatchObject({ type: 'text', text: expect.stringMatching(/^before【本地文件/) });
+    expect(content.parts[0]).toMatchObject({ type: 'text', text: expect.stringContaining('/tmp/original/report.pdf') });
     expect(screen.queryByRole('button', { name: '先规划' })).toBeNull();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送' })); });
     expect(onSend).toHaveBeenCalledWith(content, 'read-only', true);
@@ -1114,7 +1114,7 @@ describe('composer + menu', () => {
 
 describe('workbench file drop boundary', () => {
   const transfer = (files: File[] = []) => ({ types: ['Files'], files, items: [], getData: () => '', dropEffect: 'none', effectAllowed: 'all' });
-  const importFile = async (_session: string, files: readonly File[]) => ({ path: `/tmp/imports/${files[0].name}`, name: files[0].name, bytes: files[0].size, file_count: 1 });
+  const importFile = async (_session: string, files: readonly File[]) => ({ path: `/tmp/imports/${files[0].name}`, name: files[0].name, bytes: files[0].size });
 
   it.each([
     { insideEditor: false, mixed: false }, { insideEditor: true, mixed: false },
@@ -1271,7 +1271,7 @@ describe('workbench file drop boundary', () => {
     expect(promptDraftStore.summary('session-two').hasContent).toBe(false);
     fireEvent.dragEnter(region, { dataTransfer });
     fireEvent.drop(region, { dataTransfer });
-    await waitFor(() => expect(upload).toHaveBeenCalledWith('session-two', expect.any(Array), false, expect.any(AbortSignal)));
+    await waitFor(() => expect(upload).toHaveBeenCalledWith('session-two', expect.any(Array), expect.any(AbortSignal)));
   });
 });
 
@@ -1292,7 +1292,7 @@ describe('shared workspace read-only dock', () => {
     fireEvent.click(pathButton);
     await waitFor(() => expect(notify).toHaveBeenCalledWith(
       clipboardAvailable ? '路径已复制' : '无法复制路径',
-      clipboardAvailable ? undefined : '浏览器没有授予剪贴板权限',
+      clipboardAvailable ? undefined : '系统剪贴板暂时不可用，请重试',
       clipboardAvailable ? 'success' : 'warning',
     ));
     expect(copy).toHaveBeenCalledExactlyOnceWith(path);
@@ -1787,4 +1787,71 @@ describe('source location disclosure demand', () => {
     expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
     expect(view.container.querySelector('[data-task-id="worker"]')).toBeTruthy();
   });
+});
+
+it('keeps manual process and tool expansion at the clicked position, then resumes explicit tail-follow', () => {
+  let resizeColumn: () => void = () => {};
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: () => void) {}
+    observe(node: Element) {if (node.classList.contains('thread-column')) resizeColumn=this.callback;}
+    disconnect() {} unobserve() {}
+  });
+  const messages: ComponentProps<typeof WorkbenchView>['messages']=[
+    {id:'process',role:'assistant',assistantKind:'tool-request',turnId:'turn-one',time:'',body:'处理中',traces:[
+      {id:'tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'},
+    ]},
+    {id:'answer',role:'assistant',assistantKind:'terminal',turnId:'turn-one',rootFinal:true,time:'',body:'最终正文'},
+  ];
+  const base=props({messages,isRunning:false});
+  const view=render(<WorkbenchView {...base}/>);
+  const thread=view.container.querySelector('.thread-scroll')! as HTMLElement;
+  let height=1000, top=600;
+  Object.defineProperties(thread,{scrollHeight:{get:()=>height},clientHeight:{get:()=>400},scrollTop:{get:()=>top,set:value=>{top=Math.max(0,Math.min(height-400,value));},configurable:true}});
+  vi.spyOn(thread,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,400));
+  const process=screen.getByRole('button',{name:'展开中间过程'});
+  vi.spyOn(process,'getBoundingClientRect').mockImplementation(()=>new DOMRect(0,740-top,600,24));
+  fireEvent.click(process);
+  height=1500;act(()=>resizeColumn());
+  expect(top).toBe(600);
+  expect(process.getBoundingClientRect().top).toBe(140);
+  const tool=screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'});
+  vi.spyOn(tool,'getBoundingClientRect').mockImplementation(()=>new DOMRect(0,800-top,600,24));
+  fireEvent.click(tool);
+  height=1800;act(()=>resizeColumn());
+  expect(top).toBe(600);
+  // A resize-induced scroll event must not silently re-enable following.
+  fireEvent.scroll(thread);height=1900;act(()=>resizeColumn());
+  expect(top).toBe(600);
+  fireEvent.click(screen.getByRole('button',{name:'回到最新'}));
+  expect(top).toBe(1500);
+  height=2100;act(()=>resizeColumn());
+  expect(top).toBe(1700);
+});
+
+it('retains the same process content through exit without starting hidden hydration', async () => {
+  const observed: Array<{node:Element,notify:IntersectionObserverCallback}>=[];
+  vi.stubGlobal('IntersectionObserver',class {
+    constructor(private notify:IntersectionObserverCallback) {}
+    observe(node:Element){observed.push({node,notify:this.notify});} disconnect(){}
+  });
+  const hydrate=vi.fn(async()=>{});
+  const view=render(<WorkbenchView {...props({isRunning:false,onHydrateEntries:hydrate,messages:[
+    {id:'reasoning',role:'assistant',assistantKind:'progress',turnId:'turn-one',time:'',body:'进展正文',contentState:'ready',reasoningContentState:'unloaded'},
+    {id:'final',role:'assistant',assistantKind:'terminal',turnId:'turn-one',rootFinal:true,time:'',body:'最终正文'},
+  ]})}/>);
+  fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
+  const host=view.container.querySelector('[data-source-entry="reasoning"]')!;
+  const closing=host.closest('.animated-disclosure')!;
+  let settle!:()=>void;
+  const finished=new Promise<void>(resolve=>{settle=resolve;});
+  Object.defineProperty(closing,'getAnimations',{value:()=>[{finished}]});
+  expect(host.textContent).toContain('已保存，正文读取中');
+  fireEvent.click(screen.getByRole('button',{name:'收起中间过程'}));
+  expect(host.isConnected).toBe(true);
+  expect(host.textContent).toContain('已保存，正文读取中');
+  act(()=>observed.forEach(item=>item.notify([{target:item.node,isIntersecting:true}] as IntersectionObserverEntry[],{} as IntersectionObserver)));
+  expect(hydrate).not.toHaveBeenCalled();
+  await act(async()=>settle());
+  expect(host.isConnected).toBe(false);
+  expect(screen.getByText('最终正文')).toBeTruthy();
 });

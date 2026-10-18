@@ -1,0 +1,9 @@
+import{n as e}from"./chunk-Y2CYZVJY-CGmbByfC.js";import"./src-Cbptj2lj.js";import"./chunk-O7XYJQB3-Bjhr4kkc.js";import"./chunk-ZIGJFQKS-Y1nmFtPU.js";import"./chunk-742MDFTN-CeuvS5an.js";import"./chunk-MBY4JIJT-Br2BtSCc.js";import"./chunk-7PRAP22T-CWDfrTHp.js";import"./chunk-7INBJB4K-CE5qwcYQ.js";import"./chunk-5DYCD2WN-BM2NrN64.js";import"./chunk-Z7XXMR3K-B0tVEo6K.js";import"./chunk-GWA4HPMP-D1TpiwEe.js";import"./chunk-XXDRQBXY-CNN9JElH.js";import"./chunk-WEXAMYUT-CZpTkdvd.js";import"./chunk-UA2S7LBM-BaMfM1Lb.js";import"./chunk-GNY47TPC-B_9ajtl5.js";import"./chunk-LNGE3PJU-91fcdDm5.js";import{r as t,t as n}from"./chunk-7M6MHVWA-CFned-_K.js";var r=n({styles:e(e=>`${t(e)}
+  .swimlane.cluster:not([data-color-id]) rect {
+    stroke: ${e.clusterBorder} !important;
+  }
+  [data-look="neo"].cluster rect {
+    filter: none;
+  }
+`,`getStyles`)});export{r as diagram};
+//# sourceMappingURL=swimlanesDiagram-TC7HE7FX-Bpa5Mmbj.js.map

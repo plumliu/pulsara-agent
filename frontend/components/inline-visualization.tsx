@@ -1,9 +1,9 @@
-'use client';
-import { Images, Maximize2, Minimize2, ImageOff, RotateCcw } from 'lucide-react';
+import { Images, Maximize2, ImageOff, RotateCcw } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { VisualizationOccurrence } from '../lib/pulsara-types';
 import { visualizationEnvironment, type VisualizationEnvironment } from '../lib/visualization-environment';
 import { usableVisualizationRootRect, visualizationLayoutMessageType, type VisualizationRootRect } from '../lib/visualization-frame';
+import { useDesktopWorkspace } from './desktop-workspace';
 import { SavedImage, useSavedImage } from './saved-image';
 import { SandboxedHtmlPreview } from './sandboxed-html-preview';
 
@@ -113,7 +113,6 @@ function ImageThumbnail({ entryId, item, enabled, onRead }: { entryId: string; i
   const read = useVisualizationImageReader(entryId, item, onRead);
   const image = useSavedImage(read, enabled);
   // Saved immutable blob URLs must not go through an image optimizer.
-  // eslint-disable-next-line @next/next/no-img-element
   return <span className="inline-visualization__thumbnail-image" aria-hidden="true">{image.url ? <img src={image.url} alt="" draggable={false} /> : image.error ? <ImageOff size={19}/> : <Images size={19}/>}</span>;
 }
 
@@ -144,7 +143,6 @@ function Thumbnail({ item, entryId, enabled, onRead }: {
   }, [enabled, image, failed, onRead, entryId, ordinal, digest, size, state]);
   return <span className="inline-visualization__thumbnail-image" aria-hidden="true">
     {/* Local derived PNGs need no image proxy or external optimizer. */}
-    {/* eslint-disable-next-line @next/next/no-img-element */}
     {image ? <img src={image} alt="" draggable={false} onError={() => { setImage(undefined); setFailed(true); }} />
       : state === 'FAILED' || failed ? <ImageOff size={19} /> : <Images size={19} />}
   </span>;
@@ -154,19 +152,16 @@ function Thumbnail({ item, entryId, enabled, onRead }: {
 export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: InlineVisualizationContext) {
   const [selected, setSelected] = useState(items[0]?.ordinal);
   const [resident, setResident] = useState<number[]>(() => items.length ? [items[0].ordinal] : []);
-  const [maximized, setMaximized] = useState(false);
+  const workspace = useDesktopWorkspace();
   const [visible, setVisible] = useState<Set<number>>(new Set());
-  const dialog = useRef<HTMLDialogElement>(null);
   const strip = useRef<HTMLDivElement>(null);
-  const control = useRef<HTMLButtonElement>(null);
   const index = Math.max(0, items.findIndex(item => item.ordinal === selected));
   const current = items[index];
   const select = (next: number) => {
     const item = items[next];
     if (!item) return;
     setSelected(item.ordinal);
-    if (item.imageRef) setMaximized(false);
-    else setResident(old => [...old.filter(value => value !== item.ordinal), item.ordinal].slice(-residentFrames));
+    if (!item.imageRef) setResident(old => [...old.filter(value => value !== item.ordinal), item.ordinal].slice(-residentFrames));
   };
   useEffect(() => {
     if (!strip.current) return;
@@ -196,31 +191,27 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
     const observer = new ResizeObserver(reveal); observer.observe(element); reveal();
     return () => observer.disconnect();
   }, [selected]);
-  useLayoutEffect(() => {
-    const element = dialog.current;
-    if (!element) return;
-    if (maximized) {element.close(); element.showModal(); control.current?.focus({preventScroll: true});}
-    else if (element.matches(':modal')) {element.close(); element.show(); control.current?.focus({preventScroll: true});}
-  }, [maximized]);
   if (!current) return null;
   return <section className="inline-visualization" aria-label="可视化图集">
-    <dialog ref={dialog} open className={`${maximized ? 'is-maximized' : ''}${items.length > 1 ? ' has-thumbnails' : ''}`}
-      onCancel={event => {event.preventDefault(); setMaximized(false);}}
-      onClick={event => {
-        if (!maximized || event.target !== event.currentTarget) return;
-        const r = event.currentTarget.getBoundingClientRect();
-        if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) setMaximized(false);
-      }}>
+    <div className={`inline-visualization__layout${items.length > 1 ? ' has-thumbnails' : ''}`}>
       <div className="inline-visualization__figure">
         {items.filter(item => !item.imageRef && resident.includes(item.ordinal)).map(item => <GalleryPage
-          key={`${entryId}:${item.ordinal}:${item.contentDigest ?? item.state}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} maximized={maximized} zoomControl={
-        <button ref={control} className="inline-visualization__zoom" title={visualizationName(current)}
-          aria-label={maximized ? '退出放大' : '放大可视化'} onClick={() => setMaximized(v => !v)}>
-          {maximized ? <Minimize2 size={16}/> : <Maximize2 size={16}/>}
+          key={`${entryId}:${item.ordinal}:${item.contentDigest ?? item.state}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} maximized={false} zoomControl={
+        <button className="inline-visualization__zoom" title={visualizationName(current)}
+          aria-label="放大可视化" onClick={() => workspace?.open({
+            id: JSON.stringify([workspace.sessionId, 'visualization', entryId, current.ordinal]),
+            sessionId: workspace.sessionId, title: visualizationName(current), kind: 'visualization',
+            render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} />,
+          })}>
+          <Maximize2 size={16}/>
+
         </button>
         }/>)}
 
-        {current.imageRef && <ImagePage key={`${entryId}:${current.ordinal}:${current.contentDigest}`} entryId={entryId} item={current} onRead={onRead}/>}
+        {current.imageRef && <><button className="inline-visualization__zoom" title="在标签中打开图片" aria-label="在标签中打开图片" onClick={() => workspace?.open({
+          id: JSON.stringify([workspace.sessionId, 'visualization', entryId, current.ordinal]), sessionId: workspace.sessionId,
+          title: visualizationName(current), kind: 'visualization', render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} />,
+        })}><Maximize2 size={16} /></button><ImagePage key={`${entryId}:${current.ordinal}:${current.contentDigest}`} entryId={entryId} item={current} onRead={onRead}/></>}
       </div>
       {items.length > 1 && <aside className="inline-visualization__controls">
       <div ref={strip} className="inline-visualization__strip" role="group" aria-label="可视化缩略图"
@@ -241,6 +232,21 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
         </button>)}
       </div>
       </aside>}
-    </dialog>
+    </div>
+  </section>;
+}
+
+function FrozenVisualization({ sessionId, entryId, item, onRead }: { sessionId: string; entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization }) {
+  const workspace = useDesktopWorkspace();
+  const currentSession = useRef(workspace?.sessionId); currentSession.current = workspace?.sessionId;
+  const read = useCallback<ReadVisualization>(async (...args) => {
+    if (currentSession.current !== sessionId) throw new Error('可视化所属会话已改变。');
+    const content = await onRead(...args);
+    if (currentSession.current !== sessionId) throw new Error('可视化所属会话已改变。');
+    return content;
+  }, [sessionId, onRead]);
+  return <section className="frozen-visualization" aria-label={`历史可视化：${visualizationName(item)}`}>
+    <header><strong>{visualizationName(item)}</strong><small>发布时保存的内容</small></header>
+    {item.imageRef ? <ImagePage entryId={entryId} item={item} onRead={read} /> : <GalleryPage entryId={entryId} item={item} onRead={read} active maximized zoomControl={null} />}
   </section>;
 }

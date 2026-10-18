@@ -15,7 +15,7 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
     _decode_background_cursor,
     _encode_background_cursor,
 )
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 
 
 def _launch(

@@ -948,7 +948,7 @@ def test_web_fork_outcomes_are_closed_and_open_is_post_commit(
         import asyncio
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
-        from pulsara_agent.web_app.session_controller import LocalSessionController
+        from pulsara_agent.desktop_app.session_controller import LocalSessionController
         from pulsara_agent.conversation_kernel._repository.fork import (
             CanonicalForkCreation,
         )
@@ -986,7 +986,7 @@ def test_web_fork_disconnected_waiter_does_not_cancel_creation(tmp_path):
     async def check():
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
-        from pulsara_agent.web_app.session_controller import LocalSessionController
+        from pulsara_agent.desktop_app.session_controller import LocalSessionController
         from pulsara_agent.conversation_kernel._repository.fork import (
             CanonicalForkCreation,
         )
@@ -1872,9 +1872,9 @@ def test_fork_http_closed_request_scoped_lookup_and_cross_site_rejection(tmp_pat
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from aiohttp import ClientSession
-    from tests.test_local_web_http_surface import _model_server_dependencies, _Bridge
-    from pulsara_agent.web_app.http_server import LocalHttpServer
-    from pulsara_agent.web_app.application import packaged_static_root
+    from tests.test_desktop_http_surface import _model_server_dependencies, _Bridge
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+    from pulsara_agent.desktop_app.application import packaged_static_root
 
     async def check():
         child = identity("session")

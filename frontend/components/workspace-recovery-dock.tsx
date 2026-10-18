@@ -1,4 +1,4 @@
-'use client';
+import { writeClipboardText } from '../lib/desktop-host';
 
 import { Copy, Eye, FolderX, RefreshCw } from 'lucide-react';
 import { useId, useState } from 'react';
@@ -36,8 +36,8 @@ export function WorkspaceRecoveryDock({ isObserver, availability, busy, error, o
           aria-describedby={position ? pathId : undefined}
           onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}
           onClick={async () => {
-            try { await navigator.clipboard.writeText(path); onNotify('路径已复制', undefined, 'success'); }
-            catch { onNotify('无法复制路径', '浏览器没有授予剪贴板权限', 'warning'); }
+            try { await writeClipboardText(path); onNotify('路径已复制', undefined, 'success'); }
+            catch { onNotify('无法复制路径', '系统剪贴板暂时不可用，请重试', 'warning'); }
           }}>
           <span className="readonly-dock__path-text"><span>{path.slice(0, pathNameIndex)}</span><span>{path.slice(pathNameIndex)}</span></span>
           <Copy size={12} aria-hidden="true" />

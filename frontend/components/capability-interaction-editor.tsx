@@ -1,5 +1,3 @@
-'use client';
-
 import { useRef, useState } from 'react';
 import { McpEditor, mcpAuthLabels } from './mcp-editor';
 import { HookSourceReview } from './hook-source-review';

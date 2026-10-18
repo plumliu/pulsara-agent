@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry, KernelContextSourceCollector, _collected,
 )
@@ -22,8 +21,9 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope, decode_runtime_observation
 from pulsara_agent.llm.input import join_text_content
-from pulsara_agent.settings import LocalSettingsStore
-from tests.dogfood.run_model_switch_handover_dogfood import _create_database, _drop_database
+from tests.support.postgres_database import (
+    admin_root_dsn, create_migrated_postgres_test_database, drop_postgres_test_database,
+)
 from tests.support.model_config import frozen_test_prompt, test_model_binding as model_binding, test_model_runtime as model_runtime, test_model_limits as model_limits
 from tests.support.postgres import verified_postgres_provider
 from tests.support.round3 import ScriptedKernelModel, StaticContextSourceCollector, StructuredToolPort
@@ -35,14 +35,12 @@ pytestmark = pytest.mark.postgres
 
 @pytest.fixture(scope="module")
 def notice_database():
-    # Same verified disposable local target and saved-settings owner as dogfood;
-    # no environment credential or dotenv fallback, and no production writes.
-    saved = LocalSettingsStore(require_pulsara_home() / "local-settings.yaml").read()
-    name, _, _, runtime = _create_database(saved)
+    # Explicit integration fixture; production settings contain no database DSN.
+    database = create_migrated_postgres_test_database()
     try:
-        yield verified_postgres_provider(runtime)
+        yield verified_postgres_provider(database.runtime_dsn)
     finally:
-        _drop_database(saved, name)
+        drop_postgres_test_database(admin_root_dsn(), database.database_name)
 
 
 class _NoticeCollector(StaticContextSourceCollector):

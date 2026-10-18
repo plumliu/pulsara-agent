@@ -146,7 +146,7 @@ def test_user_facts_reach_live_hosts_and_workspace_facts_stay_in_their_scope(tmp
 
 
 def test_queued_gui_skill_cancellation_does_not_start_a_write(tmp_path, monkeypatch):
-    from pulsara_agent.web_app.session_controller import LocalSessionController
+    from pulsara_agent.desktop_app.session_controller import LocalSessionController
     from pulsara_agent.capability.local_skill_management import (
         LocalSkillManagementService,
     )
@@ -631,7 +631,7 @@ def test_notice_scrub_uses_typed_saved_credentials_without_redacting_public_cont
 
 
 def test_notice_scrub_unavailable_does_not_gate_hook_mutation(tmp_path, monkeypatch):
-    from pulsara_agent.web_app.session_controller import LocalSessionController
+    from pulsara_agent.desktop_app.session_controller import LocalSessionController
     from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
     from pulsara_agent.settings import LocalSettingsStore
     from time import monotonic

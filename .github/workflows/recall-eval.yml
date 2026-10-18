@@ -10,7 +10,7 @@ on:
       - "src/pulsara_agent/storage/migrations/**"
       - "tests/test_memory_*"
       - "tests/test_direct_*memory*.py"
-      - "tests/test_local_web_memory_management.py"
+      - "tests/test_desktop_memory_management.py"
       - "tests/support/postgres*.py"
       - "tests/conftest.py"
       - "docker/postgres-init/**"
@@ -66,4 +66,4 @@ jobs:
           tests/test_direct_memory_related_fallback.py
           tests/test_memory_management_contracts.py
           tests/test_memory_tool_result_rejection.py
-          tests/test_local_web_memory_management.py
+          tests/test_desktop_memory_management.py

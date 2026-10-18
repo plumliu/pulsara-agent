@@ -1,4 +1,4 @@
-'use client';
+import { writeClipboardText } from '../lib/desktop-host';
 
 import { InlineVisualization, type InlineVisualizationContext } from './inline-visualization';
 import { remarkVisualizationMarkers } from '../lib/visualization-markers';
@@ -7,6 +7,7 @@ import type { Root as MdastRoot } from 'mdast';
 import { toText } from 'hast-util-to-text';
 import { Image as ImageIcon } from 'lucide-react';
 import rehypeKatex from 'rehype-katex';
+import rehypeSlug from 'rehype-slug';
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -146,10 +147,10 @@ function MarkdownCopySurface({
     const source = target.dataset.mathSource;
     if (source === undefined) return;
     try {
-      await navigator.clipboard.writeText(source);
+      await writeClipboardText(source);
       onNotify('公式已复制', undefined, 'success');
     } catch {
-      onNotify('无法复制公式', '浏览器没有授予剪贴板权限。', 'warning');
+      onNotify('无法复制公式', '系统剪贴板暂时不可用，请重试。', 'warning');
     }
   }, [onNotify]);
 
@@ -267,11 +268,11 @@ function MarkdownLink({ href = '', children, onNotify }: { href?: string; childr
   const content = <MarkdownAnchorContext.Provider value={true}>{children}</MarkdownAnchorContext.Provider>;
   if (assistantChat && isCanonicalIdentity(href, 'image')) return <ImageReference reference={href} title={typeof children === 'string' ? children : '图片'}>{content}</ImageReference>;
   if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer">{content}</a>;
-  if (kind === 'anchor') return <a href={href}>{content}</a>;
+  if (kind === 'anchor') return <a href={href} onClick={event=>{if(context?.basePreview){event.preventDefault();context.open(href,event.currentTarget,context.basePreview);}}}>{content}</a>;
   return <a href={kind === 'local' ? href : undefined} role="link" tabIndex={0}
     onClick={event => {
       event.preventDefault();
-      if (kind === 'local' && context) context.open(href, event.currentTarget, context.basePreview);
+      if (kind === 'local' && context) context.open(href, event.currentTarget, context.basePreview, event.metaKey || event.ctrlKey);
       else onNotify('无法打开文件', kind === 'invalid' ? '无法识别这个文件地址。' : '此内容没有可用的会话文件连接。', 'warning');
     }} onKeyDown={event => { if (event.key === 'Enter' && !event.currentTarget.hasAttribute('href')) event.currentTarget.click(); }}>
     {content}
@@ -290,7 +291,6 @@ function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob
   const thumbnail = Boolean(url && failed !== url);
   const content = thumbnail
     // Raster resources and the existing external image policy; never raw SVG DOM.
-    // eslint-disable-next-line @next/next/no-img-element
     ? <img draggable={selectable ? false : undefined} src={url} alt={alt ?? ''} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(url)} />
     : kind === 'local' ? <><ImageIcon size={14} aria-hidden="true" /><span>{alt || src}</span></>
       : <span className="file-preview-image-placeholder" title={src}>[{alt || '图片'}：暂不可预览 — {src}]</span>;
@@ -352,7 +352,7 @@ export function MarkdownBody({ body, onNotify, streaming = false, annotationSour
       <ReactMarkdown
         urlTransform={(url, key, node) => assistantChat && isCanonicalIdentity(url, 'image') ? url : markdownUrl(url, key, node)}
         remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkCjkStrikethrough, remarkSvgBlocks, [remarkMath, { singleDollarTextMath: true }], remarkVisualizationMarkers]}
-        rehypePlugins={[rehypeCopyableMath, sourceMapping, [rehypeKatex, { strict: false }]]}
+        rehypePlugins={[rehypeSlug, rehypeCopyableMath, sourceMapping, [rehypeKatex, { strict: false }]]}
         components={components}
       >
         {normalized.text}

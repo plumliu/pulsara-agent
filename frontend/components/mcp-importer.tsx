@@ -1,5 +1,3 @@
-'use client';
-
 import { useState } from 'react';
 import { FileInput, LoaderCircle, X } from 'lucide-react';
 import type { McpImportPreview, McpImportSelection, McpImportSource } from '../lib/pulsara-types';

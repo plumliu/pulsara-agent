@@ -1,5 +1,3 @@
-'use client';
-
 import { useEffect, useState } from 'react';
 import { Check, FolderOpen, LoaderCircle, X } from 'lucide-react';
 import type { SkillImportCandidate, SkillImportInput } from '../lib/pulsara-types';

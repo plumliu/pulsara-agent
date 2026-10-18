@@ -12,9 +12,9 @@ from pulsara_agent.terminal_protocol.canonical_v3 import (
     CanonicalProtocolGap, CanonicalProtocolResourceExhausted,
 )
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
-from pulsara_agent.web_app.http_server import LocalHttpServer
-from pulsara_agent.web_app.session_controller import LocalSessionController
-from pulsara_agent.web_app import session_controller as controller_module
+from pulsara_agent.desktop_app.http_server import LocalHttpServer
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app import session_controller as controller_module
 
 
 def test_cold_history_http_precise_budget_authorization_and_resource_outcomes(monkeypatch):

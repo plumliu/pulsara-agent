@@ -71,3 +71,16 @@ it('prefers an exact final-answer host over its earlier reasoning-process alias'
   expect(target.textContent).toBe('正文已可读');
   expect(target.closest('[data-source-entry]')?.getAttribute('data-source-entry')).toBe('answer');
 });
+
+it('does not anchor or locate a closed disclosure while its exit animation retains the DOM', async () => {
+  const root=document.createElement('div');document.body.append(root);
+  root.innerHTML='<section inert><div data-source-entry="closed" data-content-state="ready"><p>hidden body</p></div></section>';
+  vi.spyOn(root,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,500));
+  vi.spyOn(root.querySelector('p')!,'getBoundingClientRect').mockReturnValue(new DOMRect(0,20,600,100));
+  expect(captureHistoryAnchor(root)).toBeUndefined();
+  let located=false;
+  const ready=waitForHistoryEntry(root,'closed',new AbortController().signal).then(node=>{located=true;return node;});
+  await Promise.resolve();expect(located).toBe(false);
+  root.querySelector('section')!.removeAttribute('inert');
+  expect((await ready).textContent).toBe('hidden body');
+});

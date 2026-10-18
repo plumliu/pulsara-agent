@@ -1,5 +1,3 @@
-'use client';
-
 import { autoUpdate, computePosition, flip, offset, shift } from '@floating-ui/dom';
 import { MessageSquare } from 'lucide-react';
 import { useId, useLayoutEffect } from 'react';

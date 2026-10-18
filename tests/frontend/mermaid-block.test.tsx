@@ -16,7 +16,7 @@ beforeEach(() => {
   notify.mockClear();
   document.documentElement.removeAttribute('data-theme');
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { delete window.pulsaraDesktop; cleanup(); vi.restoreAllMocks(); });
 
 describe('Markdown Mermaid diagrams', () => {
   it('renders fenced diagrams in order while preserving normal and inline code and math', async () => {
@@ -45,7 +45,7 @@ describe('Markdown Mermaid diagrams', () => {
 
   it('can show and copy exact source and open the existing image viewer', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    Object.defineProperty(window, 'pulsaraDesktop', { value: { writeClipboardText: writeText }, configurable: true });
     const { container } = render(<MermaidBlock source={source} streaming={false} onNotify={notify} />);
     await screen.findByRole('img', { name: 'Mermaid 图表' });
     fireEvent.click(screen.getByRole('button', { name: '查看源码' }));

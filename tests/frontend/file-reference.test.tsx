@@ -2,12 +2,12 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { closeHistory } from '@tiptap/pm/history';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
-import { fileReference, formatFileReference, splitFileReferences, type ImportedPath } from '../../frontend/lib/file-reference';
+import { fileReference, formatFileReference, formatWorkspaceReference, splitFileReferences, type ImportedPath } from '../../frontend/lib/file-reference';
 import { PromptComposer } from '../../frontend/components/prompt-composer';
 import { PromptContentView } from '../../frontend/components/prompt-content-view';
 
-const imported = (name: string): ImportedPath => ({ path: `/tmp/imports/id/${name}`, name, bytes: 12, file_count: 1 });
-const raw = (name: string) => formatFileReference(imported(name), false);
+const imported = (name: string): ImportedPath => ({ path: `/tmp/imports/id/${name}`, name, bytes: 12 });
+const raw = (name: string) => formatFileReference(imported(name));
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
@@ -16,12 +16,12 @@ function deferred<T>() {
 }
 const stores: PromptDraftStore[] = [];
 function store() { const value = new PromptDraftStore(); stores.push(value); return value; }
-afterEach(() => { cleanup(); stores.splice(0).forEach(value => value.destroy()); vi.restoreAllMocks(); });
+afterEach(() => { delete window.pulsaraDesktop; cleanup(); stores.splice(0).forEach(value => value.destroy()); vi.restoreAllMocks(); });
 
 describe('file reference path contract', () => {
   it('round trips JSON quoting, Unicode and brackets without folding ordinary paths', () => {
     for (const path of ['/tmp/测试 \\"】.pdf', 'C:\\Users\\a\\report.docx', '/tmp/a[b].xlsx']) {
-      const text = formatFileReference({ ...imported('x'), path }, false);
+      const text = formatFileReference({ ...imported('x'), path });
       expect(fileReference(text)?.path).toBe(path);
       expect(splitFileReferences(`before${text}after`)).toEqual(['before', fileReference(text), 'after']);
     }
@@ -55,16 +55,13 @@ describe('file reference path contract', () => {
     expect(value.getEditor('fork').getText()).toContain('/tmp/imports/id/a.pdf');
   });
 
-  it('uses one directory reference including its images, then deletes and undoes atomically', async () => {
-    const value = store(); const upload = vi.fn(async () => imported('directory'));
+  it('references a native directory without copying, then deletes and undoes atomically', async () => {
+    const value = store(); const upload = vi.fn();
     value.setImporter(upload); const editor = value.getEditor('s');
-    const file = new File(['image'], 'a.png', { type: 'image/png' });
-    Object.defineProperty(file, 'webkitRelativePath', { value: 'directory/nested/a.png' });
-    value.insertDirectory('s', [file]);
-    await new Promise(resolve => setTimeout(resolve, 0));
+    value.insertPaths('s', ['/tmp/directory'], true);
     const snapshot = await value.capture('s');
-    expect(upload).toHaveBeenCalledWith('s', [file], true, expect.any(AbortSignal));
-    expect(snapshot.content.parts).toEqual([{ type: 'text', text: formatFileReference(imported('directory'), true) }]);
+    expect(upload).not.toHaveBeenCalled();
+    expect(snapshot.content.parts).toEqual([{ type: 'text', text: formatWorkspaceReference({ path: '/tmp/directory', kind: 'directory' }) }]);
     editor.view.dispatch(closeHistory(editor.state.tr));
     editor.commands.setNodeSelection(1); editor.commands.deleteSelection();
     expect(value.summary('s').hasContent).toBe(false);
@@ -86,14 +83,14 @@ describe('file reference path contract', () => {
     fireEvent.click(screen.getByRole('button', { name: 'PDF：report.pdf' }));
     expect(screen.getByText('/tmp/imports/id/report.pdf')).toBeTruthy();
     const writeText = vi.fn(async () => {});
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    Object.defineProperty(window, 'pulsaraDesktop', { configurable: true, value: { writeClipboardText: writeText } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '复制路径' })); });
     expect(writeText).toHaveBeenCalledWith('/tmp/imports/id/report.pdf');
   });
 
   it('cancels removed uploads without resurrecting the card or changing a different session', async () => {
     const value = store(); const upload = deferred<ImportedPath>(); let signal!: AbortSignal;
-    value.setImporter(async (_id, _files, _directory, nextSignal) => { signal = nextSignal; return upload.promise; });
+    value.setImporter(async (_id, _files, nextSignal) => { signal = nextSignal; return upload.promise; });
     const editor = value.getEditor('s'); value.insertFiles('s', [new File(['pdf'], 'report.pdf')]);
     await Promise.resolve();
     editor.commands.selectAll(); editor.commands.deleteSelection();

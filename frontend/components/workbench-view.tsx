@@ -1,4 +1,4 @@
-'use client';
+import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 
 import { captureHistoryAnchor, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
 import { splitSkillReferences } from '../lib/skill-reference';
@@ -33,7 +33,6 @@ import {
   Upload,
   GitFork,
   ListTodo,
-  Menu,
   LoaderCircle,
   MessageSquarePlus,
   MoreHorizontal,
@@ -161,7 +160,6 @@ interface WorkbenchViewProps {
   focusTaskHighlighted: boolean;
   onReconnect: () => void;
   onTakeControl: () => void;
-  onOpenSidebar: () => void;
   onNewSession: () => void;
   canCreateSession: boolean;
   onToggleInspector: () => void;
@@ -403,6 +401,7 @@ function TraceCard({
   artifactOwnerKey,
   onReadToolArtifact,
   onReadPromptImage,
+  onNotify,
 }: {
   trace: ToolTrace;
   skills: SkillCapability[];
@@ -410,7 +409,11 @@ function TraceCard({
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
+  onNotify: MarkdownNotify;
 }) {
+  const copyOutput = (text: string) => {
+    void writeClipboardText(text).catch(() => onNotify('无法复制输出', '系统剪贴板暂时不可用，请重试', 'warning'));
+  };
   const { showBuiltinToolResults } = useContext(ToolResultDisplayContext);
   const [expanded, setExpanded] = useState(false);
   const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
@@ -540,7 +543,7 @@ function TraceCard({
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
         ) : <div className="trace-card__summary">{summary}</div>}
-        {expandable && expanded && <AnimatedDisclosure open={expanded} className="trace-card__disclosure">
+        {expandable && <AnimatedDisclosure unmountOnClose open={expanded} className="trace-card__disclosure">
           {trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
               <PromptContentView
@@ -557,7 +560,7 @@ function TraceCard({
               <section className="terminal-stream" aria-label="命令输出">
                 <header>
                   <strong>输出</strong>
-                  <button type="button" aria-label="复制命令输出" onClick={() => void navigator.clipboard.writeText(terminalOutput)}><Copy size={12} /></button>
+                  <button type="button" aria-label="复制命令输出" onClick={() => copyOutput(terminalOutput)}><Copy size={12} /></button>
                 </header>
                 <pre
                   ref={terminalOutputRef}
@@ -584,7 +587,7 @@ function TraceCard({
               <section className="tool-result-raw" aria-label="工具原始结果">
                 <header>
                   <strong>原始结果</strong>
-                  <button type="button" aria-label="复制工具原始结果" onClick={() => void navigator.clipboard.writeText(trace.resultText ?? '')}><Copy size={12} /></button>
+                  <button type="button" aria-label="复制工具原始结果" onClick={() => copyOutput(trace.resultText ?? '')}><Copy size={12} /></button>
                 </header>
                 <pre className="tool-output-scroll">{trace.resultText === '' ? <span className="empty-result">（空字符串）</span> : trace.resultText}</pre>
               </section>
@@ -610,7 +613,7 @@ function TraceCard({
                           className="tool-artifact-page__icon-button"
                           aria-label="复制当前工具输出页"
                           title="复制当前页"
-                          onClick={() => void navigator.clipboard.writeText(artifactPage.text)}
+                          onClick={() => copyOutput(artifactPage.text)}
                         ><Copy size={13} /></button>
                         <button
                           type="button"
@@ -815,9 +818,9 @@ function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: Ma
         {running && <span className="reasoning-row__live"><i />思考中</span>}
         <ChevronRight className="reasoning-row__chevron" size={12} />
       </button>
-      {expanded && <AnimatedDisclosure open={expanded}>
+      <AnimatedDisclosure unmountOnClose open={expanded}>
         <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} streaming={running} /></div>
-      </AnimatedDisclosure>}
+      </AnimatedDisclosure>
     </section>
   );
 }
@@ -894,7 +897,7 @@ function SubagentRunCard({
         </span>
         <ChevronDown size={13} />
       </button>
-      {expanded && <AnimatedDisclosure open={expanded}>
+      <AnimatedDisclosure unmountOnClose open={expanded}>
         <div className="subagent-run__body">
           {run.objective && <div className="subagent-objective"><span>目标</span><p>{run.objective}</p></div>}
           {run.activities.map((activity) => (
@@ -913,7 +916,7 @@ function SubagentRunCard({
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
                 </div>
               ) : <div className="assistant-markdown"><MarkdownBody assistantChat visualization={activity.visualizations ? {entryId: activity.id, items: activity.visualizations, onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail} : undefined} body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
-              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
+              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
             </section>
             </HistoryMessageHost>
           ))}
@@ -921,7 +924,7 @@ function SubagentRunCard({
             <section className="subagent-summary"><span>结果</span><div className="assistant-markdown"><MarkdownBody body={run.summary} onNotify={onNotify} /></div></section>
           )}
         </div>
-      </AnimatedDisclosure>}
+      </AnimatedDisclosure>
     </article>
   );
 }
@@ -1080,7 +1083,6 @@ function AssistantHeading({ message, response, label = 'Pulsara' }: { message: M
     <header className={`assistant-heading${response ? ' assistant-heading--response' : ' assistant-heading--run-start'}`}>
       <div className="assistant-avatar" aria-hidden="true">
         {/* Local static asset: the standalone app has no Next image service. */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/assets/pulsara-icon.png" width={27} height={27} alt="" draggable={false} />
       </div>
       <div className="assistant-identity">
@@ -1173,9 +1175,9 @@ function AssistantMessage({
               <div className="response-actions">
                 <button
                   onClick={() => {
-                    void navigator.clipboard.writeText(message.body).then(
+                    void writeClipboardText(message.body).then(
                       () => onNotify('已复制回复'),
-                      () => onNotify('无法复制回复', '浏览器没有授予剪贴板权限'),
+                      () => onNotify('无法复制回复', '系统剪贴板暂时不可用，请重试'),
                     );
                   }}
                   aria-label="复制回复"
@@ -1201,7 +1203,7 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
       {message.subagentRuns?.length ? (
         <SubagentGroup onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
       ) : null}
@@ -1233,7 +1235,7 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   const read = () => hydrate?.(sourceIds, includeReasoning).catch(() => {});
   useEffect(() => {
     const host = ref.current;
-    if (!host || !hydrate || contextPending || contentState !== 'unloaded') return;
+    if (!host || host.closest('[inert]') || !hydrate || contextPending || contentState !== 'unloaded') return;
     const read = () => { void hydrate(message.sourceEntryIds?.length ? message.sourceEntryIds : [message.id], includeReasoning).catch(() => {}); };
     if (typeof IntersectionObserver === 'undefined') {
       const viewport = host.closest('.thread-scroll')?.getBoundingClientRect();
@@ -1242,7 +1244,7 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
       return;
     }
     const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) { observer.disconnect(); read(); }
+      if (!host.closest('[inert]') && entries.some(entry => entry.isIntersecting)) { observer.disconnect(); read(); }
     }, { root: host.closest('.thread-scroll'), rootMargin: '200px' });
     observer.observe(host);
     return () => observer.disconnect();
@@ -1300,10 +1302,9 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
       // User guidance stays visible; tool-result notifications belong to the process.
       const hidden = !disclosure.expanded && !message.visualizations?.length
         && (message.role === 'assistant' || message.userKind === 'subagent-completion');
-      if (hidden) return null;
-      return <div key={message.id} className="conversation-run__step">
-        <div className="conversation-run__step-content">{renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded }, false, !hidden)}</div>
-      </div>;
+      return <AnimatedDisclosure key={message.id} open={!hidden} unmountOnClose className="conversation-run__disclosure" contentClassName="conversation-run__step-content">
+        <div className="conversation-run__step">{renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded || hidden }, false, !hidden)}</div>
+      </AnimatedDisclosure>;
     })}
     {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined }, false)}
   </section>;
@@ -1774,7 +1775,6 @@ export function WorkbenchView({
   focusTaskHighlighted,
   onReconnect,
   onTakeControl,
-  onOpenSidebar,
   onNewSession,
   canCreateSession,
   onToggleInspector,
@@ -1836,9 +1836,6 @@ export function WorkbenchView({
   }
   const addTrigger = useRef<HTMLButtonElement>(null);
   const addMenu = useRef<HTMLDivElement>(null);
-  const fileInput = useRef<HTMLInputElement>(null);
-  const directoryInput = useRef<HTMLInputElement>(null);
-  const pickerSession = useRef(session.id);
   const [modelOpen, setModelOpen] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
   const [previousCanControl, setPreviousCanControl] = useState(canControl);
@@ -2098,17 +2095,22 @@ export function WorkbenchView({
   const [locatedFocus, setLocatedFocus] = useState<WorkbenchViewProps['focusSourceEntry']>();
   const currentSessionRef = useRef(session.id);
   const readingAnchor = useRef<HistoryReadingAnchor | undefined>(undefined);
+  // A manual disclosure owns its button's viewport position until the reader
+  // scrolls or explicitly navigates. Tail-follow must not move it during resize.
+  const disclosureAnchor = useRef<{ element: HTMLElement; top: number } | undefined>(undefined);
   const programmaticTop = useRef<number | undefined>(undefined);
   const userScrollPending = useRef(false);
   const userScrollFrame = useRef<number | undefined>(undefined);
   const locateRequest = useRef<AbortController | undefined>(undefined);
   const loadRequests = useRef(new Map<string, Promise<void>>());
   const resetReading = useCallback(() => {
+    disclosureAnchor.current = undefined;
     followLatestRef.current = false;
     setAtBottom(false);
     readingAnchor.current = threadRef.current ? captureHistoryAnchor(threadRef.current) : undefined;
   }, []);
   const beginUserScroll = useCallback(() => {
+    disclosureAnchor.current = undefined;
     userScrollPending.current = true;
     if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
     // A wheel/key gesture at the physical edge may produce no scroll event.
@@ -2121,6 +2123,7 @@ export function WorkbenchView({
   }, []);
   useLayoutEffect(() => {
     currentSessionRef.current = session.id;
+    disclosureAnchor.current = undefined;
     followLatestRef.current = true;
     setAtBottom(followLatestRef.current);
     readingAnchor.current = undefined;
@@ -2189,6 +2192,16 @@ export function WorkbenchView({
   const restoreReadingPosition = useCallback(() => {
     const thread = threadRef.current;
     if (!thread) return;
+    const clicked = disclosureAnchor.current;
+    if (clicked && thread.contains(clicked.element) && !clicked.element.closest('[inert]')) {
+      if (!userScrollPending.current) {
+        const delta = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top - clicked.top;
+        if (Math.abs(delta) > .5) thread.scrollTop += delta;
+        programmaticTop.current = thread.scrollTop;
+      }
+      return;
+    }
+    disclosureAnchor.current = undefined;
     if (followLatestRef.current) {
       const previous = thread.scrollTop;
       thread.scrollTop = thread.scrollHeight;
@@ -2212,27 +2225,22 @@ export function WorkbenchView({
   const fileEntryBlocked = !canControl || isObserver || runtimeStatus !== 'online' || editingQueue || submitting;
   const fileDrop = useWorkbenchFileDrop({ sessionId: session.id, store: draftStore,
     blocked: () => fileEntryBlocked || queueClicks.current.has('composer-edit'), notify: onNotify });
+  const pickerCurrent = useRef({ sessionId: session.id, blocked: fileEntryBlocked });
+  pickerCurrent.current = { sessionId: session.id, blocked: fileEntryBlocked };
   const openFilePicker = (directory: boolean) => {
     if (fileEntryBlocked || queueClicks.current.has('composer-edit')) return;
-    pickerSession.current = session.id;
+    const selectedSession = session.id;
     setAddOpen(false);
-    (directory ? directoryInput : fileInput).current?.click();
-    requestAnimationFrame(() => draftStore.focus(session.id));
+    const host = desktopHost();
+    if (!host) { onNotify('文件未加入草稿', '请从 Pulsara 桌面应用选择本机文件。', 'warning'); return; }
+    void (directory ? host.chooseDirectory().then(path => path ? [path] : []) : host.chooseFiles()).then(paths => {
+      if (!paths.length) return;
+      if (pickerCurrent.current.sessionId !== selectedSession || pickerCurrent.current.blocked || queueClicks.current.has('composer-edit')) {
+        onNotify('文件未加入草稿', '会话已切换或输入框暂不可编辑，请重新选择。', 'warning'); return;
+      }
+      draftStore.insertPaths(selectedSession, paths, directory, 'end');
+    }).catch(error => onNotify('文件未加入草稿', error instanceof Error ? error.message : '请选择文件后重试。', 'warning'));
   };
-  const acceptPickedFiles = (files: File[], directory: boolean) => {
-    if (!files.length) return;
-    if (pickerSession.current !== session.id || fileEntryBlocked || queueClicks.current.has('composer-edit')) {
-      onNotify('文件未加入草稿', '会话已切换或输入框暂不可编辑，请稍后重新选择文件。');
-      return;
-    }
-    try {
-      if (directory) draftStore.insertDirectory(session.id, files);
-      else draftStore.insertFiles(session.id, files, 'end');
-    } catch (error) {
-      onNotify('文件未加入草稿', error instanceof Error ? error.message : '请重新选择文件。');
-    }
-  };
-
   const updateJumpPosition = useCallback(() => {
     const workbench = workbenchRef.current;
     const composer = composerWrapRef.current;
@@ -2406,9 +2414,8 @@ export function WorkbenchView({
       {fileDrop.dragging && <div className="workbench-file-drop" role="status">
         <span><Upload size={22} aria-hidden="true" />松开以添加文件</span>
       </div>}
-      <header className="topbar">
+      <header className="topbar" onDoubleClick={event => { if (!(event.target as HTMLElement).closest('button')) void desktopHost()?.toggleMaximize(); }}>
         <div className="session-title">
-          <button className="mobile-menu-button" onClick={onOpenSidebar} aria-label="打开会话侧栏"><Menu size={17} /></button>
           {sessionStatusLabel && <span className={`live-badge live-badge--${readOnlyDock ? "readonly" : session.status}`}>{sessionStatusLabel}</span>}
           <div><div className="session-title-heading"><h2>{session.title}</h2>
             {onOpenScheduledTask && <button type="button" className="session-schedule-button" title="查看此会话的活跃定时任务" aria-label="查看此会话的活跃定时任务" onClick={onOpenScheduledTask}><AlarmClock size={16} aria-hidden="true" /></button>}
@@ -2462,6 +2469,13 @@ export function WorkbenchView({
         className="thread-scroll"
         ref={threadRef}
         style={{ overflowAnchor: 'none', scrollBehavior: 'auto' }}
+        onClickCapture={event => {
+          const button = (event.target as HTMLElement).closest<HTMLElement>('button[aria-expanded], .code-card__toolbar button[aria-pressed]');
+          if (!button || !event.currentTarget.contains(button)) return;
+          resetReading();
+          userScrollPending.current = false;
+          disclosureAnchor.current = { element: button, top: button.getBoundingClientRect().top - event.currentTarget.getBoundingClientRect().top };
+        }}
         onWheel={event => {
           if (event.deltaY < 0) resetReading();
           beginUserScroll();
@@ -2479,6 +2493,7 @@ export function WorkbenchView({
           if (!userScrollPending.current && programmaticTop.current !== undefined
             && Math.abs(element.scrollTop - programmaticTop.current) < 1) { programmaticTop.current = undefined; return; }
           if (locatingTaskRef.current) return;
+          if (disclosureAnchor.current && !userScrollPending.current) return;
           userScrollPending.current = false;
           const nextAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
           followLatestRef.current = nextAtBottom;
@@ -2563,6 +2578,7 @@ export function WorkbenchView({
       {!atBottom && (
         <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} onClick={() => {
           followLatestRef.current = true;
+          disclosureAnchor.current = undefined;
           readingAnchor.current = undefined; userScrollPending.current = false;
           setAtBottom(true); restoreReadingPosition();
         }}>
@@ -2622,14 +2638,6 @@ export function WorkbenchView({
                   disabled={fileEntryBlocked}
                   onClick={() => { setAddOpen(value => !value); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); }}
                   onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); setAddOpen(true); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); requestAnimationFrame(() => addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()); } }}><Plus size={18} /></button>
-                <input ref={fileInput} type="file" multiple hidden aria-label="选择文件" onChange={event => {
-                  const files = [...(event.target.files ?? [])]; event.target.value = '';
-                  acceptPickedFiles(files, false);
-                }} />
-                <input ref={directoryInput} type="file" {...{ webkitdirectory: '' }} hidden aria-label="选择文件夹" onChange={event => {
-                  const files = [...(event.target.files ?? [])]; event.target.value = '';
-                  acceptPickedFiles(files, true);
-                }} />
                 {addOpen && <div ref={addMenu} className="menu-popover composer-add-menu" role="dialog" aria-label="添加内容与模式" onKeyDown={event => {
                   if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
                   const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];

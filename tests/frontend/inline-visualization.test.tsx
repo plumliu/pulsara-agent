@@ -1,3 +1,4 @@
+import { DesktopWorkspaceProvider, DesktopWorkspace } from '../../frontend/components/desktop-workspace';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MarkdownBody } from '../../frontend/components/markdown-body';
@@ -223,28 +224,24 @@ it('omits zoom below its 46px footprint and responds to changing root height', a
   }
 });
 
-it('keeps maximized exit available when switching to a short gallery page', async () => {
+it('opens frozen occurrences as independent tabs despite equal filenames and content', async () => {
   vi.spyOn(HTMLElement.prototype,'clientWidth','get').mockReturnValue(800);
   vi.spyOn(HTMLElement.prototype,'clientHeight','get').mockReturnValue(500);
-  const modal = new Set<HTMLDialogElement>();
-  const matches = Element.prototype.matches;
-  vi.spyOn(Element.prototype,'matches').mockImplementation(function (selector) {return selector === ':modal' ? modal.has(this as HTMLDialogElement) : matches.call(this,selector);});
-  const view = render(<InlineVisualization entryId="a" items={[item,{...item,ordinal:1}]} onRead={async () => '<main>chart</main>'}/>);
-  // jsdom does not implement native dialog methods; keep the stub on this fixture.
-  const dialog = view.container.querySelector('dialog')!;
-  Object.assign(dialog, {showModal: () => modal.add(dialog), close: () => modal.delete(dialog), show: () => {}});
-  await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
-  fireEvent.click(screen.getByRole('button',{name:'查看可视化 2'}));
-  await waitFor(() => expect(view.container.querySelectorAll('iframe')).toHaveLength(2));
-  const short = view.container.querySelectorAll('iframe')[1];
-  act(() => {window.dispatchEvent(new MessageEvent('message',{source:short.contentWindow,data:{type:visualizationLayoutMessageType,mode:'root',viewport:{width:800,height:500},rect:{x:0,y:0,width:800,height:20}}}));});
-  expect(screen.queryByRole('button',{name:'放大可视化'})).toBeNull();
-  fireEvent.click(screen.getByRole('button',{name:'查看可视化 1'}));
+  const read = vi.fn(async () => '<main>frozen</main>');
+  render(<DesktopWorkspaceProvider sessionId="session-a" onShow={() => {}}>
+    <InlineVisualization entryId="entry-a" items={[item,{...item,ordinal:1}]} onRead={read}/>
+    <DesktopWorkspace isOpen onClose={() => {}} toolbar={null} renderTab={() => null}/>
+  </DesktopWorkspaceProvider>);
+  await waitFor(() => expect(screen.getByRole('button',{name:'放大可视化'})).toBeTruthy());
   fireEvent.click(screen.getByRole('button',{name:'放大可视化'}));
+  expect(screen.getAllByRole('tab',{name:'chart.html'})).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button',{name:'放大可视化'}));
+  expect(screen.getAllByRole('tab',{name:'chart.html'})).toHaveLength(1);
   fireEvent.click(screen.getByRole('button',{name:'查看可视化 2'}));
-  fireEvent.click(screen.getByRole('button',{name:'退出放大'}));
-  expect(view.container.querySelector('dialog')?.classList.contains('is-maximized')).toBe(false);
-  expect(screen.queryByRole('button',{name:'放大可视化'})).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'放大可视化'}));
+  expect(screen.getAllByRole('tab',{name:'chart.html'})).toHaveLength(2);
+  expect(screen.getByText('发布时保存的内容')).toBeTruthy();
+  expect(read.mock.calls.every(call => call[0] === 'entry-a')).toBe(true);
 });
 
 it('mixes direct saved images and HTML without screenshotting images and releases URLs', async () => {

@@ -8,14 +8,14 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from aiohttp import ClientSession, FormData
+from aiohttp import ClientSession
 import pytest
 
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-from pulsara_agent.web_app.http_server import LocalHttpServer
-from pulsara_agent.web_app.file_import import LocalImport
+from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+from pulsara_agent.desktop_app.http_server import LocalHttpServer
+from pulsara_agent.desktop_app.file_import import LocalImport
 from pulsara_agent.exclusive_publish import PlatformExclusiveDirectoryPublisher
-from tests.test_local_web_http_surface import _model_server_dependencies
+from tests.test_desktop_http_surface import _model_server_dependencies
 
 
 @asynccontextmanager
@@ -30,7 +30,7 @@ async def surface(tmp_path, monkeypatch):
         return {"path": str(root), "outcome": "AVAILABLE"}
     sessions = SimpleNamespace(workspace_availability=workspace_availability,
                                _lock=asyncio.Lock(), _operations={})
-    bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
+    bridge = RendererBridge(sessions=sessions, protocol_server=object())
     owner = SimpleNamespace(
         session_id='session:tpsqggcbte7fwanzpf642ljwli', role="controller", generation=7, is_open=True
     )
@@ -65,17 +65,7 @@ def file_headers(name):
     }
 
 
-def folder(parts):
-    form = FormData(quote_fields=False)
-    for name, body in parts:
-        form.add_field("path", json.dumps(name))
-        form.add_field(
-            "file", body, filename="data", content_type="application/octet-stream"
-        )
-    return form
-
-
-def test_file_and_directory_streaming_above_json_limit_and_readonly(
+def test_file_streaming_above_json_limit_and_readonly(
     tmp_path, monkeypatch
 ):
     async def run():
@@ -99,60 +89,12 @@ def test_file_and_directory_streaming_above_json_limit_and_readonly(
                 assert path.is_relative_to(imports) and path.read_bytes() == data
                 assert path.stat().st_mode & 0o222 == 0
                 assert value["bytes"] == len(data)
-            files = [
-                ("目录/a/same.pdf", b"pdf"),
-                ("目录/b/same.pdf", b"other"),
-                ("目录/picture.png", b"png"),
-                ("目录/empty", b""),
-                ("目录/large", b"x" * ((8 << 20) + 11)),
-            ]
-            response = await client.post(
-                server.origin + "/api/connections/owner/import-directory",
-                data=folder(files),
-            )
-            assert response.status == 200, await response.text()
-            value = await response.json()
-            path = Path(value["path"])
-            assert value["file_count"] == len(files)
-            for name, data in files:
-                assert path.joinpath(*name.split("/")[1:]).read_bytes() == data
-            for directory in [path.parent, path, path / "a", path / "b"]:
-                assert directory.stat().st_mode & 0o777 == 0o500
-            # Run under the normal local user, not root: no chmod is required
-            # for reads, and ordinary writes/unlinks cannot mutate the copy.
-            with pytest.raises(PermissionError):
-                (path / "injected.txt").write_text("must fail")
-            with pytest.raises(PermissionError):
-                (path / "a" / "same.pdf").unlink()
+                assert path.parent.stat().st_mode & 0o777 == 0o500
+                with pytest.raises(PermissionError):
+                    path.write_bytes(b"must fail")
+                with pytest.raises(PermissionError):
+                    path.unlink()
             assert not list(imports.glob(".import-*"))
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize(
-    "paths",
-    [
-        ["root/../escape"],
-        ["/absolute/file"],
-        ["root/a", "other/b"],
-        ["root/a", "root/a"],
-        ["root/a", "root/a/file"],
-        ["root/a/file", "root/a"],
-        ["root//a"],
-        ["root/a\\b"],
-        ["root/\x00a"],
-        ["root/e\u0301", "root/é"],
-    ],
-)
-def test_invalid_folder_never_publishes_partial_tree(tmp_path, monkeypatch, paths):
-    async def run():
-        async with surface(tmp_path, monkeypatch) as (server, client, _, imports):
-            response = await client.post(
-                server.origin + "/api/connections/owner/import-directory",
-                data=folder([(path, b"contents") for path in paths]),
-            )
-            assert response.status == 400, await response.text()
-            assert not list(imports.iterdir())
 
     asyncio.run(run())
 
@@ -293,8 +235,9 @@ def test_publish_checks_tree_after_exclusive_rename(tmp_path, monkeypatch):
 
             monkeypatch.setattr(PlatformExclusiveDirectoryPublisher, "publish", inject)
             response = await client.post(
-                server.origin + "/api/connections/owner/import-directory",
-                data=folder([("root/nested/a.pdf", b"bytes")]),
+                server.origin + "/api/connections/owner/import-file",
+                data=b"bytes",
+                headers=file_headers("a.pdf"),
             )
             assert response.status == 400, await response.text()
             assert not list(imports.iterdir())

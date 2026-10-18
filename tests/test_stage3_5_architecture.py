@@ -185,6 +185,9 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
     allowed = {
         # Scheduled spec §6/10: one process-local timer, closed/drained by app.
         "src/pulsara_agent/scheduling/service.py",
+        # Desktop plan §5: one inherited host-control pipe pump; parent EOF
+        # joins the existing app close path, with no durable recovery owner.
+        "src/pulsara_agent/desktop_runtime.py",
         # Capability hard-cut: join local publication/credential cleanup before
         # settling cancellation; OAuth owns disposable login/refresh tasks only.
         # These are physical owners, not durable jobs or execution recovery.
@@ -232,12 +235,12 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # the session controller's running-turn observation, and the HTTP
         # runtime-reopen coordinator's cancellation-shielded settlement. None
         # is a durable execution or recovery authority.
-        "src/pulsara_agent/web_app/application.py",
-        "src/pulsara_agent/web_app/browser_bridge.py",
-        "src/pulsara_agent/web_app/http_server.py",
-        "src/pulsara_agent/web_app/protocol_client.py",
-        "src/pulsara_agent/web_app/session_controller.py",
-        "src/pulsara_agent/web_app/file_preview_http.py",
+        "src/pulsara_agent/desktop_app/application.py",
+        "src/pulsara_agent/desktop_app/renderer_bridge.py",
+        "src/pulsara_agent/desktop_app/http_server.py",
+        "src/pulsara_agent/desktop_app/protocol_client.py",
+        "src/pulsara_agent/desktop_app/session_controller.py",
+        "src/pulsara_agent/desktop_app/file_preview_http.py",
         "src/pulsara_agent/conversation_kernel/provider_dispatch.py",
     }
     observed: set[str] = set()

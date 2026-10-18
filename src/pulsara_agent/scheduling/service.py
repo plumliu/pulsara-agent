@@ -369,7 +369,7 @@ class ScheduledTaskService:
         )
 
     async def _dispatch(self, row):
-        from pulsara_agent.web_app.session_controller import SessionControlRejected
+        from pulsara_agent.desktop_app.session_controller import SessionControlRejected
 
         a = ScheduledAdmission(
             row["id"],

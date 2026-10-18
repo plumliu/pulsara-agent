@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from pulsara_agent.conversation_kernel.session_deletion import SessionDeleteRejected
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-from tests.test_local_web_browser_bridge import (
+from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+from tests.test_desktop_renderer_bridge import (
     _runtime_reopen_controller,
     _RuntimeReopenHost,
     _RuntimeReopenConnection,
@@ -32,7 +32,7 @@ def control(tmp_path, *, close_fails=False, connection_fails=False):
     core.quiesce_session_retirement = AsyncMock(side_effect=stop)
     core.commit_session_deletion = AsyncMock(return_value="DELETED")
     core.finish_session_retirement = AsyncMock()
-    bridge = LocalBrowserBridge(sessions=controller, protocol_server=object())
+    bridge = RendererBridge(sessions=controller, protocol_server=object())
     connection = _RuntimeReopenConnection(
         "connection:delete", old.session_id, fail=connection_fails
     )
@@ -158,7 +158,7 @@ def test_archived_delete_unconfirmed_retry_only_confirms_original_worker(tmp_pat
         core.canonical_session_exists.side_effect = [True, OSError('offline'), False]
         with pytest.raises(SessionDeleteRejected, match='暂时无法确认'):
             await c.delete_session(session.session_id, bridge=bridge, action='delete_archived')
-        from pulsara_agent.web_app.session_controller import SessionControlRejected
+        from pulsara_agent.desktop_app.session_controller import SessionControlRejected
         with pytest.raises(SessionControlRejected):
             await c.delete_session(session.session_id, bridge=bridge)
         result = await c.delete_session(session.session_id, bridge=bridge, action='delete_archived')
@@ -223,9 +223,9 @@ def test_postcommit_cleanup_failure_does_not_report_rollback(tmp_path):
 
 def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
     from aiohttp import ClientSession
-    from pulsara_agent.web_app.http_server import LocalHttpServer
-    from pulsara_agent.web_app.application import packaged_static_root
-    from tests.test_local_web_http_surface import _model_server_dependencies, _Bridge
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+    from pulsara_agent.desktop_app.application import packaged_static_root
+    from tests.test_desktop_http_surface import _model_server_dependencies, _Bridge
 
     async def run():
         sessions = SimpleNamespace(
@@ -348,10 +348,10 @@ def test_core_deletion_waits_admitted_open_and_rejects_new_admission():
 
 def test_archived_delete_http_needs_no_chat_connection_and_preserves_public_results(tmp_path):
     from aiohttp import ClientSession
-    from pulsara_agent.web_app.http_server import LocalHttpServer
-    from pulsara_agent.web_app.application import packaged_static_root
-    from tests.test_local_web_http_surface import _model_server_dependencies
-    from pulsara_agent.web_app.session_controller import SessionControlRejected
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+    from pulsara_agent.desktop_app.application import packaged_static_root
+    from tests.test_desktop_http_surface import _model_server_dependencies
+    from pulsara_agent.desktop_app.session_controller import SessionControlRejected
 
     async def run():
         c, core, bridge, session, _ = control(tmp_path)

@@ -1,5 +1,3 @@
-'use client';
-
 import { useState } from 'react';
 import { FileInput, LoaderCircle, PackageOpen, X } from 'lucide-react';
 import type { PluginImportOptions, PluginImportDiscovery } from '../lib/pulsara-types';

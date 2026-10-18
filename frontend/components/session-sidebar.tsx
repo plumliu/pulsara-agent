@@ -256,7 +256,7 @@ export function SessionSidebar({
         aria-label="关闭会话侧栏"
         tabIndex={isOpen ? 0 : -1}
       />
-      <aside ref={sidebarRef} className={`session-sidebar${isOpen ? ' is-mobile-open' : ''}`}>
+      <aside ref={sidebarRef} className="session-sidebar" inert={!isOpen}>
         <header className="brand-row">
           <div className="brand-lockup">
             <BrandMark compact />

@@ -35,6 +35,25 @@ beforeEach(() => {
 afterEach(() => { cleanup(); store.destroy(); window.getSelection()?.removeAllRanges(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('draft annotation UI', () => {
+  it('retains an eligible selection when the drag ends in the gutter and hides after deselection', async () => {
+    const { container } = render(<Harness />);
+    const text = container.querySelector('[data-source-text]')!.firstChild!;
+    const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 8);
+    window.getSelection()!.addRange(range);
+    fireEvent(document, new Event('selectionchange'));
+    await screen.findByRole('button', { name: '添加注释' });
+    fireEvent.pointerUp(container.querySelector('.thread-scroll')!);
+    expect(screen.getByRole('button', { name: '添加注释' })).toBeTruthy();
+    window.getSelection()!.removeAllRanges();
+    fireEvent.pointerUp(container.querySelector('.thread-scroll')!);
+    expect(screen.queryByRole('button', { name: '添加注释' })).toBeNull();
+    window.getSelection()!.addRange(range);
+    fireEvent.pointerUp(container.querySelector('.thread-scroll')!);
+    fireEvent.click(await screen.findByRole('button', { name: '添加注释' }));
+    await screen.findByRole('textbox', { name: '批注内容' });
+    expect((await store.capture('one')).content.parts).toEqual([first]);
+  });
+
   it('copies and annotates CJK formatting using canonical text, then restores its highlight', async () => {
     const sourceBody = '😀前文 **方案 A：**固定费用；~~错误：~~修正';
     const { container } = render(<Harness sourceBody={sourceBody} />);

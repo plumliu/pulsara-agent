@@ -1,5 +1,3 @@
-'use client';
-
 import type { Editor } from '@tiptap/core';
 import { EditorContent } from '@tiptap/react';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';

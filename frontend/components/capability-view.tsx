@@ -1,5 +1,3 @@
-'use client';
-
 import {
   BookOpenText,
   Box,
@@ -56,6 +54,7 @@ interface CapabilityViewProps {
   loading: boolean;
   error?: string;
   onRefresh: () => Promise<void>;
+  onReload?: () => Promise<void>;
   onOpenRoot: (root: 'agents' | 'pulsara') => Promise<void>;
   onInstallSkill: (input: SkillImportInput) => Promise<boolean>;
   onPreviewSkills: (sourcePath: string) => Promise<SkillImportCandidate[]>;
@@ -129,6 +128,7 @@ export function CapabilityView({
   loading,
   error,
   onRefresh,
+  onReload,
   onOpenRoot,
   onInstallSkill,
   onPreviewSkills,
@@ -218,7 +218,10 @@ export function CapabilityView({
             <button className={tab === 'hooks' ? 'is-active' : ''} onClick={() => setTab('hooks')} role="tab" title="当前已启用且受信任的可执行钩子">钩子 <span>{hookCount ?? '—'}</span></button>
           </div>
           <div className="capability-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${tab === 'plugins' ? '插件' : tab === 'mcp' ? ' MCP' : tab === 'hooks' ? '钩子' : '技能'}`} /></div>
+          <div className="capability-page-controls">
+          {onReload && <button className="secondary-ghost capability-reload" disabled={loading} title="显式重新加载所有运行中会话的能力，沿用原采纳边界" onClick={() => void onReload()}>重新加载会话能力</button>}
           <button className="capability-refresh" onClick={() => {setHooksRefresh(value => value + 1); void onRefresh();}} disabled={loading} aria-label="刷新能力">{loading ? <LoaderCircle size={14} /> : <RefreshCw size={14} />}</button>
+          </div>
         </div>
 
         {error && <div className="capability-page-notice"><CircleAlert size={15} /><span>{error}</span></div>}

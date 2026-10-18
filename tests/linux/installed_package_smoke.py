@@ -30,7 +30,7 @@ from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.terminal_process.environment import TerminalEnvironmentOwner, TerminalEnvConfig
 from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.tools.builtins.filesystem import FindFilesTool, SearchContentTool
-from pulsara_agent.web_app.application import LocalWebApplication, packaged_static_root
+from pulsara_agent.desktop_app.application import DesktopApplication, packaged_static_root
 
 
 class OfflineCatalogClient:
@@ -88,7 +88,7 @@ async def exercise(root: Path) -> None:
         connections=LocalMcpManagementService(settings, user_config_path=home / 'mcp.yaml'),
     )
     assert result.disposition is PluginInstallDisposition.INSTALLED, result
-    application = LocalWebApplication(
+    application = DesktopApplication(
         settings=settings, catalog=ModelCatalogOwner(OfflineCatalogClient()),
         permission_policy=preset_to_policy("bypass-permissions"),
     )

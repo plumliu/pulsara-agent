@@ -176,7 +176,7 @@ def test_search_pages_all_matches_across_workspaces_and_lifecycle(repo, search_c
 
 def test_search_hits_preserve_latest_root_status_for_web_summary(repo, search_context):
     from pulsara_agent.conversation_kernel.host import _kernel_session_summary
-    from pulsara_agent.web_app.session_controller import LocalSessionController
+    from pulsara_agent.desktop_app.session_controller import LocalSessionController
 
     domain, new, search = search_context
     lease = new()
@@ -228,10 +228,10 @@ def test_fork_search_uses_child_history_ownership(repo, search_context):
 def test_http_search_rejects_invalid_fields_origins_and_reports_timeout(tmp_path):
     from typing import cast
     from aiohttp import ClientSession
-    from pulsara_agent.web_app.http_server import LocalHttpServer
-    from pulsara_agent.web_app.session_controller import LocalSessionController
-    from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-    from tests.test_local_web_http_surface import (
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+    from pulsara_agent.desktop_app.session_controller import LocalSessionController
+    from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+    from tests.test_desktop_http_surface import (
         _Sessions,
         _Bridge,
         _model_server_dependencies,
@@ -245,7 +245,7 @@ def test_http_search_rejects_invalid_fields_origins_and_reports_timeout(tmp_path
         (tmp_path / "index.html").write_text("Pulsara")
         server = LocalHttpServer(
             sessions=cast(LocalSessionController, sessions),
-            bridge=cast(LocalBrowserBridge, _Bridge()),
+            bridge=cast(RendererBridge, _Bridge()),
             static_root=tmp_path,
             requested_port=0,
             is_ready=lambda: True,

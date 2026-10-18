@@ -17,7 +17,7 @@ from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.scheduling.service import ScheduledTaskService
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.tool_permission import default_permission_policy
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from tests.dogfood.credentials import secret_scrubber
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,

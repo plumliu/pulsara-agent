@@ -19,9 +19,8 @@ function modelConfiguration(index: number): ModelConfigurationSummary {
 }
 
 function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelConfigurationDetail, catalog: ModelCatalogReadModel = { status: 'ready', routes: [] }) {
-  const target = { runtime_dsn: 'postgresql://runtime@localhost:5432/pulsara', admin_dsn: 'postgresql://admin@localhost:5432/pulsara' };
   let settings: LocalSettingsReadModel = {
-    local_settings: { pulsara_home: '/custom/pulsara-home', postgres: target, memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
+    local_settings: { pulsara_home: '/custom/pulsara-home', memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
     database_state: 'database_reset_required', model_configurations: configurations,
   };
   const reset = vi.fn(async () => {
@@ -29,6 +28,8 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     return { database_name: 'pulsara', restart_required: false };
   });
   const refresh = vi.fn(async () => {});
+  const notify = vi.fn();
+  const check = vi.fn(async () => ({database_name:'pulsara'}));
   const deleteModel = vi.fn(async (id: string) => {
     settings = { ...settings, model_configurations: settings.model_configurations.filter((connection) => connection.id !== id) };
     return { deleted: true, model_configurations: settings.model_configurations };
@@ -53,14 +54,15 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     localSettings: async () => settings,
     modelCatalog: async () => catalog,
     resetPostgres: reset,
+    checkPostgres: check,
     deleteModelConfiguration: deleteModel,
     addModelConfiguration: addModel,
     modelConfiguration: readModel,
     updateModelConfiguration: updateModel,
     testModelConfiguration: probeModel,
   } as unknown as RuntimeAdapter;
-  render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={() => {}} sessionRevision={0} onSessionsChanged={refresh} onDeleteSession={() => {}} />);
-  return { reset, refresh, target, deleteModel, addModel, readModel, updateModel, probeModel };
+  render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={notify} sessionRevision={0} onSessionsChanged={refresh} onDeleteSession={() => {}} />);
+  return { reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel };
 }
 
 function customDetail(inputModalities: string[] | null = null): ModelConfigurationDetail {
@@ -256,21 +258,27 @@ it('closes the add modal without saving and resets its draft when reopened', asy
   expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-it('shows only the connection row in local service', async () => {
-  setup();
-  expect(await screen.findByText('页面连接')).toBeTruthy();
-  expect(screen.queryByText('数据位置')).toBeNull();
-  expect(screen.queryByText('登录方式')).toBeNull();
+it('keeps local service in General with only database actions and home', async () => {
+  const { check, notify } = setup();
+  expect(screen.queryByRole('button', {name:'本地服务'})).toBeNull();
+  expect(screen.queryByText('页面连接')).toBeNull();
+  const card = await screen.findByRole('region', {name:'本地服务'});
+  expect(within(card).getByText('PostgreSQL')).toBeTruthy();
+  expect(within(card).getAllByRole('button').map(button => button.textContent)).toEqual(['检查数据', '重置数据']);
+  fireEvent.click(within(card).getByRole('button', {name:'检查数据'}));
+  await waitFor(() => expect(check).toHaveBeenCalledOnce());
+  expect(notify).toHaveBeenCalledWith('数据检查通过', '数据库 pulsara 连接与结构检查通过。', 'success');
 });
 
-it('shows the saved target, cancels without deletion, and resets only after confirmation', async () => {
-  const { reset, refresh, target } = setup();
-  const opener = await screen.findByRole('button', { name: '重置数据…' });
-  await waitFor(() => expect((screen.getByRole('button', { name: '初始化 / 升级' }) as HTMLButtonElement).disabled).toBe(true));
-  fireEvent.change(screen.getByLabelText('Runtime DSN'), { target: { value: 'postgresql://wrong@localhost/other' } });
+it('shows the managed target without editable DSNs and resets only after confirmation', async () => {
+  const { reset, refresh, notify } = setup();
+  const opener = await screen.findByRole('button', { name: '重置数据' });
+  expect(screen.queryByRole('button', { name: '初始化 / 升级' })).toBeNull();
+  expect(screen.queryByLabelText('Runtime DSN')).toBeNull();
+  expect(screen.queryByLabelText('Admin DSN')).toBeNull();
   fireEvent.click(opener);
   let dialog = screen.getByRole('dialog', { name: '重置 Pulsara 数据？' });
-  expect(within(dialog).getByText(target.runtime_dsn)).toBeTruthy();
+  expect(within(dialog).getByText('目标：此应用管理的专用 PostgreSQL 数据库。')).toBeTruthy();
   expect(reset).not.toHaveBeenCalled();
   fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
   expect(screen.queryByRole('dialog')).toBeNull();
@@ -279,15 +287,15 @@ it('shows the saved target, cancels without deletion, and resets only after conf
   dialog = screen.getByRole('dialog', { name: '重置 Pulsara 数据？' });
   fireEvent.click(within(dialog).getByRole('button', { name: '确认清空并初始化' }));
   await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-  expect(reset).toHaveBeenCalledExactlyOnceWith(target);
+  expect(reset).toHaveBeenCalledExactlyOnceWith();
   expect(screen.queryByRole('dialog')).toBeNull();
-  expect(screen.getByText('数据库 pulsara 已重置并完成初始化。')).toBeTruthy();
+  expect(notify).toHaveBeenCalledWith('数据已重置', '数据库 pulsara 已重置并完成初始化。', 'success');
 });
 
 it('keeps a failed reset visible without automatically retrying', async () => {
   const { reset } = setup();
   reset.mockRejectedValue(new Error('目标已变更，请重新确认。'));
-  const opener = await screen.findByRole('button', { name: '重置数据…' });
+  const opener = await screen.findByRole('button', { name: '重置数据' });
   await waitFor(() => expect((opener as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(opener);
   fireEvent.click(screen.getByRole('button', { name: '确认清空并初始化' }));
@@ -297,22 +305,22 @@ it('keeps a failed reset visible without automatically retrying', async () => {
 });
 
 
-it('shows the effective Pulsara Home in a disabled display beneath the connection in Local Service', async () => {
+it('shows the effective Pulsara Home beneath PostgreSQL in General', async () => {
   setup();
-  fireEvent.click(screen.getByRole('button', { name: '本地服务' }));
-  const home = screen.getByRole('region', { name: 'Pulsara 用户目录' });
-  const path = within(home).getByRole('textbox', { name: 'Pulsara 用户目录' });
+  fireEvent.click(screen.getByRole('button', { name: '通用' }));
+  const home = screen.getByRole('region', { name: 'Pulsara 家目录' });
+  const path = within(home).getByRole('textbox', { name: 'Pulsara 家目录' });
   await waitFor(() => expect(path).toHaveProperty('value', '/custom/pulsara-home'));
   expect(path).toHaveProperty('disabled', true);
   path.focus();
   expect(document.activeElement).not.toBe(path);
   expect(within(home).queryByText('当前路径，只读')).toBeNull();
-  expect(within(home).getByText('用户级技能、MCP、插件和模型连接保存在这里。')).toBeTruthy();
+  expect(within(home).getByText('保存用户级技能、MCP、插件和模型连接。')).toBeTruthy();
   expect(within(home).queryByRole('button')).toBeNull();
   expect(home.classList.contains('is-highlighted')).toBe(false);
   const serviceCard = home.parentElement!;
   expect(within(serviceCard).getByRole('heading', { name: '本地服务' })).toBeTruthy();
-  expect(within(serviceCard).getByText('页面连接').closest('.setting-row')?.nextElementSibling).toBe(home);
-  fireEvent.click(screen.getByRole('button', { name: '通用' }));
-  expect(screen.queryByRole('region', { name: 'Pulsara 用户目录' })).toBeNull();
+  expect(within(serviceCard).getByText('PostgreSQL').closest('.setting-row')?.nextElementSibling).toBe(home);
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  expect(screen.queryByRole('region', { name: 'Pulsara 家目录' })).toBeNull();
 });

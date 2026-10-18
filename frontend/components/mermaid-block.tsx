@@ -1,5 +1,3 @@
-'use client';
-
 import { useCallback, useSyncExternalStore } from 'react';
 import { DiagramBlock } from './diagram-block';
 import { renderMermaid } from '../lib/mermaid-renderer';

@@ -1,5 +1,3 @@
-'use client';
-
 import { McpEditor } from './mcp-editor';
 import type { McpEditInput, PluginMcpConnection, PluginMcpEditInput, UserMcpServerCapability, UserPluginCapability } from '../lib/pulsara-types';
 

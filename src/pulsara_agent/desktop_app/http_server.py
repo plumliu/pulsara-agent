@@ -1,0 +1,2686 @@
+"""Loopback-only HTTP surface for Pulsara desktop."""
+
+from __future__ import annotations
+
+from pulsara_agent.settings import ModelConnectionIdentityConflict
+from pulsara_agent.conversation_kernel.session_deletion import SessionDeleteRejected
+from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
+from pulsara_agent.workspace_identity import WorkspaceUnavailable
+from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
+from pulsara_agent.desktop_app.renderer_bridge import protobuf_json
+from pulsara_agent.terminal_protocol.canonical_v3 import (
+    CanonicalProtocolGap, CanonicalProtocolResourceExhausted,
+    MAXIMUM_HISTORY_PAGE_BYTES, browser_history_uint64,
+)
+
+import asyncio
+from pathlib import Path
+from time import monotonic
+from typing import Awaitable, Callable, cast
+from pulsara_agent.identity import require_id
+
+from aiohttp import web
+from psycopg.errors import QueryCanceled
+from pulsara_agent.desktop_app.memory_controller import LocalMemoryController
+from pulsara_agent.desktop_app.scheduled_controller import ScheduledTaskController
+from pulsara_agent.scheduling.contracts import ScheduledTaskError
+from pulsara_agent.conversation_kernel.memory.management import MemoryManagementError
+
+from pulsara_agent.conversation_kernel.host import KernelHostCoreClosing
+from pulsara_agent.llm.model_catalog import (
+    ModelCatalogEntry,
+    ModelCatalogInvalid,
+    ModelCatalogOwner,
+    ModelCatalogUnavailable,
+    ModelTargetKey,
+    ReasoningFixedOn,
+    ReasoningProviderDefault,
+    ReasoningSelectableControls,
+    ReasoningUnavailable,
+    WireApi,
+)
+from pulsara_agent.llm.model_connections import (
+    ModelConnectionAuthentication,
+    ModelConnectionConfig,
+    ModelConnectionId,
+    ReasoningWireProfile,
+    UserDeclaredModelTarget,
+    model_call_binding_from_dict,
+    model_connection_to_dict,
+    reasoning_selection_to_dict,
+    user_declared_reasoning_from_dict,
+)
+from pulsara_agent.llm.model_target import (
+    ResolvedModelConnection,
+    compatible_reasoning_profiles,
+    controls_supported_by_adapter,
+    create_model_connection,
+    create_user_declared_model_connection,
+    default_reasoning_selection,
+    resolve_model_target_contract,
+)
+from pulsara_agent.llm.connection_probe import (
+    ModelConnectionProbeFailure,
+    probe_model_connection,
+)
+from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
+from pulsara_agent.mcp_config import (
+    McpConfiguredServerBoundExceeded,
+)
+from pulsara_agent.capability.mcp_management import (
+    McpManagementConflict,
+    McpSecretMutation,
+)
+from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalIdentity
+from pulsara_agent.capability.pulsara_home import require_pulsara_home
+from pulsara_agent.desktop_app.renderer_bridge import (
+    BridgeDetachFailed,
+    BridgeDetachFull,
+    BridgeDetachNotStarted,
+    BridgeSettlementFailed,
+    RendererBridge,
+)
+from pulsara_agent.desktop_app.protocol_client import ProtocolBridgeError
+from pulsara_agent.desktop_app.file_import import LocalImport, receive_file
+from pulsara_agent.desktop_app.file_preview import FilePreviewError
+from pulsara_agent.desktop_app.file_preview_http import FilePreviewHttp
+from pulsara_agent.desktop_app.visualization_preview import VisualizationPreviews
+from pulsara_agent.desktop_app.user_avatar import UserAvatarHttp
+from pulsara_agent.desktop_app.session_controller import (
+    LocalSessionController,
+    OldHostCloseQuarantined,
+    SessionControlRejected,
+    SessionWorkspaceKind,
+)
+from pulsara_agent.settings import (
+    LocalPostgresConfig,
+    LocalSettings,
+    LocalSettingsPublishIndeterminate,
+    LocalSettingsStore,
+    LocalSettingsUnavailable,
+    LocalSettingsSchemaUnsupported,
+)
+from pulsara_agent.storage.migrations.errors import (
+    PostgresSchemaError,
+    PostgresSchemaFailureCode,
+)
+
+
+LOOPBACK_HOST = "127.0.0.1"
+
+
+def _reasoning_payload(value) -> dict[str, object]:
+    if isinstance(value, ReasoningSelectableControls):
+        return {
+            "kind": "selectable",
+            "effort": (
+                None if value.effort is None else {"values": list(value.effort.values)}
+            ),
+            "toggle": value.toggle is not None,
+            "budget_tokens": (
+                None
+                if value.budget is None
+                else {
+                    "minimum": value.budget.minimum_tokens,
+                    "maximum": value.budget.maximum_tokens,
+                }
+            ),
+        }
+    if isinstance(value, ReasoningFixedOn):
+        return {"kind": "fixed_on"}
+    if isinstance(value, ReasoningUnavailable):
+        return {"kind": "unavailable"}
+    if isinstance(value, ReasoningProviderDefault):
+        return {"kind": "provider_default"}
+    raise TypeError(type(value).__name__)
+
+
+def _catalog_entry_payload(
+    entry: ModelCatalogEntry, *, model_runtime: ModelRuntime
+) -> dict[str, object]:
+    wires: list[dict[str, object]] = []
+    for wire_api in WireApi:
+        if not model_runtime.route_wires.supports(entry, wire_api):
+            wires.append(
+                {
+                    "wire_api": wire_api.value,
+                    "executable": False,
+                    "reason": "route_wire_adapter_unavailable",
+                    "endpoint": None,
+                }
+            )
+            continue
+        route_wire = model_runtime.route_wires.contract_for(entry, wire_api)
+        endpoint = model_runtime.route_wires.endpoint_for(entry)
+        executable = entry.limits is not None and endpoint is not None
+        wires.append(
+            {
+                "wire_api": wire_api.value,
+                "executable": executable,
+                "endpoint": endpoint,
+                "reason": (
+                    None
+                    if executable
+                    else (
+                        "model_hard_limits_unavailable"
+                        if entry.limits is None
+                        else "model_endpoint_unknown"
+                    )
+                ),
+                "reasoning": _reasoning_payload(
+                    controls_supported_by_adapter(
+                        entry.reasoning,
+                        route_wire.reasoning_contract(
+                            route_wire.default_reasoning_profile
+                        ),
+                    )
+                ),
+                "reasoning_wire_profiles": [
+                    profile.value
+                    for profile in compatible_reasoning_profiles(
+                        entry.reasoning,
+                        route_wire,
+                    )
+                ],
+                "recommended": (
+                    (
+                        entry.wire_shape_hint == "responses"
+                        and wire_api is WireApi.OPENAI_RESPONSES
+                    )
+                    or (
+                        entry.wire_shape_hint == "completions"
+                        and wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
+                    )
+                ),
+            }
+        )
+    return {
+        "model_id": entry.key.model_id,
+        "display_name": entry.display_name,
+        "wire_dialect": entry.wire_dialect.value,
+        "context_tokens": entry.total_context_tokens,
+        "input_tokens": None if entry.limits is None else entry.limits.max_input_tokens,
+        "output_tokens": None
+        if entry.limits is None
+        else entry.limits.max_output_tokens,
+        "tool_call": entry.tool_call,
+        "input_modalities": entry.input_modalities,
+        "output_modalities": entry.output_modalities,
+        "wire_shape_hint": entry.wire_shape_hint,
+        "wire_apis": wires,
+    }
+
+
+def _wire_shape_warning(hint: str | None, wire_api: WireApi) -> bool:
+    if hint is None:
+        return False
+    expected = (
+        WireApi.OPENAI_RESPONSES
+        if hint == "responses"
+        else WireApi.OPENAI_CHAT_COMPLETIONS
+    )
+    return wire_api is not expected
+
+
+def _plugin_import_strings(body, key):
+    value = body.get(key, {})
+    if not isinstance(value, dict) or any(
+        not isinstance(item, str) for item in value.values()
+    ):
+        raise ValueError("插件普通输入与分类需要文字值")
+    return tuple(sorted(value.items()))
+
+
+def _optional_body_string(body: dict[str, object], key: str) -> str | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    return value
+
+
+def _mcp_import_source(body: dict[str, object]) -> dict[str, object]:
+    content = _optional_body_string(body, "content")
+    shape = body.get("shape", "auto")
+    if content is None or shape not in {
+        "auto",
+        "mcpServers",
+        "opencode",
+        "map",
+        "server",
+    }:
+        raise ValueError("MCP import requires content and a supported source shape")
+    return {
+        "content": content,
+        "shape": shape,
+        "server_id": _optional_body_string(body, "server_id"),
+    }
+
+
+def _mcp_import_values(body: dict[str, object], key: str) -> dict[str, str]:
+    value = body.get(key, {})
+    if not isinstance(value, dict) or any(
+        not isinstance(item, str) for item in value.values()
+    ):
+        raise ValueError("MCP import fields must be a string mapping")
+    return value
+
+
+def _retain_credentials_confirmed(body: dict[str, object]) -> bool:
+    value = body.get("retain_credentials_confirmed", False)
+    if not isinstance(value, bool):
+        raise ValueError("MCP retained credential confirmation must be boolean")
+    return value
+
+
+def _mcp_secret_changes(body: dict[str, object]) -> tuple[McpSecretMutation, ...]:
+    from pulsara_agent.capability.management_form import parse_mcp_secret_changes
+
+    return parse_mcp_secret_changes(body.get("secret_changes", []))
+
+
+class HttpPublicError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status: int,
+        retryable: bool = False,
+    ) -> None:
+        self.code = code
+        self.public_message = message
+        self.status = status
+        self.retryable = retryable
+        super().__init__(f"{code}: {message}")
+
+
+class LocalHttpServer:
+    """Same-origin HTTP owner with an explicit ready/stop boundary."""
+
+    def __init__(
+        self,
+        *,
+        sessions: LocalSessionController,
+        bridge: RendererBridge,
+        static_root: Path,
+        requested_port: int,
+        is_ready: Callable[[], bool],
+        is_draining: Callable[[], bool],
+        settings: LocalSettingsStore,
+        catalog: ModelCatalogOwner,
+        model_runtime: ModelRuntime,
+        database_state: Callable[[], str],
+        refresh_database_state: Callable[[], Awaitable[object]],
+        reset_postgres: Callable[[LocalPostgresConfig], Awaitable[dict[str, object]]],
+        scheduled_tasks=None,
+    ) -> None:
+        self.sessions = sessions
+        self.scheduled_tasks = scheduled_tasks
+        self.bridge = bridge
+        self.static_root = static_root.resolve()
+        self.requested_port = requested_port
+        self._is_ready = is_ready
+        self._is_draining = is_draining
+        self.settings = settings
+        self.catalog = catalog
+        self.model_runtime = model_runtime
+        self._database_state = database_state
+        self._refresh_database_state = refresh_database_state
+        self._reset_postgres_data = reset_postgres
+        self._postgres_operation_lock = asyncio.Lock()
+        self._visualization_previews = VisualizationPreviews(bridge)
+        self._runner: web.AppRunner | None = None
+        self._site: web.TCPSite | None = None
+        self._port: int | None = None
+        self._closed = False
+        self._app = web.Application(
+            client_max_size=8 << 20,
+            middlewares=[self._errors, self._security, self._chat_write_admission],
+        )
+        self._install_routes()
+        FilePreviewHttp(self.bridge, lambda: self.origin).install(self._app.router)
+
+    @property
+    def port(self) -> int:
+        if self._port is None:
+            raise RuntimeError("local HTTP server has not started")
+        return self._port
+
+    @property
+    def origin(self) -> str:
+        return f"http://{LOOPBACK_HOST}:{self.port}"
+
+    async def start(self) -> None:
+        if self._runner is not None:
+            raise RuntimeError("local HTTP server already started")
+        if not (self.static_root / "index.html").is_file():
+            raise FileNotFoundError(
+                f"Pulsara local frontend is not built: {self.static_root / 'index.html'}"
+            )
+        runner = web.AppRunner(self._app, access_log=None)
+        await runner.setup()
+        self._runner = runner
+        try:
+            site = web.TCPSite(
+                runner,
+                host=LOOPBACK_HOST,
+                port=self.requested_port,
+                shutdown_timeout=0.0,
+            )
+            await site.start()
+            self._site = site
+            sockets = getattr(site._server, "sockets", None)
+            if not sockets:
+                raise RuntimeError("local HTTP listener has no bound socket")
+            self._port = int(sockets[0].getsockname()[1])
+        except BaseException:
+            await runner.cleanup()
+            self._runner = None
+            raise
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        runner = self._runner
+        self._runner = None
+        self._site = None
+        await self._visualization_previews.aclose()
+        if runner is not None:
+            await runner.cleanup()
+
+    def _install_routes(self) -> None:
+        UserAvatarHttp().install(self._app.router)
+        if self.scheduled_tasks is not None:
+            ScheduledTaskController(self.scheduled_tasks).install(self._app.router)
+        memory = LocalMemoryController(self.sessions)
+        self._app.router.add_get("/api/memories/projects", memory.projects)
+        self._app.router.add_get("/api/memories", memory.catalog)
+        self._app.router.add_get("/api/memories/{fact_id}", memory.detail)
+        self._app.router.add_patch(
+            "/api/memories/{fact_id}/statement", memory.edit_statement
+        )
+        self._app.router.add_post(
+            "/api/memories/{fact_id}/deletion-preview", memory.deletion
+        )
+        self._app.router.add_delete("/api/memories/{fact_id}", memory.deletion)
+        self._app.router.add_get("/healthz", self._health)
+        self._app.router.add_get("/", self._index)
+        self._app.router.add_get("/assets/{tail:.*}", self._public_file)
+        self._app.router.add_get("/api/app/bootstrap", self._bootstrap)
+        self._app.router.add_get("/api/model-catalog", self._model_catalog)
+        self._app.router.add_post(
+            "/api/model-catalog/refresh", self._refresh_model_catalog
+        )
+        self._app.router.add_get(
+            "/api/model-configurations", self._model_configurations
+        )
+        self._app.router.add_post(
+            "/api/model-configurations", self._add_model_configuration
+        )
+        self._app.router.add_delete(
+            "/api/model-configurations/{connection_id}",
+            self._delete_model_configuration,
+        )
+        self._app.router.add_post(
+            "/api/model-configurations/test", self._test_model_configuration
+        )
+        self._app.router.add_get(
+            "/api/model-configurations/{connection_id}", self._model_configuration
+        )
+        self._app.router.add_put(
+            "/api/model-configurations/{connection_id}", self._update_model_configuration
+        )
+        self._app.router.add_post(
+            "/api/model-configurations/{connection_id}/test", self._test_model_configuration
+        )
+        self._app.router.add_get("/api/local-settings", self._local_settings)
+        self._app.router.add_post(
+            "/api/local-settings/postgres/check", self._check_postgres
+        )
+        self._app.router.add_post(
+            "/api/local-settings/postgres/reset", self._reset_postgres
+        )
+        self._app.router.add_get("/api/local-settings/memory-retrieval", self._read_memory_retrieval)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/history-enabled", self._set_history_enabled)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/embedding-enabled", self._set_embedding_enabled)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/ranking-mode", self._set_ranking_mode)
+        self._app.router.add_put("/api/local-settings/memory-retrieval/{slot}", self._put_memory_model)
+        self._app.router.add_delete("/api/local-settings/memory-retrieval/{slot}", self._delete_memory_model)
+        self._app.router.add_post("/api/local-settings/memory-retrieval/{slot}/test", self._test_memory_model)
+        self._app.router.add_get("/api/capabilities", self._inspect_user_capabilities)
+        self._app.router.add_get("/api/capabilities/hooks", self._read_user_hooks)
+        self._app.router.add_get(
+            "/api/capabilities/hooks/local", self._read_user_hook_config
+        )
+        self._app.router.add_put(
+            "/api/capabilities/hooks/local", self._save_user_hook_config
+        )
+        self._app.router.add_get(
+            "/api/capabilities/hooks/review", self._read_user_hook_review
+        )
+        self._app.router.add_post(
+            "/api/capabilities/hooks/trust", self._trust_user_hook
+        )
+        self._app.router.add_post(
+            "/api/capabilities/refresh", self._refresh_user_capabilities
+        )
+        self._app.router.add_post(
+            "/api/capabilities/roots/{root}/open", self._open_capability_root
+        )
+        self._app.router.add_post(
+            "/api/capabilities/skills/install", self._install_user_skill
+        )
+        self._app.router.add_post(
+            "/api/capabilities/skills/preview", self._preview_skill_import
+        )
+        self._app.router.add_post(
+            "/api/capabilities/skills/enabled", self._set_user_skill_enabled
+        )
+        self._app.router.add_post("/api/capabilities/skills/remove", self._remove_skill)
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/skills/remove", self._remove_skill
+        )
+        self._app.router.add_post("/api/capabilities/mcp", self._create_user_mcp_server)
+        self._app.router.add_post("/api/capabilities/mcp/test", self._test_mcp_server)
+        self._app.router.add_post(
+            "/api/capabilities/mcp/import/preview", self._preview_mcp_import
+        )
+        self._app.router.add_post("/api/capabilities/mcp/import", self._import_mcp)
+        self._app.router.add_put(
+            "/api/capabilities/mcp/{server_id}", self._update_user_mcp_server
+        )
+        self._app.router.add_delete(
+            "/api/capabilities/mcp/{server_id}", self._remove_user_mcp_server
+        )
+        self._app.router.add_post(
+            "/api/capabilities/mcp/{server_id}/authorize", self._authorize_mcp
+        )
+        self._app.router.add_get(
+            "/api/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_delete(
+            "/api/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_post(
+            "/api/capabilities/mcp/{server_id}/authorization/cancel",
+            self._mcp_authorization,
+        )
+        self._app.router.add_post(
+            "/api/capabilities/plugins/install", self._install_user_plugin
+        )
+        self._app.router.add_post(
+            "/api/capabilities/plugins/preview-import", self._preview_plugin_import
+        )
+        self._app.router.add_post(
+            "/api/capabilities/plugins/{plugin_id}/enabled",
+            self._set_user_plugin_enabled,
+        )
+        self._app.router.add_delete(
+            "/api/capabilities/plugins/{plugin_id}", self._remove_user_plugin
+        )
+        self._app.router.add_put(
+            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}",
+            self._replace_user_plugin_connection,
+        )
+        self._app.router.add_post(
+            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}/authorization",
+            self._plugin_mcp_authorization,
+        )
+        self._app.router.add_get("/api/sessions", self._list_sessions)
+        self._app.router.add_post("/api/sessions/search", self._search_sessions)
+        self._app.router.add_put("/api/sessions/{session_id}/title", self._rename_session)
+        self._app.router.add_post("/api/sessions/{session_id}/path-candidates", self._workspace_path_candidates)
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/tasks", self._list_session_tasks
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/task-groups",
+            self._list_session_task_groups,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/task-groups/{group_id}",
+            self._read_session_task_group,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/tasks/{task_id}",
+            self._read_session_task,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/tasks/{task_id}/activities",
+            self._list_session_task_activities,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/capabilities",
+            self._inspect_session_capabilities,
+        )
+        self._app.router.add_post("/api/sessions", self._create_session)
+        self._app.router.add_get("/api/sessions/archived", self._list_archived_sessions)
+        self._app.router.add_get("/api/sessions/{session_id}", self._read_session)
+        self._app.router.add_get("/api/sessions/{session_id}/workspace-availability", self._workspace_availability)
+        self._app.router.add_post("/api/sessions/{session_id}/restore-workspace", self._restore_workspace)
+        self._app.router.add_get("/api/sessions/{session_id}/history-snapshot", self._history_snapshot)
+        for operation in ("history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"):
+            self._app.router.add_post("/api/sessions/{session_id}/history/" + operation, self._cold_history_action)
+
+        self._app.router.add_post("/api/sessions/{session_id}/archive", self._archive_session)
+        self._app.router.add_post("/api/sessions/{session_id}/unarchive", self._unarchive_session)
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/fork", self._fork_conversation
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/context-usage", self._read_context_usage,
+        )
+        self._app.router.add_put(
+            "/api/sessions/{session_id}/model-call-binding",
+            self._update_model_call_binding,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/reconnect",
+            self._reconnect_session_mcp,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/skills/install",
+            self._install_session_skill,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/skills/enabled",
+            self._set_session_skill_enabled,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp",
+            self._create_session_mcp_server,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/import", self._import_mcp
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/test", self._test_mcp_server
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorize",
+            self._authorize_mcp,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_delete(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization/cancel",
+            self._mcp_authorization,
+        )
+        self._app.router.add_put(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}",
+            self._update_session_mcp_server,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/enabled",
+            self._set_session_mcp_enabled,
+        )
+        self._app.router.add_delete(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}",
+            self._remove_session_mcp_server,
+        )
+        self._app.router.add_delete("/api/sessions/{session_id}", self._delete_session)
+        self._app.router.add_delete("/api/sessions/{session_id}/archived", self._delete_archived_session)
+        self._app.router.add_post("/api/sessions/{session_id}/close", self._close_session)
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/runtime/reopen",
+            self._runtime_reopen_session,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/connections", self._connect
+        )
+        self._app.router.add_delete(
+            "/api/connections/{connection_id}", self._disconnect
+        )
+        self._app.router.add_post("/api/connections/{connection_id}/import-file", self._import_file)
+        for operation in (
+            "snapshot",
+            "history",
+            "observe",
+            "command",
+            "query-command",
+            "subagent-capacity",
+            "live-control-snapshot",
+            "resolve-interaction",
+            "read-capability-form",
+            "resolve-capability-form",
+            "resolve-plan-interaction",
+            "read-plan-question",
+            "read-plan-draft",
+            "read-content",
+            "read-tool-artifact",
+            "visualization-thumbnail",
+            "list-background-processes",
+            "read-background-process-log",
+        ):
+            self._app.router.add_post(
+                f"/api/connections/{{connection_id}}/{operation}",
+                self._protocol_handler(operation),
+            )
+
+    @web.middleware
+    async def _errors(
+        self,
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        try:
+            return await handler(request)
+        except web.HTTPException:
+            raise
+        except HttpPublicError as exc:
+            return self._error_response(
+                exc.code,
+                exc.public_message,
+                status=exc.status,
+                retryable=exc.retryable,
+            )
+        except CanonicalProtocolResourceExhausted as exc:
+            return self._error_response("RESOURCE_EXHAUSTED", str(exc), status=413, retryable=False)
+        except CanonicalProtocolGap as exc:
+            return self._error_response("HISTORY_CUT_CONFLICT", str(exc), status=409, retryable=False)
+        except ScheduledTaskError as exc:
+            return self._error_response(exc.code, str(exc), status=409 if exc.code in {"REVISION_CONFLICT", "COMMAND_CONFLICT", "TASK_CUT_CHANGED", "ACTIVE_TASK_CONFLICT"} else 400, retryable=False)
+        except WorkspaceUnavailable as exc:
+            return self._error_response("WORKSPACE_UNAVAILABLE", str(exc), status=409, retryable=False)
+        except SessionWriterConflict as exc:
+            return self._error_response("SESSION_WRITER_CONFLICT", str(exc), status=409, retryable=False)
+        except FilePreviewError as exc:
+            return self._error_response(exc.code, exc.message, status=exc.status, retryable=False)
+        except SessionDeleteRejected as exc:
+            return self._error_response(exc.public_code, str(exc), status=exc.status, retryable=True)
+        except ProtocolBridgeError as exc:
+            return self._error_response(
+                exc.code, exc.public_message, status=409, retryable=True
+            )
+        except McpManagementConflict:
+            if "session_id" in request.match_info:
+                return self._error_response(
+                    "PROJECT_CAPABILITY_STALE",
+                    "项目能力已经变化，请刷新后再修改。",
+                    status=409,
+                    retryable=True,
+                )
+            return web.json_response(
+                {
+                    "error": {
+                        "code": "MCP_CONFIG_CHANGED",
+                        "message": "连接已发生变化，请刷新后再修改。",
+                        "retryable": True,
+                    },
+                    "capabilities": await self.sessions.inspect_user_capabilities(),
+                },
+                status=409,
+            )
+        except McpConfiguredServerBoundExceeded:
+            return self._error_response(
+                "PROJECT_MCP_CAPACITY_REACHED",
+                "当前能力组合已无法再添加 MCP，请先移除一个不再使用的连接。",
+                status=409,
+                retryable=False,
+            )
+        except MemoryManagementError as exc:
+            return self._error_response(
+                exc.code,
+                str(exc),
+                status=exc.status,
+                retryable=exc.status in {409, 504},
+            )
+        except LocalSettingsSchemaUnsupported as exc:
+            return self._error_response(
+                "local_settings_schema_unsupported", str(exc), status=409, retryable=False
+            )
+        except LocalSettingsUnavailable:
+            return self._error_response(
+                "local_settings_unavailable",
+                "本机设置文件无法读取；请在设置页保存新配置以修复。",
+                status=409,
+                retryable=False,
+            )
+        except LocalSettingsPublishIndeterminate:
+            return self._error_response(
+                "local_settings_publication_indeterminate",
+                "无法确认本机设置是否已经保存；请重新读取设置后再决定是否重试。",
+                status=503,
+                retryable=True,
+            )
+        except ModelCatalogUnavailable:
+            return self._error_response(
+                "model_catalog_unavailable",
+                "models.dev 模型目录当前不可用，请稍后重试。",
+                status=503,
+                retryable=True,
+            )
+        except ModelCatalogInvalid:
+            return self._error_response(
+                "model_catalog_invalid",
+                "models.dev 模型目录返回了无法识别的内容。",
+                status=502,
+                retryable=True,
+            )
+        except ModelRuntimeUnavailable:
+            return self._error_response(
+                "model_configuration_unavailable",
+                "模型配置当前不可用，请检查设置或刷新模型目录。",
+                status=409,
+                retryable=True,
+            )
+        except PostgresSchemaError as exc:
+            if exc.code is PostgresSchemaFailureCode.MIGRATION_CONFIRMATION_UNRESOLVED:
+                return self._error_response(
+                    "DATABASE_OPERATION_UNCONFIRMED",
+                    "无法确认数据库操作是否已提交。请先检查数据库现状，不要直接再次重置。",
+                    status=409,
+                    retryable=False,
+                )
+            if exc.code is PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED:
+                return self._error_response(
+                    "DATABASE_RESET_REQUIRED",
+                    "现有数据结构与当前版本不兼容。请在本地服务设置中确认重置数据；初始化 / 升级不会清空旧数据。",
+                    status=409,
+                    retryable=False,
+                )
+            if exc.code in {
+                PostgresSchemaFailureCode.CONNECTION_FAILED,
+                PostgresSchemaFailureCode.DEADLINE_EXCEEDED,
+            }:
+                return self._error_response(
+                    "DATABASE_CONNECTION_FAILED",
+                    "无法连接内置数据服务，请重新启动 Pulsara 后重试。",
+                    status=409,
+                    retryable=exc.retryable,
+                )
+            if exc.code in {
+                PostgresSchemaFailureCode.UNMANAGED_DATABASE,
+                PostgresSchemaFailureCode.CATALOG_DRIFT,
+                PostgresSchemaFailureCode.EXTENSION_MISSING,
+                PostgresSchemaFailureCode.EXTENSION_TOO_OLD,
+                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+            }:
+                return self._error_response(
+                    "DATABASE_SCHEMA_ACTION_REQUIRED",
+                    "数据库尚未完成 Pulsara 初始化，或需要升级后才能使用。",
+                    status=409,
+                    retryable=False,
+                )
+            return self._error_response(
+                "DATABASE_OPERATION_FAILED",
+                "数据检查或初始化没有完成，请到通用设置检查数据。",
+                status=409,
+                retryable=exc.retryable,
+            )
+        except KeyError:
+            return self._error_response(
+                "LOCAL_RESOURCE_NOT_FOUND",
+                "请求的本地资源已失效。",
+                status=404,
+                retryable=True,
+            )
+        except (ValueError, TypeError):
+            return self._error_response(
+                "BAD_REQUEST", "请求内容不正确。", status=400, retryable=False
+            )
+        except KernelHostCoreClosing:
+            return self._error_response(
+                "APPLICATION_DRAINING",
+                "Pulsara 正在关闭。",
+                status=503,
+                retryable=True,
+            )
+        except RuntimeError:
+            return self._error_response(
+                "LOCAL_RUNTIME_ERROR",
+                "本地服务暂时无法完成这次请求。",
+                status=409,
+                retryable=True,
+            )
+        except BaseException:
+            return self._error_response(
+                "INTERNAL_ERROR",
+                "Pulsara 暂时无法完成这次请求。",
+                status=500,
+                retryable=False,
+            )
+
+    @web.middleware
+    async def _security(
+        self,
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        if self._port is not None:
+            expected_host = f"{LOOPBACK_HOST}:{self._port}"
+            if request.headers.get("Host") != expected_host:
+                raise HttpPublicError(
+                    "HOST_REJECTED",
+                    "请求没有发往当前的 Pulsara 本地地址。",
+                    status=421,
+                )
+        if request.path.startswith("/api/") and request.path != "/api/healthz":
+            if (
+                request.path.startswith(
+                    ("/api/sessions", "/api/connections", "/api/memories", "/api/scheduled-tasks")
+                )
+                and self._database_state() != "ready"
+            ):
+                raise HttpPublicError(
+                    "DATABASE_DATA_PLANE_UNAVAILABLE",
+                    "数据服务尚未就绪，请到通用设置检查数据。",
+                    status=503,
+                    retryable=True,
+                )
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                origin = request.headers.get("Origin")
+                if origin is not None and origin != self.origin:
+                    raise HttpPublicError(
+                        "ORIGIN_REJECTED",
+                        "请求不是从当前 Pulsara 页面发出的。",
+                        status=403,
+                    )
+                fetch_site = request.headers.get("Sec-Fetch-Site")
+                if fetch_site is not None and fetch_site not in {
+                    "same-origin",
+                    "none",
+                }:
+                    raise HttpPublicError(
+                        "CROSS_SITE_REQUEST_REJECTED",
+                        "不允许从其他网站发起请求。",
+                        status=403,
+                    )
+                if self._is_draining():
+                    raise HttpPublicError(
+                        "APPLICATION_DRAINING",
+                        "Pulsara 正在关闭。",
+                        status=503,
+                        retryable=True,
+                    )
+        if request.path.startswith("/api/local-settings/postgres"):
+            async with self._postgres_operation_lock:
+                return await handler(request)
+        return await handler(request)
+
+    async def _health(self, _request: web.Request) -> web.Response:
+        state = "ready" if self._is_ready() else "starting"
+        if self._is_draining():
+            state = "draining"
+        return web.json_response({"status": state})
+
+    async def _index(self, _request: web.Request) -> web.StreamResponse:
+        return web.FileResponse(self.static_root / "index.html")
+
+    async def _public_file(self, request: web.Request) -> web.StreamResponse:
+        relative = request.path.lstrip("/")
+        target = (self.static_root / relative).resolve()
+        if self.static_root not in target.parents or not target.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(target)
+
+    async def _bootstrap(self, _request: web.Request) -> web.Response:
+        payload = self.sessions.bootstrap_payload()
+        payload.update(await self._settings_read_model())
+        payload["runtime"] = {
+            "status": "ready" if self._is_ready() else "starting",
+            "origin": self.origin,
+            "database_state": self._database_state(),
+        }
+        return web.json_response(payload)
+
+    async def _model_catalog(self, _request: web.Request) -> web.Response:
+        catalog = self.catalog.selectable()
+        if catalog is None:
+            return web.json_response({"status": "unavailable", "routes": []})
+        return web.json_response(
+            {
+                "status": "ready",
+                "routes": [
+                    {
+                        "route_id": route.route_id,
+                        "display_name": route.display_name,
+                        "models": [
+                            _catalog_entry_payload(
+                                entry,
+                                model_runtime=self.model_runtime,
+                            )
+                            for entry in route.entries
+                        ],
+                    }
+                    for route in catalog.routes
+                ],
+            }
+        )
+
+    async def _refresh_model_catalog(self, _request: web.Request) -> web.Response:
+        await self.catalog.refresh()
+        return await self._model_catalog(_request)
+
+    async def _model_configurations(self, _request: web.Request) -> web.Response:
+        return web.json_response(
+            {"model_configurations": await self._connection_summaries()}
+        )
+
+    async def _add_model_configuration(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        while True:
+            resolved, api_key = self._resolve_model_configuration_body(body)
+            try:
+                await self.settings.add_model_connection(
+                    connection=resolved.config,
+                    api_key=api_key,
+                )
+                break
+            except ModelConnectionIdentityConflict:
+                # This create request has not exposed its allocated ID or key binding.
+                # Published/edit requests never enter this retry path.
+                continue
+        return web.json_response(
+            {
+                "model_configuration": await self._connection_summary(resolved.config),
+                "wire_shape_warning": _wire_shape_warning(
+                    resolved.target.target_facts.wire_shape_hint,
+                    resolved.config.target.wire_api,
+                ),
+            },
+            status=201,
+        )
+
+    async def _delete_model_configuration(self, request: web.Request) -> web.Response:
+        connection_id = ModelConnectionId(request.match_info["connection_id"])
+        settings, deleted = await self.settings.delete_model_connection(connection_id)
+        return web.json_response(
+            {
+                "model_configuration_id": connection_id.value,
+                "deleted": deleted,
+                "model_configurations": await self._connection_summaries(settings),
+            }
+        )
+
+    async def _model_configuration(self, request: web.Request) -> web.Response:
+        connection = self.settings.read().connection(
+            ModelConnectionId(request.match_info["connection_id"])
+        )
+        if connection is None:
+            raise KeyError("model connection does not exist")
+        # Read saved declarations, even when the current catalog cannot resolve them.
+        configuration: dict[str, object] = {
+            "model_id": connection.target.model_id,
+            "wire_api": connection.target.wire_api.value,
+            "api_key": None,
+        }
+        declared = connection.user_declared
+        if declared is None:
+            configuration.update(
+                source="models_dev",
+                route_id=connection.target.route_id,
+                reasoning_wire_profile=connection.reasoning_wire_profile.value,
+                context_window_tokens=connection.context_window_tokens,
+            )
+        else:
+            raw = cast(dict[str, object], model_connection_to_dict(connection)["user_declared"])
+            configuration.update(
+                source="user_declared",
+                configuration_name=declared.configuration_name,
+                base_url=connection.base_url,
+                authentication=declared.authentication.value,
+                context_tokens=declared.total_context_tokens,
+                max_output_tokens=declared.max_output_tokens,
+                tool_call=declared.tool_call,
+                input_modalities=declared.input_modalities,
+                reasoning=raw["reasoning"],
+            )
+        return web.json_response({
+            "configuration": configuration,
+            "base_url": connection.base_url,
+            "credential_configured": connection.requires_api_key,
+        })
+
+    async def _update_model_configuration(self, request: web.Request) -> web.Response:
+        connection_id = ModelConnectionId(request.match_info["connection_id"])
+        if self.settings.read().connection(connection_id) is None:
+            raise KeyError("model connection does not exist")
+        resolved, api_key = self._resolve_model_configuration_body(
+            await self._json_body(request), connection_id=connection_id
+        )
+        try:
+            await self.settings.update_model_connection(connection=resolved.config, api_key=api_key)
+        except ValueError as exc:
+            raise HttpPublicError("MODEL_CONFIGURATION_EDIT_INVALID", str(exc), status=400) from exc
+        return web.json_response({
+            "model_configuration": await self._connection_summary(resolved.config),
+            "wire_shape_warning": _wire_shape_warning(
+                resolved.target.target_facts.wire_shape_hint, resolved.config.target.wire_api,
+            ),
+        })
+
+    async def _test_model_configuration(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        raw_id = request.match_info.get("connection_id")
+        connection_id = None if raw_id is None else ModelConnectionId(raw_id)
+        resolved, api_key = self._resolve_model_configuration_body(body, connection_id=connection_id)
+        if connection_id is not None:
+            try:
+                api_key = self.settings.replacement_model_api_key(
+                    self.settings.read(), resolved.config, api_key
+                )
+            except ValueError as exc:
+                raise HttpPublicError("MODEL_CONFIGURATION_EDIT_INVALID", str(exc), status=400) from exc
+        try:
+            await probe_model_connection(
+                resolved=resolved,
+                catalog=self.catalog.selectable(),
+                route_wires=self.model_runtime.route_wires,
+                api_key=api_key,
+            )
+        except ModelConnectionProbeFailure as exc:
+            raise HttpPublicError(
+                "MODEL_CONNECTION_TEST_FAILED",
+                f"测试请求未通过（{exc.code}）：{exc.message}",
+                status=409,
+                retryable=True,
+            ) from exc
+        return web.json_response({"status": "ready"})
+
+    def _resolve_model_configuration_body(
+        self, body: dict[str, object], *, connection_id: ModelConnectionId | None = None
+    ) -> tuple[ResolvedModelConnection, str | None]:
+        source = body.get("source")
+        if source == "models_dev":
+            expected = {
+                "source",
+                "route_id",
+                "model_id",
+                "wire_api",
+                "reasoning_wire_profile",
+                "api_key",
+                "context_window_tokens",
+            }
+            if set(body) != expected or not all(
+                isinstance(body[key], str) and body[key] for key in expected - {"api_key", "context_window_tokens"}
+            ):
+                raise ValueError("catalog model configuration has an invalid shape")
+            api_key = body["api_key"]
+            if not (isinstance(api_key, str) and api_key) and not (
+                connection_id is not None and api_key is None
+            ):
+                raise ValueError("catalog model configuration requires an API key")
+            target = ModelTargetKey(
+                route_id=cast(str, body["route_id"]),
+                wire_api=WireApi(cast(str, body["wire_api"])),
+                model_id=cast(str, body["model_id"]),
+            )
+            return (
+                create_model_connection(
+                    connection_id=connection_id,
+                    context_window_tokens=body["context_window_tokens"],
+                    catalog=self.model_runtime.selectable_catalog(),
+                    target=target,
+                    route_wires=self.model_runtime.route_wires,
+                    reasoning_wire_profile=ReasoningWireProfile(
+                        cast(str, body["reasoning_wire_profile"])
+                    ),
+                ),
+                cast(str | None, api_key),
+            )
+        if source != "user_declared":
+            raise ValueError("model configuration source is invalid")
+        expected = {
+            "source",
+            "configuration_name",
+            "base_url",
+            "model_id",
+            "wire_api",
+            "authentication",
+            "api_key",
+            "context_tokens",
+            "max_output_tokens",
+            "tool_call",
+            "input_modalities",
+            "reasoning",
+        }
+        if set(body) != expected:
+            raise ValueError("custom model configuration has an invalid closed shape")
+        name = body["configuration_name"]
+        base_url = body["base_url"]
+        model_id = body["model_id"]
+        raw_wire_api = body["wire_api"]
+        raw_authentication = body["authentication"]
+        context_tokens = body["context_tokens"]
+        max_output_tokens = body["max_output_tokens"]
+        tool_call = body["tool_call"]
+        input_modalities = body["input_modalities"]
+        if (
+            not isinstance(name, str)
+            or not isinstance(base_url, str)
+            or not isinstance(model_id, str)
+            or not isinstance(raw_wire_api, str)
+            or not isinstance(raw_authentication, str)
+            or isinstance(context_tokens, bool)
+            or not isinstance(context_tokens, int)
+            or isinstance(max_output_tokens, bool)
+            or not isinstance(max_output_tokens, int)
+            or not isinstance(tool_call, bool)
+            or (input_modalities is not None and not isinstance(input_modalities, list))
+        ):
+            raise ValueError("custom model configuration fields are invalid")
+        authentication = ModelConnectionAuthentication(raw_authentication)
+        api_key = body["api_key"]
+        if authentication is ModelConnectionAuthentication.BEARER_API_KEY:
+            if not (isinstance(api_key, str) and api_key) and not (
+                connection_id is not None and api_key is None
+            ):
+                raise ValueError("custom bearer connection requires an API key")
+        elif api_key is not None:
+            raise ValueError("custom no-auth connection cannot include an API key")
+        reasoning_profile, reasoning = user_declared_reasoning_from_dict(
+            body["reasoning"]
+        )
+        declaration = UserDeclaredModelTarget(
+            configuration_name=name,
+            total_context_tokens=context_tokens,
+            max_output_tokens=max_output_tokens,
+            tool_call=tool_call,
+            input_modalities=None if input_modalities is None else tuple(input_modalities),
+            reasoning=reasoning,
+            authentication=authentication,
+        )
+        return (
+            create_user_declared_model_connection(
+                connection_id=connection_id,
+                model_id=model_id,
+                wire_api=WireApi(raw_wire_api),
+                base_url=base_url,
+                declaration=declaration,
+                route_wires=self.model_runtime.route_wires,
+                reasoning_wire_profile=reasoning_profile,
+            ),
+            cast(str | None, api_key),
+        )
+
+    async def _local_settings(self, _request: web.Request) -> web.Response:
+        return web.json_response(await self._settings_read_model())
+
+    async def _check_postgres(self, _request: web.Request) -> web.Response:
+        postgres = self.settings.read().postgres
+        if postgres is None:
+            raise HttpPublicError(
+                "DATABASE_NOT_CONFIGURED",
+                "应用管理的数据库当前不可用。",
+                status=409,
+            )
+        from pulsara_agent.storage.postgres_connection_provider import (
+            PostgresRuntimeConnectionFactory,
+        )
+
+        result = await asyncio.to_thread(
+            PostgresRuntimeConnectionFactory(postgres.runtime_dsn).verify,
+            deadline_monotonic=monotonic() + 30.0,
+        )
+        if self._database_state() != "ready":
+            await self._refresh_database_state()
+        return web.json_response(
+            {
+                "status": "verified",
+                "database_name": result.binding.database_name,
+                "runtime_role": result.binding.runtime_role,
+                "migration_head_version": result.binding.migration_head_version,
+            }
+        )
+
+    async def _reset_postgres(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if (
+            set(body) != {"confirmed"}
+            or body["confirmed"] is not True
+        ):
+            raise HttpPublicError(
+                "DATABASE_RESET_CONFIRMATION_REQUIRED",
+                "请先确认目标数据库和删除范围。",
+                status=409,
+            )
+        postgres = self.settings.read().postgres
+        if postgres is None or postgres.admin_dsn is None:
+            raise HttpPublicError(
+                "DATABASE_ADMIN_DSN_REQUIRED",
+                "应用管理的数据库当前不可用。",
+                status=409,
+            )
+        return web.json_response(await self._reset_postgres_data(postgres))
+
+    async def _read_memory_retrieval(self, _request):
+        return web.json_response(self.settings.read().memory_retrieval.public())
+
+    async def _wake_memory_embedding(self):
+        await self.sessions.core.wake_memory_embeddings()
+
+    @staticmethod
+    def _memory_settings_error(exc):
+        message = str(exc)
+        confirmation = message.startswith("EMBEDDING_CONFIRMATION_REQUIRED:")
+        return HttpPublicError(
+            "EMBEDDING_CONFIRMATION_REQUIRED" if confirmation else "INVALID_MEMORY_MODEL",
+            message.partition(":")[2].strip() if confirmation else message,
+            status=409 if confirmation else 400,
+        )
+
+    async def _set_history_enabled(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise self._memory_settings_error(ValueError("历史会话检索开关值无效。"))
+        try:
+            updated = await self.settings.set_retrieval_mode(history_enabled=body["enabled"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _set_embedding_enabled(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise self._memory_settings_error(ValueError("Embedding 开关值无效。"))
+        try:
+            updated = await self.settings.set_retrieval_mode(embedding_enabled=body["enabled"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        if updated.memory_retrieval.embedding_enabled:
+            await self._wake_memory_embedding()
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _set_ranking_mode(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"mode"} or not isinstance(body["mode"], str) or body["mode"] not in {"off", "decision", "rerank"}:
+            raise self._memory_settings_error(ValueError("重排档位无效。"))
+        try:
+            updated = await self.settings.set_retrieval_mode(ranking_mode=body["mode"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _put_memory_model(self, request):
+        try:
+            updated = await self.settings.save_retrieval_connection(request.match_info["slot"], await self._json_body(request))
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        if request.match_info["slot"] == "embedding" and updated.memory_retrieval.embedding_enabled:
+            await self._wake_memory_embedding()
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _delete_memory_model(self, request):
+        try:
+            updated = await self.settings.clear_retrieval_connection(request.match_info["slot"])
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        return web.json_response(updated.memory_retrieval.public())
+
+    async def _test_memory_model(self, request):
+        from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
+        from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
+        from time import perf_counter
+        slot = request.match_info["slot"]
+        try:
+            connection = self.settings.retrieval_draft(self.settings.read(), slot, await self._json_body(request))
+        except ValueError as exc:
+            raise self._memory_settings_error(exc) from None
+        provider = build_embedding_provider(connection) if slot == "embedding" else build_rerank_provider(connection)
+        started = perf_counter()
+        try:
+            if slot == "embedding":
+                vector = await provider.embed("A short memory about using PostgreSQL.")
+                detail = {"dimensions": len(vector)}
+            else:
+                rows = await provider.rerank("Which database does the project use?", [
+                    "The project uses PostgreSQL.", "The user prefers green tea."], candidate_ids=("m1", "m2"))
+                detail = {"result_count": len(rows)}
+        except Exception as exc:
+            message = str(exc)
+            if connection.api_key:
+                message = message.replace(connection.api_key, "[REDACTED]")
+            return self._error_response("RETRIEVAL_TEST_FAILED", message, status=400, retryable=False)
+        finally:
+            await provider.aclose()
+        return web.json_response({"status": "ready", "elapsed_ms": round((perf_counter() - started) * 1000, 2), **detail})
+
+    async def _read_context_usage(self, request: web.Request) -> web.Response:
+        return web.json_response(await self.sessions.read_context_usage(request.match_info["session_id"]))
+
+    async def _update_model_call_binding(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        binding = model_call_binding_from_dict(body)
+        if binding is None:
+            raise ValueError("session model binding cannot be null")
+        return web.json_response(
+            await self.sessions.update_model_call_binding(
+                request.match_info["session_id"], binding
+            )
+        )
+
+    async def _settings_read_model(self) -> dict[str, object]:
+        try:
+            settings = self.settings.read()
+            settings_state = "ready"
+        except LocalSettingsUnavailable:
+            settings = LocalSettings()
+            settings_state = "unavailable"
+        return {
+            "local_settings": {
+                "state": settings_state,
+                "pulsara_home": str(require_pulsara_home()),
+                "memory_retrieval": settings.memory_retrieval.public(),
+            },
+            "model_configurations": await self._connection_summaries(settings),
+            "database_state": self._database_state(),
+        }
+
+    async def _connection_summaries(
+        self, settings: LocalSettings | None = None
+    ) -> list[dict[str, object]]:
+        settings = settings or self.settings.read()
+        return [
+            await self._connection_summary(connection)
+            for connection in settings.model_connections
+        ]
+
+    async def _connection_summary(
+        self, connection: ModelConnectionConfig
+    ) -> dict[str, object]:
+        payload = model_connection_to_dict(connection)
+        payload.pop("user_declared", None)
+        payload.update(
+            {
+                "source": (
+                    "models_dev"
+                    if connection.user_declared is None
+                    else "user_declared"
+                ),
+                "authentication": connection.authentication.value,
+            }
+        )
+        try:
+            catalog = self.catalog.selectable()
+            contract = resolve_model_target_contract(
+                catalog=catalog,
+                connection=connection,
+                route_wires=self.model_runtime.route_wires,
+            )
+        except (KeyError, ValueError, ModelRuntimeUnavailable):
+            payload.update(
+                {
+                    "status": "unavailable",
+                    "credential_configured": connection.requires_api_key,
+                    "reasoning": {"kind": "unavailable"},
+                }
+            )
+            return payload
+        catalog_entry = (
+            catalog.entries.get(connection.target.catalog_key)
+            if catalog is not None and connection.user_declared is None
+            else None
+        )
+        payload.update(
+            {
+                "status": "ready",
+                "credential_configured": connection.requires_api_key,
+                "route_name": contract.target_facts.route_name,
+                "display_name": contract.target_facts.display_name,
+                "context_tokens": contract.target_facts.limits.total_context_tokens,
+                "context_window_tokens": connection.context_window_tokens,
+                "max_output_tokens": contract.target_facts.limits.max_output_tokens,
+                "tool_call": contract.target_facts.tool_call,
+                "input_modalities": contract.target_facts.input_modalities,
+                "output_modalities": (
+                    catalog_entry.output_modalities
+                    if catalog_entry is not None
+                    else None
+                ),
+                "reasoning": _reasoning_payload(contract.reasoning),
+                "reasoning_wire_profile": contract.reasoning_wire.profile.value,
+                "default_reasoning": reasoning_selection_to_dict(
+                    default_reasoning_selection(contract.reasoning)
+                ),
+            }
+        )
+        return payload
+
+    async def _list_sessions(self, _request: web.Request) -> web.Response:
+        return web.json_response({"sessions": await self.sessions.list_sessions()})
+
+    async def _list_session_tasks(self, request: web.Request) -> web.Response:
+        raw_limit = request.query.get("limit", "50")
+        try:
+            maximum_items = int(raw_limit)
+        except ValueError as exc:
+            raise HttpPublicError(
+                "TASK_PAGE_INVALID",
+                "任务列表的分页参数不正确。",
+                status=400,
+            ) from exc
+        try:
+            payload = await self.sessions.list_session_tasks(
+                request.match_info["session_id"],
+                maximum_items=maximum_items,
+                cursor=request.query.get("cursor"),
+                batch_id=request.query.get("batch_id"),
+            )
+        except ValueError as exc:
+            raise HttpPublicError(
+                "TASK_PAGE_INVALID",
+                "任务列表的分页参数不正确。",
+                status=400,
+            ) from exc
+        return web.json_response(payload)
+
+    async def _list_session_task_groups(self, request: web.Request) -> web.Response:
+        raw_limit = request.query.get("limit", "50")
+        try:
+            maximum_items = int(raw_limit)
+            payload = await self.sessions.list_session_task_groups(
+                request.match_info["session_id"],
+                maximum_items=maximum_items,
+                cursor=request.query.get("cursor"),
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail.startswith("TASK_BATCH_DATA_INCOMPLETE:"):
+                raise HttpPublicError(
+                    "TASK_BATCH_DATA_INCOMPLETE",
+                    f"任务缺少批次身份：{detail.partition(':')[2]}",
+                    status=409,
+                ) from exc
+            raise HttpPublicError(
+                "TASK_GROUP_PAGE_INVALID",
+                "任务组的分页参数不正确。",
+                status=400,
+            ) from exc
+        return web.json_response(payload)
+
+    async def _read_session_task(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.read_session_task(
+            request.match_info["session_id"],
+            request.match_info["task_id"],
+        )
+        return web.json_response(payload)
+
+    async def _read_session_task_group(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.read_session_task_group(
+            request.match_info["session_id"],
+            request.match_info["group_id"],
+        )
+        return web.json_response(payload)
+
+    async def _list_session_task_activities(self, request: web.Request) -> web.Response:
+        raw_limit = request.query.get("limit", "50")
+        try:
+            payload = await self.sessions.list_session_task_activities(
+                request.match_info["session_id"],
+                request.match_info["task_id"],
+                maximum_items=int(raw_limit),
+                cursor=request.query.get("cursor"),
+            )
+        except ValueError as exc:
+            raise HttpPublicError(
+                "TASK_ACTIVITY_PAGE_INVALID",
+                "任务活动的分页参数不正确。",
+                status=400,
+            ) from exc
+        return web.json_response(payload)
+
+    async def _inspect_session_capabilities(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.inspect_session_capabilities(
+            request.match_info["session_id"]
+        )
+        return web.json_response(payload)
+
+    async def _inspect_user_capabilities(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.inspect_user_capabilities(
+            active_session_id=request.query.get("active_session_id")
+        )
+        return web.json_response(payload)
+
+    async def _refresh_user_capabilities(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        active_session_id = _optional_body_string(body, "active_session_id")
+        if set(body) - {"active_session_id"}:
+            raise ValueError("unexpected capability refresh field")
+        return web.json_response(
+            await self.sessions.refresh_user_capabilities(
+                active_session_id=active_session_id
+            )
+        )
+
+    async def _open_capability_root(self, request: web.Request) -> web.Response:
+        result = await self.sessions.open_capability_root(request.match_info["root"])
+        return web.json_response(result)
+
+    async def _preview_skill_import(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"source_path"} or not isinstance(body["source_path"], str):
+            raise ValueError("Skill preview requires a selected local source path")
+        return web.json_response(
+            await self.sessions.preview_skill_import(source_path=body["source_path"])
+        )
+
+    async def _install_user_skill(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"source_path", "active_session_id", "name", "description"}:
+            raise ValueError("unexpected Skill install field")
+        source_path = body.get("source_path")
+        if not isinstance(source_path, str):
+            raise ValueError("Skill source path is required")
+        payload = await self.sessions.install_user_skill(
+            source_path=source_path,
+            active_session_id=_optional_body_string(body, "active_session_id"),
+            name=_optional_body_string(body, "name"),
+            description=_optional_body_string(body, "description"),
+        )
+        return web.json_response(payload, status=201)
+
+    async def _set_user_skill_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"path", "enabled", "active_session_id"}:
+            raise ValueError("unexpected Skill enablement field")
+        path = body.get("path")
+        enabled = body.get("enabled")
+        if not isinstance(path, str) or not isinstance(enabled, bool):
+            raise ValueError("Skill enablement fields are invalid")
+        return web.json_response(
+            await self.sessions.set_user_skill_enabled(
+                skill_path=path,
+                enabled=enabled,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _remove_skill(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"path", "expected", "active_session_id"}:
+            raise ValueError("unexpected Skill removal field")
+        path = _optional_body_string(body, "path")
+        raw = body.get("expected")
+        names = {"root_device", "root_inode", "directory_device", "directory_inode"}
+        if (
+            path is None
+            or not isinstance(raw, dict)
+            or set(raw) != names
+            or any(
+                not isinstance(value, str)
+                or not value.isascii()
+                or not value.isdecimal()
+                for value in raw.values()
+            )
+        ):
+            raise ValueError("Skill removal needs the current inspected identity")
+        expected = LocalSkillRemovalIdentity(
+            **{name: int(value) for name, value in raw.items()}
+        )
+        if "session_id" in request.match_info:
+            if "active_session_id" in body:
+                raise ValueError("Project Skill removal cannot select another session")
+            return web.json_response(
+                await self.sessions.remove_session_skill(
+                    request.match_info["session_id"],
+                    skill_path=path,
+                    expected=expected,
+                )
+            )
+        return web.json_response(
+            await self.sessions.remove_user_skill(
+                skill_path=path,
+                expected=expected,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _preview_mcp_import(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"content", "shape", "server_id"}:
+            raise ValueError("unexpected MCP import preview field")
+        return web.json_response(
+            await self.sessions.preview_mcp_import(**_mcp_import_source(body))
+        )
+
+    async def _import_mcp(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "content",
+            "shape",
+            "server_id",
+            "selected_server_id",
+            "allow_http_localhost",
+            "classifications",
+            "values",
+            "transport",
+            "active_session_id",
+        }:
+            raise ValueError("unexpected MCP import field")
+        selected = _optional_body_string(body, "selected_server_id")
+        if selected is None:
+            raise ValueError("MCP import requires a selected server")
+        return web.json_response(
+            await self.sessions.import_mcp(
+                **_mcp_import_source(body),
+                selected_server_id=selected,
+                classifications=_mcp_import_values(body, "classifications"),
+                values=_mcp_import_values(body, "values"),
+                transport=_optional_body_string(body, "transport"),
+                allow_http_localhost=body.get("allow_http_localhost", False),
+                active_session_id=_optional_body_string(body, "active_session_id"),
+                session_id=request.match_info.get("session_id"),
+            ),
+            status=201,
+        )
+
+    async def _create_user_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"server_id", "config", "secret_changes", "active_session_id"}:
+            raise ValueError("unexpected MCP field")
+        server_id = _optional_body_string(body, "server_id")
+        config = body.get("config")
+        if server_id is None or not isinstance(config, dict):
+            raise ValueError("MCP id and complete config are required")
+        return web.json_response(
+            await self.sessions.create_user_mcp_server(
+                server_id=server_id,
+                config=config,
+                secret_changes=_mcp_secret_changes(body),
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            ),
+            status=201,
+        )
+
+    async def _update_user_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "config",
+            "expected_identity",
+            "secret_changes",
+            "active_session_id",
+            "retain_credentials_confirmed",
+        }:
+            raise ValueError("unexpected MCP field")
+        config = body.get("config")
+        expected = _optional_body_string(body, "expected_identity")
+        if not isinstance(config, dict) or expected is None:
+            raise ValueError("MCP config and current identity are required")
+        return web.json_response(
+            await self.sessions.update_user_mcp_server(
+                server_id=request.match_info["server_id"],
+                config=config,
+                expected=expected,
+                secret_changes=_mcp_secret_changes(body),
+                active_session_id=_optional_body_string(body, "active_session_id"),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+            )
+        )
+
+    async def _test_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "server_id",
+            "config",
+            "secret_changes",
+            "retain_credentials_confirmed",
+        }:
+            raise ValueError("unexpected MCP test field")
+        server_id = _optional_body_string(body, "server_id")
+        config = body.get("config")
+        if server_id is None or not isinstance(config, dict):
+            raise ValueError("MCP id and complete test config are required")
+        return web.json_response(
+            await self.sessions.test_mcp_server(
+                server_id=server_id,
+                config=config,
+                secret_changes=_mcp_secret_changes(body),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+                session_id=request.match_info.get("session_id"),
+            )
+        )
+
+    async def _remove_user_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"expected_identity", "active_session_id"}:
+            raise ValueError("unexpected MCP removal field")
+        expected = _optional_body_string(body, "expected_identity")
+        if expected is None:
+            raise ValueError("MCP current identity is required")
+        return web.json_response(
+            await self.sessions.remove_user_mcp_server(
+                server_id=request.match_info["server_id"],
+                expected=expected,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _authorize_mcp(self, request: web.Request) -> web.Response:
+        if await self._json_body(request):
+            raise ValueError("MCP login uses the saved target")
+        return web.json_response(
+            await self.sessions.authorize_mcp(
+                request.match_info["server_id"],
+                session_id=request.match_info.get("session_id"),
+            ),
+            status=202,
+        )
+
+    async def _mcp_authorization(self, request: web.Request) -> web.Response:
+        if request.method != "GET" and await self._json_body(request):
+            raise ValueError("MCP authorization action has no draft")
+        action = (
+            "status"
+            if request.method == "GET"
+            else "logout"
+            if request.method == "DELETE"
+            else "cancel"
+        )
+        return web.json_response(
+            await self.sessions.mcp_authorization(
+                request.match_info["server_id"],
+                action=action,
+                session_id=request.match_info.get("session_id"),
+            )
+        )
+
+    async def _hook_response(self, operation):
+        from pulsara_agent.hooks.source import HookSourceConflict
+
+        try:
+            return web.json_response(await operation)
+        except HookSourceConflict as exc:
+            raise HttpPublicError("HOOK_SOURCE_CHANGED", str(exc), status=409) from exc
+        except TimeoutError as exc:
+            raise HttpPublicError(
+                "HOOK_OPERATION_TIMEOUT",
+                "Hook 操作超时，请刷新确认后重试。",
+                status=503,
+                retryable=True,
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise HttpPublicError(
+                "HOOK_CONFIG_INVALID",
+                await self.sessions.hook_error_message(exc),
+                status=400,
+            ) from exc
+
+    async def _read_user_hooks(self, _request):
+        return await self._hook_response(self.sessions.read_user_hooks())
+
+    async def _read_user_hook_config(self, _request):
+        return await self._hook_response(self.sessions.read_user_hook_config())
+
+    async def _save_user_hook_config(self, request):
+        body = await self._json_body(request)
+        if (
+            set(body) != {"exists", "expected_text", "text"}
+            or type(body["exists"]) is not bool
+            or not all(isinstance(body[k], str) for k in ("expected_text", "text"))
+        ):
+            raise ValueError("invalid Hook config submission")
+        return await self._hook_response(self.sessions.save_user_hook_config(**body))
+
+    async def _read_user_hook_review(self, request):
+        if set(request.query) - {"plugin_id"}:
+            raise ValueError("invalid Hook selector")
+        plugin_id = request.query.get("plugin_id")
+        if plugin_id == "":
+            raise ValueError("empty Plugin Hook selector")
+        return await self._hook_response(self.sessions.read_user_hook_review(plugin_id))
+
+    async def _trust_user_hook(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"plugin_id", "definition_digest", "trust", "accepted"}:
+            raise ValueError("invalid Hook review submission")
+        trust = body["trust"]
+        if (
+            (body["plugin_id"] is not None and not isinstance(body["plugin_id"], str))
+            or type(body["accepted"]) is not bool
+            or not isinstance(body["definition_digest"], str)
+        ):
+            raise ValueError("invalid Hook review values")
+        if (
+            not isinstance(trust, dict)
+            or set(trust) != {"enabled", "trusted_definition_digest", "trusted_at"}
+            or type(trust["enabled"]) is not bool
+            or any(
+                trust[k] is not None and not isinstance(trust[k], str)
+                for k in ("trusted_definition_digest", "trusted_at")
+            )
+        ):
+            raise ValueError("invalid Hook trust observation")
+        return await self._hook_response(self.sessions.trust_user_hook(**body))
+
+    async def _install_user_plugin(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "source_path",
+            "active_session_id",
+            "source_format",
+            "classifications",
+            "public_values",
+        }:
+            raise ValueError("unexpected Plugin install field")
+        source_path = body.get("source_path")
+        if not isinstance(source_path, str):
+            raise ValueError("Plugin source path is required")
+        payload = await self.sessions.install_user_plugin(
+            source_path=source_path,
+            active_session_id=_optional_body_string(body, "active_session_id"),
+            source_format=_optional_body_string(body, "source_format") or "native",
+            classifications=_plugin_import_strings(body, "classifications"),
+            public_values=_plugin_import_strings(body, "public_values"),
+        )
+        return web.json_response(payload, status=201)
+
+    async def _preview_plugin_import(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"source_path"} or not isinstance(body["source_path"], str):
+            raise ValueError("请选择插件源目录")
+        return web.json_response(await self.sessions.preview_plugin_import(**body))
+
+    async def _set_user_plugin_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "enabled",
+            "package_install_id",
+            "active_session_id",
+            "connection_review",
+        }:
+            raise ValueError("unexpected Plugin enablement field")
+        enabled = body.get("enabled")
+        package_install_id = body.get("package_install_id")
+        if not isinstance(enabled, bool) or not isinstance(package_install_id, str):
+            raise ValueError("Plugin enablement fields are invalid")
+        from pulsara_agent.plugins.mcp_connection import review_from_dict
+
+        connection_review = review_from_dict(body.get("connection_review"))
+        return web.json_response(
+            await self.sessions.set_user_plugin_enabled(
+                plugin_id=request.match_info["plugin_id"],
+                package_install_id=package_install_id,
+                enabled=enabled,
+                connection_review=connection_review,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _plugin_mcp_authorization(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"action", "package_install_id"}:
+            raise ValueError("Plugin MCP authorization fields are invalid")
+        package = _optional_body_string(body, "package_install_id")
+        action = _optional_body_string(body, "action")
+        if not package or action not in {"login", "logout", "cancel", "status"}:
+            raise ValueError("Plugin MCP authorization action is invalid")
+        return web.json_response(
+            await self.sessions.plugin_mcp_authorization(
+                plugin_id=request.match_info["plugin_id"],
+                server_id=request.match_info["server_id"],
+                package_install_id=package,
+                action=action,
+            )
+        )
+
+    async def _remove_user_plugin(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"active_session_id", "package_install_id"}:
+            raise ValueError("unexpected Plugin removal field")
+        package_install_id = body.get("package_install_id")
+        if not isinstance(package_install_id, str) or not package_install_id:
+            raise ValueError("Plugin removal requires the inspected package")
+        return web.json_response(
+            await self.sessions.remove_user_plugin(
+                plugin_id=request.match_info["plugin_id"],
+                package_install_id=package_install_id,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _replace_user_plugin_connection(
+        self, request: web.Request
+    ) -> web.Response:
+        from pulsara_agent.plugins.mcp_connection import overlay_from_dict
+
+        body = await self._json_body(request)
+        if set(body) - {
+            "package_install_id",
+            "expected_overlay",
+            "overlay",
+            "secret_changes",
+            "retain_credentials_confirmed",
+            "active_session_id",
+        }:
+            raise ValueError("unexpected Plugin connection field")
+        package = body.get("package_install_id")
+        if (
+            not isinstance(package, str)
+            or not package
+            or "expected_overlay" not in body
+            or "overlay" not in body
+        ):
+            raise ValueError("Plugin connection requires exact inspected values")
+        return web.json_response(
+            await self.sessions.replace_user_plugin_connection(
+                plugin_id=request.match_info["plugin_id"],
+                server_id=request.match_info["server_id"],
+                package_install_id=package,
+                expected_overlay=overlay_from_dict(body["expected_overlay"])
+                if body["expected_overlay"] is not None
+                else None,
+                overlay=overlay_from_dict(body["overlay"])
+                if body["overlay"] is not None
+                else None,
+                secret_changes=_mcp_secret_changes(body),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _reconnect_session_mcp(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.reconnect_session_mcp(
+            request.match_info["session_id"],
+            request.match_info["server_id"],
+        )
+        return web.json_response(payload)
+
+    async def _install_session_skill(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if "source_path" not in body or set(body) - {
+            "source_path",
+            "name",
+            "description",
+        }:
+            raise HttpPublicError(
+                "SKILL_INSTALL_REQUEST_INVALID",
+                "安装项目技能需要选择一个本地目录。",
+                status=400,
+            )
+        source_path = body["source_path"]
+        if not isinstance(source_path, str):
+            raise HttpPublicError(
+                "SKILL_INSTALL_REQUEST_INVALID",
+                "安装项目技能需要选择一个本地目录。",
+                status=400,
+            )
+        payload = await self.sessions.install_session_skill(
+            request.match_info["session_id"],
+            source_path=source_path,
+            name=_optional_body_string(body, "name"),
+            description=_optional_body_string(body, "description"),
+        )
+        return web.json_response(payload)
+
+    async def _set_session_skill_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"skill_id", "enabled"}:
+            raise ValueError("unexpected project Skill enablement field")
+        skill_id = body.get("skill_id")
+        enabled = body.get("enabled")
+        if not isinstance(skill_id, str) or not isinstance(enabled, bool):
+            raise ValueError("project Skill enablement fields are invalid")
+        return web.json_response(
+            await self.sessions.set_session_skill_enabled(
+                request.match_info["session_id"],
+                skill_id=skill_id,
+                enabled=enabled,
+            )
+        )
+
+    async def _create_session_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"server_id", "config", "secret_changes"}:
+            raise ValueError("unexpected project MCP field")
+        server_id = body.get("server_id")
+        config = body.get("config")
+        if not isinstance(server_id, str) or not isinstance(config, dict):
+            raise ValueError("project MCP fields are invalid")
+        payload = await self.sessions.create_session_mcp_server(
+            request.match_info["session_id"],
+            server_id=server_id,
+            config=config,
+            secret_changes=_mcp_secret_changes(body),
+        )
+        return web.json_response(payload, status=201)
+
+    async def _update_session_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "config",
+            "expected_identity",
+            "secret_changes",
+            "retain_credentials_confirmed",
+        }:
+            raise ValueError("unexpected project MCP update field")
+        config = body.get("config")
+        expected = _optional_body_string(body, "expected_identity")
+        if not isinstance(config, dict) or expected is None:
+            raise ValueError(
+                "project MCP requires complete config and inspected identity"
+            )
+        return web.json_response(
+            await self.sessions.update_session_mcp_server(
+                request.match_info["session_id"],
+                server_id=request.match_info["server_id"],
+                config=config,
+                expected_identity=expected,
+                secret_changes=_mcp_secret_changes(body),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+            )
+        )
+
+    async def _set_session_mcp_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"enabled", "config_identity"}:
+            raise ValueError("project MCP enablement fields are incomplete")
+        if not isinstance(body.get("enabled"), bool) or not isinstance(
+            body.get("config_identity"), str
+        ):
+            raise ValueError("project MCP enablement fields are invalid")
+        return web.json_response(
+            await self.sessions.set_session_mcp_enabled(
+                request.match_info["session_id"],
+                server_id=request.match_info["server_id"],
+                enabled=body["enabled"],
+                expected_config_identity=body["config_identity"],
+            )
+        )
+
+    async def _remove_session_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"config_identity"} or not isinstance(
+            body.get("config_identity"), str
+        ):
+            raise ValueError("project MCP removal identity is required")
+        return web.json_response(
+            await self.sessions.remove_session_mcp_server(
+                request.match_info["session_id"],
+                server_id=request.match_info["server_id"],
+                expected_config_identity=body["config_identity"],
+            )
+        )
+
+    async def _workspace_availability(self, request):
+        return web.json_response(await self.sessions.workspace_availability(request.match_info["session_id"]))
+
+    async def _restore_workspace(self, request):
+        if await self._json_body(request):
+            raise ValueError("workspace recovery accepts no client path or identity")
+        return web.json_response(await self.bridge.restore_workspace(
+            request.match_info["session_id"], request.headers.get("X-Pulsara-Connection-Id"),
+            int(request.headers.get("X-Pulsara-Connection-Generation", "0"))))
+
+    async def _history_snapshot(self, request):
+        return web.json_response(protobuf_json(await self.sessions.history_snapshot(request.match_info["session_id"])))
+
+    async def _cold_content(self, session_id, body, *, artifact=False):
+        if artifact:
+            content_request = wire.ReadToolArtifactRequest(
+                result_entry_id=body.get("result_entry_id", ""),
+                offset_chars=int(body.get("offset_chars", 0)), max_chars=int(body.get("max_chars", 32000)))
+        else:
+            if sum(field in body for field in ("entry_id", "queue_item_id", "image_ref")) != 1:
+                raise ValueError("exactly one canonical content owner is required")
+            if "image_ref" in body and any(key in body for key in ("block_id", "image_ref_ordinal", "visualization_ordinal")):
+                raise ValueError("image reference content target is invalid")
+            content_request = wire.ReadContentRequest(
+                block_id=body.get("block_id", ""), offset_bytes=int(body.get("offset_bytes", 0)),
+                limit_bytes=int(body.get("limit_bytes", 256 << 10)))
+            for field in ("entry_id", "queue_item_id", "image_ref", "image_ref_ordinal", "visualization_ordinal"):
+                if field in body:
+                    setattr(content_request, field, body[field])
+        return protobuf_json(await self.sessions.history_content(session_id, content_request, artifact=artifact))
+
+    async def _cold_history_action(self, request):
+        session_id = request.match_info["session_id"]
+        operation = request.path.rsplit("/", 1)[-1]
+        body = await self._json_body(request)
+        if operation == "window":
+            return web.json_response(await self.sessions.history_window(session_id, body))
+        if operation == "context":
+            return web.json_response(await self.sessions.history_context(session_id, body))
+        if operation == "history":
+            if not isinstance(body.get("cursor"), dict):
+                raise ValueError("history cursor is required")
+            return web.json_response(protobuf_json(await self.sessions.history_page(
+                session_id, body["cursor"],
+                browser_history_uint64(body.get("maximum_entries", 128), "history entries"),
+                browser_history_uint64(body.get("maximum_serialized_bytes", MAXIMUM_HISTORY_PAGE_BYTES), "history bytes"))))
+        if operation == "visualization-thumbnail":
+            return web.json_response(await self._visualization_previews.read_canonical(
+                body, read_content=lambda value: self._cold_content(session_id, value),
+                cancelled=lambda: request.transport is None or request.transport.is_closing()))
+        return web.json_response(await self._cold_content(session_id, body, artifact=operation == "read-tool-artifact"))
+
+    @web.middleware
+    async def _chat_write_admission(self, request, handler):
+        session_id = request.match_info.get("session_id")
+        if session_id and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            suffix = request.path.split("/api/sessions/", 1)[-1].split("/", 1)[-1]
+            independent = {session_id, "title", "archive", "unarchive", "archived", "connections", "restore-workspace", "path-candidates"}
+            if suffix not in independent and not suffix.startswith("history/"):
+                await self.bridge.require_chat_controller(
+                    request.headers.get("X-Pulsara-Connection-Id", ""),
+                    int(request.headers.get("X-Pulsara-Connection-Generation", "0")), session_id=session_id)
+        connection_id = request.match_info.get("connection_id")
+        if connection_id:
+            action = request.path.rsplit("/", 1)[-1]
+            write = action in {"command", "resolve-interaction", "resolve-plan-interaction", "resolve-capability-form"}
+            if action == "subagent-capacity":
+                write = not (await self._json_body(request)).get("read_only", False)
+            if write:
+                connection = await self.bridge._connection(connection_id)
+                await self.bridge.require_chat_controller(connection_id, connection.generation)
+        return await handler(request)
+
+    async def _read_session(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "session": await self.sessions.read_session(
+                    request.match_info["session_id"]
+                )
+            }
+        )
+
+    async def _fork_conversation(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"anchor_entry_id"} or any(
+            not isinstance(body[key], str) or not body[key] for key in body
+        ):
+            raise HttpPublicError(
+                "FORK_REQUEST_INVALID",
+                "分叉需要消息 ID，新会话身份由服务器创建。",
+                status=400,
+            )
+        return web.json_response(
+            await self.sessions.fork_conversation(
+                request.match_info["session_id"],
+                anchor_entry_id=body["anchor_entry_id"],
+            )
+        )
+
+    async def _workspace_path_candidates(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        prefix, cursor = body.get("prefix"), body.get("cursor")
+        if set(body) - {"prefix", "cursor"} or not isinstance(prefix, str) or (cursor is not None and not isinstance(cursor, str)):
+            raise ValueError("path candidates require a prefix string and optional cursor string")
+        try:
+            result = await self.sessions.complete_workspace_paths(request.match_info["session_id"], prefix, cursor)
+        except (OSError, ValueError) as exc:
+            raise HttpPublicError("PATH_CANDIDATES_UNAVAILABLE", "无法读取这个目录，请检查路径或访问权限。", status=400) from exc
+        return web.json_response(result)
+
+    async def _create_session(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"workspace_kind", "workspace_path", "model_call_binding"}:
+            raise HttpPublicError(
+                "WORKSPACE_REQUEST_INVALID",
+                "新建会话配置字段无效。",
+                status=400,
+            )
+        workspace_kind = body.get("workspace_kind")
+        workspace_path = body.get("workspace_path")
+        binding = None
+        if "model_call_binding" in body:
+            try:
+                binding = model_call_binding_from_dict(body["model_call_binding"])
+                if binding is None:
+                    raise ValueError("请选择模型。")
+            except (ValueError, TypeError) as exc:
+                raise HttpPublicError("MODEL_BINDING_INVALID", "模型或推理选项无效。", status=400) from exc
+        if workspace_kind not in {"quick", "project"}:
+            raise HttpPublicError(
+                "WORKSPACE_KIND_REQUIRED",
+                "请选择“快速开始”或“指定目录”。",
+                status=400,
+            )
+        if workspace_path is not None and not isinstance(workspace_path, str):
+            raise HttpPublicError(
+                "WORKSPACE_PATH_INVALID",
+                "工作目录路径不正确。",
+                status=400,
+            )
+        try:
+            handle = await self.sessions.create_session(
+                workspace_kind=cast(SessionWorkspaceKind, workspace_kind),
+                workspace_path=workspace_path,
+                **({"model_call_binding": binding} if binding is not None else {}),
+            )
+        except SessionControlRejected as exc:
+            raise HttpPublicError(
+                exc.public_code,
+                "模型配置已不可用，请刷新或检查设置。",
+                status=400,
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise HttpPublicError(
+                "WORKSPACE_UNAVAILABLE",
+                "这个工作目录不存在或无法使用。",
+                status=400,
+            ) from exc
+        summaries = await self.sessions.list_sessions()
+        summary = next(item for item in summaries if item["id"] == handle.session_id)
+        return web.json_response({"session": summary}, status=201)
+
+    async def _delete_session(self, request: web.Request) -> web.Response:
+        return await self._delete_session_request(request, archived_only=False)
+
+    async def _delete_archived_session(self, request: web.Request) -> web.Response:
+        return await self._delete_session_request(request, archived_only=True)
+
+    async def _delete_session_request(self, request: web.Request, *, archived_only: bool) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"confirm_permanent_delete"} or body["confirm_permanent_delete"] is not True:
+            raise HttpPublicError("SESSION_DELETE_CONFIRMATION_REQUIRED", "请先确认永久删除这条会话。", status=400)
+        try:
+            kwargs = {'action': 'delete_archived'} if archived_only else {}
+            return web.json_response(await self.sessions.delete_session(
+                request.match_info["session_id"], bridge=self.bridge, **kwargs,
+            ))
+        except SessionControlRejected as exc:
+            if not archived_only:
+                raise
+            raise HttpPublicError(exc.public_code, str(exc), status=409, retryable=True) from exc
+
+    async def _search_sessions(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if "query" not in body or set(body) - {"query", "lifecycle", "cursor", "limit"}:
+            raise ValueError("invalid session search fields")
+        if not isinstance(body["query"], str) or body.get("lifecycle", "ALL") not in ("ALL", "OPEN", "ARCHIVED"):
+            raise ValueError("invalid session search query")
+        if (body.get("cursor") is not None and not isinstance(body["cursor"], str)) or type(body.get("limit", 20)) is not int or not 1 <= body.get("limit", 20) <= 50:
+            raise ValueError("invalid session search page")
+        try:
+            return web.json_response(await self.sessions.search_sessions(**body))
+        except (TimeoutError, QueryCanceled) as exc:
+            raise HttpPublicError("SESSION_SEARCH_TIMEOUT", "本次搜索超时，请稍后重试。", status=503, retryable=True) from exc
+
+    async def _rename_session(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"title"} or not isinstance(body["title"], str):
+            raise HttpPublicError("INVALID_SESSION_TITLE", "请输入会话标题。", status=400)
+        try:
+            result = await self.sessions.rename_session(request.match_info["session_id"], body["title"])
+        except ValueError as exc:
+            raise HttpPublicError("INVALID_SESSION_TITLE", "标题不能为空，且不能包含换行或控制字符。", status=400) from exc
+        return web.json_response(result)
+
+    async def _list_archived_sessions(self, request: web.Request) -> web.Response:
+        return web.json_response({'sessions': await self.sessions.list_archived_sessions()})
+
+    async def _archive_session(self, request: web.Request) -> web.Response:
+        if await self._json_body(request):
+            raise ValueError('archive accepts an empty object')
+        return web.json_response(await self.sessions.archive_session(request.match_info['session_id'], bridge=self.bridge))
+
+    async def _unarchive_session(self, request: web.Request) -> web.Response:
+        if await self._json_body(request):
+            raise ValueError('unarchive accepts an empty object')
+        return web.json_response(await self.sessions.unarchive_session(request.match_info['session_id']))
+
+    async def _close_session(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        session_id = request.match_info["session_id"]
+        if body:
+            raise ValueError("runtime close accepts an empty object")
+        operation = await self.sessions.prepare_raw_close(session_id)
+        if operation is not None:
+            detach = await self.bridge.detach_session_for_raw_close(operation)
+            if isinstance(detach, BridgeDetachNotStarted):
+                await self.sessions.abort_prepared_raw_close(
+                    session_id, operation=operation
+                )
+                raise HttpPublicError(
+                    "SESSION_CLOSE_BUSY", detach.reason, status=409, retryable=True
+                )
+            if isinstance(detach, BridgeDetachFailed):
+                await self.bridge.quarantine_detach_failure(
+                    detach.token, error=detach.error
+                )
+                await self.sessions.quarantine_raw_close(
+                    operation, public_code="SESSION_CLOSE_QUARANTINED"
+                )
+                raise HttpPublicError(
+                    "SESSION_CLOSE_QUARANTINED",
+                    "会话关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                )
+            assert isinstance(detach, BridgeDetachFull)
+            close_full = False
+            try:
+                await self.sessions.settle_raw_close(session_id, operation=operation)
+                close_full = True
+            except BaseException:
+                await self.bridge.settle_raw_close_detach(
+                    detach.token, close_full=False
+                )
+                raise
+            settlement = await self.bridge.settle_raw_close_detach(
+                detach.token, close_full=close_full
+            )
+            if isinstance(settlement, BridgeSettlementFailed):
+                await self.sessions.quarantine_raw_close(
+                    operation, public_code="SESSION_CLOSE_QUARANTINED"
+                )
+                raise HttpPublicError(
+                    "SESSION_CLOSE_QUARANTINED",
+                    "会话关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                )
+            await self.sessions.finalize_raw_close(
+                operation,
+                bridge_settlement=settlement,
+                bridge_owner=self.bridge,
+            )
+        return web.json_response(
+            {
+                "status": "closed",
+            }
+        )
+
+    async def _runtime_reopen_session(self, request: web.Request) -> web.Response:
+        raw = await request.read()
+        if raw.strip():
+            raise ValueError("runtime reopen request body must be empty")
+        session_id = request.match_info["session_id"]
+        cancel_requested = asyncio.Event()
+        commit_decision = asyncio.Lock()
+
+        async def settle() -> dict[str, object]:
+            try:
+                operation = await self.sessions.prepare_runtime_reopen(session_id)
+            except SessionControlRejected as exc:
+                raise HttpPublicError(
+                    exc.public_code,
+                    (
+                        "当前会话仍有运行中的工作，暂时不能重开运行时。"
+                        if exc.public_code == "RUNTIME_REOPEN_BUSY"
+                        else "会话运行时已隔离，请重启 Pulsara 后再继续。"
+                    ),
+                    status=409,
+                    retryable=exc.public_code == "RUNTIME_REOPEN_BUSY",
+                ) from exc
+
+            async with commit_decision:
+                if cancel_requested.is_set():
+                    await self.sessions.abort_runtime_reopen(
+                        operation, reason="HTTP_REQUEST_CANCELLED"
+                    )
+                    return {"status": "cancelled"}
+
+            detach = await self.bridge.detach_session_for_runtime_reopen(operation)
+            if isinstance(detach, BridgeDetachNotStarted):
+                await self.sessions.abort_runtime_reopen(
+                    operation, reason=detach.reason
+                )
+                raise HttpPublicError(
+                    "RUNTIME_REOPEN_BUSY",
+                    "会话连接正在变化，请稍后重试。",
+                    status=409,
+                    retryable=True,
+                )
+            if isinstance(detach, BridgeDetachFailed):
+                await self.bridge.quarantine_detach_failure(
+                    detach.token, error=detach.error
+                )
+                await self.sessions.quarantine_runtime_reopen(
+                    operation,
+                    public_code="RUNTIME_REOPEN_QUARANTINED",
+                )
+                raise HttpPublicError(
+                    "RUNTIME_REOPEN_QUARANTINED",
+                    "运行时连接关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                )
+            assert isinstance(detach, BridgeDetachFull)
+            bridge_token_terminal = False
+            try:
+                async with commit_decision:
+                    if cancel_requested.is_set():
+                        await self.sessions.prepare_abort_runtime_reopen(operation)
+                        abort_settlement = (
+                            await self.bridge.settle_runtime_reopen_abort(detach.token)
+                        )
+                        bridge_token_terminal = True
+                        if isinstance(abort_settlement, BridgeSettlementFailed):
+                            await self.sessions.quarantine_runtime_reopen(
+                                operation,
+                                public_code="RUNTIME_REOPEN_QUARANTINED",
+                            )
+                            return {
+                                "status": "quarantined",
+                                "public_code": "RUNTIME_REOPEN_QUARANTINED",
+                            }
+                        await self.sessions.finalize_abort_runtime_reopen(
+                            operation,
+                            bridge_settlement=abort_settlement,
+                            bridge_owner=self.bridge,
+                        )
+                        return {"status": "cancelled"}
+                    host_outcome = (
+                        await self.sessions.prepare_runtime_reopen_close(operation)
+                    )
+                bridge_settlement = await self.bridge.settle_runtime_reopen_detach(
+                    detach.token, host_outcome
+                )
+                bridge_token_terminal = True
+                if isinstance(host_outcome, OldHostCloseQuarantined) or isinstance(
+                    bridge_settlement, BridgeSettlementFailed
+                ):
+                    await self.sessions.quarantine_runtime_reopen(
+                        operation, public_code="RUNTIME_REOPEN_QUARANTINED"
+                    )
+                    raise HttpPublicError(
+                        "RUNTIME_REOPEN_QUARANTINED",
+                        "运行时关闭结果不确定，请重启 Pulsara 后再继续。",
+                        status=409,
+                    )
+                observation = await self.sessions.finalize_runtime_reopen(
+                    operation,
+                    host_outcome=host_outcome,
+                    bridge_settlement=bridge_settlement,
+                    bridge_owner=self.bridge,
+                )
+                try:
+                    handle = await self.sessions.resume_session(
+                        session_id,
+                        no_live_observation=observation,
+                    )
+                except BaseException as exc:
+                    return {
+                        "status": "deferred",
+                        "public_code": "RUNTIME_CLOSED_REOPEN_DEFERRED",
+                        "detail": str(exc),
+                    }
+                return {
+                    "status": "reopened",
+                    "session_id": handle.session_id,
+                    "host_session_id": handle.host_session_id,
+                }
+            except BaseException as exc:
+                if not bridge_token_terminal:
+                    try:
+                        await self.bridge.quarantine_detach_failure(
+                            detach.token,
+                            error=type(exc).__name__,
+                        )
+                    except BaseException:
+                        pass
+                try:
+                    await self.sessions.quarantine_runtime_reopen(
+                        operation,
+                        public_code="RUNTIME_REOPEN_QUARANTINED",
+                    )
+                except BaseException:
+                    pass
+                if isinstance(exc, HttpPublicError):
+                    raise
+                raise HttpPublicError(
+                    "RUNTIME_REOPEN_QUARANTINED",
+                    "运行时关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                ) from exc
+
+        task = asyncio.create_task(
+            settle(), name=f"desktop-runtime-reopen:{session_id}"
+        )
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            async with commit_decision:
+                cancel_requested.set()
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            task.result()
+            raise
+        return web.json_response(result)
+
+    async def _connect(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        browser_instance_id = _optional_body_string(body, "browser_instance_id")
+        if browser_instance_id is None:
+            raise ValueError("browser_instance_id is required")
+        require_id(browser_instance_id, "transport")
+        takeover = body.get("takeover", False)
+        if not isinstance(takeover, bool):
+            raise ValueError("takeover must be boolean")
+        payload = await self.bridge.connect(
+            request.match_info["session_id"],
+            browser_instance_id=browser_instance_id,
+            takeover=takeover,
+        )
+        return web.json_response(payload, status=201)
+
+    async def _disconnect(self, request: web.Request) -> web.Response:
+        await self.bridge.disconnect(request.match_info["connection_id"])
+        return web.json_response({"status": "detached"})
+
+    async def _import_file(self, request: web.Request) -> web.Response:
+        connection_id = request.match_info["connection_id"]
+        generation = int(request.headers.get("X-Pulsara-Connection-Generation", "0"))
+        await self.bridge.require_import_controller(connection_id, generation)
+        if request.headers.get("Content-Encoding"):
+            raise HttpPublicError("IMPORT_ENCODING_REJECTED", "请传输文件原始字节。", status=400)
+        pending = None
+        try:
+            pending = LocalImport()
+            name = await receive_file(request, pending)
+            await self.bridge.require_import_controller(connection_id, generation)
+            if self._is_draining() or request.transport is None or request.transport.is_closing():
+                raise HttpPublicError("IMPORT_INTERRUPTED", "导入已中断，请重新选择文件。", status=409)
+            return web.json_response(pending.publish(name))
+        except OSError as exc:
+            import errno
+            exhausted = exc.errno in {errno.ENOSPC, errno.EDQUOT}
+            raise HttpPublicError("IMPORT_STORAGE_FULL" if exhausted else "IMPORT_FILESYSTEM_ERROR",
+                                  "本机存储空间不足。" if exhausted else f"无法保存本地副本：{exc.strerror or exc}",
+                                  status=507 if exhausted else 400) from exc
+        except ValueError as exc:
+            raise HttpPublicError("IMPORT_INVALID", str(exc), status=400) from exc
+        finally:
+            if pending is not None:
+                pending.close()
+
+    def _protocol_handler(
+        self, operation: str
+    ) -> Callable[[web.Request], Awaitable[web.Response]]:
+        async def handler(request: web.Request) -> web.Response:
+            connection_id = request.match_info["connection_id"]
+            body = await self._json_body(request)
+            methods = {
+                "snapshot": lambda: self.bridge.snapshot(connection_id),
+                "history": lambda: self.bridge.history(connection_id, body),
+                "observe": lambda: self.bridge.observe(connection_id, body),
+                "command": lambda: self.bridge.command(connection_id, body),
+                "query-command": lambda: self.bridge.query_command(connection_id, body),
+                "subagent-capacity": lambda: self.bridge.subagent_capacity(connection_id, body),
+                "live-control-snapshot": lambda: self.bridge.live_control_snapshot(
+                    connection_id
+                ),
+                "resolve-interaction": lambda: self.bridge.resolve_interaction(
+                    connection_id, body
+                ),
+                "read-capability-form": lambda: self.bridge.capability_form(
+                    connection_id,
+                    body,
+                    submit=False,
+                ),
+                "resolve-capability-form": lambda: self.bridge.capability_form(
+                    connection_id,
+                    body,
+                    submit=True,
+                ),
+                "resolve-plan-interaction": lambda: (
+                    self.bridge.resolve_plan_interaction(connection_id, body)
+                ),
+                "read-plan-question": lambda: self.bridge.read_plan_question(
+                    connection_id, body
+                ),
+                "read-plan-draft": lambda: self.bridge.read_plan_draft(
+                    connection_id, body
+                ),
+                "read-content": lambda: self.bridge.read_content(connection_id, body),
+                "visualization-thumbnail": lambda: self._visualization_previews.read(
+                    connection_id, body, cancelled=lambda: request.transport is None or request.transport.is_closing(),
+                ),
+                "read-tool-artifact": lambda: self.bridge.read_tool_artifact(
+                    connection_id, body
+                ),
+                "list-background-processes": lambda: (
+                    self.bridge.list_background_processes(connection_id, body)
+                ),
+                "read-background-process-log": lambda: (
+                    self.bridge.read_background_process_log(connection_id, body)
+                ),
+            }
+            return web.json_response(await methods[operation]())
+
+        return handler
+
+    @staticmethod
+    async def _json_body(request: web.Request) -> dict[str, object]:
+        try:
+            # Admission may have consumed the stream; aiohttp retains the body
+            # in its read cache, whereas can_read_body only describes the stream.
+            if not await request.read():
+                return {}
+            value = await request.json()
+        except web.HTTPException:
+            raise
+        except Exception as exc:
+            raise ValueError("request body must be a JSON object") from exc
+        if not isinstance(value, dict):
+            raise ValueError("request body must be a JSON object")
+        return value
+
+    @staticmethod
+    def _error_response(
+        code: str,
+        message: str,
+        *,
+        status: int,
+        retryable: bool,
+    ) -> web.Response:
+        return web.json_response(
+            {
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "retryable": retryable,
+                }
+            },
+            status=status,
+        )
+
+
+__all__ = [
+    "HttpPublicError",
+    "LOOPBACK_HOST",
+    "LocalHttpServer",
+]

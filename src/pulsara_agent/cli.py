@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import signal
 import sys
-from time import monotonic
 from pulsara_agent.plugins.contracts import SuccessfulPluginInstallOutcome
 
 from pulsara_agent import __version__
@@ -55,12 +54,6 @@ from pulsara_agent.mcp_config import (
     StdioTransportConfig,
     StreamableHttpTransportConfig,
 )
-from pulsara_agent.primitives.permission import (
-    DEFAULT_PERMISSION_MODE,
-    PermissionMode,
-    parse_permission_mode,
-)
-from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.settings import (
     LocalSettings,
     LocalSettingsStore,
@@ -113,20 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
 
-    app = _add_app_runtime_args(
-        commands.add_parser("app", help="Run the complete local Pulsara Web app.")
-    )
-    app.add_argument("--port", type=int, default=0)
-    app.add_argument(
-        "--no-open",
-        action="store_true",
-        help="Print the local app URL without opening the default browser.",
-    )
-    app.add_argument(
-        "--static-root",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
+    commands.add_parser("app", help="Launch or focus the installed Pulsara desktop application.")
 
     skills = commands.add_parser("skills")
     skill_commands = skills.add_subparsers(dest="skills_command")
@@ -223,7 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     database = commands.add_parser("db")
     database_commands = database.add_subparsers(dest="db_command")
-    for name, deadline in (("status", 10.0), ("migrate", 300.0), ("verify", 30.0)):
+    for name, deadline in (("status", 10.0), ("verify", 30.0)):
         command = _add_database_args(database_commands.add_parser(name), deadline)
         if name == "verify":
             command.add_argument("--deep", action="store_true")
@@ -247,26 +227,6 @@ def _add_database_args(
     return parser
 
 
-def _add_app_runtime_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--memory-domain-id", default=None)
-    parser.add_argument("--skill", action="append", default=[])
-    parser.add_argument(
-        "--trust-workspace-mcp",
-        action="store_true",
-        help=(
-            "Trust project .pulsara/mcp.yaml when opening sessions. "
-            "Disabled by default because workspace MCP may launch code "
-            "or resolve secret references."
-        ),
-    )
-    parser.add_argument(
-        "--permission-mode",
-        choices=tuple(item.value for item in PermissionMode),
-        default=None,
-    )
-    return parser
-
-
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -275,7 +235,8 @@ def main() -> None:
         return
     if args.command == "app":
         try:
-            asyncio.run(_local_web_app(args))
+            from pulsara_agent.desktop_launcher import launch_desktop
+            launch_desktop()
             return
         except (ValueError, KeyError, RuntimeError, OSError) as exc:
             parser.error(_public_error(exc))
@@ -334,7 +295,7 @@ def main() -> None:
             from pulsara_agent.storage.migrations.errors import PostgresSchemaError
 
             if not isinstance(exc, PostgresSchemaError):
-                raise
+                parser.error(_public_error(exc))
             print(
                 json.dumps(
                     {
@@ -351,30 +312,6 @@ def main() -> None:
         print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
         return
     parser.print_help()
-
-
-async def _local_web_app(args) -> None:
-    from pulsara_agent.web_app import (
-        LocalWebApplication,
-        run_local_web_application,
-    )
-
-    settings, catalog, runtime = _runtime_services()
-    application = LocalWebApplication(
-        settings=settings,
-        catalog=catalog,
-        model_runtime=runtime,
-        memory_domain_id=args.memory_domain_id or "u_local",
-        trust_workspace_mcp_config=args.trust_workspace_mcp,
-        permission_policy=_permission_policy(args),
-        active_skill_names=_active_skill_names_from_args(args),
-        port=args.port,
-        static_root=(None if args.static_root is None else Path(args.static_root)),
-    )
-    await run_local_web_application(
-        application,
-        open_browser=not args.no_open,
-    )
 
 
 class _SkillCliUsageError(ValueError):
@@ -1766,65 +1703,11 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("db requires a subcommand")
     if not 1 <= args.deadline_seconds <= 3600:
         raise ValueError("--deadline-seconds must be between 1 and 3600")
-    postgres = LocalSettingsStore().read().postgres
-    if postgres is None:
-        raise ValueError("PostgreSQL is not configured in local settings")
-    runtime_dsn = postgres.runtime_dsn
-    deadline = monotonic() + args.deadline_seconds
-    from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
-    from pulsara_agent.storage.migrations.runner import (
-        PostgresMigrationRunner,
-        _read_identity_from_connection,
-        read_migration_ledger,
+    from pulsara_agent.desktop_runtime import request_database_diagnostic
+    return request_database_diagnostic(
+        command=args.db_command, deadline_seconds=args.deadline_seconds,
+        deep=getattr(args, "deep", False),
     )
-    from pulsara_agent.storage.migrations.verifier import classify_migration_history
-    from pulsara_agent.storage.postgres_connection_provider import (
-        PostgresRuntimeConnectionFactory,
-    )
-
-    factory = PostgresRuntimeConnectionFactory(runtime_dsn)
-    if args.db_command == "status":
-        with factory.connect(
-            deadline_monotonic=deadline, autocommit=False
-        ) as connection:
-            with connection.transaction():
-                connection.execute(
-                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
-                )
-                identity = _read_identity_from_connection(connection)
-                rows = read_migration_ledger(connection)
-        return {
-            "status": classify_migration_history(rows).value,
-            "database_name": identity.database_name,
-            "runtime_role": identity.runtime_role,
-            "migration_head_version": rows[-1].version if rows else None,
-            "expected_head_version": POSTGRES_MIGRATION_REGISTRY.latest_version,
-            "observed_registry_prefix_fingerprint": (
-                rows[-1].registry_prefix_fingerprint if rows else None
-            ),
-            "expected_registry_prefix_fingerprint": (
-                POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
-            ),
-        }
-    if args.db_command == "migrate":
-        admin_dsn = postgres.admin_dsn
-        if admin_dsn is None:
-            raise ValueError("PostgreSQL admin DSN is not configured")
-        report = PostgresMigrationRunner(
-            admin_dsn=admin_dsn,
-            runtime_dsn=runtime_dsn,
-        ).migrate(deadline_monotonic=deadline)
-        return report.to_dict()
-    if args.deep:
-        return factory.verify_deep(deadline_monotonic=deadline).result.to_dict()
-    bundle = factory.verify(deadline_monotonic=deadline)
-    return {
-        "status": "verified",
-        "database_name": bundle.binding.database_name,
-        "runtime_role": bundle.binding.runtime_role,
-        "migration_head_version": bundle.binding.migration_head_version,
-        "result_fingerprint": bundle.result.result_fingerprint,
-    }
 
 
 def _runtime_services():
@@ -1899,28 +1782,17 @@ async def _config_check() -> dict[str, object]:
                 "detail": detail,
             }
         )
-    database: dict[str, object]
-    if settings.postgres is None:
-        database = {"status": "database_not_configured"}
-    else:
-        from pulsara_agent.storage.postgres_connection_provider import (
-            PostgresRuntimeConnectionFactory,
+    from pulsara_agent.desktop_runtime import request_database_diagnostic
+    try:
+        verified = await asyncio.to_thread(
+            request_database_diagnostic, command="verify", deadline_seconds=30.0,
         )
-
-        try:
-            bundle = await asyncio.to_thread(
-                PostgresRuntimeConnectionFactory(settings.postgres.runtime_dsn).verify,
-                deadline_monotonic=monotonic() + 30.0,
-            )
-        except Exception as exc:
-            database = {"status": "unavailable", "detail": str(exc)}
-        else:
-            database = {
-                "status": "ready",
-                "database_name": bundle.binding.database_name,
-                "runtime_role": bundle.binding.runtime_role,
-                "migration_head_version": bundle.binding.migration_head_version,
-            }
+        database = {"status": "ready", **{
+            key: verified[key]
+            for key in ("database_name", "runtime_role", "migration_head_version")
+        }}
+    except RuntimeError as exc:
+        database = {"status": "unavailable", "detail": str(exc)}
     return {
         "local_settings": {"status": settings_status, "detail": settings_error},
         "catalog": {"status": catalog_status, "detail": catalog_error},
@@ -1928,17 +1800,6 @@ async def _config_check() -> dict[str, object]:
         "memory_retrieval": settings.memory_retrieval.public(),
         "model_connections": connections,
     }
-
-
-def _active_skill_names_from_args(args) -> frozenset[str]:
-    return frozenset(item.strip() for item in args.skill if item.strip())
-
-
-def _permission_policy(args):
-    raw = args.permission_mode
-    if raw:
-        return preset_to_policy(parse_permission_mode(raw.strip()))
-    return preset_to_policy(DEFAULT_PERMISSION_MODE)
 
 
 def _public_error(exc: BaseException) -> str:

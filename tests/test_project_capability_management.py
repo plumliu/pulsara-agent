@@ -37,7 +37,7 @@ from pulsara_agent.mcp_config import (
     load_workspace_mcp_server_configs,
     mcp_server_workspace_approval_identity,
 )
-from pulsara_agent.web_app.session_controller import (
+from pulsara_agent.desktop_app.session_controller import (
     HostSessionHandle,
     LocalSessionController,
     _capability_payload,

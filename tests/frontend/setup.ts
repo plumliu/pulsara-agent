@@ -1,3 +1,7 @@
+import { beforeEach } from 'vitest';
+import { initializeUiPreferences } from '../../frontend/lib/ui-preferences';
+beforeEach(() => initializeUiPreferences({}));
+
 if (!Range.prototype.getClientRects) {
   Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
 }

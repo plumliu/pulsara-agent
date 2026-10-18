@@ -584,7 +584,7 @@ async def test_plugin_delete_cleans_private_values_but_not_data_and_stale_delete
 
 @pytest.mark.anyio
 async def test_disabled_plugin_inspection_keeps_overlay_for_one_shared_editor(tmp_path):
-    from pulsara_agent.web_app.session_controller import _user_plugins_payload
+    from pulsara_agent.desktop_app.session_controller import _user_plugins_payload
 
     service, connections, request, _ = await fixture(tmp_path)
     await service.replace_plugin_mcp_connection_overlay(

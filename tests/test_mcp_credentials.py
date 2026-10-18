@@ -50,14 +50,13 @@ def test_references_are_closed_and_missing_never_anonymous(monkeypatch):
 
 def test_mcp_settings_preserve_other_fields_and_exact_owner(tmp_path):
     async def scenario():
-        store = LocalSettingsStore(tmp_path / "private" / "local-settings.yaml")
+        store = LocalSettingsStore(tmp_path / "private" / "local-settings.yaml", postgres=LocalPostgresConfig("postgresql://localhost/test"))
         owner = McpCredentialOwner("local", "USER", "test")
         other = McpCredentialOwner("local", 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', "test")
         binding = McpCredentialBinding(owner, "bearer")
         second = McpCredentialBinding(other, "bearer")
         await store.replace_mcp_secrets(owner, ((binding, "private-test-token"),))
         await store.replace_mcp_secrets(other, ((second, "other-token"),))
-        await store.save_postgres(LocalPostgresConfig("postgresql://localhost/test"))
         await save_model(store, "embedding", "embedding-token")
         await save_model(store, "rerank", "rerank-token")
         await store.clear_retrieval_connection("embedding")

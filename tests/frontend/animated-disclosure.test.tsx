@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { act, cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnimatedDisclosure } from '../../frontend/components/animated-disclosure';
 
 afterEach(cleanup);
@@ -25,4 +25,32 @@ describe('AnimatedDisclosure', () => {
     expect(disclosure.getAttribute('aria-hidden')).toBe('true');
     expect(disclosure.hasAttribute('inert')).toBe(true);
   });
+});
+
+it.each(['finish', 'cancel'])('releases expensive children after its closing transition %s', async outcome => {
+  let settle!: () => void;
+  const finished = new Promise<void>((resolve, reject) => {settle = outcome === 'finish' ? resolve : () => reject(new Error('cancelled'));});
+  const view = render(<AnimatedDisclosure open unmountOnClose><p>expensive content</p></AnimatedDisclosure>);
+  const getAnimations=vi.fn(()=>[{finished}]);
+  Object.defineProperty(view.container.firstElementChild!, 'getAnimations', {value:getAnimations});
+  view.rerender(<AnimatedDisclosure open={false} unmountOnClose><p>expensive content</p></AnimatedDisclosure>);
+  expect(view.container.firstElementChild!.hasAttribute('inert')).toBe(true);
+  expect(screen.getByText('expensive content')).toBeTruthy();
+  expect(getAnimations).toHaveBeenCalledExactlyOnceWith();
+  await act(async()=>settle());
+  expect(screen.queryByText('expensive content')).toBeNull();
+});
+it('ignores an old closing transition after rapid reopen and releases immediately without animations', async () => {
+  let settle!: () => void;
+  const finished = new Promise<void>(resolve=>{settle=resolve;});
+  const view=render(<AnimatedDisclosure open unmountOnClose><p>content</p></AnimatedDisclosure>);
+  const getAnimations=vi.fn(()=>[{finished}]);
+  Object.defineProperty(view.container.firstElementChild!, 'getAnimations',{value:getAnimations});
+  view.rerender(<AnimatedDisclosure open={false} unmountOnClose><p>content</p></AnimatedDisclosure>);
+  view.rerender(<AnimatedDisclosure open unmountOnClose><p>content</p></AnimatedDisclosure>);
+  await act(async()=>settle());
+  expect(screen.getByText('content')).toBeTruthy();
+  getAnimations.mockReturnValue([]); // CSS reduced-motion has no transitions.
+  view.rerender(<AnimatedDisclosure open={false} unmountOnClose><p>content</p></AnimatedDisclosure>);
+  expect(screen.queryByText('content')).toBeNull();
 });

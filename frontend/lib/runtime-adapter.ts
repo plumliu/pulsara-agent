@@ -1,3 +1,4 @@
+import { desktopHost } from './desktop-host';
 import { randomIdentity, isCanonicalIdentity } from './identity';
 import type { FilePreviewApi } from './file-preview';
 import { LocalMemoryApi } from './memory-api';
@@ -235,7 +236,6 @@ export interface RetrievalTestResult { status: 'ready'; elapsed_ms: number; dime
 export interface LocalSettingsSummary {
   state?: 'ready' | 'unavailable';
   pulsara_home?: string;
-  postgres: { runtime_dsn: string; admin_dsn: string | null } | null;
   memory_retrieval: MemoryRetrievalSettings;
 }
 
@@ -569,10 +569,8 @@ export interface RuntimeAdapter {
     model_configurations: ModelConfigurationSummary[];
   }>;
   testModelConfiguration(input: ModelConfigurationInput, connectionId?: string): Promise<{ status: 'ready' }>;
-  savePostgres(runtimeDsn: string, adminDsn: string | null): Promise<LocalSettingsReadModel & { restart_required: boolean }>;
   checkPostgres(): Promise<Record<string, unknown>>;
-  migratePostgres(): Promise<Record<string, unknown>>;
-  resetPostgres(target: NonNullable<LocalSettingsSummary['postgres']>): Promise<{ database_name: string; restart_required: boolean }>;
+  resetPostgres(): Promise<{ database_name: string; restart_required: boolean }>;
   saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings>;
   clearMemoryModel(slot: MemoryModelSlot): Promise<MemoryRetrievalSettings>;
   testMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<RetrievalTestResult>;
@@ -921,7 +919,7 @@ export interface RuntimeConnection {
   subscribe?: (listener: () => void) => () => void;
   locateAnnotationSource?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   readonly filePreview: FilePreviewApi;
-  importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath>;
+  importFiles(files: readonly File[], signal: AbortSignal): Promise<import('./file-reference').ImportedPath>;
   readonly sessionId: string;
   readonly role: 'observer' | 'controller';
   readonly generation: number;
@@ -1529,27 +1527,13 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
-  async savePostgres(runtimeDsn: string, adminDsn: string | null) {
-    return apiRequest<LocalSettingsReadModel & { restart_required: boolean }>(
-      '/api/local-settings/postgres',
-      {
-        method: 'PUT',
-        body: JSON.stringify({ runtime_dsn: runtimeDsn, admin_dsn: adminDsn }),
-      },
-    );
-  }
-
   async checkPostgres(): Promise<Record<string, unknown>> {
     return apiRequest<Record<string, unknown>>('/api/local-settings/postgres/check', { method: 'POST' });
   }
 
-  async migratePostgres(): Promise<Record<string, unknown>> {
-    return apiRequest<Record<string, unknown>>('/api/local-settings/postgres/migrate', { method: 'POST' });
-  }
-
-  async resetPostgres(target: NonNullable<LocalSettingsSummary['postgres']>): Promise<{ database_name: string; restart_required: boolean }> {
+  async resetPostgres(): Promise<{ database_name: string; restart_required: boolean }> {
     return apiRequest('/api/local-settings/postgres/reset', {
-      method: 'POST', body: JSON.stringify({ ...target, confirmed: true }),
+      method: 'POST', body: JSON.stringify({ confirmed: true }),
     });
   }
 
@@ -2109,7 +2093,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async openCapabilityRoot(root: 'agents' | 'pulsara'): Promise<void> {
-    await apiRequest(`/api/capabilities/roots/${root}/open`, { method: 'POST' });
+    const target = await apiRequest<{ path: string; reveal: boolean }>(`/api/capabilities/roots/${root}/open`, { method: 'POST' });
+    const host = desktopHost();
+    if (!host) throw new Error('请从 Pulsara 桌面应用打开目录。');
+    await host.openPath(target);
   }
 
   async deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }> {
@@ -2166,10 +2153,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async pickWorkspaceDirectory(initialPath: string, signal?: AbortSignal): Promise<string | null> {
-    const result = await apiRequest<{ path: string | null }>('/api/workspace-directory/pick', {
-      method: 'POST', body: JSON.stringify({ initial_path: initialPath }), signal,
-    });
-    return result.path;
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const host = desktopHost();
+    if (!host) throw new Error('请从 Pulsara 桌面应用选择目录。');
+    const path = await host.chooseDirectory();
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    return path;
   }
 
   async createSession(selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload): Promise<SessionSummary> {
@@ -2952,10 +2941,10 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
 
   readonly filePreview: FilePreviewApi = {
-    open: (path, basePreview) => this.previewRequest('', { path, base_preview: basePreview }),
+    open: (path, basePreview, readingRoot) => this.previewRequest('', { path, base_preview: basePreview, reading_root: readingRoot }),
     close: async token => { await this.previewRequest('', { read_token: token }, 'DELETE'); },
     page: (token, cursor, mode, signal) => this.previewRequest('/page', { read_token: token, cursor, mode }, 'POST', signal),
-    action: async (token, action) => { await this.previewRequest('/action', { read_token: token, action }); },
+    action: async (token, action) => { const target = await this.previewRequest<{path:string;reveal:boolean}>('/action', { read_token: token, action }); const host=desktopHost();if(!host)throw new Error('桌面操作当前不可用。');await host.openPath(target); },
   };
 
   private previewRequest<T>(suffix: string, body: object, method = 'POST', signal?: AbortSignal): Promise<T> {
@@ -2967,27 +2956,16 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
 
   async initialize(): Promise<void> { void this.hydrateQueuedPromptContent(); }
 
-  async importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath> {
+  async importFiles(files: readonly File[], signal: AbortSignal): Promise<import('./file-reference').ImportedPath> {
     if (this.closed || this.role !== 'controller') throw new RuntimeApiError('IMPORT_CONTROLLER_REQUIRED', '当前页面没有文件导入控制权。', true);
     if (!files.length) throw new Error('没有可导入的文件。');
     const headers: Record<string, string> = { 'X-Pulsara-Connection-Generation': String(this.generation) };
-    let body: BodyInit;
-    if (directory) {
-      const form = new FormData();
-      for (const file of files) {
-        form.append('path', JSON.stringify(file.webkitRelativePath));
-        form.append('file', file, file.name);
-      }
-      body = form;
-    } else {
-      if (files.length !== 1) throw new Error('单文件导入只接受一个文件。');
-      headers['Content-Type'] = 'application/octet-stream';
-      headers['X-Pulsara-Filename'] = JSON.stringify(files[0].name).replace(/[^\x20-\x7e]/g,
-        character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
-      body = files[0];
-    }
-    return httpRequest(`/api/connections/${encodeURIComponent(this.connectionId)}/${directory ? 'import-directory' : 'import-file'}`,
-      { method: 'POST', body, headers, signal });
+    if (files.length !== 1) throw new Error('单文件导入只接受一个文件。');
+    headers['Content-Type'] = 'application/octet-stream';
+    headers['X-Pulsara-Filename'] = JSON.stringify(files[0].name).replace(/[^\x20-\x7e]/g,
+      character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    return httpRequest(`/api/connections/${encodeURIComponent(this.connectionId)}/import-file`,
+      { method: 'POST', body: files[0], headers, signal });
   }
 
   current(): RuntimeProjection {

@@ -1,25 +1,29 @@
-# Inline visualizations and HTML review
+# Figures, file browsing and HTML review
 
-Choose text or tables for simple results, Markdown image links for saved figures, fenced `svg` or `mermaid` for static diagrams, and self-contained HTML for interaction. SVG and Mermaid display as images; ordinary HTML code blocks display source. Use `$...$` for inline formulas or `$$` on separate lines for display math; `\(...\)` and `\[...\]` are also supported.
+Choose text or tables for simple results, publish saved figures inline with `pulsara-visualization`, use fenced `svg` or `mermaid` for static diagrams, and self-contained HTML for interaction. SVG and Mermaid display as images; ordinary HTML code blocks display source. Use `$...$` for inline formulas or `$$` on separate lines for display math; `\(...\)` and `\[...\]` are also supported.
+
+## Open current files
+
+Link a deliverable with `[label](/absolute/path)`. The desktop opens its current contents in a right-side browsing tab. Links between local HTML and Markdown documents navigate in that tab with back/forward history. Use this for document packages, Skill references and files the user should revisit after edits. In conversation replies, Markdown image syntax `![label](/absolute/plot.png)` creates a clickable image reference; it does not display the full figure inline.
 
 ## Create and publish
 
 Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. For simple visuals, consider a single HTML file. Local image paths may be absolute or relative to the file that references them. Use inline SVG for icons such as Lucide. Network resources are unavailable. Paths in publication fences resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access. Resources inside HTML/CSS resolve relative to the declaring file.
 
-In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing HTML paths, one per line:
+In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing HTML, PNG, JPEG or static WebP paths, or known `image:` references copied unchanged, one per line. Images do not need an HTML wrapper or a prior `view_image` call:
 
 ````markdown
 Compare the costs:
 
 ```pulsara-visualization
 .pulsara/visualizations/cost.html
-.pulsara/visualizations/cost-breakdown.html
+.pulsara/visualizations/cost-breakdown.png
 ```
 ````
 
 Each fence creates an independent gallery. One path shows one figure; multiple paths share host-provided thumbnail navigation. Group alternatives together; use separate fences to show figures together. Views with shared controls belong in one file. Keep actual display fences outside lists and blockquotes; wrap syntax examples in a longer outer fence as above.
 
-Publication freezes each HTML together with its supported local resources. Later edits or deletion leave earlier replies unchanged; publishing the path again captures its current contents. Missing or unreadable files show an error at their display position.
+Publication freezes each image or HTML together with its supported local resources. Later edits or deletion leave earlier replies unchanged; publishing the path again captures its current contents. Missing or unreadable files show an error at their display position. Opening a published figure in a tab still shows that snapshot. A frozen HTML snapshot does not include an entire linked document package; provide a current-file link when the user needs cross-file browsing.
 
 ## Layout and review
 
@@ -27,7 +31,7 @@ Use concise labels, readable axes and units, and compact layouts that fit narrow
 
 For compact content, mark exactly one visible container `data-pulsara-visualization-root`. Keep its content within its bounds for reliable fitting. Without a marker, a unique visible `main` containing all visible content may be fitted automatically; other layouts use page mode.
 
-Optionally inspect the current HTML with `view_image(path=...)`. Its screenshot is a visual check, not publication or proof that every interaction works; inspect again after editing when claiming the updated version was reviewed.
+Inspect saved images or current HTML with `view_image(path=...)` when useful. This gives the model pixels independently of the user’s tabs; publishing a figure does not mean you have seen it. An HTML screenshot checks the captured appearance, not clicks or other interactions. Describe exactly what you inspected, and inspect again after edits before claiming the updated version was reviewed.
 
 ## Host environment
 

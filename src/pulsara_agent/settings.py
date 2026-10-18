@@ -211,14 +211,6 @@ def default_local_settings_path() -> Path:
 def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
     return {
         "schema": LOCAL_SETTINGS_SCHEMA,
-        "postgres": (
-            None
-            if settings.postgres is None
-            else {
-                "runtime_dsn": settings.postgres.runtime_dsn,
-                "admin_dsn": settings.postgres.admin_dsn,
-            }
-        ),
         "model_connections": [
             {
                 **model_connection_to_dict(item),
@@ -250,6 +242,11 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
 
 
 def local_settings_from_dict(value: object) -> LocalSettings:
+    # Discard the removed database field before parsing the one current shape.
+    # This preserves unrelated saved model credentials without interpreting an
+    # old endpoint, retaining it in memory, or publishing it on the next save.
+    if isinstance(value, dict):
+        value = {key: item for key, item in value.items() if key != "postgres"}
     if (
         isinstance(value, dict)
         and isinstance(value.get("schema"), str)
@@ -260,7 +257,6 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         )
     if not isinstance(value, dict) or set(value) != {
         "schema",
-        "postgres",
         "model_connections",
         "memory_retrieval",
         "mcp_credentials",
@@ -269,23 +265,6 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         raise ValueError("local settings have an invalid closed shape")
     if value["schema"] != LOCAL_SETTINGS_SCHEMA:
         raise ValueError("local settings schema is unsupported")
-    raw_postgres = value["postgres"]
-    postgres: LocalPostgresConfig | None
-    if raw_postgres is None:
-        postgres = None
-    elif isinstance(raw_postgres, dict) and set(raw_postgres) == {
-        "runtime_dsn",
-        "admin_dsn",
-    }:
-        runtime_dsn = raw_postgres["runtime_dsn"]
-        admin_dsn = raw_postgres["admin_dsn"]
-        if not isinstance(runtime_dsn, str) or (
-            admin_dsn is not None and not isinstance(admin_dsn, str)
-        ):
-            raise ValueError("PostgreSQL settings fields are invalid")
-        postgres = LocalPostgresConfig(runtime_dsn, admin_dsn)
-    else:
-        raise ValueError("PostgreSQL settings have an invalid closed shape")
     raw_connections = value["model_connections"]
     if not isinstance(raw_connections, list):
         raise ValueError("model_connections must be an array")
@@ -304,7 +283,6 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         if api_key is not None:
             model_api_keys.append(LocalModelApiKey(connection.id, api_key))
     return LocalSettings(
-        postgres=postgres,
         model_connections=tuple(connections),
         model_api_keys=tuple(model_api_keys),
         memory_retrieval=MemoryRetrievalSettings.from_dict(value["memory_retrieval"]),
@@ -454,15 +432,17 @@ class LocalSettingsStore:
         path: Path | None = None,
         *,
         writer: SettingsWriter = write_local_settings,
+        postgres: LocalPostgresConfig | None = None,
     ) -> None:
         self.path = path or default_local_settings_path()
         if not self.path.is_absolute():
             raise ValueError("local settings path must be absolute")
+        self._postgres = postgres
         self._writer = writer
         self._lock = asyncio.Lock()
 
     def read(self) -> LocalSettings:
-        return read_local_settings(self.path)
+        return replace(read_local_settings(self.path), postgres=self._postgres)
 
     @contextmanager
     def capture_credential_mutations(self, scrub: ProcessCredentialScrubSet | None):
@@ -576,26 +556,7 @@ class LocalSettingsStore:
         except LocalSettingsSchemaUnsupported:
             raise
         except LocalSettingsUnavailable:
-            return LocalSettings()
-
-    async def save_postgres(
-        self, postgres: LocalPostgresConfig | None
-    ) -> LocalSettings:
-        updated, _ = await self._run_mutation(
-            lambda current: (
-                LocalSettings(
-                    postgres=postgres,
-                    model_connections=current.model_connections,
-                    model_api_keys=current.model_api_keys,
-                    memory_retrieval=current.memory_retrieval,
-                    mcp_credentials=current.mcp_credentials,
-                    mcp_oauth=current.mcp_oauth,
-                ),
-                None,
-            ),
-            name="publish-postgres-settings",
-        )
-        return updated
+            return LocalSettings(postgres=self._postgres)
 
     async def add_model_connection(
         self,

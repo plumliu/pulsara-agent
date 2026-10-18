@@ -1,0 +1,87 @@
+name: Native Desktop Packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['desktop/**', 'frontend/**', 'src/**', 'pyproject.toml', 'uv.lock', 'tools/prepare_ripgrep.py', '.github/workflows/desktop-package.yml']
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CI: 'true'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Native build tools (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bison flex pkg-config binutils patchelf pax-utils libopenblas0
+      - name: Native build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bison flex dylibbundler
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+      - name: Prepare Python and application dependencies
+        run: |
+          uv python install 3.12
+          uv run --no-project --python 3.12 python tools/prepare_ripgrep.py
+          uv sync --locked --dev
+      - name: Chromium OS dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: uv run --no-sync python -m playwright install-deps chromium
+      - name: Build the desktop renderer and shell
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build:desktop
+          npm --prefix desktop ci
+          npm --prefix desktop test
+          node --test desktop/scripts/linux-hooks.test.cjs
+      - name: Build pinned native resources and verify relocation
+        run: |
+          uv run --no-sync python desktop/scripts/prepare_resources.py
+          uv run --no-sync python desktop/scripts/smoke_resources.py
+      - name: Package native installer
+        run: npm --prefix desktop run package -- --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+      - name: Install Debian package and verify command ownership
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ./desktop/release/*.deb
+          test "$(readlink /usr/bin/pulsara)" = /opt/Pulsara/resources/bin/pulsara
+          /usr/bin/pulsara --help
+          /usr/bin/pulsara-desktop --pulsara-cli --help
+          sudo apt-get remove -y pulsara-desktop
+          test ! -L /usr/bin/pulsara
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pulsara-desktop-${{ matrix.runner }}-${{ matrix.arch }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.deb
+            desktop/release/*.AppImage
+          if-no-files-found: error

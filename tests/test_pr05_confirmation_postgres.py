@@ -38,7 +38,7 @@ from pulsara_agent.primitives.run_permission import (
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
+from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from tests.test_stage2_conversation_kernel_postgres import _repository, _start_root_turn
 
 
@@ -325,7 +325,7 @@ def test_r15_real_rollback_returns_explicit_non_acceptance_and_allows_new_click(
         async def resume(_):
             return SimpleNamespace(session_id=host.session_id, host_session_id=host.host_session_id)
 
-        bridge = LocalBrowserBridge(sessions=SimpleNamespace(resume_session=resume), protocol_server=server)
+        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume), protocol_server=server)
         await server.start()
         waiter = None
         try:
@@ -401,7 +401,7 @@ def test_r12_real_unix_bridge_takeover_while_original_decision_settles(
                 session_id=host.session_id, host_session_id=host.host_session_id
             )
 
-        bridge = LocalBrowserBridge(
+        bridge = RendererBridge(
             sessions=SimpleNamespace(resume_session=resume), protocol_server=server
         )
         await server.start()

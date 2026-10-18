@@ -1,4 +1,3 @@
-'use client';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { autoUpdate, computePosition, flip, hide, offset, shift } from '@floating-ui/dom';
 import type { MappedSelection } from '../lib/response-selection';
@@ -263,7 +262,9 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     const pointerup = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest('.annotation-selection-menu')) return;
-      if (target?.closest('[data-annotation-entry]')) update(); else hide();
+      // A drag can end in the page gutter while its text range remains valid.
+      // Selection mapping, not the pointer release target, owns eligibility.
+      update();
     };
     document.addEventListener('selectionchange', update);
     document.addEventListener('pointerdown', pointerdown);

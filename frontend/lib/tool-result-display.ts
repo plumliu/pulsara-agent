@@ -1,6 +1,7 @@
 import { createContext } from 'react';
+import { uiPreferences } from './ui-preferences';
 
-// Browser-only presentation preference, shared by the main chat and task views.
+// Desktop presentation preference, shared by the main chat and task views.
 export const ToolResultDisplayContext = createContext<{
   showBuiltinToolResults: boolean;
   onChange: (show: boolean) => void;
@@ -10,9 +11,5 @@ export const ToolResultDisplayContext = createContext<{
 });
 
 export function readSavedToolResultDisplay(): boolean {
-  try {
-    return window.localStorage?.getItem('pulsara-show-builtin-tool-results') === 'true';
-  } catch {
-    return false;
-  }
+  return uiPreferences.getItem('pulsara-show-builtin-tool-results') === 'true';
 }

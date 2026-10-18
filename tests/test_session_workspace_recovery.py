@@ -25,8 +25,8 @@ from pulsara_agent.ports.user_control_feedback import (
     project_user_control_feedback_for_provider,
 )
 from pulsara_agent.conversation_kernel.host import default_permission_policy
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     WorkspaceUnavailable,
@@ -184,7 +184,7 @@ def test_cold_history_and_explicit_restore_use_real_core_without_read_activation
             permission_policy=default_permission_policy(),
             active_skill_names=frozenset(),
         )
-        bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
+        bridge = RendererBridge(sessions=sessions, protocol_server=object())
         try:
             before = len(captures)
             assert (await core.list_resumable_sessions(workspace_input=source))[
@@ -579,7 +579,7 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
 
 def test_browser_write_gate_rejects_takeover_while_directory_read_is_pending(tmp_path):
     from types import SimpleNamespace
-    from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
+    from pulsara_agent.desktop_app.protocol_client import ProtocolBridgeError
 
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -592,7 +592,7 @@ def test_browser_write_gate_rejects_takeover_while_directory_read_is_pending(tmp
         sessions = SimpleNamespace(
             workspace_availability=availability, _lock=asyncio.Lock(), _operations={}
         )
-        bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
+        bridge = RendererBridge(sessions=sessions, protocol_server=object())
         a = SimpleNamespace(
             session_id='session:5dofirezik2z5wyc4ouhsixn3i', role="controller", generation=1, is_open=True
         )

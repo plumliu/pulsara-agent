@@ -1,5 +1,3 @@
-'use client';
-
 import { useEffect, useState } from 'react';
 import { ChevronDown, LoaderCircle, Plus, Save, Trash2, X, PlugZap } from 'lucide-react';
 import type { McpEditInput, McpCredentialOwner, McpConnectionTestResult, UserMcpServerCapability, PluginMcpConnection } from '../lib/pulsara-types';

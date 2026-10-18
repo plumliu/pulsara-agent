@@ -3,7 +3,6 @@ export interface ImportedPath {
   path: string;
   name: string;
   bytes: number;
-  file_count: number;
 }
 
 export interface FileReference {
@@ -13,7 +12,7 @@ export interface FileReference {
   raw: string;
 }
 
-export type ImportFiles = (sessionId: string, files: readonly File[], directory: boolean,
+export type ImportFiles = (sessionId: string, files: readonly File[],
   signal: AbortSignal) => Promise<ImportedPath>;
 
 export interface WorkspacePathCandidate {
@@ -35,22 +34,21 @@ export function formatWorkspaceReference(value: Pick<WorkspacePathCandidate, 'ki
   return `【本地${value.kind === 'directory' ? '文件夹' : '文件'}：${JSON.stringify(value.path)}】`;
 }
 
-export function formatFileReference(value: ImportedPath, directory: boolean): string {
-  return directory
-    ? `【本地文件夹（只读副本，${value.file_count} 个文件）：${JSON.stringify(value.path)}】`
-    : `【本地文件（只读副本，${value.bytes} bytes）：${JSON.stringify(value.path)}】`;
+export function formatFileReference(value: ImportedPath): string {
+  return `【本地文件（只读副本，${value.bytes} bytes）：${JSON.stringify(value.path)}】`;
 }
 
 export function splitFileReferences(text: string): Array<string | FileReference> {
-  const pattern = /【本地(文件夹|文件)(?:（只读副本，(\d+) (个文件|bytes)）)?：("(?:\\.|[^"\\])*?")】/g;
+  const pattern = /【本地(文件夹|文件)(?:（只读副本，(\d+) bytes）)?：("(?:\\.|[^"\\])*?")】/g;
   const result: Array<string | FileReference> = [];
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
-    if (match[2] !== undefined && ((match[1] === '文件夹') !== (match[3] === '个文件')
+    if (match[2] !== undefined && (match[1] === '文件夹'
       || !Number.isSafeInteger(Number(match[2])))) continue;
     let path: unknown;
-    try { path = JSON.parse(match[4]); } catch { continue; }
+    try { path = JSON.parse(match[3]); } catch { continue; }
     if (typeof path !== 'string' || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(path)
+      // eslint-disable-next-line no-control-regex -- Reject control characters in user-supplied paths.
       || /[\u0000-\u001f\u007f]/.test(path)) continue;
     const name = path.split(/[\\/]/).filter(Boolean).at(-1);
     if (!name) continue;

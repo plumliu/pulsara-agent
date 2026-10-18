@@ -1,5 +1,4 @@
-'use client';
-
+import { CliSettings } from './cli-settings';
 import {
   Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, House,
   LoaderCircle, Moon, Palette, Pencil, Plus, RefreshCw,
@@ -20,7 +19,7 @@ import { RuntimeApiError } from '../lib/runtime-adapter';
 
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 
-export type SettingsSection = 'general' | 'models' | 'service' | 'archived';
+export type SettingsSection = 'general' | 'models' | 'archived';
 type ModelConfigurationSource = 'models_dev' | 'user_declared';
 type CustomReasoningKind = CustomReasoningProfile;
 
@@ -38,20 +37,15 @@ interface SettingsViewProps {
   adapter: RuntimeAdapter;
   onThemeChange: (theme: 'light' | 'dark') => void;
   onConfigurationChanged: () => Promise<void>;
+  onDatabaseReset?: () => void;
   onNotify: (title: string, detail?: string, tone?: 'neutral' | 'success' | 'warning') => void;
 }
 
 const navItems = [
   { id: 'general' as const, label: '通用', icon: SlidersHorizontal },
   { id: 'models' as const, label: '模型', icon: Bot },
-  { id: 'service' as const, label: '本地服务', icon: HardDrive },
   { id: 'archived' as const, label: '已归档会话', icon: Archive },
 ];
-
-const statusLabels: Record<RuntimeStatus, string> = {
-  starting: '正在连接', online: '连接正常', reconnecting: '正在重连',
-  offline: '连接中断', failed: '连接失败',
-};
 
 const minimumContextTokens = 256_000;
 // Presentation batch only; every saved connection remains available across pages.
@@ -63,9 +57,9 @@ const alphabeticalCollator = new Intl.Collator('en', {
 });
 
 function SettingRow({ icon: Icon, title, detail, children }: {
-  icon: typeof Sun; title: string; detail: string; children: React.ReactNode;
+  icon: typeof Sun; title: string; detail?: string; children: React.ReactNode;
 }) {
-  return <div className="setting-row"><span className="setting-row__icon"><Icon size={15} /></span><span className="setting-row__copy"><strong>{title}</strong><small>{detail}</small></span><div className="setting-row__control">{children}</div></div>;
+  return <div className="setting-row"><span className="setting-row__icon"><Icon size={15} /></span><span className="setting-row__copy"><strong>{title}</strong>{detail && <small>{detail}</small>}</span><div className="setting-row__control">{children}</div></div>;
 }
 
 function formatTokens(value?: number | null): string {
@@ -153,8 +147,7 @@ function reasoningProfilePayload(
   return { kind: profile };
 }
 
-function DatabaseResetDialog({ target, busy, error, onClose, onConfirm }: {
-  target: NonNullable<LocalSettingsReadModel['local_settings']['postgres']>;
+function DatabaseResetDialog({ busy, error, onClose, onConfirm }: {
   busy: boolean; error?: string; onClose: () => void; onConfirm: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -162,7 +155,7 @@ function DatabaseResetDialog({ target, busy, error, onClose, onConfirm }: {
   return <dialog ref={dialog} className="database-reset-dialog" aria-labelledby="database-reset-title" onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); }}>
     <h2 id="database-reset-title">重置 Pulsara 数据？</h2>
     <p>将永久删除目标数据库中的 Pulsara 会话、图片、任务和记忆，并重新初始化。此操作无法撤销。</p>
-    <dl><dt>Runtime DSN</dt><dd>{target.runtime_dsn}</dd><dt>Admin DSN</dt><dd>{target.admin_dsn}</dd></dl>
+    <p>目标：此应用管理的专用 PostgreSQL 数据库。</p>
     <p>模型配置、API key 和工作目录中的文件会保留。正在运行的数据服务将先关闭；若内核已经启动，完成后需要重启 Pulsara。</p>
     {error && <p role="alert" className="database-reset-error">{error}</p>}
     <footer><button autoFocus disabled={busy} onClick={onClose}>取消</button><button className="database-reset-confirm" disabled={busy} onClick={onConfirm}>{busy ? '正在重置…' : '确认清空并初始化'}</button></footer>
@@ -178,9 +171,9 @@ function ModelFormContainer({ editing, busy, onClose, children }: {
   return <dialog ref={dialog} className="model-config-dialog" aria-label={editing ? '修改模型配置' : '添加模型配置'} onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); else onClose(); }}>{content}</dialog>;
 }
 
-export function SettingsView({ initialSection, highlightHome, theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession, onDeleteArchivedSessions, sessionDeletionBusy }: SettingsViewProps) {
+export function SettingsView({ initialSection, highlightHome, theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onDatabaseReset, onNotify, sessionRevision, onSessionsChanged, onDeleteSession, onDeleteArchivedSessions, sessionDeletionBusy }: SettingsViewProps) {
   const { showBuiltinToolResults, onChange: onToolResultDisplayChange } = useContext(ToolResultDisplayContext);
-  const [section, setSection] = useState<SettingsSection>(initialSection ?? (bootstrap?.database_state === 'ready' ? 'general' : 'service'));
+  const [section, setSection] = useState<SettingsSection>(initialSection ?? 'general');
   const homeSetting = useRef<HTMLElement>(null);
   const homeLocated = useRef(false);
   const [homeHighlighted, setHomeHighlighted] = useState(Boolean(highlightHome));
@@ -191,7 +184,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     return () => clearTimeout(timer);
   }, [highlightHome]);
   useEffect(() => {
-    if (!highlightHome || section !== 'service' || homeLocated.current) return;
+    if (!highlightHome || section !== 'general' || homeLocated.current) return;
     homeLocated.current = true;
     homeSetting.current?.scrollIntoView?.({ block: 'center' });
     homeSetting.current?.focus({ preventScroll: true });
@@ -227,11 +220,8 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [deleteCandidateId, setDeleteCandidateId] = useState<string>();
   const [deletingModelId, setDeletingModelId] = useState<string>();
   const [modelPage, setModelPage] = useState(0);
-  const [runtimeDsn, setRuntimeDsn] = useState(bootstrap?.local_settings?.postgres?.runtime_dsn ?? '');
-  const [adminDsn, setAdminDsn] = useState(bootstrap?.local_settings?.postgres?.admin_dsn ?? '');
-  const [databaseBusy, setDatabaseBusy] = useState<'save' | 'check' | 'migrate' | 'reset'>();
-  const [databaseMessage, setDatabaseMessage] = useState<string>();
-  const [resetTarget, setResetTarget] = useState<NonNullable<LocalSettingsReadModel['local_settings']['postgres']>>();
+  const [databaseBusy, setDatabaseBusy] = useState<'check' | 'reset'>();
+  const [resetTarget, setResetTarget] = useState(false);
   const [resetError, setResetError] = useState<string>();
 
   const load = async () => {
@@ -239,8 +229,6 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     try {
       const [nextSettings, nextCatalog] = await Promise.all([adapter.localSettings(), adapter.modelCatalog()]);
       setSettings(nextSettings); setCatalog(nextCatalog);
-      setRuntimeDsn(nextSettings.local_settings.postgres?.runtime_dsn ?? '');
-      setAdminDsn(nextSettings.local_settings.postgres?.admin_dsn ?? '');
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '本机设置暂时无法读取。');
     } finally { setLoading(false); }
@@ -253,8 +241,6 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
         if (!active) return;
         setSettings(nextSettings);
         setCatalog(nextCatalog);
-        setRuntimeDsn(nextSettings.local_settings.postgres?.runtime_dsn ?? '');
-        setAdminDsn(nextSettings.local_settings.postgres?.admin_dsn ?? '');
       })
       .catch((loadError: unknown) => {
         if (!active) return;
@@ -455,27 +441,15 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     }
   };
 
-  const saveDatabase = async () => {
-    if (!runtimeDsn.trim()) return;
-    setDatabaseBusy('save'); setDatabaseMessage(undefined);
+  const databaseAction = async () => {
+    setDatabaseBusy('check');
     try {
-      const next = await adapter.savePostgres(runtimeDsn.trim(), adminDsn.trim() || null);
-      setSettings(next);
-      setDatabaseMessage(next.restart_required ? '已保存，重启 Pulsara 后连接。' : '已保存。现在可以检查连接或初始化数据库。');
-      await onConfigurationChanged();
-    } catch (saveError) { setDatabaseMessage(saveError instanceof Error ? saveError.message : '连接信息未保存。'); }
-    finally { setDatabaseBusy(undefined); }
-  };
-
-  const databaseAction = async (kind: 'check' | 'migrate') => {
-    setDatabaseBusy(kind); setDatabaseMessage(undefined);
-    try {
-      const result = kind === 'check' ? await adapter.checkPostgres() : await adapter.migratePostgres();
+      const result = await adapter.checkPostgres();
       const databaseName = typeof result.database_name === 'string' ? `数据库 ${result.database_name}` : '已保存的数据库';
-      setDatabaseMessage(kind === 'check' ? `${databaseName} 连接与结构检查通过。` : `${databaseName} 已完成初始化或升级。`);
+      onNotify('数据检查通过', `${databaseName} 连接与结构检查通过。`, 'success');
       setSettings(await adapter.localSettings()); await onConfigurationChanged();
     } catch (actionError) {
-      setDatabaseMessage(actionError instanceof Error ? actionError.message : '数据库操作没有完成。');
+      onNotify('数据检查未通过', actionError instanceof Error ? actionError.message : '数据库操作没有完成。', 'warning');
       if (actionError instanceof RuntimeApiError && actionError.code === 'DATABASE_RESET_REQUIRED') {
         setSettings((current) => current ? { ...current, database_state: 'database_reset_required' } : current);
       }
@@ -487,16 +461,17 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     if (!resetTarget || databaseBusy || runtimeStatus !== 'online') return;
     setDatabaseBusy('reset'); setResetError(undefined);
     try {
-      const result = await adapter.resetPostgres(resetTarget);
-      setResetTarget(undefined);
-      setDatabaseMessage(result.restart_required
+      const result = await adapter.resetPostgres();
+      onDatabaseReset?.();
+      setResetTarget(false);
+      onNotify('数据已重置', result.restart_required
         ? `数据库 ${result.database_name} 已重置。请重启 Pulsara 后继续使用。`
-        : `数据库 ${result.database_name} 已重置并完成初始化。`);
+        : `数据库 ${result.database_name} 已重置并完成初始化。`, 'success');
       try {
         setSettings(await adapter.localSettings());
         await onConfigurationChanged();
       } catch {
-        setDatabaseMessage(`数据库 ${result.database_name} 已重置，但页面状态未刷新。请重新打开页面检查；如果提示数据服务已关闭，请重启 Pulsara。`);
+        onNotify('数据已重置，界面尚未更新', `数据库 ${result.database_name} 已重置，但页面状态未刷新。请重新打开页面检查；如果提示数据服务已关闭，请重启 Pulsara。`, 'warning');
       }
     } catch (resetFailure) {
       setResetError(resetFailure instanceof Error ? resetFailure.message : '重置没有完成。');
@@ -504,13 +479,6 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   };
 
   const databaseState = settings?.database_state ?? bootstrap?.database_state ?? 'database_not_configured';
-  const databaseStateCopy = {
-    ready: '数据服务已就绪', database_not_configured: '尚未配置 PostgreSQL',
-    database_configured_unverified: '已保存，尚未检查 PostgreSQL',
-    database_unavailable: '无法连接 PostgreSQL', database_schema_action_required: '需要初始化或升级数据库',
-    database_reset_required: '现有数据与当前版本不兼容，需要重置',
-    database_resetting: '正在重置数据', database_restart_required: '数据服务已关闭，请重启 Pulsara',
-  }[databaseState];
   const selectedShapeWarning = Boolean(selectedModel?.wire_shape_hint && wireApi
     && ((selectedModel.wire_shape_hint === 'responses') !== (wireApi === 'openai_responses')));
   const parsedContextTokens = Number(contextTokens);
@@ -528,8 +496,8 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     : customDeclarationReady && !incompatibleCustomProfile && (authentication === 'none' || keyPresent || canKeepModelKey);
 
   return <section className="surface-view settings-view">
-    {resetTarget && <DatabaseResetDialog target={resetTarget} busy={databaseBusy === 'reset'} error={resetError} onClose={() => { if (!databaseBusy) setResetTarget(undefined); }} onConfirm={() => void resetDatabase()} />}
-    <header className="page-header"><div><span className="page-kicker">本机设置</span><h1>设置</h1><p>配置模型、记忆检索与本机 PostgreSQL。访问密钥保存在权限受限的本机设置文件中。</p></div></header>
+    {resetTarget && <DatabaseResetDialog busy={databaseBusy === 'reset'} error={resetError} onClose={() => { if (!databaseBusy) setResetTarget(false); }} onConfirm={() => void resetDatabase()} />}
+    <header className="page-header"><div><span className="page-kicker">本机设置</span><h1>设置</h1><p>配置模型、记忆检索与应用管理的数据服务。</p></div></header>
     <div className="settings-layout">
       <aside className="settings-nav">
         <div className="settings-profile"><UserAvatar /><div><strong>用户</strong><small>偏好与设置</small></div></div>
@@ -540,13 +508,27 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
         {section === 'archived' && <ArchivedSessions adapter={adapter} revision={sessionRevision} onRestored={onSessionsChanged} onDelete={onDeleteSession} onDeleteAll={onDeleteArchivedSessions} deletionBusy={sessionDeletionBusy} />}
         {error && <div className="settings-alert"><CircleAlert size={15} /><span>{error}</span><button onClick={() => void load()}>重试</button></div>}
         {loading && <div className="settings-loading"><LoaderCircle size={15} />正在读取本机设置…</div>}
-        {section === 'general' && <section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>
+        {section === 'general' && <><section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>
           <SettingRow icon={theme === 'light' ? Sun : Moon} title="主题" detail="切换明暗外观"><div className="theme-picker"><button className={theme === 'light' ? 'is-active' : ''} onClick={() => onThemeChange('light')}><Sun size={12} /> 浅色</button><button className={theme === 'dark' ? 'is-active' : ''} onClick={() => onThemeChange('dark')}><Moon size={12} /> 深色</button></div></SettingRow>
-          <SettingRow icon={SlidersHorizontal} title="显示内置工具原始结果" detail="显示原始文本、长结果预览和分页读取入口。仅影响界面，保存在当前浏览器。">
+          <SettingRow icon={SlidersHorizontal} title="显示内置工具原始结果" detail="显示原始文本、长结果预览和分页读取入口。">
             <button type="button" role="switch" className="settings-switch" aria-label="显示内置工具原始结果" aria-checked={showBuiltinToolResults} onClick={() => onToolResultDisplayChange(!showBuiltinToolResults)}><span /></button>
           </SettingRow>
           <AvatarSetting onNotify={onNotify} />
-        </section>}
+        </section>
+        <section className="settings-group settings-local-service" aria-label="本地服务"><header><HardDrive size={16} /><div><h2>本地服务</h2><p>Pulsara 的设置与任务都由这台设备上的进程管理。</p></div></header>
+          <SettingRow icon={Database} title="PostgreSQL" detail="保存会话、记忆与任务数据。"><div className="settings-service-actions">
+            <button disabled={Boolean(databaseBusy)} onClick={() => void databaseAction()}>{databaseBusy === 'check' ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}检查数据</button>
+            <button className="subtle-danger" disabled={Boolean(databaseBusy) || runtimeStatus !== 'online' || databaseState === 'database_resetting'} onClick={() => { setResetError(undefined); setResetTarget(true); }}><Trash2 size={13} />重置数据</button>
+          </div></SettingRow>
+            <section ref={homeSetting} id="pulsara-home" tabIndex={-1} aria-labelledby="pulsara-home-title"
+              className={`database-form settings-home${homeHighlighted ? ' is-highlighted' : ''}`} onAnimationEnd={() => setHomeHighlighted(false)}>
+              <div className="settings-home-heading"><span className="setting-row__icon"><House size={15} aria-hidden="true" /></span>
+                <div className="setting-row__copy"><strong id="pulsara-home-title">Pulsara 家目录</strong><small>保存用户级技能、MCP、插件和模型连接。</small></div>
+              </div>
+              <input className="settings-readonly-path" aria-label="Pulsara 家目录" disabled value={settings?.local_settings.pulsara_home ?? ''} placeholder={loading ? '正在读取…' : '暂时无法读取目录'} />
+            </section>
+          <CliSettings />
+        </section></>}
         {section === 'models' && <>
           <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" disabled={Boolean(loadingModelId) || savingModel || testingModel} onClick={() => { if (adding) closeModelForm(); else { resetModelDraft(); setEditingConfiguration(undefined); setAdding(true); } }}><Plus size={13} />添加配置</button></header>
             {modelConfigurations.length ? <>
@@ -601,22 +583,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
             void onConfigurationChanged();
           }} />}
         </>}
-        {section === 'service' && <>
-          <section className="settings-group"><header><Database size={16} /><div><h2>PostgreSQL</h2><p>会话数据平面使用本机 PostgreSQL；保存不会自动连接或迁移。</p></div></header>
-            {settings?.local_settings.state === 'unavailable' && <div className="settings-alert settings-alert--inside"><CircleAlert size={15} /><span>本机设置文件无法读取。保存下面的完整 PostgreSQL 配置会覆盖并修复该文件。</span></div>}
-            <div className="database-state-row"><span className={`database-state database-state--${databaseState}`}><i />{databaseStateCopy}</span><small>浏览器设置壳：{statusLabels[runtimeStatus]}</small></div>
-            <div className="database-form"><label><span>Runtime DSN</span><input value={runtimeDsn} onChange={(event) => setRuntimeDsn(event.target.value)} placeholder="postgresql://pulsara:…@localhost:5432/pulsara" /></label><label><span>Admin DSN（可选）</span><input value={adminDsn} onChange={(event) => setAdminDsn(event.target.value)} placeholder="只用于显式初始化、升级或重置" /></label><p>初始化/升级将使用上方已保存的 Admin DSN 管理同一数据库，并按 Runtime DSN 验证运行角色。请先核对目标数据库与角色。</p>{databaseMessage && <div className="database-message">{databaseMessage}</div>}<div className="form-actions"><button className="primary-action" disabled={Boolean(databaseBusy) || !runtimeDsn.trim()} onClick={() => void saveDatabase()}>{databaseBusy === 'save' ? <LoaderCircle size={13} /> : <Check size={13} />}保存连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres} onClick={() => void databaseAction('check')}>{databaseBusy === 'check' ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}检查连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_reset_required'} onClick={() => void databaseAction('migrate')}>{databaseBusy === 'migrate' ? <LoaderCircle size={13} /> : <Database size={13} />}初始化 / 升级</button><button className="subtle-danger" disabled={Boolean(databaseBusy) || runtimeStatus !== 'online' || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_resetting'} onClick={() => { setResetError(undefined); setResetTarget(settings!.local_settings.postgres!); }}><Trash2 size={13} />重置数据…</button></div></div>
-          </section>
-          <section className="settings-group"><header><HardDrive size={16} /><div><h2>本地服务</h2><p>Pulsara 的设置与任务都由这台设备上的进程管理。</p></div></header><SettingRow icon={HardDrive} title="页面连接" detail="浏览器与本地设置服务"><span className={`connection-value connection-value--${runtimeStatus}`} role="status"><i aria-hidden="true" />{statusLabels[runtimeStatus]}</span></SettingRow>
-            <section ref={homeSetting} id="pulsara-home" tabIndex={-1} aria-labelledby="pulsara-home-title"
-              className={`database-form settings-home${homeHighlighted ? ' is-highlighted' : ''}`} onAnimationEnd={() => setHomeHighlighted(false)}>
-              <div className="settings-home-heading"><span className="setting-row__icon"><House size={15} aria-hidden="true" /></span>
-                <div className="setting-row__copy"><strong id="pulsara-home-title">Pulsara 用户目录</strong><small>用户级技能、MCP、插件和模型连接保存在这里。</small></div>
-              </div>
-              <input aria-label="Pulsara 用户目录" disabled value={settings?.local_settings.pulsara_home ?? ''} placeholder={loading ? '正在读取…' : '暂时无法读取目录'} />
-            </section>
-          </section>
-        </>}
+
       </div>
     </div>
   </section>;

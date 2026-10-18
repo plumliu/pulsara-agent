@@ -405,7 +405,7 @@ describe('MemoryView', () => {
   it.each(['database_not_configured', 'database_configured_unverified', 'database_unavailable', 'database_schema_action_required'] as const)('gates %s without reading memories', async databaseState => {
     const api = setup();
     render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState={databaseState} onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
-    expect(screen.getByRole('button', { name: /前往本地服务设置/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /前往通用设置/ })).toBeTruthy();
     expect(api.catalog).not.toHaveBeenCalled(); expect(api.projects).not.toHaveBeenCalled();
   });
   it('keeps details in the page but confirms deletion in a separate dialog', async () => {

@@ -1,5 +1,3 @@
-'use client';
-
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronRight, CircleAlert, FileCode2, LoaderCircle, Pencil, Plus, Save, ShieldCheck, Workflow, X } from 'lucide-react';

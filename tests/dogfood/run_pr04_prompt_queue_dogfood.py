@@ -1,4 +1,4 @@
-"""PR04 real-provider/browser probe using saved, read-only production owners.
+"""PR04 real-provider probe using saved, read-only production owners.
 
 Only this probe holds assistant settlement at explicit file-controlled test
 barriers. Production receives no flags, endpoints, queues or delivery owners.
@@ -25,9 +25,7 @@ from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
-from pulsara_agent.web_app.application import LocalWebApplication
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 from tests.dogfood.run_content_revision_line_edit_dogfood import _scrub
@@ -454,77 +452,28 @@ async def _run(args, saved, secrets):
                 return session
 
             core.open_session = opened
-            app = None
             try:
                 workspace_input = HostWorkspaceInput(
                     workspace_kind="project",
                     workspace_root=workspace,
                     trust_workspace_mcp_config=False,
                 )
-                if args.serve_browser:
-                    app = LocalWebApplication(
-                        settings=store,
-                        catalog=catalog,
-                        model_runtime=runtime,
-                        core=core,
-                        permission_policy=preset_to_policy(
-                            PermissionMode.BYPASS_PERMISSIONS
-                        ),
-                        port=args.port,
-                    )
-                    await app.start()
-                    handle = await app.sessions.create_session(
-                        workspace_kind="project", workspace_path=str(workspace)
-                    )
-                    session = handle.session
-                    await session.update_model_call_binding(
-                        _binding(delegate, connection)
-                    )
-                    report["origin"] = app.origin
-                    report["static_root"] = str(app.static_root)
-                    report["session_id"] = session.session_id
-                    report["workspace"] = str(workspace)
-                    print(
-                        json.dumps(
-                            {
-                                key: report[key]
-                                for key in (
-                                    "origin",
-                                    "static_root",
-                                    "session_id",
-                                    "workspace",
-                                    "package_path",
-                                )
-                            }
-                        ),
-                        flush=True,
-                    )
-                    while not (args.output_dir / "stop-server").exists():
-                        report["canonical"] = [
-                            await _canonical(session) for session in sessions
-                        ]
-                        _write(
-                            args.output_dir / "browser-runtime.json", report, secrets
-                        )
-                        await asyncio.sleep(0.5)
-                    report["status"] = "browser-recording-finished"
-                else:
-                    session = await core.open_session(
-                        workspace_input,
-                        system_prompt="Follow each human instruction exactly. This is a controlled queue/wait test. Use only the requested tools and keep replies short. Preserve IDs and markers.",
-                    )
-                    await session.update_model_call_binding(
-                        _binding(delegate, connection)
-                    )
-                    report["session_id"] = session.session_id
-                    report["cases"] = await _provider_cases(
-                        session,
-                        workspace,
-                        args.output_dir,
-                        report["provider_input_installs"],
-                        report["provider_calls"],
-                    )
-                    report["status"] = "passed"
+                session = await core.open_session(
+                    workspace_input,
+                    system_prompt="Follow each human instruction exactly. This is a controlled queue/wait test. Use only the requested tools and keep replies short. Preserve IDs and markers.",
+                )
+                await session.update_model_call_binding(
+                    _binding(delegate, connection)
+                )
+                report["session_id"] = session.session_id
+                report["cases"] = await _provider_cases(
+                    session,
+                    workspace,
+                    args.output_dir,
+                    report["provider_input_installs"],
+                    report["provider_calls"],
+                )
+                report["status"] = "passed"
             except BaseException:
                 report["status"] = "failed"
                 report["failure"] = traceback.format_exc()
@@ -534,8 +483,6 @@ async def _run(args, saved, secrets):
                 ]
                 for phase in ("before", "after"):
                     _release(args.output_dir, phase)
-                if app:
-                    await app.aclose()
                 await core.shutdown()
     finally:
         if old_home is None:
@@ -545,8 +492,7 @@ async def _run(args, saved, secrets):
         _drop_database(saved, database)
         report["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         _write(
-            args.output_dir
-            / ("browser-runtime.json" if args.serve_browser else "real-provider.json"),
+            args.output_dir / "real-provider.json",
             report,
             secrets,
         )
@@ -554,7 +500,7 @@ async def _run(args, saved, secrets):
         json.dumps({"status": report["status"], "output": str(args.output_dir)}),
         flush=True,
     )
-    return 0 if report["status"] in {"passed", "browser-recording-finished"} else 1
+    return 0 if report["status"] == "passed" else 1
 
 
 async def _canonical(session):
@@ -575,8 +521,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--connection-id", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--serve-browser", action="store_true")
-    parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)

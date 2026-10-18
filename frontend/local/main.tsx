@@ -1,6 +1,8 @@
 import '../app/styles/scheduled.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { desktopHost } from '../lib/desktop-host';
+import { initializeUiPreferences } from '../lib/ui-preferences';
 import PulsaraApp from '../app/pulsara-app';
 import 'katex/dist/katex.min.css';
 import 'yet-another-react-lightbox/styles.css';
@@ -15,6 +17,7 @@ import '../app/styles/capabilities.css';
 import '../app/styles/memory.css';
 import '../app/styles/overlays.css';
 import '../app/styles/responsive.css';
+import '../app/styles/desktop.css';
 
 const root = document.getElementById('root');
 
@@ -22,8 +25,16 @@ if (!root) {
   throw new Error('Pulsara root element is missing');
 }
 
-createRoot(root).render(
+if (!desktopHost()) {
+  root.innerHTML = '<main style="font:16px system-ui;padding:48px;color:#625a49;background:#faf8f1;height:100vh"><h1>Pulsara</h1><p>请从 Pulsara 桌面应用打开工作台。</p></main>';
+} else void desktopHost()!.readUiPreferences().catch(error => {
+  console.warn('Could not load UI preferences', error);
+  return {};
+}).then(saved => {
+  initializeUiPreferences(saved);
+  createRoot(root).render(
   <StrictMode>
     <PulsaraApp />
   </StrictMode>,
-);
+  );
+});

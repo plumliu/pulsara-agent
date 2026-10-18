@@ -13,8 +13,8 @@ from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.scheduling.service import ScheduledTaskService
 from pulsara_agent.scheduling.contracts import ScheduledTriggerSource
 from pulsara_agent.tool_permission import default_permission_policy
-from pulsara_agent.web_app.session_controller import LocalSessionController
-from pulsara_agent.web_app.session_controller import SessionControlRejected
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.session_controller import SessionControlRejected
 from pulsara_agent.llm.model_connections import ModelCallBinding, ModelConnectionId
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -697,9 +697,9 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             human = await h.session.run_turn(
                 PromptContent.text("Human continuation after compaction")
             )
-            from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
+            from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 
-            bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
+            bridge = RendererBridge(sessions=sessions, protocol_server=object())
             creation = await sessions.fork_conversation(
                 h.session_id, anchor_entry_id=human.final_entry_id
             )

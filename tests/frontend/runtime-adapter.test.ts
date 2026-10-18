@@ -1,3 +1,4 @@
+import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { webcrypto } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,7 +13,7 @@ import {
 import type { AgentTask } from '../../frontend/lib/pulsara-types';
 
 let historyOwnerFixture: Record<string, unknown> = {};
-afterEach(() => { vi.unstubAllGlobals(); historyOwnerFixture = {}; });
+afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOwnerFixture = {}; });
 
 // Page-context requests are an independent owner read, not another frame in
 // a command/content fixture's ordered response queue. Capture the fixture's
@@ -89,18 +90,16 @@ it('bootstraps the app without assigning a working directory', async () => {
 });
 
 it('requests a native directory selection and distinguishes cancellation', async () => {
-  const fetchMock = vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify({ path: '/tmp/项目 ' }), { status: 200 }))
-    .mockResolvedValueOnce(new Response(JSON.stringify({ path: null }), { status: 200 }));
+  const fetchMock = vi.fn();
+  const chooseDirectory = vi.fn().mockResolvedValueOnce('/tmp/项目 ').mockResolvedValueOnce(null);
+  window.pulsaraDesktop = { chooseDirectory } as unknown as PulsaraDesktop;
   stubRuntimeFetch(fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
   const controller = new AbortController();
   expect(await adapter.pickWorkspaceDirectory('/tmp/current', controller.signal)).toBe('/tmp/项目 ');
-  expect(fetchMock).toHaveBeenCalledWith('/api/workspace-directory/pick', expect.objectContaining({
-    method: 'POST', body: JSON.stringify({ initial_path: '/tmp/current' }),
-    signal: controller.signal, credentials: 'same-origin',
-  }));
+  expect(chooseDirectory).toHaveBeenCalledExactlyOnceWith();
   expect(await adapter.pickWorkspaceDirectory('/tmp/项目 ')).toBeNull();
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
 const SOURCE_FIDELITY_TEXT = [
@@ -2861,17 +2860,17 @@ it.each([
   expect(closed.messages).toEqual([]);
 });
 
-it('imports raw file bytes and multipart directories outside JSON commands using current controller generation', async () => {
+it('imports raw file bytes outside JSON commands using current controller generation', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   stubRuntimeFetch(vi.fn(async (url, init) => {
     calls.push({ url: String(url), init });
     return new Response(JSON.stringify(String(url).endsWith('/connections') ? connectPayload()
-      : { path: '/tmp/imported/测试.pdf', name: '测试.pdf', bytes: 3, file_count: 1 }), { status: 200 });
+      : { path: '/tmp/imported/测试.pdf', name: '测试.pdf', bytes: 3 }), { status: 200 });
   }));
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   const file = new File(['pdf'], '测试.pdf', { type: 'application/pdf' });
   const signal = new AbortController().signal;
-  await connection.importFiles([file], false, signal);
+  await connection.importFiles([file], signal);
   const single = calls.at(-1)!;
   expect(single.url).toContain('/api/connections/connection-fidelity/import-file');
   expect(single.init?.body).toBe(file);
@@ -2881,14 +2880,7 @@ it('imports raw file bytes and multipart directories outside JSON commands using
   expect(headers['X-Pulsara-Connection-Generation']).toBe('1');
   expect(JSON.parse(headers['X-Pulsara-Filename'])).toBe('测试.pdf');
   expect(headers['X-Pulsara-Filename']).toMatch(/^[\x20-\x7e]+$/);
-  Object.defineProperty(file, 'webkitRelativePath', { value: '目录/nested/测试.pdf' });
-  await connection.importFiles([file], true, signal);
-  const directory = calls.at(-1)!;
-  expect(directory.init?.body).toBeInstanceOf(FormData);
-  expect((directory.init?.headers as Record<string, string>)['Content-Type']).toBeUndefined();
-  const entries = [...(directory.init?.body as FormData).entries()];
-  expect(entries[0]).toEqual(['path', JSON.stringify(file.webkitRelativePath)]);
-  expect(entries[1][0]).toBe('file');
+
 });
 
 it('lists cwd path candidates for the selected session with paging and cancellation', async () => {

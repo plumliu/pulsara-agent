@@ -1,5 +1,3 @@
-'use client';
-
 import {
   AlertTriangle,
   Ban,
@@ -9,12 +7,11 @@ import {
   LoaderCircle,
   Maximize2,
   Scan,
-  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
+import type { WorkspaceTab } from './desktop-workspace';
 import type { AgentTask, SkillCapability, SubagentActivity, TaskStatus } from '../lib/pulsara-types';
 import { MarkdownBody, type MarkdownNotify } from './markdown-body';
 import type {
@@ -77,7 +74,7 @@ function groupTitle(tasks: AgentTask[]): string {
   const time = date && !Number.isNaN(date.getTime())
     ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(date)
     : undefined;
-  return time ? `任务组 · ${time}` : '任务组';
+  return time ? `任务组 ${time}` : '任务组';
 }
 
 function statusIcon(status: TaskStatus) {
@@ -148,12 +145,14 @@ function layoutTaskGraph(tasks: AgentTask[], edges: TaskGraphEdge[], vertical = 
 
 /** Browser scrolling owns the viewport; transforms only scale the graph inside
  * an explicitly sized scroll surface so every node stays reachable. */
-function TaskGraphViewport({ width, height, focusX, focusY, onMeasure, onBlankClick, children }: {
+function TaskGraphViewport({ width, height, focusX, focusY, onMeasure, onBlankClick, children, viewPosition }: {
+  viewPosition?: { top: number; left: number; zoom?: number };
   width: number; height: number; focusX: number; focusY: number; children: ReactNode; onMeasure: (width: number) => void; onBlankClick: () => void;
 }) {
   const canvas = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({width: 0, height: 0});
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(viewPosition?.zoom ?? 1);
+  const restorePosition = useRef(viewPosition ? { ...viewPosition } : undefined);
   const [dragging, setDragging] = useState(false);
   const pan = useRef<{id: number; x: number; y: number; left: number; top: number} | undefined>(undefined);
   const pendingCenter = useRef<{x: number; y: number} | undefined>(undefined);
@@ -188,7 +187,9 @@ function TaskGraphViewport({ width, height, focusX, focusY, onMeasure, onBlankCl
     element.scrollLeft = left + center.x * zoom - size.width / 2;
     element.scrollTop = top + center.y * zoom - size.height / 2;
     pendingCenter.current = undefined;
-  }, [zoom, left, top, size, focusX, focusY, width, height]);
+    if (restorePosition.current) { element.scrollTop = restorePosition.current.top; element.scrollLeft = restorePosition.current.left; restorePosition.current = undefined; }
+    if (viewPosition) viewPosition.zoom = zoom;
+  }, [viewPosition, zoom, left, top, size, focusX, focusY, width, height]);
   const changeZoom = (next: number, fit = false) => {
     const element = canvas.current;
     if (!element) return;
@@ -211,7 +212,7 @@ function TaskGraphViewport({ width, height, focusX, focusY, onMeasure, onBlankCl
       <button type="button" aria-label="原始大小" onClick={() => changeZoom(1)}>1:1</button>
       <button type="button" aria-label="放大任务图" onClick={() => changeZoom(Math.min(2, zoom * 1.25))}><ZoomIn size={13} /></button>
     </div>
-    <div ref={canvas} className={`task-graph-canvas${dragging ? ' is-panning' : ''}`} role="region" aria-label="任务图画布" tabIndex={0}
+    <div ref={canvas} className={`task-graph-canvas${dragging ? ' is-panning' : ''}`} role="region" aria-label="任务图画布" tabIndex={0} onScroll={event => { if (viewPosition) { viewPosition.top = event.currentTarget.scrollTop; viewPosition.left = event.currentTarget.scrollLeft; } }}
       onPointerDown={event => {
         if (event.pointerType !== 'mouse' || event.button !== 0 || (event.target as HTMLElement).closest('button, a, input, textarea')) return;
         const element = event.currentTarget;
@@ -246,7 +247,7 @@ function TaskGraphViewport({ width, height, focusX, focusY, onMeasure, onBlankCl
   </div>;
 }
 
-function TaskGraphDialog({
+export function TaskGraphDetail({
   tasks,
   loadTask,
   modelConfigurations,
@@ -261,9 +262,13 @@ function TaskGraphDialog({
   onReadToolArtifact,
   onReadVisualization,
   onReadVisualizationThumbnail,
-  onClose,
-  opener,
+  initialTaskId,
+  onOpenTask,
+  viewState,
 }: {
+  viewState?: WorkspaceTab['view'];
+  initialTaskId?: string;
+  onOpenTask?: (task: AgentTask) => void;
   tasks: AgentTask[];
   loadTask?: (taskId: string) => Promise<AgentTask>;
   modelConfigurations: readonly ModelConfigurationSummary[];
@@ -278,10 +283,9 @@ function TaskGraphDialog({
   onReadVisualization?: import("./inline-visualization").ReadVisualization;
   onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
-  onClose: () => void;
-  opener: HTMLElement | null;
 }) {
-  const [selectedId, setSelectedId] = useState(tasks.length === 1 ? tasks[0]?.id : undefined);
+  const [selectedId, setSelectedId] = useState(initialTaskId ?? viewState?.taskId ?? (tasks.length === 1 ? tasks[0]?.id : undefined));
+  useEffect(() => { if (viewState) viewState.taskId = selectedId; }, [selectedId, viewState]);
   const [externalRead, setExternalRead] = useState<{ id: string; task?: AgentTask; error?: string }>();
   const [externalRetry, setExternalRetry] = useState(0);
   const localSelected = tasks.find(task => task.id === selectedId);
@@ -315,7 +319,6 @@ function TaskGraphDialog({
     nextCursor?: string;
     error?: string;
   }>();
-  const dialogRef = useRef<HTMLDivElement>(null);
   const [vertical, setVertical] = useState(false);
   const measureCanvas = useCallback((width: number) => setVertical(width < 600), []);
   const markerId = useId().replaceAll(':', '');
@@ -398,7 +401,7 @@ function TaskGraphDialog({
       const detail = task.dependencies?.find((item) => item.id === id);
       sources.set(id, {
         id, label: detail?.label || detail?.taskKey || id,
-        role: '其他任务组 · 依赖来源', objective: '', status: detail?.status || 'waiting',
+        role: '其他任务组的依赖来源', objective: '', status: detail?.status || 'waiting',
         completionAccepted: false, dependencyIds: [], color: 'violet',
       });
     }
@@ -511,36 +514,14 @@ function TaskGraphDialog({
     }
   };
 
-  useEffect(() => {
-    const application = document.querySelector<HTMLElement>('main.pulsara-shell');
-    const previous = application?.inert ?? false;
-    if (application) application.inert = true;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    window.requestAnimationFrame(() => dialogRef.current?.focus());
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      if (application) application.inert = previous;
-      window.requestAnimationFrame(() => opener?.focus());
-    };
-  }, [onClose, opener]);
-
-  return createPortal(
-    <div className="task-graph-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) {
-        setSelectedId(undefined);
-        onClose();
-      }
-    }}>
-      <div className={`task-graph-dialog${selectedId ? ' has-detail' : ''}`} role="dialog" aria-modal="true" aria-label={groupTitle(tasks)} tabIndex={-1} ref={dialogRef}>
+  const content = (
+    <div className="task-graph-embedded">
+      <div className={`task-graph-dialog${selectedId ? ' has-detail' : ''}`} role="region" aria-label={groupTitle(tasks)}>
         <header>
           <span><strong>{groupTitle(tasks)}</strong><small>{tasks.length} 个节点</small></span>
-          <button type="button" aria-label="关闭任务图" onClick={onClose}><X size={15} /></button>
         </header>
-        <div className="task-graph-dialog__body">
-          <TaskGraphViewport width={graph.width} height={graph.height} onMeasure={measureCanvas}
+        <div className="task-graph-dialog__body" ref={element => { if (element && viewState?.reader) { element.scrollTop = viewState.reader.top; element.scrollLeft = viewState.reader.left; } }} onScroll={event => { if (viewState && event.target === event.currentTarget) viewState.reader = { top: event.currentTarget.scrollTop, left: event.currentTarget.scrollLeft }; }}>
+          <TaskGraphViewport viewPosition={viewState?.graph} width={graph.width} height={graph.height} onMeasure={measureCanvas}
             onBlankClick={() => { if (tasks.length > 1) setSelectedId(undefined); }}
             focusX={(graph.positions.get(selectedId ?? tasks[0]?.id)?.x ?? 0) + TASK_GRAPH_NODE_WIDTH / 2}
             focusY={(graph.positions.get(selectedId ?? tasks[0]?.id)?.y ?? 0) + TASK_GRAPH_NODE_HEIGHT / 2}>
@@ -613,6 +594,7 @@ function TaskGraphDialog({
           </aside>}
           {selected && (
             <aside className="task-node-detail" aria-label={`${selected.label} 详情`}>
+              {onOpenTask && <button className="secondary-ghost" onClick={() => onOpenTask(selected)}>在标签中打开任务</button>}
               <header><span className="task-node-detail__identity"><Bot size={13} /><strong>{selected.label}</strong>
                 {modelName && <span className="task-node-detail__model"><span>{modelName}</span>{reasoningLabel && <small>{reasoningLabel}</small>}</span>}
               </span>
@@ -691,69 +673,25 @@ function TaskGraphDialog({
           )}
         </div>
       </div>
-    </div>,
-    document.body,
+    </div>
   );
+  return content;
 }
 
 export function TaskWorkspace({
-  tasks,
-  loadTask,
-  modelConfigurations = [],
-  groups: providedGroups,
-  loadedGroupIds,
-  totalGroupCount,
-  onLoadGroup,
-  onUnloadGroup,
-  onLoadMoreGroups,
-  readCapacity,
-  loading,
-  error,
-  canControl,
-  onRetry,
-  onCancel,
-  onNotify,
-  activities,
-  loadActivities,
-  loadBackgroundProcesses,
-  skills = [],
-  artifactOwnerKey = 'task-activity',
-  onReadToolArtifact = async () => { throw new Error('完整工具输出暂时无法读取。'); },
-  onReadVisualization,
-  onReadVisualizationThumbnail,
+  onOpenGroup, tasks, groups: providedGroups, totalGroupCount, onLoadMoreGroups,
+  readCapacity, loading, error, onRetry,
 }: {
+  onOpenGroup: (groupId: string, title: string) => void;
   tasks: AgentTask[];
-  loadTask?: (taskId: string) => Promise<AgentTask>;
-  modelConfigurations?: readonly ModelConfigurationSummary[];
   groups?: AgentTaskGroup[];
-  loadedGroupIds?: ReadonlySet<string>;
   totalGroupCount?: number;
-  onUnloadGroup?: (groupId: string) => void;
-  onLoadGroup?: (groupId: string) => Promise<void>;
   onLoadMoreGroups?: () => Promise<void>;
   readCapacity?: () => Promise<{ target: number; occupied: number }>;
   loading: boolean;
   error?: string;
-  canControl: boolean;
   onRetry: () => void;
-  onCancel: (task: AgentTask) => Promise<void>;
-  onNotify: MarkdownNotify;
-  activities: ReadonlyMap<string, SubagentActivity[]>;
-  loadActivities: (taskId: string, cursor?: string) => Promise<AgentTaskActivityPage>;
-  loadBackgroundProcesses: (cursor?: string) => Promise<BackgroundProcessPage>;
-  skills?: SkillCapability[];
-  artifactOwnerKey?: string;
-  onReadVisualization?: import("./inline-visualization").ReadVisualization;
-  onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
-  onReadToolArtifact?: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
 }) {
-  const [openGroup, setOpenGroup] = useState<string>();
-  useEffect(() => () => {
-    if (openGroup) onUnloadGroup?.(openGroup);
-  }, [openGroup, onUnloadGroup]);
-  const [loadingGroup, setLoadingGroup] = useState<string>();
-  const [groupError, setGroupError] = useState<string>();
-  const [opener, setOpener] = useState<HTMLElement | null>(null);
   const loadedTasksByGroup = useMemo(() => {
     const value = new Map<string, AgentTask[]>();
     for (const task of tasks) {
@@ -778,7 +716,6 @@ export function TaskWorkspace({
     },
     singleTaskLabel: group.length === 1 ? group[0]?.label : undefined,
   }));
-  const selected = loadedTasksByGroup.find(([id]) => id === openGroup)?.[1];
   const incomplete = tasks.filter((task) => !task.batchId);
 
   if (error) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>任务没有读完整</strong><small>{error}</small></span><button onClick={onRetry}>重试</button></div>;
@@ -793,17 +730,9 @@ export function TaskWorkspace({
       const attention = group.statusCounts.failed + group.statusCounts.blocked + group.statusCounts.interrupted;
       const completed = group.statusCounts.completed;
       const title = group.singleTaskLabel || (group.firstAcceptedAt
-        ? `任务组 · ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(group.firstAcceptedAt))}`
+        ? `任务组 ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(group.firstAcceptedAt))}`
         : '任务组');
-      return <button key={group.id} type="button" className="task-group-card" onClick={(event) => {
-        setOpener(event.currentTarget);
-        setOpenGroup(group.id);
-        if (onLoadGroup && !loadedGroupIds?.has(group.id)) {
-          setLoadingGroup(group.id);
-          setGroupError(undefined);
-          void onLoadGroup(group.id).catch((error) => setGroupError(error instanceof Error ? error.message : '任务组暂时无法读取。')).finally(() => setLoadingGroup(undefined));
-        }
-      }}>
+      return <button key={group.id} type="button" className="task-group-card" onClick={() => onOpenGroup(group.id, title)}>
         <span className="task-group-card__icon"><Maximize2 size={14} /></span>
         <span><strong>{title}</strong><small>{completed} 已完成 · {running} 进行中{attention ? ` · ${attention} 需留意` : ''}</small></span>
         <span className="task-group-card__progress"><i style={{ width: `${group.taskCount ? (completed / group.taskCount) * 100 : 0}%` }} /></span>
@@ -811,8 +740,5 @@ export function TaskWorkspace({
       </button>;
     })}
     {onLoadMoreGroups && groups.length < (totalGroupCount ?? groups.length) && <button type="button" onClick={() => void onLoadMoreGroups()}>加载更多任务组</button>}
-    {groupError && <p role="alert">{groupError}</p>}
-    {loadingGroup && <p>正在读取任务组…</p>}
-    {selected && (!loadedGroupIds || loadedGroupIds.has(openGroup!)) && <TaskGraphDialog key={`${artifactOwnerKey}:${openGroup}`} tasks={selected} loadTask={loadTask} modelConfigurations={modelConfigurations} canControl={canControl} onCancel={onCancel} onNotify={onNotify} activities={activities} loadActivities={loadActivities} loadBackgroundProcesses={loadBackgroundProcesses} skills={skills} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} opener={opener} onClose={() => setOpenGroup(undefined)} />}
   </div>;
 }

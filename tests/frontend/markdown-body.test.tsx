@@ -1,6 +1,8 @@
 import { fireEvent, render, waitFor, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarkdownBody, MarkdownInline, normalizeMathMarkdown } from '../../frontend/components/markdown-body';
+
+afterEach(() => { delete window.pulsaraDesktop; });
 
 const noopNotify = () => undefined;
 
@@ -50,7 +52,7 @@ describe('MarkdownBody math rendering', () => {
     const body = '```python\ndef fibonacci(n):\n    return "<unsafe>"\n```';
     const writeText = vi.fn().mockResolvedValue(undefined);
     const onNotify = vi.fn();
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    Object.defineProperty(window, 'pulsaraDesktop', { value: { writeClipboardText: writeText }, configurable: true });
     const { container } = render(<MarkdownBody body={body} onNotify={onNotify} />);
     const card = container.querySelector('.code-card')!;
     expect(card.querySelector('.code-card__toolbar')?.textContent).toContain('PYTHON');
@@ -196,8 +198,8 @@ describe('MarkdownBody math rendering', () => {
   it('copies the source of the clicked rendered formula and uses the shared success notice', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const onNotify = vi.fn();
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText },
+    Object.defineProperty(window, 'pulsaraDesktop', {
+      value: { writeClipboardText: writeText },
       configurable: true,
     });
     const body = [
@@ -220,8 +222,8 @@ describe('MarkdownBody math rendering', () => {
   it('reports clipboard rejection through the shared warning notice', async () => {
     const writeText = vi.fn().mockRejectedValue(new Error('denied'));
     const onNotify = vi.fn();
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText },
+    Object.defineProperty(window, 'pulsaraDesktop', {
+      value: { writeClipboardText: writeText },
       configurable: true,
     });
     const { container } = render(<MarkdownBody body="$x$" onNotify={onNotify} />);
@@ -231,7 +233,7 @@ describe('MarkdownBody math rendering', () => {
 
     await waitFor(() => expect(onNotify).toHaveBeenCalledWith(
       '无法复制公式',
-      '浏览器没有授予剪贴板权限。',
+      '系统剪贴板暂时不可用，请重试。',
       'warning',
     ));
   });
@@ -239,8 +241,8 @@ describe('MarkdownBody math rendering', () => {
   it('supports keyboard copy and ignores a pointer drag across display math', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const onNotify = vi.fn();
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText },
+    Object.defineProperty(window, 'pulsaraDesktop', {
+      value: { writeClipboardText: writeText },
       configurable: true,
     });
     const { container } = render(<MarkdownBody body="$$x+y$$" onNotify={onNotify} />);

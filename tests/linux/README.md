@@ -1,6 +1,8 @@
 # Ubuntu backend and package validation
 
-The supported build targets are macOS 11+ ARM64 and Ubuntu 24.04 x86_64/ARM64.
+The Python wheel build targets are macOS ARM64 and Ubuntu 24.04 x86_64/ARM64.
+The macOS wheel tag does not establish the minimum OS version of Electron or
+other bundled desktop binaries.
 Linux wheels use `linux_x86_64` / `linux_aarch64` tags; this is not a manylinux
 compatibility claim. Official ripgrep 15.2.0 musl assets are prepared explicitly,
 verified by their pinned upstream SHA-256, then checked with binutils `readelf`
@@ -51,38 +53,30 @@ container database volume.
 Use `DOCKER_DEFAULT_PLATFORM=linux/amd64` or `linux/arm64` to select an
 architecture; emulated tests do not replace the native CI matrix.
 
-## Desktop actions
+## Desktop application checks
 
-On Ubuntu desktops, install the distribution's desktop components:
+The product entry point is the Electron desktop application. Its preload and
+main process own native file/folder dialogs, file-manager reveal, and opening
+supported files with their associated applications. The former Python
+Zenity/AppleScript/default-app adapters and HTTP directory-picker endpoint have
+been removed.
 
-```sh
-sudo apt-get install zenity xdg-utils
-```
+Launch the installed application as an ordinary user inside a graphical session
+with its display and session bus environment. Headless containers and SSH
+sessions do not supply desktop acceptance. The installed app starts its own
+bundled PostgreSQL instance; the Compose database above is an explicit backend
+test fixture, not a product setup requirement.
 
-Launch Pulsara as your ordinary user inside the graphical session, with its
-display and session bus environment inherited. The browser and native dialogs
-operate on the machine running Pulsara, not on a remote browser's machine.
-Headless containers/SSH sessions do not supply a desktop.
+Build instructions and native resource requirements are in the root
+[README](../../README.md#build-the-desktop-from-source). Desktop shell tests run
+with `npm --prefix desktop test`; Python lifecycle tests exercise the private
+host channel, owner lock, database initialization and ordinary shutdown owner.
+Neither suite substitutes for running the installed Electron artifact.
 
-Zenity owns folder selection through GTK's native file chooser (and its portal
-integration); Pulsara passes the starting directory as a single argument and
-validates the returned local directory. It uses Zenity's supported per-process
-exit overrides to distinguish Cancel/Escape from startup failure. The panel
-remains open until selected/cancelled or the application shuts down, and requests
-are serialized. No Python GTK dependency or copied D-Bus protocol is introduced.
-See the [Zenity implementation](https://github.com/GNOME/zenity/blob/4.0.1/src/fileselection.c)
-and [exit-code configuration](https://github.com/GNOME/zenity/blob/4.0.1/src/util.c).
-
-[`xdg-open`](https://portland.freedesktop.org/doc/xdg-open.html) owns default-app
-and file-manager routing. Opening capability roots, opening a previewed file,
-and showing its containing folder share one adapter. Showing a file's location
-opens the containing directory on Linux; it does not promise to select the file.
-macOS retains its existing native folder picker and Finder selection behavior.
-All paths are passed without a shell. Missing components and unavailable desktop
-sessions return visible errors, rather than a fake successful action.
-
-Automated tests cover dispatch, cancellation, process cleanup, path validation
-and HTTP errors without opening a desktop. Ubuntu GUI/VM checks remain manual:
-select/cancel a working directory, open `.agents`/Pulsara home, and open/show a
-previewed file with your desktop's default applications. Verify both X11 and
-Wayland when available; backend/package gates do not certify window appearance.
+Ubuntu GUI/VM checks cover title-bar controls, close/return/quit, directory and
+file selection, real-path drag/drop, capability directories, native file open
+and reveal, independent preview tabs, history navigation, and a real model task.
+Check the desktop environment that is actually available and record it. Backend
+or wheel checks do not certify the window, tray, packaged native extensions, or
+an untested Linux desktop. The full scoped acceptance contract is in the
+[desktop plan](../../PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md).

@@ -1,10 +1,31 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
 
 import pytest
+import asyncio
+from types import SimpleNamespace
 
 from pulsara_agent import cli
+
+
+def test_config_check_keeps_database_readiness_shape_through_desktop_diagnostics(monkeypatch):
+    from pulsara_agent import desktop_runtime
+    from pulsara_agent.settings import LocalSettings
+
+    async def refresh():
+        pass
+
+    monkeypatch.setattr(cli, "_runtime_services", lambda: (
+        SimpleNamespace(read=LocalSettings), SimpleNamespace(refresh=refresh), object(),
+    ))
+    monkeypatch.setattr(desktop_runtime, "request_database_diagnostic", lambda **_: {
+        "status": "verified", "database_name": "pulsara", "runtime_role": "pulsara_runtime",
+        "migration_head_version": 0, "result_fingerprint": "diagnostic-only",
+    })
+    assert asyncio.run(cli._config_check())["database"] == {
+        "status": "ready", "database_name": "pulsara", "runtime_role": "pulsara_runtime",
+        "migration_head_version": 0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -36,16 +57,25 @@ def test_public_cli_help_lists_app_and_administration_commands():
     assert "{app,skills,plugins,mcp,hooks,db,config-check}" in help_text
 
 
-def test_app_command_dispatches_to_web_application(monkeypatch):
-    launch = AsyncMock()
-    monkeypatch.setattr(cli, "_local_web_app", launch)
-    monkeypatch.setattr("sys.argv", ["pulsara", "app", "--port", "8765", "--no-open"])
+def test_app_command_dispatches_to_installed_desktop(monkeypatch):
+    from unittest.mock import Mock
+    launch = Mock()
+    monkeypatch.setattr("pulsara_agent.desktop_launcher.launch_desktop", launch)
+    monkeypatch.setattr("sys.argv", ["pulsara", "app"])
     cli.main()
-    launch.assert_awaited_once()
-    arguments = launch.await_args.args[0]
-    assert arguments.port == 8765
-    assert arguments.no_open is True
-    assert not hasattr(arguments, "workspace")
+    launch.assert_called_once_with()
+
+
+@pytest.mark.parametrize("arguments", [
+    ["app", "--port", "8765"], ["app", "--no-open"],
+    ["app", "--static-root", "/tmp"], ["app", "--permission-mode", "full"],
+    ["app", "--trust-workspace-mcp"], ["app", "--skill", "x"],
+    ["app", "--memory-domain-id", "other"], ["db", "migrate"],
+])
+def test_removed_desktop_arguments_are_explicitly_rejected(arguments):
+    with pytest.raises(SystemExit) as rejected:
+        cli.build_parser().parse_args(arguments)
+    assert rejected.value.code == 2
 
 
 @pytest.mark.parametrize(

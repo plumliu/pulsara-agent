@@ -327,7 +327,7 @@ def test_mailbox_collision_rejects_only_new_candidate_and_preserves_fifo(
     ["scheduled:" + "0" * 32, "entry:" + "a" * 26, "schedule:" + "a" * 25 + "b", ""],
 )
 def test_scheduled_http_rejects_invalid_ids_before_service(endpoint, field, kind, bad):
-    from pulsara_agent.web_app.scheduled_controller import ScheduledTaskController
+    from pulsara_agent.desktop_app.scheduled_controller import ScheduledTaskController
     from pulsara_agent.scheduling.contracts import ScheduledTaskError
 
     async def scenario():
@@ -358,7 +358,7 @@ def test_scheduled_http_rejects_invalid_ids_before_service(endpoint, field, kind
     ],
 )
 def test_scheduled_http_forwards_exact_new_id(endpoint, field, kind):
-    from pulsara_agent.web_app.scheduled_controller import ScheduledTaskController
+    from pulsara_agent.desktop_app.scheduled_controller import ScheduledTaskController
     from unittest.mock import AsyncMock
 
     async def scenario():
@@ -381,7 +381,7 @@ def test_scheduled_http_forwards_exact_new_id(endpoint, field, kind):
     "query", [{"action": "list"}, {"action": "get"}, {"unknown": "x"}]
 )
 def test_scheduled_http_list_rejects_unknown_query_fields(query):
-    from pulsara_agent.web_app.scheduled_controller import ScheduledTaskController
+    from pulsara_agent.desktop_app.scheduled_controller import ScheduledTaskController
     from pulsara_agent.scheduling.contracts import ScheduledTaskError
 
     async def scenario():
@@ -398,7 +398,7 @@ def test_scheduled_http_list_rejects_unknown_query_fields(query):
 @pytest.mark.parametrize("bad", ["scheduled:" + "0" * 32, "entry:" + "a" * 26])
 def test_scheduled_http_mutation_rejects_invalid_id_before_service(action, bad):
     from unittest.mock import AsyncMock
-    from pulsara_agent.web_app.scheduled_controller import ScheduledTaskController
+    from pulsara_agent.desktop_app.scheduled_controller import ScheduledTaskController
     from pulsara_agent.scheduling.contracts import ScheduledTaskError
 
     async def scenario():

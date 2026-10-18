@@ -3,9 +3,14 @@ import type { ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BackgroundProcess } from '../../frontend/lib/runtime-adapter';
 import type { CapabilitySnapshot } from '../../frontend/lib/pulsara-types';
+import { DesktopWorkspaceProvider } from '../../frontend/components/desktop-workspace';
 import { InspectorPanel } from '../../frontend/components/inspector-panel';
 
 afterEach(cleanup);
+
+function Panel(props: ComponentProps<typeof InspectorPanel>) {
+  return <DesktopWorkspaceProvider sessionId={props.session.id} onShow={() => {}}><InspectorPanel {...props} /></DesktopWorkspaceProvider>;
+}
 
 const backgroundProcess: BackgroundProcess = {
   processId: 'process-one',
@@ -177,11 +182,12 @@ describe('InspectorPanel PR03 production navigation', () => {
       skills: { ...capabilitySnapshot.skills, items: [], details: ['Plugin Skill definitions are unavailable'] },
     };
     const base = props({ capabilities: snapshot, capabilityLoading: false });
-    const view = render(<InspectorPanel {...base} />);
+    const view = render(<Panel {...base} />);
+    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
     const empty = screen.getByText('这个目录还没有技能');
     const warning = screen.getByText('部分技能目录暂时无法完整读取');
     for (const loading of [true, false, true, false]) {
-      view.rerender(<InspectorPanel {...base} capabilityLoading={loading} />);
+      view.rerender(<Panel {...base} capabilityLoading={loading} />);
       expect(screen.getByText('这个目录还没有技能')).toBe(empty);
       expect(screen.getByText('部分技能目录暂时无法完整读取')).toBe(warning);
       expect(screen.queryByText('正在同步')).toBeNull();
@@ -191,7 +197,8 @@ describe('InspectorPanel PR03 production navigation', () => {
   });
 
   it('shows loading rather than an empty result before the first capability snapshot arrives', () => {
-    render(<InspectorPanel {...props()} />);
+    render(<Panel {...props()} />);
+    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
     expect(screen.getByText('正在读取项目能力')).toBeTruthy();
     expect(screen.queryByText('这个目录还没有技能')).toBeNull();
   });
@@ -201,20 +208,22 @@ describe('InspectorPanel PR03 production navigation', () => {
       ...capabilitySnapshot,
       skills: { ...capabilitySnapshot.skills, status: 'attention', items: [], details: ['Plugin Skill definitions are unavailable'] },
     };
-    render(<InspectorPanel {...props({ capabilities: snapshot, capabilityLoading: false })} />);
+    render(<Panel {...props({ capabilities: snapshot, capabilityLoading: false })} />);
+    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
     expect(screen.getByText('部分技能目录暂时无法完整读取')).toBeTruthy();
     expect(screen.queryByText('这个目录还没有技能')).toBeNull();
   });
 
   it('closes capability editing on control loss and keeps it closed after control returns', () => {
     const base = props({ capabilities: capabilitySnapshot, capabilityLoading: false, canControl: true });
-    const view = render(<InspectorPanel {...base} />);
+    const view = render(<Panel {...base} />);
+    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
     fireEvent.click(screen.getByRole('button', { name: '添加' }));
     expect(screen.getByRole('dialog')).toBeTruthy();
 
-    view.rerender(<InspectorPanel {...base} canControl={false} />);
+    view.rerender(<Panel {...base} canControl={false} />);
     expect(screen.queryByRole('dialog')).toBeNull();
-    view.rerender(<InspectorPanel {...base} />);
+    view.rerender(<Panel {...base} />);
     expect(screen.queryByRole('dialog')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: '添加' }));
@@ -230,43 +239,47 @@ describe('InspectorPanel PR03 production navigation', () => {
       onLoadBackgroundProcesses: loadBackground,
       capabilityLoading: false,
     });
-    const panel = render(<InspectorPanel {...emptyProps} />);
-    expect(screen.getByText('创建或选择会话后查看项目能力')).toBeTruthy();
+    const panel = render(<Panel {...emptyProps} />);
+    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '添加' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    expect(screen.getByText('创建或选择会话后查看任务')).toBeTruthy();
+    expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByText('这个会话还没有任务')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: '后台终端' }));
-    expect(screen.getByText('创建或选择会话后查看后台终端')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '后台进程' }));
+    expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
     expect(loadBackground).not.toHaveBeenCalled();
 
-    panel.rerender(<InspectorPanel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
+    panel.rerender(<Panel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
+    fireEvent.click(screen.getByRole('button', { name: '后台进程' }));
     expect(await screen.findByText('sleep 30')).toBeTruthy();
     expect(loadBackground).toHaveBeenCalledWith(undefined);
 
-    panel.rerender(<InspectorPanel {...emptyProps} />);
-    expect(screen.getByText('创建或选择会话后查看后台终端')).toBeTruthy();
+    panel.rerender(<Panel {...emptyProps} />);
+    expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByText('sleep 30')).toBeNull();
   });
 
   it('keeps capability access and adds task/background tabs in the frozen order', async () => {
     const loadBackground = vi.fn(async () => ({ processes: [backgroundProcess] }));
-    render(<InspectorPanel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
+    render(<Panel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
 
-    const navigation = screen.getByRole('navigation', { name: '详情视图' });
+    const navigation = screen.getByRole('navigation', { name: '工作区入口' });
     expect(within(navigation).getAllByRole('button').map((button) => button.textContent?.trim())).toEqual([
-      '能力', '任务', '后台终端',
+      '能力', '任务', '后台进程',
     ]);
-    expect(within(navigation).getByRole('button', { name: '项目能力' }).classList.contains('is-active')).toBe(true);
+    expect(screen.queryAllByRole('tab')).toHaveLength(0);
+    fireEvent.click(within(navigation).getByRole('button', { name: '项目能力' }));
+    expect(screen.getByRole('tab', { name: '会话能力' })).toBeTruthy();
     expect(screen.getByText('正在读取项目能力')).toBeTruthy();
 
     fireEvent.click(within(navigation).getByRole('button', { name: '任务' }));
     expect(screen.getByText('这个会话还没有任务')).toBeTruthy();
 
-    fireEvent.click(within(navigation).getByRole('button', { name: '后台终端' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: '后台进程' }));
     await waitFor(() => expect(loadBackground).toHaveBeenCalledWith(undefined));
     expect(await screen.findByText('sleep 30')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '终止 sleep 30' })).toBeNull();
@@ -276,7 +289,8 @@ describe('InspectorPanel PR03 production navigation', () => {
   });
 
   it('keeps capability tabs on the left, groups MCP actions on the right, and shows effective totals', () => {
-    render(<InspectorPanel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
+    render(<Panel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
+    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
 
     const tabs = screen.getByRole('tablist', { name: '能力类型' });
     expect(within(tabs).getByRole('tab', { name: '技能 2' })).toBeTruthy();
@@ -294,7 +308,8 @@ describe('InspectorPanel PR03 production navigation', () => {
   });
 
   it('animates inherited capabilities and nested MCP details without unmounting on collapse', () => {
-    const view = render(<InspectorPanel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
+    const view = render(<Panel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
+    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
     fireEvent.click(screen.getByRole('tab', { name: 'MCP 2' }));
 
     const inheritedToggle = screen.getByRole('button', { name: '继承的能力1' });
@@ -308,7 +323,7 @@ describe('InspectorPanel PR03 production navigation', () => {
     const detailDisclosure = mcpRow.querySelector('.project-capability-row__detail-disclosure')!;
     expect(detailDisclosure.classList.contains('is-open')).toBe(false);
 
-    fireEvent.click(within(mcpRow as HTMLElement).getByRole('button', { name: /用户 MCP/ }));
+    fireEvent.click(within(mcpRow as HTMLElement).getByRole('button', { name: '展开详情' }));
     expect(detailDisclosure.classList.contains('is-open')).toBe(true);
     expect(mcpRow.querySelector('.project-capability-row__detail')).toBeTruthy();
 
@@ -320,4 +335,21 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(inheritedDisclosure.classList.contains('is-open')).toBe(false);
     expect(view.container.querySelector('.project-capability-row__detail')).toBeTruthy();
   });
+});
+
+it('keeps the original MCP identity unavailable after removal or Host replacement without reconnecting', () => {
+  const base = props({ capabilities: capabilitySnapshot, capabilityLoading: false, canControl: true });
+  const view = render(<Panel {...base} />);
+  fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+  fireEvent.click(screen.getByRole('tab', { name: 'MCP 2' }));
+  fireEvent.click(screen.getByRole('button', { name: /工作区 MCP/ }));
+  expect(screen.getByRole('tab', { name: '工作区 MCP' })).toBeTruthy();
+  expect(base.onReconnectProjectMcp).not.toHaveBeenCalled();
+  view.rerender(<Panel {...base} capabilities={{...capabilitySnapshot, mcp: {...capabilitySnapshot.mcp, servers: []}}} />);
+  expect(screen.getByText('此 MCP 连接已不可用。标签保留原连接身份。')).toBeTruthy();
+  view.rerender(<Panel {...base} backgroundHostSessionId="host-replacement" />);
+  expect(screen.getByText('原运行实例已不可用。此标签不会改绑到新的实例。')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '关闭 工作区 MCP' }));
+  expect(base.onReconnectProjectMcp).not.toHaveBeenCalled();
+  expect(base.onTerminateBackgroundProcess).not.toHaveBeenCalled();
 });

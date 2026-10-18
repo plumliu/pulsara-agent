@@ -1,5 +1,3 @@
-'use client';
-
 import {
   AlertTriangle,
   Blocks,
@@ -10,7 +8,6 @@ import {
   Info,
   ListChecks,
   LoaderCircle,
-  PanelRightClose,
   Plus,
   RefreshCw,
   Server,
@@ -18,7 +15,7 @@ import {
   Trash2,
   Wrench,
 } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { useContext, useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { McpEditor } from './mcp-editor';
 import { McpImporter } from './mcp-importer';
@@ -41,7 +38,9 @@ import type {
   SubagentActivity,
 } from '../lib/pulsara-types';
 import type { MarkdownNotify } from './markdown-body';
-import { TaskWorkspace } from './task-workspace';
+import { TaskWorkspace, TaskGraphDetail } from './task-workspace';
+import { DesktopWorkspace, useDesktopWorkspace, type WorkspaceTab } from './desktop-workspace';
+import { FileLinkContext } from './file-link-context';
 import { BackgroundTerminalPanel } from './background-terminal-panel';
 import { AnimatedDisclosure } from './animated-disclosure';
 import { usePromptHover } from '../lib/prompt-hover';
@@ -115,7 +114,6 @@ interface ProjectMcpForms {
   authorize: (server: McpServerCapability, action: 'login' | 'status' | 'cancel' | 'logout') => Promise<void>;
 }
 
-type InspectorView = 'tasks' | 'capabilities' | 'background';
 type ProjectCapabilityKind = 'skills' | 'mcp';
 
 const capabilitySourceLabels = {
@@ -254,6 +252,8 @@ function ProjectCapabilityDialog({
 
 function ProjectCapabilityPanel({
   onNotify,
+  onOpenMcp,
+  selectedMcpId,
   canControl,
   kind,
   setKind,
@@ -276,6 +276,8 @@ function ProjectCapabilityPanel({
   onOpenHomeSettings,
 }: {
   onNotify: MarkdownNotify;
+  onOpenMcp?: (server: McpServerCapability) => void;
+  selectedMcpId?: string;
   canControl: boolean;
   mcpForms: ProjectMcpForms;
   kind: ProjectCapabilityKind;
@@ -297,11 +299,12 @@ function ProjectCapabilityPanel({
   onOpenHomeSettings: () => void;
   onRemoveSkill: (skill: SkillCapability) => Promise<void>;
 }) {
+  const fileLink = useContext(FileLinkContext);
   const [expandedMcp, setExpandedMcp] = useState<string>();
   const [editingMcp, setEditingMcp] = useState<McpServerCapability>();
   const [importingMcp, setImportingMcp] = useState(false);
   const [removingSkill, setRemovingSkill] = useState<string>();
-  const [inheritedExpanded, setInheritedExpanded] = useState(false);
+  const [inheritedExpanded, setInheritedExpanded] = useState(Boolean(selectedMcpId));
   const [dialogKind, setDialogKind] = useState<ProjectCapabilityKind>();
   const [dialogOpener, setDialogOpener] = useState<HTMLButtonElement | null>(null);
   const [previousCanControl, setPreviousCanControl] = useState(canControl);
@@ -313,7 +316,7 @@ function ProjectCapabilityPanel({
     }
   }
   const skills = snapshot?.skills.items ?? [];
-  const servers = snapshot?.mcp.servers ?? [];
+  const servers = (snapshot?.mcp.servers ?? []).filter(server => !selectedMcpId || server.id === selectedMcpId);
   const projectSkills = skills.filter((item) => item.source === 'workspace');
   const inheritedSkills = skills.filter((item) => item.source !== 'workspace');
   const projectMcp = servers.filter((item) => item.source === 'workspace');
@@ -332,7 +335,7 @@ function ProjectCapabilityPanel({
   const renderSkill = (skill: SkillCapability) => (
     <article className={`project-capability-row${skill.enabled ? '' : ' is-disabled'}`} key={`${skill.source}:${skill.id}:${skill.path}`}>
       <span className="project-capability-row__icon"><Wrench size={13} /></span>
-      <span className="project-capability-row__copy"><strong>{skill.name}</strong><small>{skill.description}</small></span>
+      <button type="button" className="project-capability-row__copy skill-read-button" onClick={event => fileLink?.open(skill.path, event.currentTarget)} title={skill.path}><strong>{skill.name}</strong><small>{skill.description}</small></button>
       {skill.editable && skill.removalIdentity && (removingSkill === skill.path ? <>
         <button className="secondary-ghost" disabled={!canControl || Boolean(busy)} onClick={() => setRemovingSkill(undefined)}>取消</button>
         <button className="danger-ghost" disabled={!canControl || Boolean(busy)} onClick={() => void onRemoveSkill(skill).then(() => setRemovingSkill(undefined), () => {})}>确认删除</button>
@@ -346,13 +349,13 @@ function ProjectCapabilityPanel({
   );
 
   const renderMcp = (server: McpServerCapability) => {
-    const expanded = expandedMcp === `${server.source}:${server.id}`;
+    const expanded = Boolean(selectedMcpId) || expandedMcp === `${server.source}:${server.id}`;
     const rowKey = `${server.source}:${server.id}`;
     const status = server.needsApproval ? '需要确认' : mcpStatusLabels[server.status];
     return (
       <article className={`project-capability-row project-capability-row--mcp${server.enabled ? '' : ' is-disabled'}${expanded ? ' is-expanded' : ''}`} key={rowKey}>
         <div className="project-capability-row__summary">
-          <button className="project-capability-row__identity" type="button" onClick={() => setExpandedMcp(expanded ? undefined : rowKey)}>
+          <button className="project-capability-row__identity" type="button" onClick={() => onOpenMcp && !selectedMcpId ? onOpenMcp(server) : setExpandedMcp(expanded ? undefined : rowKey)}>
             <span className="project-capability-row__icon"><Server size={13} /></span>
             <span className="project-capability-row__copy"><strong>{server.name}</strong><small>{status}{server.toolCount ? ` · ${server.toolCount} 个工具` : ''}</small></span>
           </button>
@@ -426,7 +429,8 @@ function ProjectCapabilityPanel({
         </div>
       )}
       {!error && loading && !snapshot && <div className="task-inventory-notice"><LoaderCircle size={15} /><span><strong>正在读取项目能力</strong><small>整理这个目录中的技能和连接…</small></span></div>}
-      {(!loading || snapshot) && !error && rows === 0 && (kind !== 'skills' || snapshot?.skills.status !== 'attention') && <div className="inspector-empty"><Blocks size={18} /><span>这个目录还没有{kind === 'skills' ? '技能' : ' MCP'}</span></div>}
+      {!loading && !error && selectedMcpId && !servers.length && <div className="inspector-empty" role="status">此 MCP 连接已不可用。标签保留原连接身份。</div>}
+      {!selectedMcpId && (!loading || snapshot) && !error && rows === 0 && (kind !== 'skills' || snapshot?.skills.status !== 'attention') && <div className="inspector-empty"><Blocks size={18} /><span>这个目录还没有{kind === 'skills' ? '技能' : ' MCP'}</span></div>}
 
       {snapshot && rows > 0 && (
         <section className="inspector-section project-capability-list">
@@ -511,53 +515,28 @@ export function InspectorPanel({
   onNotify,
   onClose,
 }: InspectorPanelProps) {
-  const [view, setView] = useState<InspectorView>('capabilities');
+  const workspace = useDesktopWorkspace();
   const [capabilityKind, setCapabilityKind] = useState<ProjectCapabilityKind>('skills');
 
-  return (
-    <aside className={`inspector-panel${isOpen ? ' is-open' : ''}`} aria-label="当前会话详情">
-      <header className="inspector-tabs">
-        <span><strong>当前会话</strong><small>{session.title}</small></span>
-        <button className="inspector-close" onClick={onClose} aria-label="关闭检查器"><PanelRightClose size={14} /></button>
-        <nav aria-label="详情视图">
-          <button aria-label="项目能力" className={view === 'capabilities' ? 'is-active' : ''} onClick={() => setView('capabilities')}><Blocks size={12} /> 能力</button>
-          <button className={view === 'tasks' ? 'is-active' : ''} onClick={() => setView('tasks')}><ListChecks size={12} /> 任务</button>
-          <button className={view === 'background' ? 'is-active' : ''} onClick={() => setView('background')}><TerminalSquare size={12} /> 后台终端</button>
-        </nav>
-      </header>
-      <div className="inspector-scroll">
-        {!session.id ? (
-          <div className="inspector-empty">
-            {view === 'background' ? <TerminalSquare size={18} /> : view === 'tasks' ? <ListChecks size={18} /> : <Blocks size={18} />}
-            <span>创建或选择会话后查看{view === 'background' ? '后台终端' : view === 'tasks' ? '任务' : '项目能力'}</span>
-          </div>
-        ) : view === 'tasks' ? (
-          <TaskWorkspace
-            modelConfigurations={modelConfigurations}
-            tasks={agentTasks}
-            groups={taskGroups}
-            loadedGroupIds={loadedTaskGroups}
-            totalGroupCount={taskGroupTotal}
-            onLoadGroup={onLoadTaskGroup}
-            onUnloadGroup={onUnloadTaskGroup}
-            onLoadMoreGroups={onLoadMoreTaskGroups}
-            readCapacity={onReadSubagentCapacity}
-            loading={loading}
-            error={error}
-            canControl={canControl}
-            onRetry={onRetry}
-            onCancel={onCancelTask}
-            onNotify={onNotify}
-            activities={taskActivities}
-            loadTask={onLoadTask}
-            loadActivities={onLoadTaskActivities}
-            loadBackgroundProcesses={onLoadBackgroundProcesses}
-            skills={(capabilities?.skills.items ?? []).filter((skill) => skill.enabled && skill.effective)}
-            artifactOwnerKey={taskArtifactOwnerKey}
-            onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
-          />
-        ) : view === 'background' ? (
-          <BackgroundTerminalPanel
+  const open = (kind: WorkspaceTab['kind'], title: string, entityId?: string, hostSessionId?: string) => workspace?.open({
+    id: JSON.stringify([session.id, kind, entityId ?? '', hostSessionId ?? '']), sessionId: session.id, kind, title, entityId, hostSessionId,
+    onClose: kind === 'group' && entityId ? () => onUnloadTaskGroup?.(entityId) : undefined,
+  });
+  const renderTab = (tab: WorkspaceTab) => {
+    if (!session.id) return <div className="inspector-empty">创建或选择会话后查看内容</div>;
+    if ((tab.kind === 'process' || tab.kind === 'mcp') && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">原运行实例已不可用。此标签不会改绑到新的实例。</div>;
+    if (tab.kind === 'tasks') return <TaskWorkspace onOpenGroup={(id, title) => open("group", title, id)}
+      tasks={agentTasks} groups={taskGroups} totalGroupCount={taskGroupTotal}
+      onLoadMoreGroups={onLoadMoreTaskGroups} readCapacity={onReadSubagentCapacity}
+      loading={loading} error={error} onRetry={onRetry} />;
+    if (tab.kind === 'group' || tab.kind === 'task') return <WorkspaceTaskDetail
+      tab={tab} tasks={agentTasks} loadedGroupIds={loadedTaskGroups} onLoadGroup={onLoadTaskGroup} loadTask={onLoadTask}
+      modelConfigurations={modelConfigurations ?? []} canControl={canControl} onCancel={onCancelTask} onNotify={onNotify}
+      activities={taskActivities} loadActivities={onLoadTaskActivities} loadBackgroundProcesses={onLoadBackgroundProcesses}
+      skills={(capabilities?.skills.items ?? []).filter(skill => skill.enabled && skill.effective)} artifactOwnerKey={taskArtifactOwnerKey}
+      onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
+      onOpenTask={task => open('task', task.label, task.id)} />;
+    if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
             ownerKey={backgroundOwnerKey}
             sessionId={session.id}
             hostSessionId={backgroundHostSessionId}
@@ -567,13 +546,12 @@ export function InspectorPanel({
             readLog={onReadBackgroundProcessLog}
             terminateProcess={onTerminateBackgroundProcess}
             queryControl={onQueryControl}
-          />
-        ) : (
-          <ProjectCapabilityPanel
+          />;
+    return <ProjectCapabilityPanel selectedMcpId={tab.kind === "mcp" ? tab.entityId : undefined} onOpenMcp={server => open("mcp", server.name, server.id, backgroundHostSessionId)}
             canControl={canControl}
             onNotify={onNotify}
             key={session.id}
-            kind={capabilityKind}
+            kind={tab.kind === "mcp" ? "mcp" : capabilityKind}
             setKind={setCapabilityKind}
             mcpForms={projectMcpForms}
             snapshot={capabilities}
@@ -592,9 +570,36 @@ export function InspectorPanel({
             onReconnectMcp={onReconnectProjectMcp}
             onOpenUserCapabilities={onOpenUserCapabilities}
             onOpenHomeSettings={onOpenHomeSettings}
-          />
-        )}
-      </div>
-    </aside>
-  );
+          />;
+  };
+  return <DesktopWorkspace isOpen={isOpen} onClose={onClose} renderTab={renderTab} toolbar={<nav aria-label="工作区入口">
+    <button type="button" aria-label="项目能力" title="项目能力" onClick={() => open('capabilities', '会话能力')}><Blocks size={13} />能力</button>
+    <button type="button" title="任务" className={workspace?.tabs.find(tab => tab.id === workspace.activeId)?.kind === "tasks" ? "is-active" : undefined} onClick={() => open('tasks', '任务')}><ListChecks size={13} />任务</button>
+    <button type="button" title="后台进程" onClick={() => open('background', '后台进程')}><TerminalSquare size={13} />后台进程</button>
+  </nav>} />;
+}
+
+function WorkspaceTaskDetail({ tab, tasks, loadedGroupIds, onLoadGroup, ...props }: Omit<React.ComponentProps<typeof TaskGraphDetail>, 'tasks'> & {
+  tab: WorkspaceTab; tasks: AgentTask[]; loadedGroupIds?: ReadonlySet<string>; onLoadGroup?: (id: string) => Promise<void>;
+}) {
+  const [loaded, setLoaded] = useState<AgentTask>();
+  const [error, setError] = useState<string>();
+  const [retry, setRetry] = useState(0);
+  const local = tasks.find(task => task.id === tab.entityId);
+  const readTask = props.loadTask;
+  const groupLoaded = loadedGroupIds?.has(tab.entityId!);
+  useEffect(() => {
+    let current = true;
+    setError(undefined);
+    const operation = tab.kind === 'group'
+      ? (!groupLoaded ? onLoadGroup?.(tab.entityId!) : undefined)
+      : (!local ? readTask?.(tab.entityId!).then(task => { if (current) setLoaded(task); }) : undefined);
+    void operation?.catch(caught => { if (current) setError(caught instanceof Error ? caught.message : '任务暂时无法读取'); });
+    return () => { current = false; };
+  }, [tab.entityId, tab.kind, groupLoaded, onLoadGroup, local, readTask, retry]);
+  const selected = tab.kind === 'group' ? tasks.filter(task => task.batchId === tab.entityId) : local ? [local] : loaded ? [loaded] : [];
+  if (error) return <div className="task-inventory-notice"><p role="alert">{error}</p><button onClick={() => setRetry(value => value + 1)}>重试</button></div>;
+  if (!selected.length && tab.kind === 'group' && groupLoaded) return <div className="inspector-empty" role="status">这个任务组已没有可读取的任务。</div>;
+  if (!selected.length) return <div className="inspector-empty"><LoaderCircle className="is-spinning" size={18} />正在读取任务…</div>;
+  return <TaskGraphDetail {...props} viewState={tab.view} tasks={selected} initialTaskId={tab.kind === 'task' ? tab.entityId : undefined} />;
 }

@@ -185,7 +185,7 @@ def test_fork_outcome_cut_nested_copy_parent_delete_and_summary_inventory(repo):
     assert child.created, child.public_code
     child_snapshot = snapshot(reader, child.child_session_id)
     assert len(child_snapshot.interruption_notices) == 1
-    from pulsara_agent.web_app.browser_bridge import protobuf_json
+    from pulsara_agent.desktop_app.renderer_bridge import protobuf_json
     tiny = snapshot(reader, child.child_session_id, maximum_entries=1)
     assert tiny.older_history_cursor.HasField("event_sequence_cut")
     assert protobuf_json(tiny.older_history_cursor)["event_sequence_cut"] == "0"

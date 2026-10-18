@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pulsara_agent.web_app.path_completion import complete_workspace_paths
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.path_completion import complete_workspace_paths
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 
 
 def test_paths_only_progressive_prefixes_and_no_contents(tmp_path, monkeypatch):

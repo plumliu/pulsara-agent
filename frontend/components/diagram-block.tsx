@@ -1,4 +1,4 @@
-'use client';
+import { writeClipboardText } from '../lib/desktop-host';
 
 import { Code2, Copy, Image as ImageIcon, Maximize2, RotateCcw, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
@@ -49,10 +49,10 @@ export function DiagramBlock({ source, streaming, onNotify, format, renderImage 
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(source);
+      await writeClipboardText(source);
       onNotify(`${format} 源码已复制`, undefined, 'success');
     } catch {
-      onNotify('无法复制源码', '浏览器没有授予剪贴板权限。', 'warning');
+      onNotify('无法复制源码', '系统剪贴板暂时不可用，请重试。', 'warning');
     }
   };
 
@@ -75,7 +75,6 @@ export function DiagramBlock({ source, streaming, onNotify, format, renderImage 
     </div>}
     {showSource || !ready ? <pre><code className={`language-${format.toLowerCase()}`}>{source}</code></pre> : <div className="mermaid-block__preview">
       {/* Renderers supply sanitized SVG, displayed only as an image. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
       <img draggable={false} src={ready.url} width={ready.width} height={ready.height} alt={`${format} 图表`}
         onError={() => setPreview(previous => previous === ready ? { ...previous, kind: 'failed' } : previous)} />
     </div>}

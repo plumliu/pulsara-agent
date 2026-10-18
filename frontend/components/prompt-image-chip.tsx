@@ -28,7 +28,6 @@ export function PromptImageChip({ number, state, reason, previewSrc, onPreview, 
       {state === 'failed' ? <span className="prompt-image-tooltip__state">{reason ?? '图片读取失败，点击查看详情'}</span>
         : previewSrc
           // The image owner supplies its existing Blob URL; the preview owns no extra copy.
-          // eslint-disable-next-line @next/next/no-img-element
           ? <img src={previewSrc} alt={`Figure ${number} 缩略图`} />
           : <span className="prompt-image-tooltip__state"><LoaderCircle size={16} className="spin" aria-hidden="true" />正在读取图片…</span>}
     </span>, document.body)}

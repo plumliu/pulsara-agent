@@ -1,0 +1,84 @@
+{
+  "name": "pulsara-desktop",
+  "productName": "Pulsara",
+  "version": "0.1.0",
+  "description": "Pulsara local agent workbench",
+  "author": "Pulsara",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && electron .",
+    "test": "npm run build && node --test dist/*.test.js",
+    "prepare:resources": "../.venv/bin/python scripts/prepare_resources.py",
+    "package:dir": "node scripts/linux-hooks.cjs && npm run build && electron-builder --dir",
+    "package": "node scripts/linux-hooks.cjs && npm run build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "electron": "44.9.0",
+    "electron-builder": "26.15.3",
+    "typescript": "5.9.3"
+  },
+  "build": {
+    "appId": "dev.pulsara.desktop",
+    "productName": "Pulsara",
+    "executableName": "pulsara",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "assets/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "."
+      },
+      {
+        "from": "scripts/pulsara-cli.sh",
+        "to": "bin/pulsara"
+      }
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "assets/pulsara.icns",
+      "minimumSystemVersion": "15.0.0",
+      "category": "public.app-category.productivity",
+      "identity": null
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "assets/pulsara.png",
+      "category": "Utility",
+      "desktop": {
+        "entry": {
+          "Name": "Pulsara",
+          "Comment": "Local agent workbench"
+        }
+      },
+      "executableName": "pulsara-desktop"
+    },
+    "deb": {
+      "afterInstall": "build/linux-after-install.sh",
+      "afterRemove": "build/linux-after-remove.sh",
+      "recommends": [],
+      "appArmorProfile": "build/linux-apparmor-profile",
+      "maintainer": "Pulsara maintainers"
+    },
+    "afterPack": "scripts/linux-cli-entry.cjs"
+  },
+  "homepage": "https://github.com/plumliu/pulsara-agent"
+}

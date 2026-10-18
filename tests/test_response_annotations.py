@@ -30,7 +30,7 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     hydrate_canonical_prompt_body,
 )
 from pulsara_agent.conversation_kernel.image_validation import HostPromptImageValidator
-from pulsara_agent.web_app.browser_bridge import _prompt_content_from_json
+from pulsara_agent.desktop_app.renderer_bridge import _prompt_content_from_json
 from pulsara_agent.terminal_protocol.v3_gateway import _prompt_content_from_wire
 from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,

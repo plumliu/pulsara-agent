@@ -117,3 +117,14 @@ it('updates the active count after a complete source is trusted', async () => {
   await screen.findByRole('tab', {name:'钩子 2'});
   expect(hooks.trust).toHaveBeenCalledWith(source);
 });
+
+it('groups toolbar actions while keeping display refresh separate from explicit reload', () => {
+  const onRefresh = vi.fn(), onReload = vi.fn();
+  const view = render(<CapabilityView {...callbacks} loading={false} snapshot={snapshot} onRefresh={onRefresh} onReload={onReload} />);
+  const controls = view.container.querySelector('.capability-page-controls')! as HTMLElement;
+  fireEvent.click(within(controls).getByRole('button', { name: '刷新能力' }));
+  expect(onRefresh).toHaveBeenCalledOnce();
+  expect(onReload).not.toHaveBeenCalled();
+  fireEvent.click(within(controls).getByRole('button', { name: '重新加载会话能力' }));
+  expect(onReload).toHaveBeenCalledOnce();
+});

@@ -12,24 +12,24 @@ const setupCopy: Record<Exclude<DatabaseDataPlaneState, 'ready'>, {
   detail: string;
 }> = {
   database_not_configured: {
-    title: '先连接 PostgreSQL，再开始会话',
-    detail: '会话、任务和记忆需要保存在这台设备的 PostgreSQL 中。填写连接信息并完成初始化后，就可以开始使用。',
+    title: '正在准备内置数据服务',
+    detail: 'Pulsara 正在准备自己的 PostgreSQL。请在应用启动页查看准备进度或错误详情。',
   },
   database_configured_unverified: {
-    title: '检查已保存的 PostgreSQL 连接',
-    detail: '连接信息已经保存，但还没有完成检查。确认本机服务正在运行，再检查连接并初始化数据。',
+    title: '检查内置数据服务',
+    detail: '应用专用数据服务尚未完成检查，请查看服务状态。',
   },
   database_unavailable: {
     title: 'PostgreSQL 当前无法连接',
-    detail: 'Pulsara 无法使用已保存的连接。请检查本机 PostgreSQL 是否启动，并核对连接信息。',
+    detail: 'Pulsara 暂时无法连接应用管理的数据服务，请查看启动诊断并重试。',
   },
   database_schema_action_required: {
     title: '完成 PostgreSQL 初始化',
-    detail: '数据库连接已经可用，但数据结构尚未就绪。运行“初始化 / 升级”后即可继续。',
+    detail: '内置数据库已经启动，应用正在准备当前版本的数据结构。',
   },
   database_reset_required: {
     title: '现有数据需要重置',
-    detail: '现有数据结构与当前版本不兼容。请在本地服务设置中查看重置影响并确认；初始化 / 升级不会清空旧数据。',
+    detail: '现有数据结构与当前版本不兼容。请在本地服务设置中查看重置影响并确认；此操作会清空应用数据库中的历史。',
   },
   database_resetting: {
     title: '正在重置本地数据',
@@ -37,7 +37,7 @@ const setupCopy: Record<Exclude<DatabaseDataPlaneState, 'ready'>, {
   },
   database_restart_required: {
     title: '请重启 Pulsara',
-    detail: '数据服务已关闭。重启 Pulsara 后将重新检查数据库；刷新网页不会重新启动内核。',
+    detail: '数据服务已关闭。重启 Pulsara 后将重新检查数据库；重新打开应用后将恢复数据服务。',
   },
 };
 
@@ -59,15 +59,8 @@ export function DatabaseSetupGuide({
         <h2>{copy.title}</h2>
         <p>{copy.detail}</p>
       </div>
-      {variant === 'overview' && state !== 'database_reset_required' && state !== 'database_resetting' && state !== 'database_restart_required' && (
-        <ol className="database-setup-guide__steps" aria-label="配置步骤">
-          <li><span>1</span><div><strong>保存连接</strong><small>填写 Runtime DSN；需要初始化时再填写 Admin DSN。</small></div></li>
-          <li><span>2</span><div><strong>检查 PostgreSQL</strong><small>确认数据库、账号和权限可以正常使用。</small></div></li>
-          <li><span>3</span><div><strong>初始化数据</strong><small>在设置页运行“初始化 / 升级”。</small></div></li>
-        </ol>
-      )}
       <button className="primary-action" onClick={onOpenSettings}>
-        前往本地服务设置 <ArrowRight size={14} />
+        前往通用设置 <ArrowRight size={14} />
       </button>
     </section>
   );

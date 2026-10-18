@@ -16,7 +16,7 @@ from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.settings import LocalSettingsStore, LocalPostgresConfig
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.scheduling.service import ScheduledTaskService
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from pulsara_agent.tool_permission import default_permission_policy
 from datetime import timedelta
 from tests.dogfood.credentials import secret_scrubber

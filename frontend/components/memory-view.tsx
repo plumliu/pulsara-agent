@@ -1,5 +1,3 @@
-'use client';
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowRight, ArrowUpRight, Brain, Check, ChevronDown, ChevronRight, CircleAlert, FileText, FolderOpen, Globe2, History, Layers3, MessageSquare, Pencil, Search, SlidersHorizontal, Trash2, UserRound, X } from 'lucide-react';

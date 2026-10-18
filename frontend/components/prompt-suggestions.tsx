@@ -1,5 +1,3 @@
-'use client';
-
 import type { Editor } from '@tiptap/core';
 import { shift } from '@floating-ui/dom';
 import { PluginKey } from '@tiptap/pm/state';
@@ -146,8 +144,9 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
         allow: ({ state, range }) => {
           if (!editor.isEditable || (kind === 'path' && !current.current.completePaths)) return false;
           const before = state.doc.textBetween(Math.max(0, range.from - 1), range.from, '\n', '\ufffc');
-          if ((kind === 'skill' ? /[\p{L}\p{N}_\/@.$:\\-]/u : /[A-Za-z0-9_/@.$-]/).test(before)) return false;
+          if ((kind === 'skill' ? /[\p{L}\p{N}_/@.$:\\-]/u : /[A-Za-z0-9_/@.$-]/).test(before)) return false;
           const query = state.doc.textBetween(range.from + 1, range.to);
+          // eslint-disable-next-line no-control-regex -- Reject control characters in user-supplied paths.
           return kind === 'skill' ? /^[a-z0-9-]*$/i.test(query) : !/[\u0000-\u001f\u007f]/.test(query);
         },
         items: async ({ query, signal }) => [await load(query, null, signal)],

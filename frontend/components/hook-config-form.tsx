@@ -1,5 +1,3 @@
-'use client';
-
 import {Plus, Trash2} from 'lucide-react';
 import {useState} from 'react';
 import events from '../lib/hook-form-events.json';

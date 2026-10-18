@@ -350,7 +350,7 @@ def test_shared_publication_history_chunks_fork_and_gc(
 
 def test_cold_image_content_target_is_exclusive():
     from types import SimpleNamespace
-    from pulsara_agent.web_app.http_server import LocalHttpServer
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
 
     calls = []
 

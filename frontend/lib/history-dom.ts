@@ -12,9 +12,9 @@ function visibleHost(element: HTMLElement): HTMLElement {
 
 export function findHistoryEntry(root: HTMLElement, entryId: string): HTMLElement | undefined {
   const trace = [...root.querySelectorAll<HTMLElement>('[data-result-entry]')]
-    .find(node => node.dataset.resultEntry === entryId);
+    .find(node => node.dataset.resultEntry === entryId && !node.closest('[inert], [hidden]'));
   if (trace) return trace;
-  const entries = [...root.querySelectorAll<HTMLElement>('[data-source-entry]')];
+  const entries = [...root.querySelectorAll<HTMLElement>('[data-source-entry]')].filter(node => !node.closest('[inert], [hidden]'));
   const entry = entries.find(node => node.dataset.sourceEntry === entryId)
     ?? entries.find(node => node.dataset.sourceEntries?.split(' ').includes(entryId));
   return entry && visibleHost(entry);
@@ -41,6 +41,7 @@ export function captureHistoryAnchor(root: HTMLElement): HistoryReadingAnchor | 
   // Prefer a text/trace subanchor over the outer message whose height can change.
   for (const selector of ['[data-source-text]', '[data-result-entry]', '[data-source-entry]']) {
     for (const candidate of root.querySelectorAll<HTMLElement>(selector)) {
+      if (candidate.closest('[inert], [hidden]')) continue;
       const node = visibleHost(candidate);
       const rect = node.getBoundingClientRect();
       if (rect.bottom <= viewport.top || rect.top >= viewport.bottom || !rect.height) continue;

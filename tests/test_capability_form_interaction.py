@@ -317,8 +317,8 @@ def test_capability_and_boolean_confirmation_share_one_fifo_slot():
 
 
 def test_browser_form_uses_current_host_without_secret_protocol_frames():
-    from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-    from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
+    from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+    from pulsara_agent.desktop_app.protocol_client import ProtocolBridgeError
 
     async def run():
         coordinator, live, permission = setup()
@@ -339,7 +339,7 @@ def test_browser_form_uses_current_host_without_secret_protocol_frames():
             assert host_id == 'host:ry7e4bmpbggddedtrhcfbibkzu'
             return session
 
-        bridge = LocalBrowserBridge(
+        bridge = RendererBridge(
             sessions=SimpleNamespace(session_by_host_id=get_session),
             protocol_server=None,
         )

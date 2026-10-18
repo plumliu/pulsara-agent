@@ -29,7 +29,7 @@ from pulsara_agent.hooks.source import (
 from pulsara_agent.plugins.management import PluginManagementService
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.tool_permission import preset_to_policy
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 
 CONFIG = json.dumps(
     {
@@ -474,8 +474,8 @@ def test_unavailable_plugin_inventory_keeps_local_source_and_reports_failure(
 
 def test_http_direct_hook_roundtrip_no_session_and_closed_selectors(owners, tmp_path):
     from aiohttp import ClientSession
-    from tests.test_local_web_http_surface import _Bridge, _model_server_dependencies
-    from pulsara_agent.web_app.http_server import LocalHttpServer
+    from tests.test_desktop_http_surface import _Bridge, _model_server_dependencies
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
 
     controller, provider, _ = owners
     (tmp_path / "index.html").write_text("Pulsara")

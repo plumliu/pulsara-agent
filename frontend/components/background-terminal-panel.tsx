@@ -1,5 +1,3 @@
-'use client';
-
 import {
   AlertTriangle,
   ChevronDown,
@@ -9,8 +7,9 @@ import {
   RefreshCw,
   TerminalSquare,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createUserControlCommandRef } from '../lib/runtime-adapter';
+import { useDesktopWorkspace } from './desktop-workspace';
 import { AnimatedDisclosure } from './animated-disclosure';
 import type {
   BackgroundProcess,
@@ -63,6 +62,8 @@ const controlQueryMessage = (status: UserControlQueryResult['status']): string =
 );
 
 export function BackgroundTerminalPanel({
+  processId: selectedProcessId,
+  onOpenProcess,
   ownerKey,
   sessionId,
   hostSessionId,
@@ -73,6 +74,8 @@ export function BackgroundTerminalPanel({
   terminateProcess,
   queryControl,
 }: {
+  processId?: string;
+  onOpenProcess?: (process: BackgroundProcess) => void;
   ownerKey: string;
   sessionId: string;
   hostSessionId?: string;
@@ -90,7 +93,11 @@ export function BackgroundTerminalPanel({
   const revision = useRef(0);
   const readRevisions = useRef(new Map<string, number>());
   const operations = useRef({ loadProcesses, readLog, terminateProcess, queryControl });
-  const controls = useRef(new Map<string, Pick<ProcessView, 'control' | 'reference' | 'error'>>());
+  const workspace = useDesktopWorkspace();
+  const localControls = useRef(new Map<string, Pick<ProcessView, 'control' | 'reference' | 'error'>>());
+  const controlOwner = JSON.stringify([sessionId, hostSessionId]);
+  if (workspace && !workspace.backgroundControls.has(controlOwner)) workspace.backgroundControls.set(controlOwner, new Map());
+  const controls = useMemo(() => ({ current: workspace?.backgroundControls.get(controlOwner) ?? localControls.current }), [workspace?.backgroundControls, controlOwner]);
   const controlReady = Boolean(
     canControl && hostSessionId && controlAdmissionDeadlineMs,
   );
@@ -120,7 +127,7 @@ export function BackgroundTerminalPanel({
       let cursor: string | undefined;
       do {
         const page = await operations.current.loadProcesses(cursor);
-        processes.push(...page.processes);
+        processes.push(...page.processes.filter(process => !selectedProcessId || process.processId === selectedProcessId));
         cursor = page.nextCursor;
         if (cursor) {
           if (seen.has(cursor)) throw new Error('后台命令分页游标发生循环。');
@@ -134,7 +141,7 @@ export function BackgroundTerminalPanel({
           const existing = current.get(process.processId);
           const retainedControl = controls.current.get(process.processId);
           next.set(process.processId, existing ? { ...existing, process } : {
-            process, expanded: false, details: false, output: '', reading: false,
+            process, expanded: Boolean(selectedProcessId), details: Boolean(selectedProcessId), output: '', reading: false,
             ...retainedControl,
           });
         }
@@ -184,12 +191,11 @@ export function BackgroundTerminalPanel({
     } finally {
       if (requestRevision === revision.current) setLoading(false);
     }
-  }, [update]);
+  }, [update, selectedProcessId, controls]);
 
   useEffect(() => {
     revision.current += 1;
     readRevisions.current.clear();
-    controls.current.clear();
     setItems(new Map());
     setLoading(true);
     const ownerRevision = revision.current;
@@ -250,6 +256,8 @@ export function BackgroundTerminalPanel({
   }, [ownerKey, read]);
 
   const stop = async (process: BackgroundProcess) => {
+    if (controls.current.has(process.processId)) { await refresh(); return; }
+    const controlMemory = controls.current;
     const requestRevision = revision.current;
     const reference = createUserControlCommandRef(
       { hostSessionId, controlAdmissionDeadlineMs },
@@ -258,12 +266,12 @@ export function BackgroundTerminalPanel({
       'BACKGROUND_PROCESS',
       process.processId,
     );
-    controls.current.set(process.processId, { reference });
+    controlMemory.set(process.processId, { reference });
     update(process.processId, (value) => ({ ...value, reference, error: undefined }));
     try {
       const receipt = await operations.current.terminateProcess(reference);
       if (requestRevision !== revision.current) return;
-      controls.current.set(process.processId, { reference, control: receipt });
+      controlMemory.set(process.processId, { reference, control: receipt });
       update(process.processId, (value) => ({ ...value, control: receipt, reference }));
       if (controlNeedsPolling(receipt)) {
         const poll = async () => {
@@ -274,18 +282,18 @@ export function BackgroundTerminalPanel({
             if (requestRevision !== revision.current) return;
             if (query.status !== 'FOUND' || !query.receipt) {
               const message = controlQueryMessage(query.status);
-              controls.current.set(process.processId, { reference, control: receipt, error: message });
+              controlMemory.set(process.processId, { reference, control: receipt, error: message });
               update(process.processId, (value) => ({ ...value, error: message }));
               return;
             }
             const result = query.receipt;
-            controls.current.set(process.processId, { reference, control: result });
+            controlMemory.set(process.processId, { reference, control: result });
             update(process.processId, (value) => ({ ...value, control: result, error: undefined }));
             if (controlNeedsPolling(result)) void poll();
           } catch (caught) {
             if (requestRevision !== revision.current) return;
             const message = caught instanceof Error ? caught.message : '控制状态暂时无法查询。';
-            controls.current.set(process.processId, { reference, control: receipt, error: message });
+            controlMemory.set(process.processId, { reference, control: receipt, error: message });
             update(process.processId, (value) => ({ ...value, error: message }));
           }
         };
@@ -293,7 +301,7 @@ export function BackgroundTerminalPanel({
       }
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : '终止请求没有完成。';
-      controls.current.set(process.processId, { reference, error: message });
+      controlMemory.set(process.processId, { reference, error: message });
       if (requestRevision === revision.current) update(process.processId, (value) => ({
         ...value, reference, error: `${message} 结果待按原操作身份确认。`,
       }));
@@ -302,7 +310,7 @@ export function BackgroundTerminalPanel({
 
   if (loading && items.size === 0) return <div className="task-inventory-notice"><LoaderCircle className="is-spinning" size={15} /><span><strong>正在读取后台终端</strong><small>仅显示当前 Host 保留范围。</small></span></div>;
   if (error && items.size === 0) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>后台终端不可用</strong><small>{error}</small></span><button onClick={() => void refresh()}><RefreshCw size={11} /> 重试</button></div>;
-  if (!items.size) return <div className="inspector-empty"><TerminalSquare size={18} /><span>当前没有已交付的后台命令</span></div>;
+  if (!items.size) return <div className="inspector-empty"><TerminalSquare size={18} /><span>{selectedProcessId ? '原进程记录已不在当前保留范围。' : '当前没有已交付的后台命令'}</span></div>;
 
   return <div className="background-terminal-panel">
     {[...items.values()].map((item) => <article className={`background-process${item.expanded ? ' is-expanded' : ''}`} key={item.process.processId}>
@@ -321,8 +329,9 @@ export function BackgroundTerminalPanel({
           }));
           if (!item.expanded && !item.output) void read(item.process.processId);
         }}><ChevronDown size={13} /><span><strong>{item.process.command}</strong><small>{item.control?.status === 'pending' ? '正在终止' : processStatusText(item.process)}</small></span></button>
+        {!selectedProcessId && onOpenProcess && <button type="button" className="secondary-ghost" onClick={() => onOpenProcess(item.process)}>打开</button>}
         <button type="button" className="background-process__info" aria-label="查看命令详情" aria-pressed={item.details} onClick={() => update(item.process.processId, (value) => ({ ...value, details: !value.details }))}><Info size={13} /></button>
-        {controlReady && !terminal(item.process.status) && <button type="button" className="background-process__stop" aria-label={`终止 ${item.process.command}`} disabled={item.control?.status === 'pending'} onClick={() => void stop(item.process)}>{item.control?.status === 'pending' ? <LoaderCircle className="is-spinning" size={13} /> : <CircleStop size={13} />}</button>}
+        {controlReady && !terminal(item.process.status) && <button type="button" className="background-process__stop" aria-label={`终止 ${item.process.command}`} disabled={Boolean(item.reference && (!item.control || controlNeedsPolling(item.control)))} onClick={() => void stop(item.process)}>{item.control?.status === 'pending' ? <LoaderCircle className="is-spinning" size={13} /> : <CircleStop size={13} />}</button>}
       </header>
       <AnimatedDisclosure open={item.details} className="background-process__details">
         <dl><div><dt>来源</dt><dd>{item.process.originSubagentTaskId ? `任务 ${item.process.originSubagentTaskId}` : `主 Agent ${item.process.originTurnId}`}</dd></div><div><dt>目录</dt><dd>{item.process.cwd}</dd></div><div><dt>物理状态</dt><dd>{item.process.physicalState}</dd></div></dl>

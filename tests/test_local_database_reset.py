@@ -22,9 +22,9 @@ from pulsara_agent.storage.postgres_connection_provider import (
     PostgresRuntimeConnectionFactory,
 )
 from pulsara_agent.tool_permission import default_permission_policy
-from pulsara_agent.web_app.application import (
+from pulsara_agent.desktop_app.application import (
     DatabaseDataPlaneState,
-    LocalWebApplication,
+    DesktopApplication,
 )
 from tests.support.model_config import test_model_runtime as make_runtime
 from tests.test_stage5_clean_migration import (
@@ -132,7 +132,7 @@ def test_reset_http_confirms_target_and_obeys_data_plane_lifetime(
         settings.value = replace(settings.read(), postgres=postgres)
         saved = settings.read()
         monkeypatch.setattr(type(runtime.catalog), "refresh", AsyncMock())
-        app = LocalWebApplication(
+        app = DesktopApplication(
             settings=settings,
             model_runtime=runtime,
             catalog=runtime.catalog,
@@ -162,7 +162,7 @@ def test_reset_http_confirms_target_and_obeys_data_plane_lifetime(
                         assert response.status == 409
                 assert reset.await_count == 0
                 async with client.post(
-                    url, json={**target, "confirmed": True}
+                    url, json={"confirmed": True}
                 ) as response:
                     assert response.status == 200, await response.text()
                     assert (await response.json())["restart_required"] is prepared
@@ -190,7 +190,7 @@ def test_reset_close_failure_preserves_database(tmp_path, monkeypatch):
     async def run(database):
         runtime = make_runtime(postgres_dsn=database.runtime_dsn)
         monkeypatch.setattr(type(runtime.catalog), "refresh", AsyncMock())
-        app = LocalWebApplication(
+        app = DesktopApplication(
             settings=runtime.settings,
             model_runtime=runtime,
             catalog=runtime.catalog,
@@ -232,7 +232,7 @@ def test_cancelled_reset_waits_for_physical_transaction_before_readmission(
     async def run(database):
         runtime = make_runtime(postgres_dsn=database.runtime_dsn)
         monkeypatch.setattr(type(runtime.catalog), "refresh", AsyncMock())
-        app = LocalWebApplication(
+        app = DesktopApplication(
             settings=runtime.settings,
             model_runtime=runtime,
             catalog=runtime.catalog,

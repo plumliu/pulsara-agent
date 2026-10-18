@@ -19,8 +19,8 @@ from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogC
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.settings import LocalSettingsStore, LocalPostgresConfig
 from pulsara_agent.workspace_identity import HostWorkspaceInput, WorkspaceUnavailable
-from pulsara_agent.web_app.session_controller import LocalSessionController
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from tests.dogfood.credentials import secret_scrubber
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
@@ -71,7 +71,7 @@ async def run():
                 permission_policy=default_permission_policy(),
                 active_skill_names=frozenset(),
             )
-            bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
+            bridge = RendererBridge(sessions=sessions, protocol_server=object())
             source = HostWorkspaceInput(workspace_kind="project", workspace_root=root)
             try:
                 first = await core.open_session(source)

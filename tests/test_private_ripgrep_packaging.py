@@ -56,7 +56,7 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         assert archive.read('pulsara_agent/_vendor/ripgrep/LICENSE-MIT')
         assert archive.read('pulsara_agent/_vendor/ripgrep/COPYING')
         assert archive.read('pulsara_agent/_vendor/ripgrep/LICENSE-PCRE2')
-        assert archive.read('pulsara_agent/web_app/static/index.html')
+        assert archive.read('pulsara_agent/desktop_app/static/index.html')
     with tarfile.open(next((source / 'dist').glob('*.tar.gz'))) as archive:
         names = archive.getnames()
         assert not any('_vendor/ripgrep' in name for name in names)

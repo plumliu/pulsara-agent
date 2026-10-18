@@ -1,9 +1,21 @@
 import { ToolResultDisplayContext } from '../../frontend/lib/tool-result-display';
-import type { ReactElement, PropsWithChildren } from 'react';
+import { useState, type ComponentProps, type ReactElement, type PropsWithChildren } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentTask } from '../../frontend/lib/pulsara-types';
-import { TaskWorkspace } from '../../frontend/components/task-workspace';
+import { TaskGraphDetail, TaskWorkspace as TaskList } from '../../frontend/components/task-workspace';
+
+// The list opens a desktop detail surface; detail contracts stay independent of modal behavior.
+type WorkspaceProps = Omit<ComponentProps<typeof TaskList>, 'onOpenGroup'> &
+  Omit<ComponentProps<typeof TaskGraphDetail>, 'modelConfigurations' | 'skills' | 'artifactOwnerKey' | 'onReadToolArtifact'> &
+  Partial<Pick<ComponentProps<typeof TaskGraphDetail>, 'modelConfigurations' | 'skills' | 'artifactOwnerKey' | 'onReadToolArtifact'>>;
+function TaskWorkspace(props: WorkspaceProps) {
+  const [groupId, setGroupId] = useState<string>();
+  if (!groupId) return <TaskList {...props} onOpenGroup={setGroupId} />;
+  return <TaskGraphDetail modelConfigurations={[]} skills={[]} artifactOwnerKey="task-activity"
+    onReadToolArtifact={async () => { throw new Error('完整工具输出暂时无法读取。'); }} {...props}
+    tasks={props.tasks.filter(task => task.batchId === groupId)} />;
+}
 
 function renderWithRawResults(ui: ReactElement) {
   return render(ui, { wrapper: ({ children }: PropsWithChildren) => (
@@ -159,7 +171,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
     fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
-    const dialog = screen.getByRole('dialog');
+    const dialog = screen.getByRole('region', { name: '精确任务', exact: true });
     expect(within(dialog).getByLabelText('其他任务组依赖来源：先前审阅')).toBeTruthy();
     expect(dialog.querySelectorAll('.task-graph-edges > path.is-external')).toHaveLength(1);
   });
@@ -183,7 +195,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     expect(within(detail).getByText('high')).toBeTruthy();
     expect(loadTask).toHaveBeenLastCalledWith('prior');
     expect(loadActivities).toHaveBeenCalledWith('prior');
-    expect(screen.getByRole('dialog').querySelectorAll('.task-node')).toHaveLength(2);
+    expect(screen.getByRole('region', { name: '精确任务', exact: true }).querySelectorAll('.task-node')).toHaveLength(2);
   });
 
   it('ignores a late cross-group read after another node is selected', async () => {
@@ -194,7 +206,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadTask={loadTask} loading={false} canControl={false} onRetry={vi.fn()} onCancel={vi.fn()} onNotify={vi.fn()}
       activities={new Map()} loadActivities={loadActivities} loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
     fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
-    const dialog = screen.getByRole('dialog');
+    const dialog = screen.getByRole('region', { name: '精确任务', exact: true });
     fireEvent.click(screen.getByRole('button', { name: '其他任务组依赖来源：先前审阅' }));
     expect(screen.getByRole('status').textContent).toContain('正在读取任务');
     fireEvent.click(within(dialog).getByRole('button', { name: /精确任务/ }));
@@ -304,6 +316,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     const detail = screen.getByLabelText('精确任务 详情');
     await waitFor(() => expect(loadActivities).toHaveBeenCalled());
     expect(detail.querySelectorAll('.task-conversation .user-turn')).toHaveLength(1);
+    fireEvent.click(within(detail).getByRole('button', { name: '展开中间过程' }));
     expect(detail.querySelectorAll('.task-conversation .assistant-turn')).toHaveLength(1);
     expect(within(detail).getByText('主 Agent')).toBeTruthy();
     expect(within(detail).getAllByText('精确任务')).toHaveLength(2);
@@ -337,12 +350,13 @@ describe('TaskWorkspace PR03 hard cut', () => {
 
     const opener = screen.getByRole('button', { name: /精确任务/ });
     fireEvent.click(opener);
-    expect(screen.getByRole('dialog', { name: '精确任务' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: '精确任务' })).toBeTruthy();
     expect(screen.getByLabelText('精确任务 详情')).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
     await waitFor(() => expect(loadActivities).toHaveBeenCalledWith('task-a'));
     fireEvent.keyDown(window, { key: 'Escape' });
-    await waitFor(() => expect(document.activeElement).toBe(opener));
+    expect(screen.getByRole('region', { name: '精确任务', exact: true })).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('does not invent a group when batch identity is absent', () => {
@@ -398,7 +412,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     />);
 
     fireEvent.click(screen.getByRole('button', { name: /任务组/ }));
-    const dialog = screen.getByRole('dialog', { name: /任务组/ });
+    const dialog = screen.getByRole('region', { name: /任务组/ });
     const left = (label: string) => Number.parseFloat(
       (within(dialog).getByRole('button', { name: new RegExp(label) }) as HTMLElement).style.left,
     );
@@ -453,10 +467,11 @@ describe('TaskWorkspace PR03 hard cut', () => {
     />);
 
     fireEvent.click(screen.getByRole('button', { name: /任务组/ }));
-    const dialog = screen.getByRole('dialog', { name: /任务组/ });
+    const dialog = screen.getByRole('region', { name: /任务组/ });
     expect(dialog.querySelectorAll('.task-graph-edges > path')).toHaveLength(1);
     fireEvent.click(within(dialog).getByRole('button', { name: /后续节点/ }));
     await waitFor(() => expect(loadActivities).toHaveBeenCalledWith('task-b'));
+    fireEvent.click(within(dialog).getByRole('button', { name: '展开中间过程' }));
     expect(within(dialog).getByText('第一页活动')).toBeTruthy();
     expect(loadActivities).not.toHaveBeenCalledWith('task-b', 'activity:next');
     fireEvent.click(within(dialog).getByRole('button', { name: '加载更多任务活动' }));
@@ -500,7 +515,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     />);
 
     fireEvent.click(screen.getByRole('button', { name: /任务组/ }));
-    const dialog = screen.getByRole('dialog', { name: /任务组/ });
+    const dialog = screen.getByRole('region', { name: /任务组/ });
     fireEvent.click(within(dialog).getByRole('button', { name: /被取消节点/ }));
     await waitFor(() => expect(within(dialog).getByRole('button', { name: '取消任务' })).toBeTruthy());
     expect(within(dialog).queryByText(/下游任务：真实下游/)).toBeNull();
@@ -511,4 +526,27 @@ describe('TaskWorkspace PR03 hard cut', () => {
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('取消任务不会自动终止'));
     expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ id: 'task-a' }));
   });
+});
+
+it('restores the task reader position when a desktop tab remounts', () => {
+  const viewState: import('../../frontend/components/desktop-workspace').WorkspaceTab['view'] = {top:0,left:0,graph:{top:0,left:0}};
+  const common = { tasks:[task()], viewState, modelConfigurations:[], skills:[], artifactOwnerKey:"task-activity", onReadToolArtifact:vi.fn(), canControl:false,
+    onCancel:vi.fn(), onNotify:vi.fn(), activities:new Map(),
+    loadActivities:vi.fn(async()=>({activities:[]})), loadBackgroundProcesses:vi.fn(async()=>({processes:[]})) };
+  const view = render(<TaskGraphDetail {...common} />);
+  const reader = view.container.querySelector('.task-graph-dialog__body')!;
+  fireEvent.scroll(reader, {target:{scrollTop:420,scrollLeft:3}});
+  view.rerender(<div />);
+  view.rerender(<TaskGraphDetail {...common} />);
+  expect(view.container.querySelector('.task-graph-dialog__body')?.scrollTop).toBe(420);
+  expect(common.onCancel).not.toHaveBeenCalled();
+});
+
+it('delegates opening a task group to the desktop workspace without creating a modal', () => {
+  const open = vi.fn();
+  render(<TaskList tasks={[task()]} loading={false} onRetry={vi.fn()} onOpenGroup={open} />);
+  fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
+  expect(open).toHaveBeenCalledExactlyOnceWith('batch-a', '精确任务');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.queryByRole('complementary')).toBeNull();
 });

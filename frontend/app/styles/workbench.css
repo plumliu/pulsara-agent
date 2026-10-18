@@ -20,7 +20,6 @@
 .session-schedule-button:hover { color: var(--amber); background: var(--amber-soft); }
 .session-schedule-button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 .session-title p { margin-top: 3px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); }
-.mobile-menu-button { display: none; place-items: center; width: 31px; height: 31px; border-radius: 8px; background: transparent; color: var(--muted); }
 .session-opening { grid-template-rows: 62px minmax(0, 1fr); }
 .session-opening__body { display: grid; place-items: center; min-height: 0; overflow: auto; padding: 32px 24px; }
 .session-opening__content { display: flex; flex-direction: column; align-items: center; gap: 22px; width: min(100%, 420px); text-align: center; animation: pop-in .2s ease-out; }
@@ -177,17 +176,15 @@
 .assistant-copy { margin: 10px 0 18px 40px; }
 /* Inline HTML retains a fixed reference viewport; only the crop shrinks. */
 .inline-visualization { --visualization-height: min(120dvh, 1200px); margin: 18px 0; font-family: var(--sans); user-select: none; }
-.inline-visualization dialog { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "chart"; position: relative; inset: auto; margin: 0; padding: 0; width: 100%; max-width: none; max-height: none; border: 0; overflow: visible; background: transparent; color: var(--ink); }
-.inline-visualization dialog.is-maximized { --visualization-height: calc(100dvh - 142px); position: fixed; inset: 16px; margin: auto; width: calc(100vw - 32px); padding: 12px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-solid); }
-.inline-visualization dialog::backdrop { background: #19160e66; backdrop-filter: blur(4px); }
+.inline-visualization__layout { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "chart"; position: relative; inset: auto; margin: 0; padding: 0; width: 100%; max-width: none; max-height: none; border: 0; overflow: visible; background: transparent; color: var(--ink); }
 /* The invisible reference probe must not extend the conversation scroll range. */
 .inline-visualization__page { position: relative; min-width: 0; overflow: clip; }
 .inline-visualization__controls { grid-area: controls; display: flex; align-items: flex-start; gap: 12px; min-width: 0; margin-top: 8px; }
-.inline-visualization dialog.has-thumbnails { grid-template-areas: "chart" "controls"; }
+.inline-visualization__layout.has-thumbnails { grid-template-areas: "chart" "controls"; }
 .inline-visualization__zoom-anchor { position: absolute; top: 0; left: 0; width: 100%; height: 0; }
 .inline-visualization__figure { position: relative; grid-area: chart; min-width: 0; }
 .inline-visualization button.inline-visualization__zoom { position: absolute; top: 8px; right: 8px; z-index: 1; width: 30px; height: 30px; padding: 6px; border: 1px solid color-mix(in srgb, var(--line) 60%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--paper-solid) 72%, transparent); color: var(--muted); backdrop-filter: blur(6px); opacity: 0; pointer-events: none; transition: opacity .15s ease; }
-.inline-visualization__figure:hover .inline-visualization__zoom, .inline-visualization__figure:focus-within .inline-visualization__zoom, .inline-visualization .is-maximized .inline-visualization__zoom { opacity: 1; pointer-events: auto; }
+.inline-visualization__figure:hover .inline-visualization__zoom, .inline-visualization__figure:focus-within .inline-visualization__zoom { opacity: 1; pointer-events: auto; }
 @media (hover: none), (pointer: coarse) { .inline-visualization button.inline-visualization__zoom { opacity: .65; pointer-events: auto; } }
 @media (prefers-reduced-motion: reduce) { .inline-visualization button.inline-visualization__zoom { transition: none; } }
 .inline-visualization :where(button.inline-visualization__zoom, .inline-visualization__strip > button, .inline-visualization__status-copy > button) { display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; background: transparent; color: var(--muted); border-radius: 6px; }
@@ -905,10 +902,10 @@
 
 /* 690px text column + two 100px margins: 72px rail, 12px gap, safe outer space. */
 @container (min-width: 890px) {
-  .inline-visualization dialog.has-thumbnails:not(.is-maximized) { width: calc(100% + 84px); grid-template-columns: minmax(0, 1fr) 72px; grid-template-areas: "chart controls"; gap: 12px; }
-  .inline-visualization dialog:not(.is-maximized) .inline-visualization__controls { flex-direction: column; margin-top: 0; gap: 8px; }
-  .inline-visualization dialog:not(.is-maximized) .inline-visualization__strip { flex: none; flex-direction: column; width: 72px; max-height: min(60dvh, 400px); overflow-x: hidden; overflow-y: auto; }
-  .inline-visualization dialog:not(.is-maximized) .inline-visualization__strip > button { flex: 0 0 50px; width: 68px; }
+  .inline-visualization__layout.has-thumbnails { width: calc(100% + 84px); grid-template-columns: minmax(0, 1fr) 72px; grid-template-areas: "chart controls"; gap: 12px; }
+  .inline-visualization__layout .inline-visualization__controls { flex-direction: column; margin-top: 0; gap: 8px; }
+  .inline-visualization__layout .inline-visualization__strip { flex: none; flex-direction: column; width: 72px; max-height: min(60dvh, 400px); overflow-x: hidden; overflow-y: auto; }
+  .inline-visualization__layout .inline-visualization__strip > button { flex: 0 0 50px; width: 68px; }
 }
 
 /* Transparent pixels reveal the surrounding surface. */
@@ -916,3 +913,7 @@
 .saved-image__open { display: block; width: 100%; border: 0; padding: 0; cursor: zoom-in; background: transparent; }
 .saved-image__open img { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; }
 .saved-image-reference { display: inline; }
+
+/* Code expansion shares the disclosure cadence; existing viewport bounds stay unchanged. */
+.assistant-markdown .code-card__body { transition: max-height .22s cubic-bezier(.2,.7,.2,1); }
+@media (prefers-reduced-motion: reduce) { .assistant-markdown .code-card__body { transition: none; } }

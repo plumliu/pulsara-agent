@@ -6,11 +6,11 @@ from aiohttp import ClientSession
 from PIL import Image, PngImagePlugin
 import pytest
 
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-from pulsara_agent.web_app.http_server import LocalHttpServer
-from pulsara_agent.web_app.session_controller import LocalSessionController
-from pulsara_agent.web_app.user_avatar import UserAvatarHttp, normalize_avatar
-from tests.test_local_web_http_surface import (
+from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+from pulsara_agent.desktop_app.http_server import LocalHttpServer
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.user_avatar import UserAvatarHttp, normalize_avatar
+from tests.test_desktop_http_surface import (
     _Bridge,
     _Sessions,
     _model_server_dependencies,
@@ -78,7 +78,7 @@ def test_avatar_http_custom_home_replacement_reset_and_security(tmp_path, monkey
         (tmp_path / "index.html").write_text("Pulsara")
         server = LocalHttpServer(
             sessions=cast(LocalSessionController, _Sessions()),
-            bridge=cast(LocalBrowserBridge, _Bridge()),
+            bridge=cast(RendererBridge, _Bridge()),
             static_root=tmp_path,
             requested_port=0,
             is_ready=lambda: True,

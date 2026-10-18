@@ -1,19 +1,17 @@
-import { LoaderCircle, Menu, RotateCcw } from 'lucide-react';
+import { LoaderCircle, RotateCcw } from 'lucide-react';
 import type { SessionSummary, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
 
-export function SessionOpeningView({ session, workspace, error, onRetry, onOpenSidebar }: {
+export function SessionOpeningView({ session, workspace, error, onRetry }: {
   session: SessionSummary;
   workspace: Workspace;
   error?: string;
   onRetry: () => void;
-  onOpenSidebar: () => void;
 }) {
   return (
     <section className="workbench session-opening" aria-label="会话加载页">
       <header className="topbar">
         <div className="session-title">
-          <button className="mobile-menu-button" onClick={onOpenSidebar} aria-label="打开会话侧栏"><Menu size={17} /></button>
           <div><h2>{session.title}</h2><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
         </div>
       </header>

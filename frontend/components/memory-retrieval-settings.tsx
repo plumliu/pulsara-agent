@@ -1,5 +1,3 @@
-'use client';
-
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Bot, Brain, Check, LoaderCircle, Pencil, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';

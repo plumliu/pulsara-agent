@@ -1,3 +1,5 @@
+import { desktopHost } from './desktop-host';
+import { isNativeDirectory } from './file-drop';
 import { closeHistory } from '@tiptap/pm/history';
 import { Editor, type JSONContent } from '@tiptap/core';
 import { PromptAnnotationNode } from '../components/prompt-annotation-node';
@@ -11,7 +13,7 @@ import { UndoRedo } from '@tiptap/extensions';
 import { FileReferenceNode } from '../components/file-reference-node';
 import { PromptImageNode } from '../components/prompt-image-node';
 import { SkillReferenceNode } from '../components/skill-reference-node';
-import { fileReference, formatFileReference, splitFileReferences, type ImportFiles } from './file-reference';
+import { fileReference, formatFileReference, formatWorkspaceReference, splitFileReferences, type ImportFiles } from './file-reference';
 import { skillReference, splitSkillReferences } from './skill-reference';
 import type { EditablePromptContent, LocalPromptImagePart } from './prompt-content';
 
@@ -41,7 +43,6 @@ interface DraftSession {
 interface DraftImport {
   id: string;
   files: readonly File[];
-  directory: boolean;
   controller: AbortController;
   raw: string;
   error?: string;
@@ -97,7 +98,7 @@ export class PromptDraftStore {
     const current = this.sessions.get(sessionId);
     if (current) return current.editor;
     if (typeof document === 'undefined') {
-      throw new Error('编辑器只能在浏览器中创建。');
+      throw new Error('编辑器只能在工作台中创建。');
     }
     const session: DraftSession = {
       editor: undefined as unknown as Editor,
@@ -180,14 +181,16 @@ export class PromptDraftStore {
   insertFiles(sessionId: string, files: readonly File[], position?: number | 'end'): void {
     const session = this.requireSession(sessionId);
     for (const file of files) {
-      if (file.type.startsWith('image/') && !acceptedImageMediaTypes.has(file.type)) {
+      if (!desktopHost()?.pathForFile(file) && file.type.startsWith('image/') && !acceptedImageMediaTypes.has(file.type)) {
         throw new Error('图片仅支持 PNG、JPEG 和 WebP。');
       }
     }
     const nodes: JSONContent[] = [];
     for (const file of files) {
+      const path = desktopHost()?.pathForFile(file);
+      if (path) { nodes.push(referenceNode(formatWorkspaceReference({ path, kind: isNativeDirectory(file) ? "directory" : "file" }))); continue; }
       if (!acceptedImageMediaTypes.has(file.type)) {
-        nodes.push(this.createImport(sessionId, session, [file], false));
+        nodes.push(this.createImport(sessionId, session, [file]));
         continue;
       }
       const asset = this.createAsset(file, file.type);
@@ -208,20 +211,21 @@ export class PromptDraftStore {
     this.changed();
   }
 
-  insertDirectory(sessionId: string, files: readonly File[]): void {
-    if (!files.length) return;
+  insertPaths(sessionId: string, paths: readonly string[], directory: boolean, position?: number | 'end'): void {
     const session = this.requireSession(sessionId);
-    const node = this.createImport(sessionId, session, files, true);
-    session.editor.chain().focus('end', { scrollIntoView: false }).insertContent(node).run();
+    const nodes = paths.map(path => referenceNode(formatWorkspaceReference({ path, kind: directory ? 'directory' : 'file' })));
+    const chain = session.editor.chain().focus(undefined, { scrollIntoView: false });
+    if (position !== undefined) chain.setTextSelection(position === 'end' ? session.editor.state.doc.content.size - 1 : position);
+    chain.insertContent(nodes).run();
+    this.changed();
   }
 
-  private createImport(sessionId: string, session: DraftSession, files: readonly File[], directory: boolean): JSONContent {
-    const item: DraftImport = { id: crypto.randomUUID(), files, directory, controller: new AbortController(), raw: '' };
+  private createImport(sessionId: string, session: DraftSession, files: readonly File[]): JSONContent {
+    const item: DraftImport = { id: crypto.randomUUID(), files, controller: new AbortController(), raw: '' };
     session.imports.set(item.id, item);
     // Reserve all editor positions synchronously before starting asynchronous IO.
     queueMicrotask(() => { void this.runImport(sessionId, session, item); });
-    return { type: 'fileReference', attrs: { id: item.id, name: directory
-      ? files[0].webkitRelativePath.split('/')[0] : files[0].name, kind: directory ? 'directory' : 'file', state: 'uploading' } };
+    return { type: 'fileReference', attrs: { id: item.id, name: files[0].name, kind: 'file', state: 'uploading' } };
   }
 
   private async runImport(sessionId: string, session: DraftSession, item: DraftImport): Promise<void> {
@@ -232,9 +236,9 @@ export class PromptDraftStore {
     this.syncImports(session);
     try {
       if (!this.importer) throw new Error('本地连接尚未就绪，请重新连接后重试。');
-      const result = await this.importer(sessionId, item.files, item.directory, controller.signal);
+      const result = await this.importer(sessionId, item.files, controller.signal);
       if (item.controller !== controller || controller.signal.aborted) return;
-      const raw = formatFileReference(result, item.directory);
+      const raw = formatFileReference(result);
       if (!fileReference(raw)) throw new Error('导入服务返回了无效路径。');
       item.raw = raw;
     } catch (error) {

@@ -1,4 +1,4 @@
-'use client';
+import { writeClipboardText } from '../lib/desktop-host';
 
 import { ChevronDown, Code2, Copy, TextWrap } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -80,10 +80,10 @@ export function CodeBlock({ source, language, sourceMap, invalidSource, onNotify
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(displaySource);
+      await writeClipboardText(displaySource);
       onNotify('代码已复制', undefined, 'success');
     } catch {
-      onNotify('无法复制代码', '浏览器没有授予剪贴板权限。', 'warning');
+      onNotify('无法复制代码', '系统剪贴板暂时不可用，请重试。', 'warning');
     }
   };
 

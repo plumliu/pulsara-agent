@@ -1,5 +1,3 @@
-'use client';
-
 import { LoaderCircle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Cropper, { type Area } from 'react-easy-crop';

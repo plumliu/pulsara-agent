@@ -848,7 +848,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "view_image": _descriptor(
         name="view_image",
         description=(
-            "View one PNG, JPEG or static WebP image, or screenshot a local .html/.htm file. "
+            "Inspect one PNG, JPEG or static WebP image, or screenshot a local .html/.htm file "
+            "for the model. This does not open or control the user's preview tab or publish "
+            "an inline visualization. "
             "Provide exactly one of path or image_ref. Use image_ref only to reread an "
             "exact reference already shown beside an image or in a historical image "
             "placeholder within the current workspace; copy it "

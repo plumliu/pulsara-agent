@@ -67,10 +67,10 @@ Playwright 命令同时准备 Chromium 和其 Ubuntu 系统依赖，可能要求
 npm --prefix frontend ci
 npm --prefix frontend run lint
 npm --prefix frontend test
-npm --prefix frontend run build:local
+npm --prefix frontend run build:desktop
 ```
 
-`build:local` 写入 `src/pulsara_agent/web_app/static`，完整应用使用这里的资源。它会产生静态文件的 Git diff，这是现有构建路径。不要使用 `npm run build` 的网站部署产物替代本地应用资源。首次运行 npm/构建时观察磁盘和内存；失败时保留原始错误。
+`build:desktop` 写入 `src/pulsara_agent/web_app/static`，完整应用使用这里的资源。它会产生静态文件的 Git diff，这是现有构建路径。桌面工作台只使用该静态资源构建，不提供网站部署入口。首次运行 npm/构建时观察磁盘和内存；失败时保留原始错误。
 
 ## 4. PostgreSQL 16 与 pgvector
 

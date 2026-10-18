@@ -79,7 +79,8 @@ def test_local_settings_closed_codec_round_trip_includes_local_secrets() -> None
 
     encoded = local_settings_to_dict(value)
 
-    assert local_settings_from_dict(encoded) == value
+    assert local_settings_from_dict(encoded) == replace(value, postgres=None)
+    assert "postgres" not in encoded
     assert encoded["model_connections"][0]["api_key"] == "secret-0"
     assert encoded["memory_retrieval"]["embedding"]["api_key"] == "embedding-secret"
     assert encoded["memory_retrieval"]["rerank"]["api_key"] == "rerank-secret"
@@ -93,7 +94,6 @@ def test_local_settings_closed_codec_round_trip_includes_local_secrets() -> None
     [
         {"extra": True},
         {"schema": "old"},
-        {"postgres": {}},
         {"model_connections": {}},
         {"memory_retrieval": {}},
     ],
@@ -196,20 +196,18 @@ def test_store_serializes_add_add_without_lost_update(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_store_serializes_model_add_and_postgres_save(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        store = LocalSettingsStore(tmp_path / "local-settings.yaml")
-        connection = _connection("a")
+def test_injected_database_survives_model_mutation_without_persistence(tmp_path):
+    async def scenario():
         postgres = LocalPostgresConfig("postgresql://pulsara@localhost:5432/pulsara")
-        await asyncio.gather(
-            store.add_model_connection(connection=connection, api_key="secret"),
-            store.save_postgres(postgres),
-        )
+        store = LocalSettingsStore(tmp_path / "local-settings.yaml", postgres=postgres)
+        connection = _connection("a")
+        await store.add_model_connection(connection=connection, api_key="secret")
         observed = store.read()
         assert observed.postgres == postgres
         assert observed.model_connections == (connection,)
         assert observed.model_api_key(connection.id) == "secret"
-
+        assert read_local_settings(store.path).postgres is None
+        assert postgres.runtime_dsn not in store.path.read_text()
     asyncio.run(scenario())
 
 
@@ -248,19 +246,13 @@ def test_store_publishes_no_auth_connection_without_a_key(
     asyncio.run(scenario())
 
 
-def test_explicit_postgres_save_repairs_an_invalid_settings_document(
-    tmp_path: Path,
-) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "local-settings.yaml"
-        path.write_text("schema: [\n", encoding="utf-8")
-        store = LocalSettingsStore(path)
-        postgres = LocalPostgresConfig("postgresql://pulsara@localhost:5432/pulsara")
-
-        assert await store.save_postgres(postgres) == LocalSettings(postgres=postgres)
-        assert store.read() == LocalSettings(postgres=postgres)
-
-    asyncio.run(scenario())
+def test_old_database_field_is_inert_and_never_overrides_injected_database():
+    payload = local_settings_to_dict(_settings_with(_connection("a")))
+    payload["postgres"] = {"runtime_dsn": "old-external-target", "admin_dsn": "old-secret"}
+    restored = local_settings_from_dict(payload)
+    assert restored.postgres is None
+    assert restored.model_api_key(_connection("a").id) == "secret-0"
+    assert "postgres" not in local_settings_to_dict(restored)
 
 
 def test_explicit_model_add_repairs_an_invalid_settings_document(
@@ -508,7 +500,7 @@ def test_delete_model_connection_removes_only_its_record_and_secret(
                 ),
             ),
         )
-        store = LocalSettingsStore(path)
+        store = LocalSettingsStore(path, postgres=postgres)
 
         observed, deleted = await store.delete_model_connection(first.id)
 
@@ -563,7 +555,7 @@ def test_unsupported_schema_cannot_be_repaired_into_empty_settings(tmp_path):
     with pytest.raises(LocalSettingsSchemaUnsupported):
         store.read()
     with pytest.raises(LocalSettingsSchemaUnsupported):
-        asyncio.run(store.save_postgres(None))
+        asyncio.run(store.add_model_connection(connection=_connection("a"), api_key="secret"))
     assert path.read_bytes() == original
 
 

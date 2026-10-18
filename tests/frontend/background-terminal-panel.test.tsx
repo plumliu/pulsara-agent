@@ -6,6 +6,7 @@ import type {
   CommandReceipt,
   UserControlCommandRef,
 } from '../../frontend/lib/runtime-adapter';
+import { DesktopWorkspaceProvider } from '../../frontend/components/desktop-workspace';
 import { BackgroundTerminalPanel } from '../../frontend/components/background-terminal-panel';
 
 afterEach(() => { vi.unstubAllGlobals(); cleanup(); });
@@ -168,4 +169,22 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
     await waitFor(() => expect(readLog).toHaveBeenCalledTimes(2));
     expect(screen.queryByText(/late-collapsed-output/)).toBeNull();
   });
+});
+
+it('keeps the same pending control after its view closes and reopens', async () => {
+  const terminate = vi.fn(async (_reference:UserControlCommandRef):Promise<CommandReceipt> => {throw new Error('transport unknown');});
+  const query = vi.fn(async (_reference:UserControlCommandRef)=>({status:'RESULT_UNAVAILABLE' as const}));
+  const common = {ownerKey:'session-a:1:host-a',sessionId:'session-a',hostSessionId:'host-a',controlAdmissionDeadlineMs:42000,canControl:true,
+    loadProcesses:vi.fn(async()=>({processes:[process]})), readLog:vi.fn(),terminateProcess:terminate,queryControl:query};
+  function Host({visible}:{visible:boolean}) { return <DesktopWorkspaceProvider sessionId="session-a" onShow={()=>{}}>{visible && <BackgroundTerminalPanel {...common}/>}</DesktopWorkspaceProvider>; }
+  const view=render(<Host visible/>);
+  fireEvent.click(await screen.findByRole('button',{name:'终止 printf long-output'}));
+  await screen.findByText(/transport unknown/);
+  const reference=terminate.mock.calls[0][0];
+  view.rerender(<Host visible={false}/>);
+  expect(terminate).toHaveBeenCalledOnce();
+  view.rerender(<Host visible/>);
+  await waitFor(()=>expect(query).toHaveBeenCalledWith(reference));
+  expect(await screen.findByText('当前无法取得这次操作的结果；不会自动重发。')).toBeTruthy();
+  expect(terminate).toHaveBeenCalledOnce();
 });

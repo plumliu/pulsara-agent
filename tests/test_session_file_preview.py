@@ -10,16 +10,16 @@ from unittest.mock import AsyncMock
 from aiohttp import ClientSession
 import pytest
 
-from pulsara_agent.web_app.file_preview import (
+from pulsara_agent.desktop_app.file_preview import (
     FilePreviewError,
     PAGE_BYTES,
     TEXT_BYTES,
     local_path,
     open_preview,
 )
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-from pulsara_agent.web_app.http_server import LocalHttpServer
-from tests.test_local_web_http_surface import _model_server_dependencies
+from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+from pulsara_agent.desktop_app.http_server import LocalHttpServer
+from tests.test_desktop_http_surface import _model_server_dependencies
 
 
 def bridge_for(root):
@@ -30,7 +30,7 @@ def bridge_for(root):
         core=SimpleNamespace(read_resumable_session=summary),
         memory_domain_id="device",
     )
-    bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
+    bridge = RendererBridge(sessions=sessions, protocol_server=object())
     for name in ("one", "two"):
         (root / name).mkdir(exist_ok=True)
         bridge._connections[name] = SimpleNamespace(
@@ -120,11 +120,11 @@ def test_descriptor_binding_resources_and_no_symlink_follow(tmp_path):
         assert item.page(0, "text")["text"] == "<h1>original</h1>"
         (root / "index.html").rename(root / "old.html")
         (root / "index.html").write_text("replacement")
-        fd, mime = item.resource("index.html", images=False)
-        try:
-            assert os.pread(fd, 100, 0) == b"<h1>original</h1>"
-        finally:
-            os.close(fd)
+        with pytest.raises(FilePreviewError) as changed:
+            item.resource("index.html", images=False)
+        assert changed.value.code == "FILE_CHANGED"
+        item.close()
+        item = open_preview("one", root / "index.html")
         for name in (
             "../data.json",
             ".private.json",
@@ -136,8 +136,7 @@ def test_descriptor_binding_resources_and_no_symlink_follow(tmp_path):
                 item.resource(name, images=False)
         with pytest.raises(FilePreviewError):
             item.action_path("open")
-        with pytest.raises(FilePreviewError, match="文件已发生变化"):
-            item.action_path("reveal")
+        assert item.action_path("reveal") == root / "index.html"
         fd, mime = item.resource("data.json", images=False)
         try:
             assert mime == "application/json"
@@ -225,13 +224,13 @@ def test_http_preview_contract(tmp_path):
                 assert "/resources/index.html" in html["document_url"]
                 assert (
                     await client.get(server.origin + one["content_url"])
-                ).status == 409
+                ).status == 200
                 late = await client.delete(
                     server.origin + "/api/connections/one/file-preview",
                     json={"read_token": one["read_token"]},
                     headers=headers,
                 )
-                assert late.status == 409
+                assert late.status == 200
                 doc = await client.get(
                     server.origin + html["document_url"],
                     headers={"Sec-Fetch-Dest": "iframe"},
@@ -279,36 +278,47 @@ def test_http_preview_contract(tmp_path):
     asyncio.run(run())
 
 
-def test_open_replacement_and_disconnect_prevent_late_install(tmp_path, monkeypatch):
+def test_independent_open_and_disconnect_release_all_instances(tmp_path, monkeypatch):
     async def run():
         root = tmp_path.resolve()
         bridge = bridge_for(root)
         for name in ("slow.txt", "fast.txt"):
             (root / "one" / name).write_text(name)
-        from pulsara_agent.web_app import browser_bridge
+        from pulsara_agent.desktop_app import renderer_bridge
 
-        real_open = browser_bridge.open_preview
+        real_open = renderer_bridge.open_preview
         entered, release = threading.Event(), threading.Event()
         opened = []
 
-        def slow(connection, path):
+        def slow(connection, path, reading_root=None):
             if path.name == "slow.txt":
                 entered.set()
                 release.wait(5)
-            result = real_open(connection, path)
+            result = real_open(connection, path, reading_root)
             opened.append(result)
             return result
 
-        monkeypatch.setattr(browser_bridge, "open_preview", slow)
+        monkeypatch.setattr(renderer_bridge, "open_preview", slow)
         first = asyncio.create_task(bridge.open_file_preview("one", "slow.txt", None))
         await asyncio.to_thread(entered.wait, 5)
         second = await bridge.open_file_preview("one", "fast.txt", None)
         release.set()
-        with pytest.raises(FilePreviewError):
-            await first
-        assert bridge.file_previews.slots["one"].token == second["read_token"]
-        assert next(i for i in opened if i.path.name == "slow.txt").closed
+        first_result = await first
+        assert set(bridge.file_previews.slots["one"]) == {
+            first_result["read_token"],
+            second["read_token"],
+        }
+        assert not next(i for i in opened if i.path.name == "slow.txt").closed
+        entered.clear()
+        release.clear()
+        late = asyncio.create_task(bridge.open_file_preview("one", "slow.txt", None))
+        await asyncio.to_thread(entered.wait, 5)
         await bridge.disconnect("one")
+        release.set()
+        with pytest.raises(FilePreviewError) as disconnected:
+            await late
+        assert disconnected.value.code == "PREVIEW_EXPIRED"
+        assert all(item.closed for item in opened)
         assert not bridge.file_previews.slots
 
     asyncio.run(run())
@@ -350,7 +360,7 @@ def test_directory_root_and_ancestor_symlink_notice(tmp_path):
 def test_revoked_inline_stream_stops_but_explicit_download_finishes(
     tmp_path, monkeypatch
 ):
-    from pulsara_agent.web_app import file_preview_http
+    from pulsara_agent.desktop_app import file_preview_http
 
     async def run(download):
         path = tmp_path.resolve() / "stream.txt"
@@ -391,3 +401,77 @@ def test_revoked_inline_stream_stops_but_explicit_download_finishes(
 
     asyncio.run(run(False))
     asyncio.run(run(True))
+
+
+def test_browsing_scope_survives_child_navigation_entry_deletion_and_reconnect(
+    tmp_path,
+):
+    async def run():
+        root = tmp_path.resolve()
+        bridge = bridge_for(root)
+        site = root / "one" / "field_release"
+        (site / "learner" / "role_manuals").mkdir(parents=True)
+        (site / "index.html").write_text('<a href="learner/index.html">Learn</a>')
+        (site / "learner" / "index.html").write_text(
+            '<a href="role_manuals/ACCESS-07.md">Manual</a>'
+        )
+        manual = site / "learner" / "role_manuals" / "ACCESS-07.md"
+        manual.write_text("# Manual\n[Home](../../index.html)")
+        entry = await bridge.open_file_preview("one", str(site / "index.html"), None)
+        learner = await bridge.open_file_preview(
+            "one", "learner/index.html", entry["read_token"]
+        )
+        document = await bridge.open_file_preview(
+            "one", "role_manuals/ACCESS-07.md", learner["read_token"]
+        )
+        assert {
+            entry["reading_root"],
+            learner["reading_root"],
+            document["reading_root"],
+        } == {str(site)}
+        assert document["kind"] == "markdown"
+        assert learner["document_url"].endswith("/resources/learner/index.html")
+        for candidate in ("../../../outside.txt", str(root / "one" / "other.txt")):
+            with pytest.raises(FilePreviewError) as rejected:
+                await bridge.open_file_preview("one", candidate, document["read_token"])
+            assert rejected.value.code == "RESOURCE_OUTSIDE_ROOT"
+        assert (
+            (await bridge.require_file_preview("one", document["read_token"]))
+            .page(0, "text")["text"]
+            .startswith("# Manual")
+        )
+        bridge.file_previews.revoke("one", learner["read_token"])
+        assert await bridge.require_file_preview("one", entry["read_token"])
+        (site / "index.html").unlink()
+        bridge.file_previews.revoke("one")
+        restored = await bridge.open_file_preview("one", str(manual), None, str(site))
+        assert restored["reading_root"] == str(site)
+        assert (
+            (await bridge.require_file_preview("one", restored["read_token"]))
+            .page(0, "text")["text"]
+            .startswith("# Manual")
+        )
+        await bridge.disconnect("one")
+        assert not bridge.file_previews.slots
+
+    asyncio.run(run())
+
+
+def test_unlink_and_atomic_replacement_never_reuse_old_page_or_cursor(tmp_path):
+    path = tmp_path.resolve() / "data.csv"
+    path.write_text("old,value\n")
+    item = open_preview("one", path)
+    try:
+        item.page(0, "table")
+        replacement = path.with_suffix(".replacement")
+        replacement.write_text("new,value\n")
+        replacement.replace(path)
+        with pytest.raises(FilePreviewError) as changed:
+            item.page(0, "table")
+        assert changed.value.code == "FILE_CHANGED"
+        path.unlink()
+        with pytest.raises(FilePreviewError) as missing:
+            item.page(0, "text")
+        assert missing.value.code == "FILE_NOT_FOUND"
+    finally:
+        item.close()

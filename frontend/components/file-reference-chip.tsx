@@ -1,4 +1,4 @@
-'use client';
+import { writeClipboardText } from '../lib/desktop-host';
 
 import { Check, Copy, File, FileText, Folder, Presentation, Sheet, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
@@ -31,7 +31,7 @@ export function FileReferenceChip({ reference }: { reference: FileReference }) {
       onMouseEnter={keep} onMouseLeave={hide} onFocus={keep} onBlur={hide}>
       <span className="file-reference__path">{reference.path}</span>
       <button type="button" className="file-reference__copy" aria-label={copyLabel} title={copyLabel} onClick={async () => {
-        try { await navigator.clipboard.writeText(reference.path); setCopyState('copied'); }
+        try { await writeClipboardText(reference.path); setCopyState('copied'); }
         catch { setCopyState('failed'); }
       }}><CopyIcon size={13} aria-hidden="true" /></button>
     </span>, document.body)}

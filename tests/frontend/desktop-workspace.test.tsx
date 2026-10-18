@@ -1,0 +1,176 @@
+import { uiPreferences } from '../../frontend/lib/ui-preferences';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { useState } from 'react';
+import { afterEach, expect, it, vi } from 'vitest';
+import { DesktopWorkspace, DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
+import { DesktopTitlebar } from '../../frontend/components/desktop-titlebar';
+import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
+import { rejectDirectoryDrop } from '../../frontend/lib/file-drop';
+import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
+
+afterEach(() => { cleanup(); delete window.pulsaraDesktop; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+let workspace: NonNullable<ReturnType<typeof useDesktopWorkspace>>;
+function Content({ onClose = () => {} }: { onClose?: () => void }) { workspace = useDesktopWorkspace()!; return <DesktopWorkspace isOpen onClose={onClose} toolbar={null} renderTab={tab => <p>{tab.sessionId}:{tab.entityId}</p>} />; }
+function Host({ sessionId, onClose }: { sessionId: string; onClose?: () => void }) { return <DesktopWorkspaceProvider sessionId={sessionId} onShow={() => {}}><Content onClose={onClose} /></DesktopWorkspaceProvider>; }
+it('hides after a deliberate rightward drag and reopens the same tab at a usable width', () => {
+  vi.stubGlobal('PointerEvent', MouseEvent);
+  const closed = vi.fn();
+  function Resizable() {
+    workspace = useDesktopWorkspace()!;
+    const [open, setOpen] = useState(true);
+    return <><button onClick={() => setOpen(true)}>Reopen</button><DesktopWorkspace isOpen={open} onClose={() => { closed(); setOpen(false); }} toolbar={null} renderTab={tab => <p>{tab.title}</p>} /></>;
+  }
+  render(<DesktopWorkspaceProvider sessionId="a" onShow={() => {}}><Resizable /></DesktopWorkspaceProvider>);
+  const dispose = vi.fn();
+  act(() => workspace.open({ id: 'file', sessionId: 'a', title: 'guide.md', kind: 'file', onClose: dispose }));
+  const pane = screen.getByLabelText('会话标签工作区');
+  const separator = screen.getByRole('separator');
+  separator.setPointerCapture = vi.fn();
+  separator.releasePointerCapture = vi.fn();
+  vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue({ width: 400 } as DOMRect);
+  fireEvent.pointerDown(separator, { clientX: 1000, button: 0 });
+  expect(pane.classList.contains('is-resizing')).toBe(true);
+  fireEvent.pointerMove(separator, { clientX: 1110 });
+  expect(pane.style.getPropertyValue('--workspace-width')).toBe('320px');
+  expect(closed).not.toHaveBeenCalled();
+  fireEvent.pointerMove(separator, { clientX: 1240 });
+  fireEvent.pointerMove(separator, { clientX: 1300 });
+  expect(closed).toHaveBeenCalledOnce();
+  expect(pane.classList.contains('is-open')).toBe(false);
+  expect(pane.classList.contains('is-resizing')).toBe(false);
+  expect(pane.hasAttribute('inert')).toBe(true);
+  expect(dispose).not.toHaveBeenCalled();
+  expect(separator.releasePointerCapture).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByText('Reopen'));
+  expect(pane.classList.contains('is-open')).toBe(true);
+  expect(pane.hasAttribute('inert')).toBe(false);
+  expect(pane.style.getPropertyValue('--workspace-width')).toBe('400px');
+  expect(screen.getByRole('tab', { name: 'guide.md' }).getAttribute('aria-selected')).toBe('true');
+  fireEvent.pointerDown(separator, { clientX: 1000, button: 0 });
+  fireEvent.lostPointerCapture(separator);
+  fireEvent.pointerMove(separator, { clientX: 1300 });
+  expect(closed).toHaveBeenCalledOnce();
+});
+it('focuses exact instances and preserves independent session tabs without retargeting', () => {
+  const view = render(<Host sessionId="a" />);
+  act(() => workspace.open({ id: 'a-task', sessionId: 'a', kind: 'task', title: 'Review', entityId: 'task-1' }));
+  act(() => workspace.open({ id: 'a-task', sessionId: 'a', kind: 'task', title: 'Review', entityId: 'task-1' }));
+  expect(screen.getAllByRole('tab')).toHaveLength(1);
+  view.rerender(<Host sessionId="b" />);
+  expect(screen.queryByRole('tab')).toBeNull();
+  act(() => workspace.open({ id: 'b-task', sessionId: 'b', kind: 'task', title: 'Other', entityId: 'task-2' }));
+  expect(screen.getByText('b:task-2')).toBeTruthy();
+  view.rerender(<Host sessionId="a" />);
+  expect(screen.getByText('a:task-1')).toBeTruthy();
+  expect(screen.queryByRole('tab', { name: 'Other' })).toBeNull();
+});
+it('closes only the view and retains uncertain controls under the original Host', () => {
+  const closeRead = vi.fn();
+  render(<Host sessionId="a" />);
+  const original = new Map();
+  workspace.backgroundControls.set('["a","host-a"]', original);
+  act(() => workspace.open({ id: 'process-1', sessionId: 'a', kind: 'process', hostSessionId: 'host-a', entityId: 'p1', title: 'build', onClose: closeRead }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭 build' }));
+  expect(closeRead).toHaveBeenCalledOnce();
+  expect(workspace.backgroundControls.get('["a","host-a"]')).toBe(original);
+  expect(screen.queryByRole('tab')).toBeNull();
+});
+it('accepts native files as original paths and does not read or import their bytes', async () => {
+  const file = new File(['secret bytes'], 'photo.png', { type: 'image/png' });
+  const read = vi.fn(); Object.defineProperty(file, 'arrayBuffer', { value: read });
+  window.pulsaraDesktop = { pathForFile: candidate => candidate === file ? '/tmp/original/photo.png' : '' } as PulsaraDesktop;
+  const store = new PromptDraftStore();
+  act(() => { store.getEditor('a'); store.insertFiles('a', [file], 'end'); });
+  const result = await store.capture('a');
+  expect(result.content.parts).toEqual([{ type: 'text', text: '【本地文件："/tmp/original/photo.png"】' }]);
+  expect(read).not.toHaveBeenCalled();
+  store.destroy();
+});
+it('references a native directory itself without recursively importing its children', async () => {
+  const file = new File([], 'project');
+  window.pulsaraDesktop = { pathForFile: () => '/tmp/project' } as PulsaraDesktop;
+  const transfer = { files: [file], items: [{kind: 'file', getAsFile: () => file, webkitGetAsEntry: () => ({ isDirectory: true })}] } as unknown as DataTransfer;
+  expect(rejectDirectoryDrop(transfer, vi.fn())).toBe(false);
+  const store = new PromptDraftStore();
+  act(() => { store.getEditor('a'); store.insertFiles('a', [file], 'end'); });
+  const result = await store.capture('a');
+  expect(result.content.parts).toEqual([{ type: 'text', text: '【本地文件夹："/tmp/project"】' }]);
+  store.destroy();
+});
+it('clears only a confirmed deleted session and disposes its file resources', () => {
+  const control = { current: null as import('../../frontend/components/desktop-workspace').WorkspaceControl | null };
+  const release = vi.fn();
+  render(<DesktopWorkspaceProvider sessionId="a" onShow={() => {}} controlRef={control}><Content /></DesktopWorkspaceProvider>);
+  act(() => workspace.open({ id: 'a-file', sessionId: 'a', title: 'notes.md', kind: 'file', onClose: release }));
+  act(() => workspace.open({ id: 'b-task', sessionId: 'b', title: 'Work', kind: 'task' }));
+  workspace.backgroundControls.set('["a","host-a"]', new Map());
+  workspace.backgroundControls.set('["b","host-b"]', new Map());
+  act(() => control.current!.forgetSession('a'));
+  expect(release).toHaveBeenCalledOnce();
+  expect(workspace.tabs).toHaveLength(0);
+  expect(workspace.backgroundControls.has('["a","host-a"]')).toBe(false);
+  expect(workspace.backgroundControls.has('["b","host-b"]')).toBe(true);
+});
+
+it('keeps category controls in the top header and instance tabs below it', () => {
+  const view = render(<Host sessionId="a" />);
+  act(() => workspace.open({id:'a-task',sessionId:'a',kind:'task',title:'Review',entityId:'task-1'}));
+  const topbar = view.container.querySelector('.workspace-topbar')!;
+  expect(topbar.querySelector('[role="tablist"]')).toBeNull();
+  expect(topbar.nextElementSibling?.getAttribute('role')).toBe('tablist');
+  expect(topbar.querySelector('.workspace-toolbar')).toBeTruthy();
+  expect(view.container.querySelectorAll('header')).toHaveLength(1);
+  expect(screen.getByRole('button',{name:'收起工作区'})).toBeTruthy();
+});
+it('leaves session title and workspace switch with the session header and keeps native controls', () => {
+  const sidebar=vi.fn(), maximize=vi.fn();
+  window.pulsaraDesktop={platform:'darwin',toggleMaximize:maximize} as unknown as PulsaraDesktop;
+  const view=render(<DesktopTitlebar workbench title="Session name" onToggleSidebar={sidebar} onToggleWorkspace={vi.fn()}/>);
+  expect(screen.queryByText('Session name')).toBeNull();
+  expect(screen.queryByRole('button',{name:'切换标签工作区'})).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'切换会话侧栏'}));
+  expect(sidebar).toHaveBeenCalledOnce();
+  fireEvent.doubleClick(screen.getByRole('button',{name:'切换会话侧栏'}));
+  expect(maximize).not.toHaveBeenCalled();
+  fireEvent.doubleClick(view.container.querySelector('header')!);
+  expect(maximize).toHaveBeenCalledOnce();
+});
+
+it('collapses only after closing the current session last tab and retains other sessions', () => {
+  const collapse = vi.fn(), release = vi.fn();
+  const view = render(<Host sessionId="a" onClose={collapse} />);
+  act(() => workspace.open({ id: 'a-file', sessionId: 'a', kind: 'file', title: 'guide.md', onClose: release }));
+  act(() => workspace.open({ id: 'a-task', sessionId: 'a', kind: 'task', title: 'Review' }));
+  act(() => workspace.open({ id: 'b-file', sessionId: 'b', kind: 'file', title: 'Other' }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭 Review' }));
+  expect(collapse).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '关闭 guide.md' }));
+  expect(collapse).toHaveBeenCalledOnce();
+  expect(release).toHaveBeenCalledOnce();
+  view.rerender(<Host sessionId="b" onClose={collapse} />);
+  expect(screen.getByRole('tab', { name: 'Other' })).toBeTruthy();
+});
+
+it('remembers widths per session across switching and remounting, saving after drag completion', () => {
+  vi.stubGlobal('PointerEvent', MouseEvent);
+  let view = render(<Host sessionId="a" />);
+  const pane = () => screen.getByLabelText('会话标签工作区');
+  const separator = screen.getByRole('separator');
+  separator.setPointerCapture = vi.fn();
+  vi.spyOn(pane(), 'getBoundingClientRect').mockReturnValue({width:460} as DOMRect);
+  fireEvent.pointerDown(separator, {clientX:800,button:0});
+  fireEvent.pointerMove(separator, {clientX:700});
+  expect(uiPreferences.getItem('pulsara-workspace-width:a')).toBeNull();
+  fireEvent.pointerUp(separator);
+  expect(uiPreferences.getItem('pulsara-workspace-width:a')).toBe('560');
+  view.rerender(<Host sessionId="b" />);
+  expect(pane().style.getPropertyValue('--workspace-width')).toBe('460px');
+  vi.spyOn(pane(), 'getBoundingClientRect').mockReturnValue({width:460} as DOMRect);
+  fireEvent.keyDown(screen.getByRole('separator'), {key:'ArrowRight'});
+  expect(uiPreferences.getItem('pulsara-workspace-width:b')).toBe('428');
+  view.rerender(<Host sessionId="a" />);
+  expect(pane().style.getPropertyValue('--workspace-width')).toBe('560px');
+  view.unmount();
+  view = render(<Host sessionId="b" />);
+  expect(pane().style.getPropertyValue('--workspace-width')).toBe('428px');
+});

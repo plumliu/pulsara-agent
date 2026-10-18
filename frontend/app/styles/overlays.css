@@ -15,14 +15,8 @@
 @keyframes dialog-in { from { opacity: 0; transform: translateY(-8px) scale(.985); } }
 
 
-/* Session file reading: a native modal owns focus, inertness and Escape. */
-.file-preview-dialog { width: min(1120px, calc(100vw - 48px)); height: min(820px, calc(100dvh - 64px)); max-width: none; max-height: none; margin: auto; padding: 0; border: 1px solid var(--line); border-radius: 16px; color: var(--ink); background: var(--paper); box-shadow: 0 24px 90px #0003; overflow: hidden; }
-.file-preview-dialog[open] { display: flex; flex-direction: column; animation: file-preview-in 160ms ease-out; }
-.file-preview-dialog::backdrop { background: #17191e55; backdrop-filter: blur(3px); }
+/* File reading controls shared by desktop tabs. */
 .file-preview-header { flex: none; display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); }
-.file-preview-title { min-width: 0; display: grid; gap: 3px; }
-.file-preview-title strong { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-preview-title small { color: var(--muted); font: 11px var(--mono); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .file-preview-header nav { display: flex; flex: none; align-items: center; gap: 5px; }
 .file-preview-header nav :is(button,a) { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: inherit; background: transparent; border: 0; cursor: pointer; }
 .file-preview-header nav :is(button,a):hover { background: var(--paper-deep); }
@@ -55,9 +49,7 @@
 .file-preview-table [role=row] { position: absolute; height: 34px; }
 .file-preview-table :is([role=cell],[role=columnheader]) { position: absolute; width: 180px; height: 34px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 0 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .file-preview-table [role=columnheader] { font-weight: 600; background: var(--paper-deep); }
-@keyframes file-preview-in { from { opacity: 0; transform: translateY(6px) scale(.99); } to { opacity: 1; transform: none; } }
-@media (max-width: 640px) { .file-preview-dialog { width: calc(100vw - 12px); height: calc(100dvh - 20px); border-radius: 12px; } .file-preview-header { padding: 10px; gap: 6px; } .file-preview-header nav { gap: 0; } .file-preview-title small { max-width: 40vw; } .file-preview-page-position { display: none; } .file-preview-pagebar { flex-wrap: wrap; } }
-@media (prefers-reduced-motion: reduce) { .file-preview-dialog[open] { animation: none; } }
+@media (max-width: 640px) { .file-preview-header { padding: 10px; gap: 6px; } .file-preview-header nav { gap: 0; } .file-preview-page-position { display: none; } .file-preview-pagebar { flex-wrap: wrap; } }
 
 .session-rename-dialog { width: min(440px, calc(100vw - 32px)); }
 .memory-delete-dialog.session-rename-dialog > header { display: flex; align-items: center; gap: 10px; border-bottom: 0; padding: 12px 20px 4px; }

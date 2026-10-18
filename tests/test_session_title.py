@@ -9,7 +9,7 @@ import pytest
 
 from pulsara_agent.conversation_kernel.host import _kernel_session_summary, _read_resumable_session_row
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from tests.test_conversation_fork import repo as repo, new_session, rows, turn
 from tests.test_session_archive import archive
 
@@ -92,16 +92,16 @@ def test_controller_rename_uses_current_domain_without_loading_runtime():
 def test_title_http_shape_security_and_missing_target(tmp_path):
     from typing import cast
     from aiohttp import ClientSession
-    from pulsara_agent.web_app.http_server import LocalHttpServer
-    from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
-    from tests.test_local_web_http_surface import _Sessions, _Bridge, _model_server_dependencies
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+    from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
+    from tests.test_desktop_http_surface import _Sessions, _Bridge, _model_server_dependencies
 
     async def run():
         sessions = _Sessions()
         sessions.rename_session = AsyncMock(return_value={"session_id": 'session:5dofirezik2z5wyc4ouhsixn3i', "title": "new"})
         (tmp_path / "index.html").write_text("Pulsara")
         server = LocalHttpServer(sessions=cast(LocalSessionController, sessions),
-            bridge=cast(LocalBrowserBridge, _Bridge()), static_root=tmp_path, requested_port=0,
+            bridge=cast(RendererBridge, _Bridge()), static_root=tmp_path, requested_port=0,
             is_ready=lambda: True, is_draining=lambda: False, **_model_server_dependencies())
         await server.start()
         try:

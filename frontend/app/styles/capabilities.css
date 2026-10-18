@@ -19,7 +19,10 @@
 .capability-menu__popover strong, .capability-menu__popover small { display: block; min-width: 0; }
 .capability-menu__popover strong { font-size: var(--type-control); font-weight: 600; }
 .capability-menu__popover small { overflow: hidden; margin-top: 2px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); text-overflow: ellipsis; white-space: nowrap; }
-.capability-page-toolbar { display: grid; grid-template-columns: minmax(0,1fr) 230px 38px; gap: 10px; align-items: center; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
+.capability-page-toolbar { display: grid; grid-template-columns: minmax(0,1fr) minmax(150px,230px) auto; gap: 10px; align-items: center; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
+.capability-page-controls { display: flex; align-items: center; gap: 8px; }
+.capability-page-controls > button { flex: none; white-space: nowrap; }
+.capability-page-controls .capability-reload { min-height: 38px; border: 1px solid var(--line); background: var(--paper-solid); }
 .capability-tabs { display: flex; align-items: center; gap: 4px; }
 .capability-tabs button { display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 12px; border-radius: 9px; color: var(--muted); font-size: var(--type-control); }
 .capability-tabs button:hover, .capability-tabs button.is-active { background: var(--paper-deep); color: var(--ink); }
@@ -142,7 +145,7 @@
 .capability-add-panel footer .secondary-action { min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); font-size: var(--type-control); }
 
 @media (max-width: 960px) {
-  .capability-page-toolbar { grid-template-columns: minmax(0,1fr) 38px; }
+  .capability-page-toolbar { grid-template-columns: minmax(0,1fr) auto; }
   .capability-tabs { grid-column: 1 / -1; overflow-x: auto; }
 }
 

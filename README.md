@@ -22,7 +22,7 @@
 
 **Pulsara puts a personal AI team to work on your code, research, and data.** Give it an assignment: investigate a bug, compare competing approaches, turn a dataset into a dashboard, or prepare a document for review. It plans the work, delegates tasks, runs tools, and builds the deliverables in a local-first visual workbench.
 
-Agents can work in parallel, branch from a shared investigation, and carry knowledge into future conversations. Stable prompt prefixes give long runs a foundation for cache reuse. Follow the work in your browser, steer it as it develops, and open the code, documents, or interactive results it produces.
+Agents can work in parallel, branch from a shared investigation, and carry knowledge into future conversations. Stable prompt prefixes give long runs a foundation for cache reuse. Follow the work in the desktop workbench, steer it as it develops, and open the code, documents, or interactive results it produces.
 
 **Bring an ambitious task. Give Pulsara room to work.**
 
@@ -118,7 +118,7 @@ Built-in Skills give agents practical workflows for substantial deliverables:
 
 ## Make it your own
 
-Settings → Archived sessions includes “Delete all”. Confirmation covers every page of the current list; sessions restored before their deletion check are skipped. A bottom-right notification shows progress and unread results across navigation; it disappears once the final results have been viewed. Incomplete items can be retried from the results dialog. Saved memories and working directories are preserved. Closing or reloading the browser stops sending remaining items; deletions already accepted by the service still settle.
+Settings → Archived sessions includes “Delete all”. Confirmation covers every page of the current list; sessions restored before their deletion check are skipped. A bottom-right notification shows progress and unread results across navigation; it disappears once the final results have been viewed. Incomplete items can be retried from the results dialog. Saved memories and working directories are preserved. Reloading the workbench or quitting the application stops sending remaining items; deletions already accepted by the service still settle.
 
 Bring your research services, specialist workflows, and project tools into the same workbench.
 
@@ -149,13 +149,58 @@ Select part of a response to give precise feedback. Fork a conversation to explo
 
 ## Open the workbench
 
-With Pulsara installed:
+Open the installed **Pulsara** desktop application. The app starts its bundled PostgreSQL instance and Python runtime, then opens the workbench. Choose a working directory and configure your models in Settings. Python, PostgreSQL, its search/vector extensions, ripgrep, and the screenshot browser are included in the desktop resources.
+
+The desktop targets macOS 15+ ARM64 and Ubuntu 24.04 x86_64/ARM64. These are build targets; backend CI does not by itself establish desktop installation acceptance on every target. See the [desktop implementation and acceptance plan](PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md) for the current validation scope.
+
+Closing the window keeps the application available in the Dock or tray. Use **Pulsara → Quit Pulsara** for a full shutdown; the app settles current work before stopping its database. On Linux without a tray, closing the window offers minimize or quit.
+
+Application data lives under `~/.pulsara` by default. An absolute `PULSARA_HOME` selects another home. Model credentials remain in the existing local settings; the app owns its database under `desktop/postgres`. The first desktop launch creates its own database and does not import old development history. Ordinary restarts preserve data. During development, incompatible updates can require the explicitly confirmed **Reset dedicated database** operation, which clears conversations, memories, and scheduled tasks while preserving workspace files and model settings.
+
+### Optional command-line tools
+
+The CLI is bundled with the app. macOS and AppImage register `~/.local/bin/pulsara` on first launch and refresh their own launcher on subsequent starts; deb packages manage `/usr/bin/pulsara`. Open **Settings → General → Local services → Command-line entry** to inspect, recheck, or repair it. Existing commands are preserved until you explicitly choose Reset to point the entry to the desktop version. Pulsara does not edit shell profiles: add the entry directory to your terminal PATH if needed and check `command -v pulsara`. AppImage launchers reference the original AppImage file; reopen the app after moving it to update the entry. Commands use bundled Python without a separate installation.
 
 ```bash
 pulsara app
+pulsara --help
+pulsara config-check
+pulsara db status
+pulsara db verify
 ```
 
-Pulsara starts the local service and opens the browser workbench. Choose a working directory and configure your models in the interface.
+`pulsara app` launches or focuses the same desktop instance and returns after handing off the request. Closing that terminal does not stop the app. `skills`, `plugins`, `mcp`, and `hooks` retain their management commands. Database diagnostics query the running app's private instance; they report unavailable when the app is closed. The public CLI has no Web-server options, external-DSN configuration, or `db migrate` command. Runtime permission/Skill overrides are not accepted by the desktop launcher; configure the corresponding session and capability controls in the workbench.
+
+### Build the desktop from source
+
+Build on the target platform using Node.js 22.13+, npm, `uv` with managed Python 3.12, a C compiler, `make`, `pkg-config`, Bison, and Flex. macOS builds need Xcode command-line tools and `dylibbundler`; Ubuntu builds need `binutils`, `pax-utils` (`lddtree`), `patchelf`, and `libopenblas0`. These are build-machine requirements.
+
+The resource builder builds PostgreSQL **17.9** and **pgvector 0.8.1** from pinned upstream source archives, downloads the pinned **pg_search 0.26.1** package for macOS ARM64 Sequoia or Ubuntu Noble PG17 x86_64/ARM64, verifies downloads, and bundles their native dependencies. It also packages a relocatable Python runtime and Playwright Chromium. Building macOS resources therefore requires macOS 15 or newer. To supply your own matching extension payload instead, pass both `--extension-lib` (native libraries) and `--extension-share` (control/SQL files); the same version and architecture checks apply.
+
+From the repository root:
+
+```bash
+uv sync --frozen --managed-python --no-install-project
+.venv/bin/python tools/prepare_ripgrep.py
+uv sync --frozen --managed-python
+npm --prefix frontend ci
+npm --prefix frontend run build:desktop
+npm --prefix desktop ci
+.venv/bin/python desktop/scripts/prepare_resources.py
+npm --prefix desktop run package:dir
+```
+
+The unpacked application is written under `desktop/release`. `npm --prefix desktop run package` produces the configured DMG or Linux AppImage/deb artifacts. Release signing and notarization require separate release configuration; the local build is unsigned. Re-run the resource builder after Python changes, and rebuild the frontend before refreshing resources after UI changes. `npm --prefix desktop start` runs the Electron development shell against prepared bundled resources; it does not expose a second browser-based product entry.
+
+Backend checks use the repository environment; desktop shell checks use Node's test runner:
+
+```bash
+.venv/bin/python -m pytest -m 'not postgres'
+npm --prefix frontend test
+npm --prefix desktop test
+```
+
+Database integration fixtures and Ubuntu package checks are described in [tests/linux/README.md](tests/linux/README.md). Actual desktop acceptance also checks native resources, shutdown, restart, and real model work as specified in the desktop plan.
 
 ---
 

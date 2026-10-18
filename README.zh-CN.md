@@ -22,7 +22,7 @@
 
 **Pulsara 让一支专属 AI 团队，投入你的代码、研究和数据工作。** 给它一个任务：追查 Bug、比较几种方案、把数据做成仪表盘，或准备一份可供审阅的文档。它会规划工作、委派任务、调用工具，并在本地优先的可视化工作台中完成交付。
 
-多个 Agent 可以并行工作，从同一次调查分出不同方向，也能把积累的知识带入后续对话。稳定的提示词前缀为长任务的缓存复用打下基础。你可以在浏览器中跟进进展、随时调整方向，直接查看生成的代码、文档和交互成果。
+多个 Agent 可以并行工作，从同一次调查分出不同方向，也能把积累的知识带入后续对话。稳定的提示词前缀为长任务的缓存复用打下基础。你可以在桌面工作台中跟进进展、随时调整方向，直接查看生成的代码、文档和交互成果。
 
 **把值得投入的大任务，交给 Pulsara。**
 
@@ -118,7 +118,7 @@ Pulsara 把这些成果带进工作台：对话内的交互式 HTML、SVG 与 Me
 
 ## 打造你的工作台
 
-设置中的“已归档会话”支持“删除全部”。确认范围覆盖当前完整列表的所有分页；执行时已取消归档的会话会跳过。右下角通知显示进度和未读结果，切换页面后仍可查看；最终结果查看一次后通知消失，未完成项可在结果弹窗中重试。保存的记忆和工作目录保留。关闭或刷新浏览器会停止发送剩余条目，已被服务接纳的删除仍会结算。
+设置中的“已归档会话”支持“删除全部”。确认范围覆盖当前完整列表的所有分页；执行时已取消归档的会话会跳过。右下角通知显示进度和未读结果，切换页面后仍可查看；最终结果查看一次后通知消失，未完成项可在结果弹窗中重试。保存的记忆和工作目录保留。刷新工作台或退出应用会停止发送剩余条目，已被服务接纳的删除仍会结算。
 
 把你的研究服务、专业工作流程和项目工具，接入同一个工作台。
 
@@ -149,13 +149,58 @@ Pulsara 把这些成果带进工作台：对话内的交互式 HTML、SVG 与 Me
 
 ## 打开工作台
 
-安装 Pulsara 后，运行：
+打开已安装的 **Pulsara** 桌面应用。应用会启动随包 PostgreSQL 和 Python 内核，再显示工作台。在界面中选择工作目录，并在设置中配置模型。桌面资源包含 Python、PostgreSQL 及搜索/向量扩展、ripgrep 和截图所需的浏览器。
+
+桌面构建目标为 macOS 15+ ARM64、Ubuntu 24.04 x86_64/ARM64。构建目标不等于所有平台均已完成安装实测；后端 CI 也不能代替桌面验收。当前验证范围见[桌面实现与验收方案](PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md)。
+
+关闭窗口后，应用继续驻留，可从 Dock 或托盘返回。选择 **Pulsara → 退出 Pulsara** 才会完整退出；应用先停止并结算当前工作，再关闭数据库。Linux 无可用托盘时，关闭窗口会提供最小化或退出选项。
+
+应用数据默认保存在 `~/.pulsara`；绝对路径的 `PULSARA_HOME` 可指定其他目录。模型凭据继续使用现有本机设置，专用数据库位于 `desktop/postgres`。首次桌面启动建立独立数据库，不导入原开发库历史。普通重启保留数据；开发期不兼容更新可以要求明确确认“重置专用数据库”，清除会话、记忆和定时任务，保留工作目录文件与模型设置。
+
+### 可选命令行工具
+
+CLI 已随应用提供。macOS 与 AppImage 在首次启动时自动注册 `~/.local/bin/pulsara`，后续启动更新自己的入口；deb 包负责注册 `/usr/bin/pulsara`。在 **设置 → 通用 → 本地服务 → 命令行入口** 查看状态、重新检查或修复。遇到已有命令时自动注册会保留它，由用户明确选择“重置”。应用不会自动修改 shell 配置；若终端找不到命令，请把入口目录加入 `PATH`，并用 `command -v pulsara` 核对。AppImage 入口指向原始 AppImage 文件，移动后重新打开应用即可更新。命令使用随包 Python，无需单独安装。
 
 ```bash
 pulsara app
+pulsara --help
+pulsara config-check
+pulsara db status
+pulsara db verify
 ```
 
-Pulsara 会启动本地服务并打开浏览器工作台。在界面中选择工作目录，配置你的模型。
+`pulsara app` 启动或聚焦同一桌面实例，交付启动请求后即返回；关闭该终端不会停止应用。`skills`、`plugins`、`mcp`、`hooks` 保留原管理命令。数据库诊断查询正在运行的应用专用实例；应用关闭时明确报告不可用。公开 CLI 不再提供 Web 服务参数、外部 DSN 配置或 `db migrate`。桌面启动器不接受旧的权限、Skill 等运行参数；请使用工作台中的会话与能力管理入口。
+
+### 从源码构建桌面应用
+
+请在目标平台构建。构建机需要 Node.js 22.13+、npm、`uv` 管理的 Python 3.12、C 编译器、`make`、`pkg-config`、Bison 和 Flex。macOS 还需要 Xcode command-line tools 与 `dylibbundler`；Ubuntu 需要 `binutils`、`pax-utils`（提供 `lddtree`）、`patchelf` 和 `libopenblas0`。这些依赖用于构建机。
+
+资源脚本从固定上游源码构建 PostgreSQL **17.9** 与 **pgvector 0.8.1**，下载对应 macOS ARM64 Sequoia 或 Ubuntu Noble PG17 x86_64/ARM64 的 **pg_search 0.26.1** 包，校验下载并收集动态库依赖，再打包可搬移 Python 运行时及 Playwright Chromium。因此 macOS 资源构建需要 macOS 15 或更新版本。如需使用自行准备的匹配扩展产物，可以同时传入 `--extension-lib`（动态库目录）和 `--extension-share`（control/SQL 目录）；同样执行版本和架构检查。
+
+在仓库根目录运行：
+
+```bash
+uv sync --frozen --managed-python --no-install-project
+.venv/bin/python tools/prepare_ripgrep.py
+uv sync --frozen --managed-python
+npm --prefix frontend ci
+npm --prefix frontend run build:desktop
+npm --prefix desktop ci
+.venv/bin/python desktop/scripts/prepare_resources.py
+npm --prefix desktop run package:dir
+```
+
+未封装的应用位于 `desktop/release`。`npm --prefix desktop run package` 生成配置中的 DMG 或 Linux AppImage/deb 产物。发布签名与公证需要单独配置，本地构建不带发布签名。Python 变更后重新运行资源脚本；UI 变更后先重新构建前端，再更新资源。`npm --prefix desktop start` 使用已准备的随包资源运行 Electron 开发壳，不提供另一套浏览器产品入口。
+
+后端检查使用仓库环境，桌面壳检查使用 Node 测试运行器：
+
+```bash
+.venv/bin/python -m pytest -m 'not postgres'
+npm --prefix frontend test
+npm --prefix desktop test
+```
+
+数据库集成夹具与 Ubuntu 包检查见 [tests/linux/README.md](tests/linux/README.md)。实际桌面验收还包括原生资源、退出、重开与真实模型任务，范围以桌面方案为准。
 
 ---
 

@@ -1,5 +1,3 @@
-'use client';
-
 import { AlarmClock, Bot, LoaderCircle, UserRound } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { RuntimeAdapter } from '../lib/runtime-adapter';
@@ -45,7 +43,6 @@ export function UserAvatar({ className = '' }: { className?: string }) {
   return <span className={`person-avatar ${className}`} role="img" aria-label="用户头像">
     {src && src !== failedSrc
       // Local image, no Next image service.
-      // eslint-disable-next-line @next/next/no-img-element
       ? <img src={src} alt="" draggable={false} onError={() => setFailedSrc(src)} />
       : <UserRound size={15} aria-hidden="true" />}
   </span>;

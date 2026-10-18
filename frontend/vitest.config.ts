@@ -23,6 +23,9 @@ export default defineConfig({
   test: {
     include: ['../tests/frontend/**/*.test.{ts,tsx}'],
     environment: 'jsdom',
+    // jsdom owns window storage. Node 25's native Web Storage otherwise masks
+    // its per-document implementation in Vitest's populated global object.
+    execArgv: ['--no-experimental-webstorage'],
     css: false,
     setupFiles: ['../tests/frontend/setup.ts'],
   },

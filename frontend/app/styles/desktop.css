@@ -1,0 +1,141 @@
+/* Chromium owns the interpolation; these are disposable layout values only. */
+@property --desktop-navigation-width { syntax: '<length>'; inherits: true; initial-value: 314px; }
+.desktop-shell { grid-template-rows: 44px minmax(0, 1fr); min-height: 420px; }
+.desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { --desktop-navigation-width: 314px; grid-template-columns: var(--desktop-navigation-width) minmax(360px, 1fr) auto; transition: --desktop-navigation-width .22s cubic-bezier(.2,.7,.2,1); }
+.desktop-shell.is-surface { grid-template-columns: 62px minmax(0, 1fr); }
+.desktop-titlebar { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; user-select: none; }
+.desktop-titlebar.is-macos { padding-left: 82px; }
+.desktop-titlebar button { -webkit-app-region: no-drag; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); background: transparent; border-radius: 6px; }
+.desktop-titlebar button:hover { background: var(--paper-deep); color: var(--ink); }
+.desktop-titlebar__title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font: 550 12px var(--sans); color: var(--muted); }
+.desktop-window-controls { display: flex; gap: 8px; margin-left: 12px; }
+.desktop-shell .workbench, .desktop-shell .surface-view, .desktop-shell .session-opening-view { grid-row: 2; }
+.desktop-workspace { --workspace-visible-width: min(var(--workspace-width, 460px), calc(100vw - var(--desktop-navigation-width) - 360px)); position: relative; z-index: 18; grid-column: 3; width: 0; max-width: var(--workspace-visible-width); min-width: 0; display: flex; flex-direction: column; background: var(--paper-raised); overflow: clip; border-left: 0; opacity: 1; visibility: hidden; transition: width .22s cubic-bezier(.2,.7,.2,1), visibility 0s .22s; }
+.desktop-workspace.is-open { width: var(--workspace-visible-width); visibility: visible; transition-delay: 0s; }
+.desktop-workspace.is-resizing { transition: none; }
+/* Keep documents at their reading width while the surrounding pane slides away. */
+.workspace-surface { width: var(--workspace-visible-width); flex: 1; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
+.workspace-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 44px; border-bottom: 1px solid var(--line); padding: 0 9px; }
+.workspace-toolbar nav { display: flex; gap: 3px; }
+.workspace-toolbar button { display: flex; align-items: center; gap: 5px; padding: 7px; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px; }
+.workspace-toolbar button:hover { background: var(--paper-deep); color: var(--ink); }
+.workspace-tabs { display: flex; flex: none; overflow: auto; scrollbar-width: thin; min-height: 36px; border-bottom: 1px solid var(--line); }
+.workspace-tabs:empty { display: none; }
+.workspace-tab { display: flex; flex: none; align-items: center; max-width: 220px; border-right: 1px solid var(--line); border-bottom: 2px solid transparent; }
+.workspace-tab.is-active { border-bottom-color: var(--amber); background: var(--paper-solid); }
+.workspace-tab button { display: flex; gap: 6px; align-items: center; min-width: 0; padding: 9px 7px; background: transparent; color: var(--muted); font-size: 11px; }
+.workspace-tab button[role=tab] { padding-left: 11px; }
+.workspace-tab button span { text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.workspace-tab button svg { flex: none; }
+.workspace-tab.is-active button { color: var(--ink); }
+.workspace-content { flex: 1; min-height: 0; min-width: 0; overflow: auto; }
+.workspace-content > .project-capability-panel { padding: 8px 14px; }
+.workspace-empty { height: 100%; min-height: 260px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; padding: 40px; color: var(--muted); text-align: center; }
+.workspace-empty svg { color: var(--amber); opacity: .7; }.workspace-empty strong { color: var(--ink-soft); font-size: 14px; }.workspace-empty p { font-size: 12px; line-height: 1.8; margin: 0; }.workspace-empty small { font-size: 10px; color: var(--faint); }
+.workspace-resizer { position: absolute; top: 0; bottom: 0; left: 0; width: 7px; z-index: 6; cursor: col-resize; touch-action: none; }.workspace-resizer:hover, .workspace-resizer:focus-visible { background: color-mix(in srgb, var(--amber) 22%, transparent); }
+.task-graph-embedded { height: 100%; min-height: 0; }.skill-read-button { text-align: left; background: transparent; }
+.desktop-shell .conversation { padding-inline: clamp(20px, 4vw, 64px); }
+
+
+.file-browser-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.file-browser-panel .file-preview-header { flex-wrap: nowrap; justify-content: flex-start; min-height: 38px; padding: 4px 8px; gap: 4px; overflow-x: auto; }.file-browser-panel .file-preview-header nav { gap: 3px; }.file-browser-panel .file-preview-header nav button { width: 28px; height: 28px; }.file-browser-panel .file-preview-body { flex: 1; min-height: 0; }.file-preview-error { padding: 20px; color: var(--red); }
+.frozen-visualization { height: 100%; display: flex; flex-direction: column; --visualization-height: calc(100dvh - 170px); }.frozen-visualization > header { display: flex; flex-direction: column; gap: 5px; padding: 14px; border-bottom: 1px solid var(--line); }.frozen-visualization > header strong { font-size: 13px; }.frozen-visualization > header small { color: var(--muted); font-size: 11px; }.frozen-visualization .inline-visualization__page { flex: 1; }
+
+/* Keep the original Pulsara rail and session column under the native titlebar. */
+.desktop-navigation { display: grid; grid-template-columns: 62px minmax(0, 1fr); grid-column: 1; grid-row: 2; min-height: 0; min-width: 0; }
+.desktop-navigation > .activity-rail { grid-column: 1; grid-row: 1; }
+.desktop-navigation > .session-sidebar { grid-column: 2; grid-row: 1; }
+.desktop-shell.is-surface .desktop-navigation { grid-template-columns: 62px; }
+.desktop-shell .workbench, .desktop-shell .surface-view, .desktop-shell .session-opening-view { grid-column: 2; }
+@media (min-width: 1151px) {
+  .desktop-shell:not(.sidebar-visible).is-workbench { --desktop-navigation-width: 62px; }
+  .desktop-navigation { overflow: clip; }
+  .desktop-navigation > .session-sidebar { width: 252px; transition: opacity .22s ease, visibility 0s; }
+  .desktop-shell:not(.sidebar-visible) .session-sidebar { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .22s ease, visibility 0s .22s; }
+}
+@media (max-width: 1150px) {
+  .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { --desktop-navigation-width: 62px; grid-template-columns: 62px minmax(360px, 1fr) auto; }
+  .desktop-navigation { grid-template-columns: 62px; }
+  .desktop-navigation > .session-sidebar { position: fixed; left: 62px; top: 44px; bottom: 0; width: 252px; z-index: 80; display: flex; visibility: hidden; pointer-events: none; transform: translateX(-100%); box-shadow: var(--shadow-lg); transition: transform .22s cubic-bezier(.2,.7,.2,1), visibility 0s .22s; }
+  .desktop-shell.sidebar-visible .session-sidebar { visibility: visible; pointer-events: auto; transform: none; transition-delay: 0s; }
+  .desktop-shell .mobile-scrim { position: fixed; inset: 44px 0 0 62px; z-index: 70; display: block; background: rgba(13,14,18,.24); opacity: 0; pointer-events: none; }
+  .desktop-shell .mobile-scrim.is-visible { opacity: 1; pointer-events: auto; }
+}
+
+@media (max-width: 760px) {
+  .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { grid-template-columns: 62px minmax(0, 1fr); }
+  .desktop-shell .desktop-workspace { --workspace-visible-width: min(100vw, var(--workspace-width)); position: fixed; top: 0; right: 0; bottom: 0; z-index: 35; box-shadow: var(--shadow-lg); }
+  .workspace-resizer { display: none; }
+}
+
+/* One window-top row: native controls, session controls, and workspace categories. */
+.desktop-shell.is-workbench > .desktop-titlebar { grid-column: 1; min-width: 0; z-index: 40; }
+.desktop-shell.is-workbench > .desktop-titlebar.is-macos { min-width: 124px; box-sizing: border-box; }
+.desktop-shell.is-workbench .workbench { grid-row: 1 / -1; grid-template-rows: 44px minmax(0, 1fr) auto; }
+.desktop-shell.is-workbench .workbench.session-opening { grid-template-rows: 44px minmax(0, 1fr); }
+.desktop-shell.is-workbench .workbench > .topbar { gap: 10px; padding-inline: 16px; border-left: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; }
+.desktop-shell.is-workbench .topbar button, .desktop-shell.is-workbench .topbar .menu-popover { -webkit-app-region: no-drag; }
+.desktop-shell.is-workbench .topbar .session-title { gap: 8px; }
+.desktop-shell.is-workbench .topbar .session-title p { display: none; }
+.desktop-shell.is-workbench .topbar .session-title h2 { font-size: 13px; font-weight: 600; }
+.desktop-shell.is-workbench .topbar-actions { flex: none; gap: 4px; }
+.desktop-shell.is-workbench .topbar .context-compact-button { width: 28px; padding: 0; justify-content: center; }
+.desktop-shell.is-workbench .topbar .context-compact-button > span { display: none; }
+.desktop-shell.is-workbench .desktop-workspace { grid-row: 1 / -1; }
+.workspace-topbar { display: flex; flex: none; align-items: stretch; min-width: 0; height: 44px; border-bottom: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; }
+.workspace-topbar .workspace-toolbar { flex: 1; min-width: 0; gap: 4px; min-height: 0; padding: 0 9px; border-bottom: 0; }
+.workspace-topbar .workspace-toolbar nav { gap: 3px; }
+.workspace-topbar .workspace-toolbar button { justify-content: center; height: 28px; padding: 5px 7px; font-size: 11px; gap: 5px; white-space: nowrap; }
+.workspace-topbar button { -webkit-app-region: no-drag; }
+.desktop-window-controls { position: fixed; top: 8px; right: 10px; margin: 0; z-index: 50; }
+.desktop-shell:has(.desktop-window-controls) .workspace-topbar { padding-right: 112px; }
+.desktop-shell:has(.desktop-window-controls):not(.has-inspector) .topbar { padding-right: 122px; }
+.desktop-shell.is-surface:has(.desktop-window-controls) .desktop-titlebar { padding-right: 122px; }
+/* Reserve a real box for native controls: padding would leave this drag region
+   overlapping the sidebar button when the navigation column shrinks to 62px. */
+@media (min-width: 1151px) {
+  .desktop-shell.is-workbench:has(.desktop-titlebar.is-macos) .topbar { margin-left: max(0px, calc(124px - var(--desktop-navigation-width))); padding-left: 14px; }
+}
+@media (max-width: 1150px) {
+  .desktop-shell.is-workbench:has(.desktop-titlebar.is-macos) .topbar { margin-left: 62px; padding-left: 14px; }
+}
+@media (max-width: 760px) {
+  .desktop-shell .desktop-workspace.is-open { top: 0; }
+}
+
+/* Compact conversation reading scale; document previews retain their own typography. */
+.desktop-shell .thread-column {
+  padding-bottom: 30px;
+  --type-body: 13.5px;
+  --type-title-small: 15px;
+  --type-title: 16px;
+  --type-title-large: 17px;
+  --type-heading: 20px;
+}
+.desktop-shell .thread-column > .conversation-run:last-child { margin-bottom: 0; }
+.desktop-shell .thread-column .assistant-copy {
+  --type-body: 15.5px;
+  --type-title-small: 17px;
+  --type-title: 18px;
+  --type-title-large: 19px;
+  --type-heading: 22px;
+}
+.desktop-shell .thread-column .assistant-markdown { line-height: 1.52; }
+.desktop-shell .thread-column .assistant-markdown p { margin-bottom: 5px; }
+.desktop-shell .thread-column .assistant-markdown :is(h1, h2, h3) { margin-block: 12px 5px; }
+.desktop-shell .thread-column .user-message { --type-body: 16px; padding: 12px 14px; }
+.desktop-shell .thread-column .user-message :is(.prompt-content-body, p) { line-height: 1.7; }
+.desktop-shell .thread-column .user-message p + p { margin-top: 10px; }
+.desktop-shell .thread-column .trace-node { margin-bottom: 6px; }
+.desktop-shell .thread-column .trace-node__dot { top: 15px; }
+.desktop-shell .thread-column .trace-card { border-radius: 8px; }
+.desktop-shell .thread-column .trace-card__summary { grid-template-columns: 22px minmax(0, 1fr) auto auto; min-height: 34px; gap: 7px; padding: 5px 8px; }
+.desktop-shell .thread-column .trace-icon { width: 22px; height: 22px; border-radius: 5px; }
+.desktop-shell .thread-column .trace-icon svg { width: 12px; height: 12px; }
+.desktop-shell .thread-column .trace-summary-copy strong { font-size: 11.5px; line-height: 1.35; }
+.desktop-shell .thread-column .trace-summary-copy small { margin-top: 1px; font-size: 10.5px; line-height: 1.35; }
+.desktop-shell .thread-column .trace-purpose { font-size: 10.5px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector, .desktop-shell .desktop-workspace, .desktop-navigation > .session-sidebar { transition: none; }
+}

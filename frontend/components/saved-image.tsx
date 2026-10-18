@@ -1,4 +1,3 @@
-'use client';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Download } from 'lucide-react';
 import Lightbox from 'yet-another-react-lightbox';
@@ -40,7 +39,6 @@ export function SavedImage({ read, title, inline = false, children }: { read: Re
   return <span className={inline ? 'saved-image' : 'saved-image-reference'}>
     <button ref={opener} type="button" className={inline ? 'saved-image__open' : 'file-reference__label markdown-image-reference'} onClick={() => setOpen(true)} aria-label={`查看图片：${title}`}>
       {/* Saved immutable blob URLs must not go through an image optimizer. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
       {inline && state.url ? <img src={state.url} alt={title} width={state.width} height={state.height} /> : children ?? title}
     </button>
     {inline && !state.url && <span role="status">{state.error ?? '正在加载图片…'}{state.error && <button onClick={state.retry}>重试</button>}</span>}

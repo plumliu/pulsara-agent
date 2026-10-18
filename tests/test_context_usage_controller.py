@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.tool_permission import EffectivePermissionPolicy
-from pulsara_agent.web_app.session_controller import (
+from pulsara_agent.desktop_app.session_controller import (
     LocalSessionController,
     _Quarantined,
 )

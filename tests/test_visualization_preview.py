@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pulsara_agent.web_app.visualization_preview import VisualizationPreviews
+from pulsara_agent.desktop_app.visualization_preview import VisualizationPreviews
 from pulsara_agent.conversation_kernel.visualization_screenshot import VisualizationScreenshotOwner
 
 
@@ -124,8 +124,8 @@ def test_disconnected_queued_thumbnail_does_not_start_a_browser():
 
 def test_thumbnail_http_origin_boundary_and_canonical_response(tmp_path):
     from aiohttp import ClientSession
-    from pulsara_agent.web_app.http_server import LocalHttpServer
-    from tests.test_local_web_http_surface import _Sessions, _model_server_dependencies
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+    from tests.test_desktop_http_surface import _Sessions, _model_server_dependencies
 
     async def run():
         (tmp_path / 'index.html').write_text('Pulsara')

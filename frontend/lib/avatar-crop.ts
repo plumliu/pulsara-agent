@@ -20,7 +20,7 @@ export async function prepareAvatarCrop(file: File): Promise<AvatarCropSource> {
     canvas.width = image.width;
     canvas.height = image.height;
     const context = canvas.getContext('2d');
-    if (!context) throw new Error('当前浏览器无法处理图片。');
+    if (!context) throw new Error('无法处理这张图片。');
     context.drawImage(image, 0, 0);
     const blob = await canvasBlob(canvas);
     return { image, url: URL.createObjectURL(blob) };
@@ -38,7 +38,7 @@ export async function exportAvatarCrop(source: AvatarCropSource, area: Area): Pr
   // crop or original metadata is sent to the local service.
   canvas.width = canvas.height = 256;
   const context = canvas.getContext('2d');
-  if (!context) throw new Error('当前浏览器无法处理图片。');
+  if (!context) throw new Error('无法处理这张图片。');
   context.drawImage(source.image, area.x, area.y, area.width, area.height, 0, 0, 256, 256);
   return new File([await canvasBlob(canvas)], 'avatar.png', { type: 'image/png' });
 }

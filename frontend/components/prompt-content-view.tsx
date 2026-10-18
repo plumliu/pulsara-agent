@@ -1,5 +1,3 @@
-'use client';
-
 import { AnnotationCard } from './response-annotations';
 import { SentAnnotationChip } from './sent-annotation-chip';
 import { splitFileReferences } from '../lib/file-reference';
@@ -294,7 +292,6 @@ function LazyImage({
       <span className={`${variant === 'tool' ? 'tool-image-preview__image' : 'prompt-thumbnail__image'} is-${state?.kind ?? 'loading'}`}>
         {state?.kind === 'ready'
           // Exact owner-scoped Blob URLs cannot pass through Next image optimization.
-          // eslint-disable-next-line @next/next/no-img-element
           ? <img src={state.url} alt="" />
           : variant === 'tool'
             ? state?.kind === 'failed' ? '图片读取失败，点击查看' : '正在读取图片…'

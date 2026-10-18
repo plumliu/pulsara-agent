@@ -20,7 +20,7 @@ from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogC
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.settings import LocalSettingsStore, LocalPostgresConfig
 from pulsara_agent.tool_permission import preset_to_policy
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from tests.dogfood.credentials import secret_scrubber
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
