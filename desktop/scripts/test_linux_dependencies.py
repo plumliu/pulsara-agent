@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from prepare_resources import linux_dependencies
+from prepare_resources import bundle_linux_dependencies, linux_dependencies
 
 
 class LinuxDependencyTests(unittest.TestCase):
@@ -50,6 +50,35 @@ class LinuxDependencyTests(unittest.TestCase):
             leaf.unlink()
             with self.assertRaisesRegex(RuntimeError, "Unresolved native dependency"):
                 linux_dependencies(parent)
+
+    def test_wheel_sibling_libraries_become_independently_relocatable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "wheel payload"
+            libraries = root / "package.libs"
+            libraries.mkdir(parents=True)
+            leaf = libraries / "libwheel_leaf.so"
+            parent = libraries / "libwheel_parent.so"
+            source = root / "leaf.c"
+            source.write_text("double leaf(double x) { return x; }\n")
+            subprocess.run([
+                "cc", "-shared", "-fPIC", str(source),
+                "-Wl,-soname,libwheel_leaf.so", "-o", str(leaf),
+            ], check=True)
+            source.write_text("extern double leaf(double);\ndouble parent(double x) { return leaf(x); }\n")
+            subprocess.run([
+                "cc", "-shared", "-fPIC", str(source), str(leaf),
+                "-o", str(parent),
+            ], check=True)
+            # Like a wheel's internal .libs objects, this ELF initially relies
+            # on an importing object's search path, not its own RPATH.
+            with self.assertRaisesRegex(RuntimeError, "Unresolved native dependency"):
+                linux_dependencies(parent)
+            bundle_linux_dependencies(root)
+            self.assertIn(leaf, linux_dependencies(parent))
+            relocated = Path(temporary) / "moved wheel payload"
+            shutil.move(root, relocated)
+            self.assertIn(relocated / "package.libs" / leaf.name,
+                          linux_dependencies(relocated / "package.libs" / parent.name))
 
 
 if __name__ == "__main__":

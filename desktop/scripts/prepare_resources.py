@@ -277,6 +277,16 @@ def linux_dependencies(binary: Path) -> list[Path]:
 
 def bundle_linux_dependencies(target: Path):
     originals = list(native_files(target))
+    # Wheel .libs directories (for example psycopg_binary.libs) can rely on the
+    # importing extension's inherited RPATH. Give every bundled ELF its own
+    # sibling search path before inspecting any of them; keep upstream paths
+    # until the final relocation pass replaces them with verified local paths.
+    for binary in originals:
+        if "(NEEDED)" not in output(["readelf", "-d", binary]):
+            continue
+        validate_architecture(binary)
+        paths = output(["patchelf", "--print-rpath", binary]).split(":")
+        run(["patchelf", "--set-rpath", ":".join(dict.fromkeys(["$ORIGIN", *filter(None, paths)])), binary])
     shared = {}
     local_directories = {}
     for binary in originals:
