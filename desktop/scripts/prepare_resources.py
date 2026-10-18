@@ -258,7 +258,12 @@ def linux_dependencies(binary: Path) -> list[Path]:
     """
     env = {key: value for key, value in os.environ.items() if not key.startswith("LD_")}
     env["LC_ALL"] = "C"
-    result = output(["/usr/bin/ldd", binary], env=env)
+    try:
+        result = output(["/usr/bin/ldd", binary], env=env)
+    except UnicodeDecodeError as error:
+        raise RuntimeError(
+            f"Invalid loader output for {binary}: {error.object!r}"
+        ) from error
     dependencies = []
     for line in result.splitlines():
         entry = line.strip()
