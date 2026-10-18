@@ -2,7 +2,7 @@
 
 Upstream PostgreSQL owns its relocatable layout, PGXS builds pgvector, pkgutil /
 dpkg-deb extract the exact ParadeDB release without running installer scripts,
-and dylibbundler / lddtree / patchelf own native dependency relocation.
+and dylibbundler / the native Linux loader / patchelf own dependency relocation.
 Run natively on macOS ARM64 or Ubuntu 24.04 x86_64/ARM64; no cross compilation.
 """
 
@@ -248,6 +248,33 @@ def system_elf(path: Path):
     )
 
 
+def linux_dependencies(binary: Path) -> list[Path]:
+    """Let Ubuntu's loader resolve the complete dependency tree of build payloads.
+
+    python-build-standalone uses $ORIGIN in DT_NEEDED, which Ubuntu 24.04's
+    lddtree 1.3.7 does not resolve. ldd delegates to the native glibc loader,
+    preserving that binding without rewriting ELF dependencies or losing their
+    transitive libraries. Only our native, prepared build payloads reach here.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LD_")}
+    env["LC_ALL"] = "C"
+    result = output(["/usr/bin/ldd", binary], env=env)
+    dependencies = []
+    for line in result.splitlines():
+        entry = line.strip()
+        if re.fullmatch(r"linux-(?:vdso|gate)\.so\.\d+\s+\(0x[0-9a-fA-F]+\)", entry):
+            continue  # Kernel-provided virtual library, not a redistributable file.
+        location = entry.split(" => ", 1)[-1]
+        match = re.fullmatch(r"(/.+)\s+\(0x[0-9a-fA-F]+\)", location)
+        if not match:
+            raise RuntimeError(f"Unresolved native dependency for {binary}: {line}")
+        dependency = Path(os.path.normpath(match[1].rstrip()))
+        if not dependency.is_file():
+            raise RuntimeError(f"Unresolved native dependency for {binary}: {line}")
+        dependencies.append(dependency)
+    return dependencies
+
+
 def bundle_linux_dependencies(target: Path):
     originals = list(native_files(target))
     shared = {}
@@ -256,13 +283,9 @@ def bundle_linux_dependencies(target: Path):
         # Statically linked tools (including ripgrep) have no loader dependencies.
         if "(NEEDED)" not in output(["readelf", "-d", binary]):
             continue
-        local_directories[binary] = set()
+        local_directories[binary] = {binary.parent}
         validate_architecture(binary)
-        result = output(["/usr/bin/python3", "/usr/bin/lddtree", "-l", binary])
-        for line in result.splitlines():
-            candidate = Path(line)
-            if not candidate.is_absolute() or not candidate.is_file():
-                raise RuntimeError(f"Unresolved native dependency for {binary}: {line}")
+        for candidate in linux_dependencies(binary):
             if candidate.is_relative_to(target):
                 local_directories[binary].add(candidate.parent)
                 continue
@@ -318,15 +341,12 @@ def bundle_linux_dependencies(target: Path):
     for binary in native_files(target):
         if "(NEEDED)" not in output(["readelf", "-d", binary]):
             continue
-        for line in output(
-            ["/usr/bin/python3", "/usr/bin/lddtree", "-l", binary]
-        ).splitlines():
-            dependency = Path(line)
+        for dependency in linux_dependencies(binary):
             if not dependency.is_file() or not (
                 system_elf(dependency) or dependency.is_relative_to(target)
             ):
                 raise RuntimeError(
-                    f"Non-bundled ELF dependency after relocation: {binary}: {line}"
+                    f"Non-bundled ELF dependency after relocation: {binary}: {dependency}"
                 )
 
 
