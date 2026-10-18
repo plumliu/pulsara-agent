@@ -248,7 +248,7 @@ def system_elf(path: Path):
     )
 
 
-def linux_dependencies(binary: Path) -> list[Path]:
+def linux_dependencies(binary: Path, *, search_siblings: bool = False) -> list[Path]:
     """Let Ubuntu's loader resolve the complete dependency tree of build payloads.
 
     python-build-standalone uses $ORIGIN in DT_NEEDED, which Ubuntu 24.04's
@@ -258,6 +258,10 @@ def linux_dependencies(binary: Path) -> list[Path]:
     """
     env = {key: value for key, value in os.environ.items() if not key.startswith("LD_")}
     env["LC_ALL"] = "C"
+    if search_siblings:
+        # Wheel-internal libraries can inherit the importing extension's RPATH.
+        # Inspect them independently without modifying the upstream ELF first.
+        env["LD_LIBRARY_PATH"] = str(binary.parent)
     try:
         result = output(["/usr/bin/ldd", binary], env=env)
     except UnicodeDecodeError as error:
@@ -282,16 +286,8 @@ def linux_dependencies(binary: Path) -> list[Path]:
 
 def bundle_linux_dependencies(target: Path):
     originals = list(native_files(target))
-    # Wheel .libs directories (for example psycopg_binary.libs) can rely on the
-    # importing extension's inherited RPATH. Give every bundled ELF its own
-    # sibling search path before inspecting any of them; keep upstream paths
-    # until the final relocation pass replaces them with verified local paths.
-    for binary in originals:
-        if "(NEEDED)" not in output(["readelf", "-d", binary]):
-            continue
-        validate_architecture(binary)
-        paths = output(["patchelf", "--print-rpath", binary]).split(":")
-        run(["patchelf", "--set-rpath", ":".join(dict.fromkeys(["$ORIGIN", *filter(None, paths)])), binary])
+    # Collect first, then patch each ELF once. Ubuntu's patchelf 0.18 corrupts
+    # Pillow x64 libXau version data when a second RPATH edit grows .dynstr.
     shared = {}
     local_directories = {}
     for binary in originals:
@@ -300,7 +296,7 @@ def bundle_linux_dependencies(target: Path):
             continue
         local_directories[binary] = {binary.parent}
         validate_architecture(binary)
-        for candidate in linux_dependencies(binary):
+        for candidate in linux_dependencies(binary, search_siblings=True):
             if candidate.is_relative_to(target):
                 local_directories[binary].add(candidate.parent)
                 continue
