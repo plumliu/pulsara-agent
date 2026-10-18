@@ -119,6 +119,29 @@ def test_preview_frames_explicit_and_automatic_roots_and_keeps_ambiguous_pages()
     asyncio.run(run())
 
 
+def test_preview_ordinary_div_includes_document_spacing() -> None:
+    async def run() -> None:
+        owner = VisualizationScreenshotOwner()
+        try:
+            html = (
+                b"<!doctype html><style>body{margin:12px 0 18px;padding:6px 0 10px}"
+                b".wrap{padding:20px 16px 40px;margin:14px 0 24px}"
+                b".content{height:90px}.spacer{height:70px}</style>"
+                b"<div class=wrap><div class=content>Report</div><div class=spacer></div></div>"
+            )
+            cropped = await owner.render(html, deadline_monotonic=monotonic() + 20)
+            assert unpack(">II", cropped[16:24]) == (1200, 304)
+            framed = await owner.render(
+                html.replace(b"body{", b"html{margin:30px}body{"),
+                deadline_monotonic=monotonic() + 20,
+            )
+            assert unpack(">II", framed[16:24]) == (1200, 800)
+        finally:
+            await owner.aclose()
+
+    asyncio.run(run())
+
+
 def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
     visualization_ref = "sha256:" + "a" * 64
     human_json = canonical_json_bytes(

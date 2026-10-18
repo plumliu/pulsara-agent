@@ -96,6 +96,14 @@
 
 .thread-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; container-type: inline-size; }
 .thread-column { width: min(690px, calc(100% - 54px)); margin: 0 auto; padding: 34px 0 42px; font-family: var(--serif); }
+.history-boundary { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 12px; margin: 18px 0; padding: 10px 12px; border-block: 1px dashed var(--line); color: var(--muted); font-size: var(--type-caption); }
+.history-boundary [role="alert"] { flex-basis: 100%; text-align: center; color: var(--red); }
+.history-boundary button, .history-content-status > button { padding: 5px 9px; border-radius: 6px; background: var(--paper-deep); color: var(--blue); font-size: inherit; }
+.history-boundary button:focus-visible, .history-content-status > button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.history-boundary button:disabled { opacity: .6; cursor: wait; }
+.history-content-status { margin-block: 12px; color: var(--muted); font-size: var(--type-caption); }
+.history-content-status > button { margin-left: 8px; }
+
 .assistant-turn:has(+ .context-compaction-divider), .user-turn:has(+ .context-compaction-divider) { margin-bottom: 16px; }
 .context-compaction-divider { display: flex; align-items: center; gap: 12px; margin: 2px 0 10px; color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); font-weight: 700; letter-spacing: .1em; white-space: nowrap; }
 .context-compaction-divider__label { display: inline-flex; align-items: center; gap: 6px; }
@@ -107,14 +115,14 @@
 .user-turn { width: min(520px, 88%); margin: 0 0 24px auto; }
 .user-heading { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 3px 8px 0; }
 .user-heading strong { font-family: var(--serif); font-size: var(--type-title-small); }
-.user-message { width: fit-content; max-width: 100%; margin-left: auto; padding: 14px 15px 9px; border: 1px solid var(--line); border-radius: 15px 4px 15px 15px; background: color-mix(in srgb, var(--paper-solid) 90%, transparent); box-shadow: var(--shadow-sm); }
+.user-message { width: fit-content; max-width: 100%; margin-left: auto; padding: 14px 15px; border: 1px solid var(--line); border-radius: 15px 4px 15px 15px; background: color-mix(in srgb, var(--paper-solid) 90%, transparent); box-shadow: var(--shadow-sm); }
 .user-message p { margin: 0; font-size: var(--type-body); line-height: 1.72; }
 .prompt-content-body { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-body); line-height: 1.72; }
 .prompt-content-text { white-space: pre-wrap; }
 .prompt-lightbox-state { display: grid; justify-items: center; gap: 10px; max-width: min(520px, calc(100vw - 40px)); padding: 24px; border-radius: 12px; background: color-mix(in srgb, #111 88%, transparent); color: white; text-align: center; }
 .prompt-lightbox-state button { padding: 7px 10px; border-radius: 7px; background: white; color: #111; }
 .prompt-lightbox-caption { position: absolute; right: 0; bottom: 0; left: 0; padding: 11px 16px; background: linear-gradient(transparent, rgb(0 0 0 / .72)); color: white; text-align: center; pointer-events: none; }
-.message-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); }
+.message-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; padding-right: 4px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); }
 .user-steer { display: grid; grid-template-columns: 22px minmax(0,1fr); gap: 8px; margin: 0 0 8px 40px; padding: 7px 10px 7px 8px; border-left: 2px solid color-mix(in srgb, var(--amber) 24%, var(--line-strong)); border-radius: 3px 8px 8px 3px; background: color-mix(in srgb, var(--paper-deep) 46%, transparent); transition: margin-block .24s cubic-bezier(.2,.7,.2,1), padding-block .24s cubic-bezier(.2,.7,.2,1); }
 .user-steer__icon { display: grid; place-items: center; width: 22px; height: 22px; color: color-mix(in srgb, var(--muted) 80%, var(--amber)); }
 .user-steer__content { min-width: 0; }
@@ -624,10 +632,9 @@
 .conversation-run > div:last-child .assistant-turn,
 .conversation-run > div:last-child .assistant-copy { margin-bottom: 0; }
 
-/* Animate intrinsic height, so adjacent content moves with the disclosure. */
-.conversation-run__step { display: grid; grid-template-rows: 1fr; opacity: 1; visibility: visible; transition: grid-template-rows .24s cubic-bezier(.2, .7, .2, 1), opacity .18s ease, visibility 0s; }
+/* Collapsed process bodies are unmounted; only visible steps have layout. */
+.conversation-run__step { display: grid; grid-template-rows: 1fr; }
 .conversation-run__step-content { min-height: 0; overflow: hidden; }
-.conversation-run__step[aria-hidden="true"] { grid-template-rows: 0fr; opacity: 0; visibility: hidden; transition: grid-template-rows .24s cubic-bezier(.2, .7, .2, 1), opacity .16s ease, visibility 0s .24s; }
 .conversation-run__toggle svg { transition: transform .2s ease; }
 
 /* The dock is bottom anchored: growing a new row lifts existing rows smoothly. */
@@ -638,7 +645,7 @@
 @keyframes queue-card-enter { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @media (prefers-reduced-motion: reduce) {
   .subagent-completion-event__tooltip { animation: none; }
-  .user-steer, .conversation-run__step, .conversation-run__step[aria-hidden="true"], .conversation-run__toggle svg { transition: none; }
+  .user-steer, .conversation-run__toggle svg { transition: none; }
   .composer-queue__item, .composer-queue__item article { animation: none; }
 }
 
@@ -731,7 +738,6 @@
 .sent-annotation-strip { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; margin-bottom: 8px; }
 .user-steer-turn { min-width: 0; }
 .user-steer-turn .sent-annotation-strip { margin-bottom: 5px; }
-.user-message-meta .message-foot { margin-top: 0; padding-right: 4px; }
 .prompt-thumbnail, .prompt-thumbnail-more { flex: none; width: 74px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: var(--type-micro); text-align: center; }
 .prompt-thumbnail__image, .prompt-thumbnail-more { display: grid; place-items: center; width: 72px; height: 72px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-deep); }
 .prompt-thumbnail__image img { display: block; width: 100%; height: 100%; object-fit: contain; }

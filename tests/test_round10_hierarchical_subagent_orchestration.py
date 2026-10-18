@@ -1968,6 +1968,99 @@ def test_round9_2_subagent_launch_permit_closes_both_stop_race_sides(
 
 
 @pytest.mark.postgres
+def test_round10_batch_admission_preserves_cross_batch_canonical_dependency_ids(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+
+    async def exercise() -> None:
+        session_id = _id("session")
+        first_attempt_id = _id("attempt")
+        earlier_task_id = _round10_id("task", first_attempt_id, "0")
+        first_arguments = {"tasks": [{"task_key": "earlier", "task": "Hold earlier work"}]}
+        next_arguments = {
+            "tasks": [
+                {"task_key": "local", "task": "Hold local work"},
+                {
+                    "task_key": "join",
+                    "task": "Join the earlier and local results",
+                    "depends_on": [earlier_task_id, "local"],
+                },
+            ]
+        }
+        lease, contexts = _prepare_root_tool_batch(
+            repository,
+            session_id=session_id,
+            workspace_id=_id("workspace"),
+            calls=(
+                ("create_agent_tasks", _id("call"), first_attempt_id, first_arguments),
+                ("create_agent_tasks", _id("call"), _id("attempt"), next_arguments),
+            ),
+        )
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
+            repository=repository,
+            guard=lease.guard,
+            host_owner_id=_id("host"),
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id=session_id, owner_epoch=f"todo:{uuid4().hex}"
+            ),
+        )
+        manager.bind_runner_factory(
+            lambda _scope: _BlockingChildRunner()  # type: ignore[arg-type]
+        )
+        try:
+            first = await manager.invoke(
+                tool_name="create_agent_tasks",
+                arguments=first_arguments,
+                invocation_context=contexts[0],
+            )
+            assert first.state == "SUCCESS"
+            assert json.loads(first.content)["tasks"][0]["task_id"] == earlier_task_id
+            following = await manager.invoke(
+                tool_name="create_agent_tasks",
+                arguments=next_arguments,
+                invocation_context=contexts[1],
+            )
+            assert following.state == "SUCCESS"
+            rows = repository.list_subagent_tasks(
+                session_id=session_id,
+                maximum_items=10,
+                deadline_monotonic=monotonic() + 30,
+            )
+            by_key = {row["task_key"]: row for row in rows}
+            assert set(by_key) == {"earlier", "local", "join"}
+            assert by_key["earlier"]["status"] == "ACTIVE"
+            assert by_key["local"]["status"] == "ACTIVE"
+            assert by_key["join"]["status"] == "WAITING_DEPENDENCY"
+            with provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR,
+                deadline_monotonic=monotonic() + 30,
+            ) as connection:
+                edges = connection.execute(
+                    "SELECT dependency_task_id FROM pulsara_v3.subagent_task_dependencies "
+                    "WHERE session_id=%s AND task_id=%s",
+                    (session_id, by_key["join"]["id"]),
+                ).fetchall()
+                parent = connection.execute(
+                    "SELECT status, terminal_reason FROM pulsara_v3.turns "
+                    "WHERE session_id=%s AND id=%s",
+                    (session_id, contexts[0].turn_id),
+                ).fetchone()
+            assert {row[0] for row in edges} == {
+                earlier_task_id, by_key["local"]["id"]
+            }
+            assert parent == ("RUNNING", None)
+        finally:
+            await manager.aclose(deadline_monotonic=monotonic() + 2)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.postgres
 def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,

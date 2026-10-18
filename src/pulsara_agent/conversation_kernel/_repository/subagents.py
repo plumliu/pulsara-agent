@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id
+from pulsara_agent.identity import derive_id, is_valid_id
 
 
 
@@ -204,8 +204,8 @@ def _subagent_batch_arguments_match(
                 return False
             if token in key_to_id:
                 dependency_id = key_to_id[token]
-            elif token.startswith("task:") and len(token) > 5:
-                dependency_id = token[5:]
+            elif is_valid_id(token, "task"):
+                dependency_id = token
             else:
                 return False
             resolved.append(dependency_id)

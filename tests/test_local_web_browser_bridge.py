@@ -298,6 +298,7 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
         {
             "command_id": command_id,
             "command_kind": "TERMINATE_BACKGROUND_PROCESS",
+            "control_admission_deadline_ms": 9000,
             "expected_session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
             "expected_host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
             "target_process_id": 'process:77t67dg5pb4j4dif5xd3xcidwe',
@@ -307,6 +308,7 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
     assert kind == "command"
     assert isinstance(request, wire.CommandRequest)
     assert request.client_submission_id == ""
+    assert request.control_admission_deadline_ms == 9000
     assert request.expected_session_id == 'session:5dyf7lfzp7z22pphjtostkgsjm'
     assert request.expected_host_session_id == 'host:7r7elstdigup6xfbo3hd3d5jfu'
     assert request.target_process_id == 'process:77t67dg5pb4j4dif5xd3xcidwe'
@@ -318,6 +320,7 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
         {
             "command_id": command_id,
             "expected_control": {
+                "admission_deadline_ms": 9000,
                 "operation": "USER_CONTROL_TERMINATE_BACKGROUND_PROCESS",
                 "session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
                 "host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
@@ -329,6 +332,7 @@ async def _exercise_pr03_browser_bridge_fields(monkeypatch) -> None:
     kind, query = connection.requests[-1]
     assert kind == "query_command"
     assert isinstance(query, wire.QueryCommandRequest)
+    assert query.expected_control.admission_deadline_ms == 9000
     assert query.expected_control.target.target_id == 'process:77t67dg5pb4j4dif5xd3xcidwe'
     assert query.expected_control.host_session_id == 'host:7r7elstdigup6xfbo3hd3d5jfu'
 
@@ -1010,3 +1014,119 @@ def test_runtime_reopen_post_detach_exception_quarantines_gate_and_operation(
             await server.aclose()
 
     asyncio.run(scenario())
+
+
+def test_history_http_round_trips_protobuf_cursor_without_losing_cut_or_precision(
+    tmp_path,
+) -> None:
+    """The browser returns the snapshot's protobuf JSON cursor unchanged."""
+    async def scenario() -> None:
+        session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'
+        read_calls = []
+
+        class Reader:
+            def history_page(self, **values):
+                read_calls.append(values)
+                return wire.HistoryPageResponse()
+
+        state = SimpleNamespace(
+            host_session=SimpleNamespace(session_id=session_id),
+            protocol_reader=Reader(),
+        )
+        gateway = SimpleNamespace(
+            _maximum_frame_bytes=MAXIMUM_FRAME_BYTES,
+            _fits_frame=lambda _frame: True,
+        )
+
+        class Connection(_RuntimeConnection):
+            async def request(self, kind, request):
+                assert kind == "history_page"
+                self.requests.append((kind, request))
+                return await TerminalKernelProtocolServer._history(gateway, state, request)
+
+        bridge = LocalBrowserBridge(
+            sessions=cast(LocalSessionController, _Sessions()),
+            protocol_server=cast(TerminalKernelProtocolServer, object()),
+        )
+        connection = Connection(session_id=session_id, generation=1, role="observer")
+        bridge._connections[connection.connection_id] = connection
+        static_root = tmp_path / "static"
+        static_root.mkdir()
+        (static_root / "index.html").write_text("Pulsara", encoding="utf-8")
+        runtime = test_model_runtime()
+
+        async def refresh_database_state():
+            return None
+
+        async def unexpected_reset(_postgres):
+            raise AssertionError("unexpected reset")
+
+        server = LocalHttpServer(
+            sessions=bridge.sessions, bridge=bridge, static_root=static_root,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            settings=runtime.settings, catalog=runtime.catalog, model_runtime=runtime,
+            database_state=lambda: "ready", refresh_database_state=refresh_database_state,
+            postgres_settings_saved=lambda: None, reset_postgres=unexpected_reset,
+        )
+        await server.start()
+        try:
+            async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+                url = f"{server.origin}/api/connections/{connection.connection_id}/history"
+
+                async def post_cursor(cursor):
+                    async with client.post(url, json={"cursor": cursor}) as response:
+                        return response.status, await response.json()
+
+                # Use the actual JSON serializer, including its uint64 strings.
+                for event_cut in (0, 2**53 + 3):
+                    cursor = wire.HistoryCursor(
+                        session_id=session_id, cut_sequence=2**53 + 1,
+                        entry_sequence=2**53, event_sequence_cut=event_cut,
+                    )
+                    status, frame = await post_cursor(browser_bridge_module.protobuf_json(cursor))
+                    assert status == 200
+                    assert "history_page" in frame
+                    sent = connection.requests[-1][1].cursor
+                    assert sent == cursor
+                    assert sent.HasField("event_sequence_cut")
+                    assert read_calls[-1]["event_sequence_cut"] == event_cut
+                    assert read_calls[-1]["cut_sequence"] == 2**53 + 1
+                    assert read_calls[-1]["before_entry_sequence"] == 2**53
+
+                # Missing/null optional values must not silently become an accepted zero cut.
+                base = {"session_id": session_id, "cut_sequence": "5", "entry_sequence": "4"}
+                for cursor in (base, {**base, "event_sequence_cut": None}):
+                    status, frame = await post_cursor(cursor)
+                    assert status == 200
+                    assert frame["error"]["stable_code"] == "HISTORY_CURSOR_INVALID"
+                    assert not connection.requests[-1][1].cursor.HasField("event_sequence_cut")
+                assert len(read_calls) == 2
+
+                for invalid in (True, "-1", str(2**64), "1.5"):
+                    status, frame = await post_cursor({**base, "event_sequence_cut": invalid})
+                    assert status == 400
+                    assert frame["error"]["code"] == "BAD_REQUEST"
+                status, frame = await post_cursor({**base, "event_sequence_cut": "5", "unknown": "x"})
+                assert status == 400
+                assert frame["error"]["code"] == "BAD_REQUEST"
+                assert len(connection.requests) == 4
+        finally:
+            await server.aclose()
+            await bridge.aclose()
+
+    asyncio.run(scenario())
+
+@pytest.mark.parametrize('sequence', ['0', str(2**53 + 3), str(2**64 - 1)])
+def test_browser_observe_accepts_exact_decimal_wire_cursor(sequence):
+    from unittest.mock import AsyncMock
+
+    async def exercise():
+        bridge = object.__new__(LocalBrowserBridge)
+        observer = SimpleNamespace(request=AsyncMock(return_value=wire.ServerFrame()))
+        bridge._connection = AsyncMock(return_value=SimpleNamespace(observer=observer))
+        await bridge.observe('browser', {'after_event_sequence': sequence})
+        kind, request = observer.request.await_args.args
+        assert kind == 'observe'
+        assert request.after_event_sequence == int(sequence)
+        assert request.maximum_events == 128
+    asyncio.run(exercise())

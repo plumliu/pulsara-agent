@@ -134,7 +134,7 @@
 .task-conversation .user-turn { width: min(390px,92%); margin-bottom: 20px; }
 .task-conversation .user-heading { margin-bottom: 6px; }
 .task-conversation .user-heading strong, .task-conversation .assistant-identity > strong { font-size: var(--type-title-small); }
-.task-conversation .user-message { padding: 11px 12px 8px; }
+.task-conversation .user-message { padding: 11px 12px; }
 .task-conversation .user-message p { font-size: var(--type-small); }
 .task-conversation .assistant-turn { margin: 22px 0 28px; }
 .task-conversation .assistant-turn--operational { margin: 8px 0 14px; }

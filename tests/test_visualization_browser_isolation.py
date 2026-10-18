@@ -166,6 +166,117 @@ def test_automatic_main_requires_complete_unambiguous_visible_content() -> None:
             browser.close()
 
 
+def test_ordinary_div_uses_natural_document_bounds_and_preserves_author_spacing() -> None:
+    root = Path(__file__).resolve().parents[1]
+    selector = (root / "src/pulsara_agent/conversation_kernel/visualization_root.js").read_text().replace("export default ", "", 1)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 600, "height": 500})
+            html = """<!doctype html><style>
+                body{margin:12px 0 18px;padding:6px 0 10px}
+                .wrap{padding:20px 16px 40px;margin:14px 0 24px}
+                .content{height:90px}.spacer{height:70px}
+                </style><div class="wrap"><div class="content">Report</div>
+                <div class="spacer"></div></div>"""
+            page.set_content(html)
+            bounds = page.evaluate("() => {" + selector + """;
+                const root=visualizationRoot();
+                return {tag:root?.tagName,height:root?.getBoundingClientRect().height,
+                    contentBottom:document.querySelector('.content').getBoundingClientRect().bottom,
+                    scrollHeight:document.documentElement.scrollHeight};
+            }""")
+            assert bounds == {"tag": "HTML", "height": 304, "contentBottom": 142, "scrollHeight": 500}
+            # The 162px after text includes an intentional 70px spacer, wrapper
+            # padding/margin and body padding/margin. None is trimmed away.
+            assert bounds["height"] - bounds["contentBottom"] == 162
+            page.set_content("<!doctype html><style>body{margin:0}.wrap{margin:30px 0}.inner{height:100px;margin:20px 0}</style><div class=wrap><div class=inner>Collapsed margins</div></div>")
+            assert page.evaluate("() => {" + selector + "; return visualizationRoot()?.getBoundingClientRect().height; }") == 160
+            page.set_content("<!doctype html><style>body{margin:0;min-height:100vh}</style><div>Intentional full page</div>")
+            assert page.evaluate("() => {" + selector + "; return visualizationRoot()?.getBoundingClientRect().height; }") == 500
+            for ambiguous in [
+                "<style>html{margin:30px}</style><div>Page framing</div>",
+                "<div>Report</div><footer>Source note</footer>",
+                "<div><main>Report</main></div><footer>Source note</footer>",
+                "<div>Report</div><div>Another panel</div>",
+                "<div style='position:absolute;top:300px'>Out of flow</div>",
+                "<div>Report<aside style='position:fixed;bottom:0'>Fixed note</aside></div>",
+                "<style>body::after{content:'Source note'}</style><div>Report</div>",
+            ]:
+                page.set_content("<!doctype html>" + ambiguous)
+                assert page.evaluate("() => {" + selector + "; return visualizationRoot() === null; }") is True, ambiguous
+        finally:
+            browser.close()
+
+
+def test_ordinary_div_remeasures_expansion_and_keeps_overflow_reachable() -> None:
+    root = Path(__file__).resolve().parents[1]
+    selector = (root / "src/pulsara_agent/conversation_kernel/visualization_root.js").read_text().replace("export default ", "", 1)
+    source = (root / "frontend/lib/visualization-frame.ts").read_text()
+    script = re.search(r"export const visualizationFrameMeasurementScript = `(<script>.*?</script>)`;", source, re.DOTALL).group(1).replace("${visualizationRoot.toString()}", selector)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 800, "height": 700})
+            page.set_content('<div id="stage" style="position:relative;overflow:clip;width:600px;height:500px"><iframe sandbox="allow-scripts" style="position:absolute;border:0;width:600px;height:500px"></iframe></div>')
+            page.evaluate("""() => {
+                window.layouts=[];
+                addEventListener('message',e=>{
+                    const d=e.data;window.layouts.push(d);
+                    const r=d.rect,crop=d.mode==='root'&&r.y>=0&&r.y+r.height<=500;
+                    document.querySelector('#stage').style.height=(crop?Math.ceil(r.y+r.height)-Math.floor(r.y):500)+'px';
+                    document.querySelector('iframe').style.transform=crop?`translateY(${-Math.floor(r.y)}px)`:'';
+                });
+            }""")
+            html = """<!doctype html><style>
+                body{margin:0}.wrap{padding:20px 16px 40px}
+                summary{height:20px;line-height:20px}.detail{height:180px}
+                </style><div class="wrap"><input value="Retained state">
+                <details><summary>Details</summary><div class="detail">Expanded content</div></details>
+                <button onclick="this.previousElementSibling.lastElementChild.style.height='700px';this.previousElementSibling.open=true">Long details</button></div>"""
+            page.locator('iframe').evaluate('(frame,html)=>frame.srcdoc=html', html + script)
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root'")
+            frame = page.frames[1]
+            initial = page.evaluate("()=>window.layouts.at(-1).rect.height")
+            assert initial < 200
+            frame.locator('input').fill('Kept after expansion')
+            frame.locator('summary').click()
+            page.wait_for_function("height=>window.layouts.at(-1)?.mode==='root'&&window.layouts.at(-1).rect.height===height+180", arg=initial)
+            assert page.locator('#stage').evaluate('el=>el.clientHeight') == initial + 180
+            assert frame.locator('.wrap').evaluate('el=>getComputedStyle(el).paddingBottom') == '40px'
+            frame.locator('summary').click()
+            page.wait_for_function("height=>window.layouts.at(-1)?.mode==='root'&&window.layouts.at(-1).rect.height===height", arg=initial)
+            frame.locator('.wrap').evaluate("el=>{const note=document.createElement('div');note.style.height='80px';note.textContent='Async content';el.append(note)}")
+            page.wait_for_function("height=>window.layouts.at(-1)?.mode==='root'&&window.layouts.at(-1).rect.height===height+80", arg=initial)
+            frame.locator('button').click()
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='page'")
+            assert page.locator('#stage').evaluate('el=>el.clientHeight') == 500
+            frame.evaluate('()=>window.scrollTo(0,document.documentElement.scrollHeight)')
+            assert frame.evaluate('()=>scrollY>0')
+            assert frame.locator('input').input_value() == 'Kept after expansion'
+            assert frame.locator('.detail').is_visible()
+            # Switching html -> main -> html must not disconnect the always-on
+            # document observer used for later natural-height changes.
+            frame.evaluate("()=>{document.body.innerHTML='<main style=height:100px>Main</main>';window.scrollTo(0,0)}")
+            # Prior real overflow remains page until viewport changes.
+            page.locator('iframe').evaluate("el=>el.style.width='620px'")
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root'&&window.layouts.at(-1).rect.height===100")
+            # WAAPI changes an ancestor's layout without DOM mutations or CSS
+            # transition events; the main box itself does not resize. Only the
+            # retained document ResizeObserver sees these intermediate bounds.
+            page.mouse.move(750, 650)
+            page.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+            page.evaluate('()=>window.layouts=[]')
+            frame.evaluate("()=>window.spacingAnimation=document.body.animate([{paddingTop:'0px'},{paddingTop:'120px'}],{duration:2000,fill:'forwards'})")
+            page.wait_for_function("()=>{const d=window.layouts.at(-1);return d?.mode==='root'&&d.rect.y>10&&d.rect.y<110}", timeout=1500)
+            frame.evaluate("()=>{window.spacingAnimation.cancel();document.body.innerHTML='<div style=height:120px>Wrapper</div>'}")
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root'&&window.layouts.at(-1).rect.height===120")
+            frame.locator('div').evaluate("el=>el.style.height='160px'")
+            page.wait_for_function("()=>window.layouts.at(-1)?.mode==='root'&&window.layouts.at(-1).rect.height===160")
+        finally:
+            browser.close()
+
+
 def test_automatic_crop_stays_in_page_mode_after_real_interaction_overflow() -> None:
     root = Path(__file__).resolve().parents[1]
     selector = (root / "src/pulsara_agent/conversation_kernel/visualization_root.js").read_text().replace("export default ", "", 1)

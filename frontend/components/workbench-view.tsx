@@ -1,5 +1,6 @@
 'use client';
 
+import { captureHistoryAnchor, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
 import { splitSkillReferences } from '../lib/skill-reference';
 
 import { createPortal } from 'react-dom';
@@ -52,6 +53,7 @@ import {
 } from 'lucide-react';
 import {
   type ReactNode,
+  createContext,
   useCallback,
   useContext,
   useEffect,
@@ -97,7 +99,23 @@ import { useWorkbenchFileDrop } from '../lib/workbench-file-drop';
 import { promptContentTextProjection } from '../lib/prompt-content';
 
 
+export interface WorkbenchHistory {
+  hasOlder: boolean;
+  loading: boolean;
+  error?: string;
+  compactions?: Array<{ eventId: string; adoptedAfterEntrySequence: number; displayBeforeEntryId?: string; displayAfterEntryId?: string }>;
+  windows: Array<{
+    id: string; firstEntryId?: string; lastEntryId?: string; entryIds?: string[];
+    hasOlder: boolean; hasNewer: boolean; loading: boolean; error?: string;
+    contextState?: 'loading' | 'ready' | 'error';
+  }>;
+}
+
 interface WorkbenchViewProps {
+  history?: WorkbenchHistory;
+  onLoadHistory?: (windowId?: string, direction?: 'older' | 'newer') => Promise<void>;
+  onHydrateEntries?: (entryIds: string[], includeReasoning?: boolean) => Promise<void>;
+  onLocateEntry?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onCompletePaths?: import('../lib/file-reference').CompleteWorkspacePaths;
   focusSourceEntry?: { sessionId: string; entryId: string };
@@ -509,7 +527,7 @@ function TraceCard({
   return (
     <div className={`trace-node trace-node--${trace.status}`}>
       <span className="trace-node__dot" />
-      <article className={`trace-card${expanded ? ' is-expanded' : ''}`}>
+      <article data-result-entry={trace.resultEntryId} className={`trace-card${expanded ? ' is-expanded' : ''}`}>
         {expandable ? (
           <button
             className="trace-card__summary"
@@ -522,7 +540,7 @@ function TraceCard({
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
         ) : <div className="trace-card__summary">{summary}</div>}
-        {expandable && <AnimatedDisclosure open={expanded} className="trace-card__disclosure">
+        {expandable && expanded && <AnimatedDisclosure open={expanded} className="trace-card__disclosure">
           {trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
               <PromptContentView
@@ -797,9 +815,9 @@ function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: Ma
         {running && <span className="reasoning-row__live"><i />思考中</span>}
         <ChevronRight className="reasoning-row__chevron" size={12} />
       </button>
-      <AnimatedDisclosure open={expanded}>
+      {expanded && <AnimatedDisclosure open={expanded}>
         <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} streaming={running} /></div>
-      </AnimatedDisclosure>
+      </AnimatedDisclosure>}
     </section>
   );
 }
@@ -876,11 +894,12 @@ function SubagentRunCard({
         </span>
         <ChevronDown size={13} />
       </button>
-      <AnimatedDisclosure open={expanded}>
+      {expanded && <AnimatedDisclosure open={expanded}>
         <div className="subagent-run__body">
           {run.objective && <div className="subagent-objective"><span>目标</span><p>{run.objective}</p></div>}
           {run.activities.map((activity) => (
-            <section className="subagent-activity" key={activity.id}>
+            <HistoryMessageHost key={activity.id} message={{ ...activity, status: undefined, role: 'assistant', historyIncludeReasoning: true }}>
+            <section className="subagent-activity">
               {activity.reasoning?.length ? (
                 <ReasoningDisclosure
                   blocks={activity.reasoning}
@@ -896,12 +915,13 @@ function SubagentRunCard({
               ) : <div className="assistant-markdown"><MarkdownBody assistantChat visualization={activity.visualizations ? {entryId: activity.id, items: activity.visualizations, onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail} : undefined} body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
               {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
             </section>
+            </HistoryMessageHost>
           ))}
           {showSummary && run.summary && (
             <section className="subagent-summary"><span>结果</span><div className="assistant-markdown"><MarkdownBody body={run.summary} onNotify={onNotify} /></div></section>
           )}
         </div>
-      </AnimatedDisclosure>
+      </AnimatedDisclosure>}
     </article>
   );
 }
@@ -1033,12 +1053,7 @@ function UserMessage({
       : renderSteer(<p style={sourceTextStyle}>{message.body}</p>);
   }
 
-  const renderBubble = (body: ReactNode) => (
-    <div className={body ? 'user-message' : 'user-message-meta'}>
-      {body}
-      <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
-    </div>
-  );
+  const renderBubble = (body: ReactNode) => body ? <div className="user-message">{body}</div> : null;
 
   return (
     <article className="user-turn">
@@ -1055,6 +1070,7 @@ function UserMessage({
             renderMessageBody={renderBubble}
           />
         : renderBubble(<p style={sourceTextStyle}>{message.body}</p>)}
+      <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
     </article>
   );
 }
@@ -1202,11 +1218,53 @@ function isCompleteAnswer(message: Message, taskFinalAnswerId?: string): boolean
     && (message.rootFinal === true || message.forkEligible === true || message.id === taskFinalAnswerId);
 }
 
-function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId }: {
+const HistoryHydrationContext = createContext<WorkbenchViewProps['onHydrateEntries']>(undefined);
+
+function HistoryMessageHost({ message, children, knownContent, contextLoadingSummarized = false }: { message: Message; children: ReactNode; knownContent?: ReactNode; contextLoadingSummarized?: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const hydrate = useContext(HistoryHydrationContext);
+  const contextPending = message.historyContextState === 'loading' || message.historyContextState === 'error';
+  const includeReasoning = message.historyIncludeReasoning === true;
+  const contentStates = [message.contentState, ...(includeReasoning ? [message.reasoningContentState] : [])];
+  const contentState = contentStates.includes('error') ? 'error' : contentStates.includes('loading') ? 'loading'
+    : contentStates.includes('unloaded') ? 'unloaded' : 'ready';
+  const pending = contentState !== 'ready';
+  const sourceIds = message.sourceEntryIds?.length ? message.sourceEntryIds : [message.id];
+  const read = () => hydrate?.(sourceIds, includeReasoning).catch(() => {});
+  useEffect(() => {
+    const host = ref.current;
+    if (!host || !hydrate || contextPending || contentState !== 'unloaded') return;
+    const read = () => { void hydrate(message.sourceEntryIds?.length ? message.sourceEntryIds : [message.id], includeReasoning).catch(() => {}); };
+    if (typeof IntersectionObserver === 'undefined') {
+      const viewport = host.closest('.thread-scroll')?.getBoundingClientRect();
+      const rect = host.getBoundingClientRect();
+      if (!viewport || (rect.bottom >= viewport.top && rect.top <= viewport.bottom)) read();
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { observer.disconnect(); read(); }
+    }, { root: host.closest('.thread-scroll'), rootMargin: '200px' });
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, [contextPending, hydrate, message.id, contentState, message.sourceEntryIds, includeReasoning]);
+  const summarized = contextLoadingSummarized && message.historyContextState === 'loading';
+  if (summarized && !knownContent) return null;
+  return <div ref={ref} data-source-entry={message.id} data-content-state={contextPending ? 'loading' : contentState} data-source-entries={message.sourceEntryIds?.join(' ')}>
+    {summarized ? knownContent : contextPending ? <div role="status">{knownContent}{message.historyContextState === 'error' ? '记录分组读取失败，请重试此页。' : '正在读取记录分组…'}</div>
+      : pending ? <div role="status" className="history-content-status">
+        {knownContent}
+        {contentState === 'error' ? message.contentError ?? message.reasoningContentError ?? '正文读取失败。' : '已保存，正文读取中…'}
+        {contentState === 'error' && hydrate && <button type="button" onClick={() => { void read(); }}>重试正文</button>}
+      </div> : children}
+  </div>;
+}
+
+function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId, historyLoading = false }: {
   messages: Message[];
   renderMessage: (message: Message, startsRun: boolean, visible?: boolean) => ReactNode;
   focusRequest?: object | number;
   taskFinalAnswerId?: string;
+  historyLoading?: boolean;
   completed: boolean;
   active: boolean;
   assistantLabel: string;
@@ -1220,16 +1278,17 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   // the reader's choice; explicit navigation reveals its target again.
   if (disclosure.complete !== complete || disclosure.active !== active || disclosure.focusRequest !== focusRequest) {
     setDisclosure({ complete, active, focusRequest, expanded: disclosure.focusRequest !== focusRequest && Boolean(focusRequest)
-      ? true : active && !complete });
+      ? true : disclosure.complete !== complete || disclosure.active !== active ? active && !complete : disclosure.expanded });
   }
   const process = messages.flatMap((message) => {
     if (message !== answer) return [message];
-    return message.reasoning?.length || message.traces?.length || message.subagentRuns?.length
-      ? [{ ...message, id: `${message.id}:process`, body: '', forkEligible: false, visualizations: undefined }] : [];
+    return message.reasoning?.length || (message.reasoningContentState && message.reasoningContentState !== 'ready') || message.traces?.length || message.subagentRuns?.length
+      ? [{ ...message, id: `${message.id}:process`, sourceEntryIds: message.sourceEntryIds ?? [message.id], body: '', forkEligible: false, visualizations: undefined }] : [];
   });
   const hasProcess = process.some((message) => message.role === 'assistant' || message.userKind === 'subagent-completion');
   if (!hasProcess) return renderMessage(answer!, true);
   return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
+    {!historyLoading && messages.some(message => message.historyEarlierUnloaded) && <div role="status" className="history-boundary">本轮较早过程尚未加载</div>}
     <AssistantHeading message={messages[0]} response={Boolean(messages[0].body.trim())} label={assistantLabel} />
     <button type="button" className="conversation-run__toggle"
       aria-expanded={disclosure.expanded}
@@ -1241,15 +1300,21 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
       // User guidance stays visible; tool-result notifications belong to the process.
       const hidden = !disclosure.expanded && !message.visualizations?.length
         && (message.role === 'assistant' || message.userKind === 'subagent-completion');
-      return <div key={message.id} className="conversation-run__step" aria-hidden={hidden} inert={hidden}>
-        <div className="conversation-run__step-content">{renderMessage(message, false, !hidden)}</div>
+      if (hidden) return null;
+      return <div key={message.id} className="conversation-run__step">
+        <div className="conversation-run__step-content">{renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded }, false, !hidden)}</div>
       </div>;
     })}
-    {answer && renderMessage({ ...answer, reasoning: undefined, traces: undefined, subagentRuns: undefined }, false)}
+    {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined }, false)}
   </section>;
 }
 
-function findToolChainConnections(messages: Message[], contextCompactionIndex = -1): {
+function previousBoundary(previous: Message, current: Message): boolean {
+  return !previous.historyGroupId || previous.historyGroupId !== current.historyGroupId
+    || previous.historyWindowId !== current.historyWindowId;
+}
+
+function findToolChainConnections(messages: Message[]): {
   before: ReadonlySet<string>;
   after: ReadonlySet<string>;
 } {
@@ -1264,7 +1329,7 @@ function findToolChainConnections(messages: Message[], contextCompactionIndex = 
     && !message.subagentRuns?.length;
 
   for (let index = 1; index < messages.length; index += 1) {
-    if (index === contextCompactionIndex) continue;
+    if (previousBoundary(messages[index - 1], messages[index])) continue;
     const previous = messages[index - 1];
     const current = messages[index];
     if (!endsWithTools(previous) || !startsWithTools(current)) continue;
@@ -1275,6 +1340,7 @@ function findToolChainConnections(messages: Message[], contextCompactionIndex = 
 }
 
 export function ConversationMessages({
+  history, onLoadHistory, localSubmissions = [], activeTurnId,
   messages,
   interruptionNotices = [],
   skills = [],
@@ -1290,7 +1356,6 @@ export function ConversationMessages({
   userSenderKind = 'user',
   assistantLabel = 'Pulsara',
   taskFinalAnswerId,
-  contextCompactionIndex = -1,
   contextCompactionInProgress = false,
   isRunning = false,
   focusTaskId,
@@ -1298,6 +1363,10 @@ export function ConversationMessages({
   focusTaskHighlighted = false,
   focusSourceEntry,
 }: {
+  history?: WorkbenchHistory;
+  onLoadHistory?: WorkbenchViewProps['onLoadHistory'];
+  localSubmissions?: LocalPromptSubmission[];
+  activeTurnId?: string;
   messages: Message[];
   interruptionNotices?: TurnInterruptionNotice[];
   skills?: SkillCapability[];
@@ -1313,7 +1382,6 @@ export function ConversationMessages({
   userSenderKind?: 'user' | 'agent';
   assistantLabel?: string;
   taskFinalAnswerId?: string;
-  contextCompactionIndex?: number;
   contextCompactionInProgress?: boolean;
   isRunning?: boolean;
   focusTaskId?: string;
@@ -1322,11 +1390,17 @@ export function ConversationMessages({
   focusSourceEntry?: WorkbenchViewProps['focusSourceEntry'];
 }) {
   const toolChainConnections = useMemo(
-    () => findToolChainConnections(messages, contextCompactionIndex), [messages, contextCompactionIndex],
+    () => findToolChainConnections(messages), [messages],
   );
   const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
-  const renderMessage = (message: Message, startsRun: boolean, visible = true) => (
-    <div key={message.id} data-source-entry={message.id} style={{ display: 'contents' }}>
+  const renderMessage = (message: Message, startsRun: boolean, visible = true) => {
+    const pendingContent = message.role === 'user'
+      ? localSubmissions.find(item => item.commandId === message.inputSource?.commandId
+        && (!item.queueItemId || item.queueItemId === message.inputSource?.queueItemId))?.content ?? message.pendingContent
+      : undefined;
+    return <HistoryMessageHost key={message.id} message={message}
+      contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
+      ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : undefined}>
       {message.role === 'user'
         ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} visible={visible} />
         : <AssistantMessage message={message} responseActionEligible={isCompleteAnswer(message, taskFinalAnswerId)} startsAssistantRun={startsRun}
@@ -1339,42 +1413,107 @@ export function ConversationMessages({
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             assistantLabel={assistantLabel} />}
-    </div>
-  );
+    </HistoryMessageHost>;
+  };
   const completedTurns = new Set(messages.filter(message => isCompleteAnswer(message, taskFinalAnswerId)).map(message => message.turnId).filter(Boolean));
-  const content: ReactNode[] = interruptionNotices.filter(notice => !notice.displayAfterMessageId).map(notice =>
-    <TurnInterruptionHistoryNotice key={`${notice.ownerKind}:${notice.ownerId}`} notice={notice} />);
+  const content: ReactNode[] = [];
+  if (history?.error && !history.windows.some(window => window.error === history.error)) {
+    content.push(<div key="history-context-error" className="history-boundary" role="region" aria-label="历史上下文读取失败">
+      <span role="alert">{history.error}</span>
+      {onLoadHistory && <button type="button" disabled={history.loading} onClick={() => { void onLoadHistory().catch(() => {}); }}>重试历史上下文</button>}
+    </div>);
+  }
   let run: Message[] = [];
+  let segmentBoundary = 'start';
   const flush = () => {
     if (!run.length) return;
-    const focused = focusSourceEntry && run.some(message => message.id === focusSourceEntry.entryId)
+    const sourceInProcess = focusSourceEntry && run.some(message => {
+      // The accepted answer's body is always mounted outside the disclosure.
+      // Its tool-result aliases and tasks still belong to the process.
+      if (message.id === focusSourceEntry.entryId) return !isCompleteAnswer(message, taskFinalAnswerId);
+      return message.sourceEntryIds?.includes(focusSourceEntry.entryId)
+        || message.traces?.some(trace => trace.resultEntryId === focusSourceEntry.entryId);
+    });
+    const focused = sourceInProcess
       ? focusSourceEntry
       : focusTaskHighlighted && run.some(message => message.subagentRuns?.some(task => task.id === focusTaskId))
         ? focusTaskRevision : undefined;
-    content.push(<ConversationRun key={`${artifactOwnerKey}:${run[0].id}`} messages={run}
+    content.push(<ConversationRun key={`${artifactOwnerKey}:${run[0].historyGroupId ?? `${run[0].entryOwnerKind ?? 'owner'}:${run[0].turnId ?? run[0].id}`}:${run[0].historyWindowId ?? ''}:${run[0].historyGroupId ? '' : segmentBoundary}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel} taskFinalAnswerId={taskFinalAnswerId}
+      historyLoading={history?.windows.some(window => window.id === run[0].historyWindowId && (window.loading || window.contextState === 'loading'))}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
-      active={isRunning && run[0].turnId === messages.at(-1)?.turnId} />);
+      active={isRunning && run[0].turnId === activeTurnId} />);
     run = [];
   };
-  messages.forEach((message, index) => {
-    if (index === contextCompactionIndex) {
+  type TimelineItem = { message: Message; windowId?: string } | { notice: TurnInterruptionNotice; windowId: string };
+  const timeline: TimelineItem[] = messages.map(message => ({ message, windowId: message.historyWindowId
+    ?? history?.windows.find(window => window.entryIds?.includes(message.id) || window.firstEntryId === message.id || window.lastEntryId === message.id)?.id }));
+  for (const notice of interruptionNotices.filter(item => !item.displayAfterMessageId)) {
+    // USER_CONTROL_FEEDBACK has no chat bubble. Its exact retained canonical
+    // entry still provides a timeline location inside its own loaded window.
+    const window = history?.windows.find(item => notice.displayAfterEntryId && item.entryIds?.includes(notice.displayAfterEntryId));
+    if (!window) continue;
+    const windowIndex = history!.windows.indexOf(window);
+    const position = timeline.findIndex(item => {
+      const itemWindow = history!.windows.findIndex(candidate => candidate.id === item.windowId);
+      if (itemWindow > windowIndex || (itemWindow < 0 && 'message' in item && item.message.entrySequence === undefined)) return true;
+      if (itemWindow !== windowIndex) return false;
+      const sequence = 'message' in item ? item.message.entrySequence : item.notice.displayAfterEntrySequence;
+      return sequence !== undefined && sequence > notice.displayAfterEntrySequence;
+    });
+    timeline.splice(position < 0 ? timeline.length : position, 0, { notice, windowId: window.id });
+  }
+  const shownWindows = new Set<string>();
+  const emitNotice = (notice: TurnInterruptionNotice, independent = false) => {
+    flush();
+    content.push(<div key={`${notice.ownerKind}:${notice.ownerId}`} data-source-entry={independent ? notice.displayAfterEntryId : undefined}>
+      <TurnInterruptionHistoryNotice notice={notice} />
+    </div>);
+    segmentBoundary = `${notice.ownerKind}:${notice.ownerId}`;
+  };
+  timeline.forEach((item, itemIndex) => {
+    const window = history?.windows.find(candidate => candidate.id === item.windowId);
+    if (window && !shownWindows.has(window.id)) {
+      shownWindows.add(window.id);
       flush();
-      content.push(<ContextCompactionDivider key="compaction" />);
+      const gap = history!.windows.indexOf(window) > 0;
+      if (window.hasOlder || window.error || window.loading || window.contextState === 'loading' || gap) content.push(<div key={`history:${window.id}`} className="history-boundary" role="region" aria-label={gap ? '中间记录尚未加载' : '较早记录'}>
+        {window.loading || window.contextState === 'loading' ? <span role="status">正在加载…</span> : <>
+          <span>{gap ? '中间记录尚未加载' : '较早记录尚未加载'}</span>
+          {window.error && <span role="alert">{window.error}</span>}
+          {onLoadHistory && (window.hasOlder || window.error) && <button type="button" onClick={() => { void onLoadHistory(window.id, 'older').catch(() => {}); }}>{window.error ? '重试' : '加载更早记录'}</button>}
+        </>}
+      </div>);
     }
-    const newInput = message.role === 'user'
-      && message.userKind !== 'steer' && message.userKind !== 'subagent-completion';
-    if (newInput || (run.length && message.turnId && run[0].turnId !== message.turnId)) flush();
-    if (message.role === 'user' && message.userKind !== 'subagent-completion' && !run.length) content.push(renderMessage(message, false));
-    else run.push(message);
-    if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
-    for (const notice of interruptionNotices.filter(n => n.displayAfterMessageId === message.id)) {
-      flush();
-      content.push(<TurnInterruptionHistoryNotice key={`${notice.ownerKind}:${notice.ownerId}`} notice={notice} />);
+    if ('notice' in item) emitNotice(item.notice, true);
+    else {
+      const message = item.message;
+      for (const marker of history?.compactions ?? []) if (marker.displayBeforeEntryId === message.id) {
+        flush(); content.push(<ContextCompactionDivider key={marker.eventId} />); segmentBoundary = marker.eventId;
+      }
+      if (message.historyContextState === 'loading' || message.historyContextState === 'error') {
+        flush(); content.push(renderMessage(message, false));
+      } else {
+        const newInput = message.role === 'user'
+          && message.userKind !== 'steer' && message.userKind !== 'subagent-completion';
+        if (newInput || (run.length && (run[0].historyGroupId !== message.historyGroupId || run[0].historyWindowId !== message.historyWindowId || run[0].turnId !== message.turnId))) flush();
+        if (message.role === 'user' && message.userKind !== 'subagent-completion' && !run.length) content.push(renderMessage(message, false));
+        else run.push(message);
+        if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
+      }
+      for (const marker of history?.compactions ?? []) if (!marker.displayBeforeEntryId && marker.displayAfterEntryId === message.id) {
+        flush(); content.push(<ContextCompactionDivider key={marker.eventId} />); segmentBoundary = marker.eventId;
+      }
+      for (const notice of interruptionNotices.filter(n => n.displayAfterMessageId === message.id)) emitNotice(notice);
+    }
+    if (window?.hasNewer && timeline.findLastIndex(candidate => candidate.windowId === window.id) === itemIndex) {
+      flush(); content.push(<div key={`newer:${window.id}`} className="history-boundary">
+        <span>后续记录尚未加载</span>
+        {onLoadHistory && <button type="button" disabled={window.loading} onClick={() => { void onLoadHistory(window.id, 'newer').catch(() => {}); }}>加载后续记录</button>}
+      </div>);
     }
   });
   flush();
-  if (contextCompactionIndex === messages.length) content.push(<ContextCompactionDivider key="compaction" />);
   if (contextCompactionInProgress) content.push(<ContextCompactionDivider key="compaction-progress" inProgress />);
   return content;
 }
@@ -1591,6 +1730,7 @@ function AnimatedQueueItem({ children }: { children: ReactNode }) {
 }
 
 export function WorkbenchView({
+  history, onLoadHistory, onHydrateEntries, onLocateEntry,
   focusSourceEntry,
   workspace,
   session,
@@ -1735,7 +1875,9 @@ export function WorkbenchView({
     ['submitting', 'unknown'].includes(item.status)
     || (item.status === 'accepted' && !item.handled && !draft.hasContent)
     ));
-  const conversationSubmissions = localSubmissions.filter(item => item.displayAsMessage
+  const canonicalSubmission = (item: LocalPromptSubmission) => messages.some(message => message.inputSource?.commandId === item.commandId
+    && (!item.queueItemId || message.inputSource.queueItemId === item.queueItemId));
+  const conversationSubmissions = localSubmissions.filter(item => !canonicalSubmission(item) && item.displayAsMessage
     && item.deliveryMode === 'new-turn' && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER');
   const preparingSubmission = !isRunning && runtimeStatus === 'online'
     && conversationSubmissions.find(item => ['synchronizing', 'queued'].includes(item.status));
@@ -1819,7 +1961,7 @@ export function WorkbenchView({
   // an accepted queue item; only the existing action availability changes.
   const queueCards = [
     ...visibleQueue.map(queued => ({ queued, local: undefined })),
-    ...localSubmissions.filter(item => !conversationCommandIds.has(item.commandId) && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER')
+    ...localSubmissions.filter(item => !canonicalSubmission(item) && !conversationCommandIds.has(item.commandId) && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER')
       .map(local => ({ queued: undefined, local })),
   ];
   const composerQueue = (queueCards.length > 0 || editRestoreConflict) && (
@@ -1871,12 +2013,13 @@ export function WorkbenchView({
     && selectedModel?.status === 'ready'
     && (selectedModel.authentication === 'none' || selectedModel.credential_configured),
   );
-  const welcome = Boolean(session.id && !readOnlyDock && messages.length === 0
+  const hasCanonicalHistory = Boolean(history?.hasOlder || history?.windows.some(window => window.entryIds?.length));
+  const welcome = Boolean(!hasCanonicalHistory && !history?.loading && session.id && !readOnlyDock && messages.length === 0
     && !isRunning && localSubmissions.length === 0 && queuedPrompts.length === 0
     && !interaction && initialContextBase?.base_kind !== 'SNAPSHOT' && !contextCompaction
     && session.status !== 'interrupted' && runtimeStatus === 'online'
     && !(welcomeState.sessionId === session.id && welcomeState.started));
-  const hasCompactionContext = messages.length > 0 || isRunning
+  const hasCompactionContext = hasCanonicalHistory || messages.length > 0 || isRunning
     || initialContextBase?.base_kind === 'SNAPSHOT' || Boolean(contextCompaction);
   useEffect(() => {
     if (!sessionActionsOpen) return;
@@ -1910,7 +2053,7 @@ export function WorkbenchView({
     ], { duration: 560, easing: 'cubic-bezier(.22, 1, .36, 1)' });
     return () => animation?.cancel();
   }, [welcome, session.id]);
-  const lastMessageLength = messages.at(-1)?.body.length ?? 0;
+
   useLayoutEffect(() => {
     if (!addOpen || !skillOpen) return;
     const menu = addMenu.current;
@@ -1950,31 +2093,111 @@ export function WorkbenchView({
       document.removeEventListener('keydown', escape);
     };
   }, [addOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen]);
-  const contextCompactionIndex = useMemo(() => {
-    if (!contextCompaction) return -1;
-    const nextCanonical = messages.findIndex((message) => (
-      message.entrySequence !== undefined
-      && message.entrySequence > contextCompaction.adoptedAfterEntrySequence
-    ));
-    if (nextCanonical >= 0) return nextCanonical;
-    let lastCanonical = -1;
-    messages.forEach((message, index) => {
-      if (message.entrySequence !== undefined) lastCanonical = index;
-    });
-    return lastCanonical + 1;
-  }, [contextCompaction, messages]);
-
-  const locatedSourceRequest = useRef<typeof focusSourceEntry>(undefined);
-  useEffect(() => {
-    if (!focusSourceEntry || locatedSourceRequest.current === focusSourceEntry || focusSourceEntry.sessionId !== session.id) return;
-    const target = [...(threadRef.current?.querySelectorAll<HTMLElement>('[data-source-entry]') ?? [])]
-      .find(element => element.dataset.sourceEntry === focusSourceEntry.entryId)?.firstElementChild;
-    if (!target) return;
-    locatedSourceRequest.current = focusSourceEntry;
+  // Page context provides exact marker hosts. A latest control summary alone
+  // cannot place a boundary inside a partially loaded history window.
+  const [locatedFocus, setLocatedFocus] = useState<WorkbenchViewProps['focusSourceEntry']>();
+  const currentSessionRef = useRef(session.id);
+  const readingAnchor = useRef<HistoryReadingAnchor | undefined>(undefined);
+  const programmaticTop = useRef<number | undefined>(undefined);
+  const userScrollPending = useRef(false);
+  const userScrollFrame = useRef<number | undefined>(undefined);
+  const locateRequest = useRef<AbortController | undefined>(undefined);
+  const loadRequests = useRef(new Map<string, Promise<void>>());
+  const resetReading = useCallback(() => {
     followLatestRef.current = false;
-    const frame = requestAnimationFrame(() => target.scrollIntoView({ block: 'center' }));
-    return () => cancelAnimationFrame(frame);
-  }, [focusSourceEntry, session.id, messages]);
+    setAtBottom(false);
+    readingAnchor.current = threadRef.current ? captureHistoryAnchor(threadRef.current) : undefined;
+  }, []);
+  const beginUserScroll = useCallback(() => {
+    userScrollPending.current = true;
+    if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
+    // A wheel/key gesture at the physical edge may produce no scroll event.
+    // End suppression at the browser's next layout opportunity in either case.
+    userScrollFrame.current = requestAnimationFrame(() => {
+      userScrollFrame.current = undefined;
+      userScrollPending.current = false;
+      if (!followLatestRef.current && threadRef.current) readingAnchor.current = captureHistoryAnchor(threadRef.current);
+    });
+  }, []);
+  useLayoutEffect(() => {
+    currentSessionRef.current = session.id;
+    followLatestRef.current = true;
+    setAtBottom(followLatestRef.current);
+    readingAnchor.current = undefined;
+    userScrollPending.current = false;
+    programmaticTop.current = undefined;
+    loadRequests.current.clear();
+    return () => {
+      locateRequest.current?.abort();
+      if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
+    };
+  }, [session.id]);
+  useLayoutEffect(() => {
+    if (focusSourceEntry?.sessionId === session.id) followLatestRef.current = false;
+  }, [focusSourceEntry, session.id]);
+  const loadHistory = useCallback((windowId?: string, direction: 'older' | 'newer' = 'older'): Promise<void> => {
+    if (!onLoadHistory) return Promise.resolve();
+    const key = `${session.id}:${windowId ?? ''}:${direction}`;
+    const existing = loadRequests.current.get(key);
+    if (existing) return existing;
+    userScrollPending.current = false;
+    if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
+    resetReading();
+    const request = Promise.resolve().then(() => onLoadHistory(windowId, direction)).finally(() => {
+      if (loadRequests.current.get(key) === request) loadRequests.current.delete(key);
+    });
+    loadRequests.current.set(key, request);
+    return request;
+  }, [onLoadHistory, resetReading, session.id]);
+  const locateEntry = useCallback(async (entryId: string, signal: AbortSignal, annotation = false) => {
+    if (signal.aborted || currentSessionRef.current !== session.id) throw new DOMException('定位已取消', 'AbortError');
+    locateRequest.current?.abort();
+    const request = new AbortController(); locateRequest.current = request;
+    const abort = () => request.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) request.abort();
+    const owner = session.id;
+    resetReading(); readingAnchor.current = undefined;
+    try {
+      const read = annotation ? onLocateAnnotation : onLocateEntry;
+      if (read) await read(entryId, request.signal);
+      if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
+      setLocatedFocus({ sessionId: owner, entryId });
+      const thread = threadRef.current;
+      if (!thread) return;
+      const target = await waitForHistoryEntry(thread, entryId, request.signal);
+      if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
+      locatingTaskRef.current = true;
+      target.scrollIntoView({ block: 'center', behavior: 'instant' });
+      programmaticTop.current = thread.scrollTop;
+      readingAnchor.current = captureHistoryAnchor(thread);
+      locatingTaskRef.current = false;
+    } finally {
+      signal.removeEventListener('abort', abort);
+    }
+  }, [onLocateAnnotation, onLocateEntry, resetReading, session.id]);
+  const locateAnnotation = useCallback((entryId: string, signal: AbortSignal) => locateEntry(entryId, signal, true), [locateEntry]);
+  useEffect(() => {
+    if (!focusSourceEntry || focusSourceEntry.sessionId !== session.id) return;
+    const request = new AbortController();
+    void Promise.resolve().then(() => locateEntry(focusSourceEntry.entryId, request.signal)).catch(error => {
+      if (!request.signal.aborted) onNotify('无法定位来源', error instanceof Error ? error.message : '读取失败', 'warning');
+    });
+    return () => request.abort();
+  }, [focusSourceEntry, session.id, locateEntry, onNotify]);
+
+  const restoreReadingPosition = useCallback(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    if (followLatestRef.current) {
+      const previous = thread.scrollTop;
+      thread.scrollTop = thread.scrollHeight;
+      if (thread.scrollTop !== previous) programmaticTop.current = thread.scrollTop;
+    } else if (readingAnchor.current && !userScrollPending.current) {
+      programmaticTop.current = restoreHistoryAnchor(thread, readingAnchor.current);
+    }
+  }, []);
+  useLayoutEffect(restoreReadingPosition);
 
   const insertSkill = useCallback((name: string) => {
     if (editingQueue || queueClicks.current.has('composer-edit')) return;
@@ -2120,14 +2343,6 @@ export function WorkbenchView({
     }
   };
 
-  useEffect(() => {
-    if (!followLatestRef.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      const thread = threadRef.current;
-      if (thread) thread.scrollTop = thread.scrollHeight;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [atBottom, conversationSubmissions.length, interaction?.id, lastMessageLength, messages.length]);
 
   useEffect(() => {
     const workbench = workbenchRef.current;
@@ -2157,67 +2372,35 @@ export function WorkbenchView({
   useEffect(() => {
     const thread = threadRef.current;
     const column = thread?.querySelector('.thread-column');
-    if (!thread || !column || !atBottom || typeof ResizeObserver === 'undefined') return undefined;
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        if (followLatestRef.current) thread.scrollTop = thread.scrollHeight;
-      });
-    });
+    if (!thread || !column || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(restoreReadingPosition);
     observer.observe(column);
-    return () => {
-      observer.disconnect();
-      window.cancelAnimationFrame(frame);
-    };
-  }, [atBottom]);
+    return () => observer.disconnect();
+  }, [session.id, restoreReadingPosition]);
 
   useEffect(() => {
     if (!focusTaskHighlighted || !focusTaskId || focusTaskRevision < 1) return;
-    followLatestRef.current = false;
-    locatingTaskRef.current = true;
-    let settleFrame = 0;
-    let restoreFrame = 0;
-    let taskHeader: HTMLButtonElement | null = null;
-    const frame = window.requestAnimationFrame(() => {
-      setAtBottom(false);
-      const target = [...(threadRef.current?.querySelectorAll<HTMLElement>('[data-task-id]') ?? [])]
-        .find((element) => element.dataset.taskId === focusTaskId);
-      const thread = threadRef.current;
-      if (!target || !thread) {
-        locatingTaskRef.current = false;
-        return;
-      }
-      settleFrame = window.requestAnimationFrame(() => {
-        const previousScrollBehavior = thread.style.scrollBehavior;
-        thread.style.scrollBehavior = 'auto';
-        taskHeader = target.querySelector<HTMLButtonElement>('.subagent-run__header');
-        if (taskHeader) taskHeader.focus({ preventScroll: true });
-        const threadBox = thread.getBoundingClientRect();
-        const targetBox = target.getBoundingClientRect();
-        const desiredTop = Math.max(
-          0,
-          thread.scrollTop + targetBox.top - threadBox.top
-            - Math.max(0, thread.clientHeight - targetBox.height) / 2,
-        );
-        thread.scrollTop = desiredTop;
-        restoreFrame = window.requestAnimationFrame(() => {
-          thread.style.scrollBehavior = previousScrollBehavior;
-          locatingTaskRef.current = false;
-        });
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.cancelAnimationFrame(settleFrame);
-      window.cancelAnimationFrame(restoreFrame);
-      if (taskHeader && document.activeElement === taskHeader) taskHeader.blur();
-      locatingTaskRef.current = false;
+    const thread = threadRef.current;
+    if (!thread) return;
+    resetReading(); readingAnchor.current = undefined;
+    const locate = () => {
+      const target = [...thread.querySelectorAll<HTMLElement>('[data-task-id]')].find(element => element.dataset.taskId === focusTaskId);
+      if (!target) return;
+      target.querySelector<HTMLButtonElement>('.subagent-run__header')?.focus({ preventScroll: true });
+      target.scrollIntoView({ block: 'center', behavior: 'instant' });
+      programmaticTop.current = thread.scrollTop;
+      readingAnchor.current = captureHistoryAnchor(thread);
+      observer.disconnect();
     };
-  }, [focusTaskHighlighted, focusTaskId, focusTaskRevision]);
+    const observer = new MutationObserver(locate);
+    observer.observe(thread, { childList: true, subtree: true });
+    locate();
+    return () => observer.disconnect();
+  }, [focusTaskHighlighted, focusTaskId, focusTaskRevision, session.id, resetReading]);
 
   return (
-    <ResponseAnnotations sessionId={session.id} store={draftStore} onLocate={onLocateAnnotation} onNotify={onNotify}
+    <HistoryHydrationContext.Provider value={onHydrateEntries}>
+    <ResponseAnnotations sessionId={session.id} store={draftStore} onLocate={locateAnnotation} onNotify={onNotify}
       canAnnotate={canControl && !isObserver && runtimeStatus === 'online' && Boolean(session.id) && !editingQueue}>
     <section className={`workbench${welcome ? ' is-welcome' : ''}${fileDrop.dragging ? ' is-file-dragging' : ''}`} aria-label="会话工作台" ref={workbenchRef} {...fileDrop.handlers}>
       {fileDrop.dragging && <div className="workbench-file-drop" role="status">
@@ -2278,15 +2461,32 @@ export function WorkbenchView({
       <div
         className="thread-scroll"
         ref={threadRef}
+        style={{ overflowAnchor: 'none', scrollBehavior: 'auto' }}
+        onWheel={event => {
+          if (event.deltaY < 0) resetReading();
+          beginUserScroll();
+        }}
+        onTouchStart={beginUserScroll}
+        onPointerDown={event => { if (event.target === event.currentTarget) beginUserScroll(); }}
+        onPointerUp={() => { userScrollPending.current = false; }}
+        onTouchEnd={() => { userScrollPending.current = false; }}
+        onKeyDown={event => {
+          if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) resetReading();
+          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll();
+        }}
         onScroll={(event) => {
           const element = event.currentTarget;
-          if (locatingTaskRef.current) {
-            setAtBottom(false);
-            return;
-          }
+          if (!userScrollPending.current && programmaticTop.current !== undefined
+            && Math.abs(element.scrollTop - programmaticTop.current) < 1) { programmaticTop.current = undefined; return; }
+          if (locatingTaskRef.current) return;
+          userScrollPending.current = false;
           const nextAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
           followLatestRef.current = nextAtBottom;
           setAtBottom(nextAtBottom);
+          readingAnchor.current = nextAtBottom ? undefined : captureHistoryAnchor(element);
+          if (!nextAtBottom && element.scrollTop < 160 && history?.hasOlder && !history.loading && !history.error) {
+            void loadHistory(history.windows[0]?.id).catch(() => {});
+          }
         }}
       >
         <div className="thread-column">
@@ -2303,14 +2503,18 @@ export function WorkbenchView({
             </div>
           )}
           {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
-          <ConversationMessages messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
+          {history && !messages.length && !interruptionNotices?.length && (hasCanonicalHistory || history.loading || history.error) && <div className="history-boundary" role="status">
+            {history.loading ? '正在读取最近记录…' : history.error ?? '此区域有已保存记录，暂无主对话正文。'}
+            {onLoadHistory && (history.hasOlder || history.error) && <button type="button" disabled={history.loading} onClick={() => { void loadHistory(history.windows[0]?.id).catch(() => {}); }}>{history.error ? '重试' : '加载更早记录'}</button>}
+          </div>}
+          <ConversationMessages history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
-            onNotify={onNotify} onFork={onFork} canFork={canControl} contextCompactionIndex={contextCompactionIndex}
+            onNotify={onNotify} onFork={onFork} canFork={canControl}
             contextCompactionInProgress={contextCompactionInProgress}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
-            focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={focusSourceEntry} />
+            focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={locatedFocus?.sessionId === session.id ? locatedFocus : focusSourceEntry} />
           {conversationSubmissions.map(item => (
             <div key={item.commandId} data-pending-message={item.commandId}
               aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>
@@ -2359,7 +2563,8 @@ export function WorkbenchView({
       {!atBottom && (
         <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} onClick={() => {
           followLatestRef.current = true;
-          threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: 'smooth' });
+          readingAnchor.current = undefined; userScrollPending.current = false;
+          setAtBottom(true); restoreReadingPosition();
         }}>
           <ArrowDown size={13} /> 回到最新
         </button>
@@ -2557,5 +2762,6 @@ export function WorkbenchView({
       )}
     </section>
     </ResponseAnnotations>
+    </HistoryHydrationContext.Provider>
   );
 }

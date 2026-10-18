@@ -61,7 +61,8 @@ describe('PromptContentView', () => {
     expect(preview.querySelector('blockquote')?.textContent).toBe(quote);
     expect(within(preview).getByText('解释一下这一段')).toBeTruthy();
     expect(preview.querySelector('textarea, input, [contenteditable], script')).toBeNull();
-    expect(within(preview).queryByRole('button')).toBeNull();
+    expect(within(preview).getAllByRole('button')).toHaveLength(1);
+    expect(within(preview).getByRole('button', { name: '引用回复' })).toBeTruthy();
     await userEvent.unhover(trigger);
     await userEvent.hover(preview);
     await new Promise(resolve => setTimeout(resolve, 150));

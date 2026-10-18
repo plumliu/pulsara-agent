@@ -25,7 +25,10 @@ from pulsara_agent.conversation_kernel.session_deletion import (
     KernelSessionRetirement, SessionDeleteRejected,
 )
 from pulsara_agent.workspace_identity import observe_workspace
-from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader, MAXIMUM_CONTROL_ITEMS
+from pulsara_agent.terminal_protocol.canonical_v3 import (
+    CanonicalProtocolReader, MAXIMUM_CONTROL_ITEMS, MAXIMUM_HISTORY_PAGE_BYTES,
+    browser_history_uint64,
+)
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy, SessionWriterConflict
 
@@ -2212,7 +2215,8 @@ class LocalSessionController:
             maximum_control_items=MAXIMUM_CONTROL_ITEMS,
             deadline_monotonic=self.core._canonical_deadline())))
 
-    async def history_page(self, session_id: str, cursor: dict, maximum_entries: int):
+    async def history_page(self, session_id: str, cursor: dict, maximum_entries: int,
+                           maximum_serialized_bytes: int = MAXIMUM_HISTORY_PAGE_BYTES):
         if cursor.get("session_id") != session_id:
             raise ValueError("history cursor session conflicts")
         if "event_sequence_cut" not in cursor:
@@ -2220,11 +2224,45 @@ class LocalSessionController:
         reader = await self._history_reader(session_id)
         response = await asyncio.to_thread(
             reader.history_page, session_id=session_id,
-            event_sequence_cut=int(cursor["event_sequence_cut"]),
-            cut_sequence=int(cursor["cut_sequence"]),
-            before_entry_sequence=int(cursor["entry_sequence"]),
-            maximum_entries=maximum_entries, deadline_monotonic=self.core._canonical_deadline())
+            event_sequence_cut=browser_history_uint64(cursor["event_sequence_cut"], "history event cut"),
+            cut_sequence=browser_history_uint64(cursor.get("cut_sequence"), "history cut"),
+            before_entry_sequence=browser_history_uint64(cursor.get("entry_sequence"), "history edge"),
+            maximum_entries=maximum_entries, maximum_serialized_bytes=maximum_serialized_bytes,
+            deadline_monotonic=self.core._canonical_deadline())
         return wire.ServerFrame(history_page=response)
+
+    async def history_window(self, session_id: str, body: dict):
+        if "cursor" in body and not isinstance(body["cursor"], dict):
+            raise ValueError("history window cursor must be an object")
+        reader = await self._history_reader(session_id)
+        return await asyncio.to_thread(
+            reader.browser_history_window, session_id=session_id,
+            memory_domain_id=self.memory_domain_id,
+            anchor_entry_id=body.get("anchor_entry_id"), cursor=body.get("cursor"),
+            maximum_entries=browser_history_uint64(body.get("maximum_entries", 128), "history entries"),
+            maximum_serialized_bytes=browser_history_uint64(
+                body.get("maximum_serialized_bytes", MAXIMUM_HISTORY_PAGE_BYTES), "history bytes"),
+            deadline_monotonic=self.core._canonical_deadline(),
+        )
+
+    async def history_context(self, session_id: str, body: dict):
+        if "boundary_event_ids" in body and not isinstance(body["boundary_event_ids"], list):
+            raise ValueError("history context boundary event IDs must be an array")
+        if ("cut_sequence" in body) != ("event_sequence_cut" in body):
+            raise ValueError("history context requires both cuts or neither")
+        cuts = ({
+            "cut_sequence": browser_history_uint64(body["cut_sequence"], "history cut"),
+            "event_sequence_cut": browser_history_uint64(body["event_sequence_cut"], "history event cut"),
+        } if "cut_sequence" in body else {})
+        reader = await self._history_reader(session_id)
+        return await asyncio.to_thread(
+            reader.browser_history_context, session_id=session_id,
+            memory_domain_id=self.memory_domain_id, entry_ids=body.get("entry_ids"),
+            boundary_event_ids=body.get("boundary_event_ids"),
+            maximum_serialized_bytes=browser_history_uint64(
+                body.get("maximum_serialized_bytes", MAXIMUM_HISTORY_PAGE_BYTES), "history bytes"),
+            deadline_monotonic=self.core._canonical_deadline(), **cuts,
+        )
 
     async def history_content(self, session_id: str, request, *, artifact: bool = False):
         from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer

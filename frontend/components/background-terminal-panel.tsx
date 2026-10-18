@@ -59,7 +59,7 @@ const controlNeedsPolling = (receipt?: CommandReceipt): boolean => Boolean(
 const controlQueryMessage = (status: UserControlQueryResult['status']): string => (
   status === 'OWNER_UNAVAILABLE'
     ? '原 Host 已失效；不会把这次操作改投新的 Host。'
-    : '原操作结果已不在当前 Host 的保留窗口内；不会自动重发。'
+    : '当前无法取得这次操作的结果；不会自动重发。'
 );
 
 export function BackgroundTerminalPanel({

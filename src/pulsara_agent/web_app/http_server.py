@@ -8,6 +8,10 @@ from pulsara_agent.conversation_kernel.repository_errors import SessionWriterCon
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.web_app.browser_bridge import protobuf_json
+from pulsara_agent.terminal_protocol.canonical_v3 import (
+    CanonicalProtocolGap, CanonicalProtocolResourceExhausted,
+    MAXIMUM_HISTORY_PAGE_BYTES, browser_history_uint64,
+)
 
 import asyncio
 from pathlib import Path
@@ -574,7 +578,7 @@ class LocalHttpServer:
         self._app.router.add_get("/api/sessions/{session_id}/workspace-availability", self._workspace_availability)
         self._app.router.add_post("/api/sessions/{session_id}/restore-workspace", self._restore_workspace)
         self._app.router.add_get("/api/sessions/{session_id}/history-snapshot", self._history_snapshot)
-        for operation in ("history", "read-content", "read-tool-artifact", "visualization-thumbnail"):
+        for operation in ("history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"):
             self._app.router.add_post("/api/sessions/{session_id}/history/" + operation, self._cold_history_action)
 
         self._app.router.add_post("/api/sessions/{session_id}/archive", self._archive_session)
@@ -696,6 +700,10 @@ class LocalHttpServer:
                 status=exc.status,
                 retryable=exc.retryable,
             )
+        except CanonicalProtocolResourceExhausted as exc:
+            return self._error_response("RESOURCE_EXHAUSTED", str(exc), status=413, retryable=False)
+        except CanonicalProtocolGap as exc:
+            return self._error_response("HISTORY_CUT_CONFLICT", str(exc), status=409, retryable=False)
         except ScheduledTaskError as exc:
             return self._error_response(exc.code, str(exc), status=409 if exc.code in {"REVISION_CONFLICT", "COMMAND_CONFLICT", "TASK_CUT_CHANGED", "ACTIVE_TASK_CONFLICT"} else 400, retryable=False)
         except WorkspaceUnavailable as exc:
@@ -2203,11 +2211,17 @@ class LocalHttpServer:
         session_id = request.match_info["session_id"]
         operation = request.path.rsplit("/", 1)[-1]
         body = await self._json_body(request)
+        if operation == "window":
+            return web.json_response(await self.sessions.history_window(session_id, body))
+        if operation == "context":
+            return web.json_response(await self.sessions.history_context(session_id, body))
         if operation == "history":
             if not isinstance(body.get("cursor"), dict):
                 raise ValueError("history cursor is required")
             return web.json_response(protobuf_json(await self.sessions.history_page(
-                session_id, body["cursor"], int(body.get("maximum_entries", 128)))))
+                session_id, body["cursor"],
+                browser_history_uint64(body.get("maximum_entries", 128), "history entries"),
+                browser_history_uint64(body.get("maximum_serialized_bytes", MAXIMUM_HISTORY_PAGE_BYTES), "history bytes"))))
         if operation == "visualization-thumbnail":
             return web.json_response(await self._visualization_previews.read_canonical(
                 body, read_content=lambda value: self._cold_content(session_id, value),

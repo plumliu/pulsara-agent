@@ -112,6 +112,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderModelOutputIncomplete,
     ProviderNormalizedTerminalKind,
     ProviderPhysicalCompletionStatus,
+    ProviderGenerationRetry,
     ProviderStreamTerminal,
 )
 from pulsara_agent.primitives.context import (
@@ -476,7 +477,7 @@ class PreparedKernelModelExecution:
     async def open_once(
         self,
         permit: ProcessLocalProviderInputInstallPermit,
-    ) -> AsyncIterator[ProviderStreamPayload]:
+    ) -> AsyncIterator[ProviderStreamPayload | ProviderGenerationRetry]:
         request = self.request
         if (
             permit.scope.session_id != request.session_id

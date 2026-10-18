@@ -7,6 +7,8 @@ import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 import json
+import logging
+import os
 from typing import Any, AsyncIterator
 
 from pulsara_agent.llm.adapters.openai.client import (
@@ -68,6 +70,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderAdapterTerminalKind,
     ProviderOutputIncompleteReason,
     ProviderStreamFailure,
+    ProviderGenerationRetry,
     freeze_provider_adapter_completed_replay_payload,
 )
 from pulsara_agent.primitives.context import (
@@ -80,12 +83,17 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
+    LLMRetryDecision,
     RetryAttemptTrace,
     RetryDecisionKind,
     apply_retry_after_cap,
     compute_retry_delay,
 )
 from pulsara_agent.settings import LocalSettingsStore
+from pulsara_agent.primitives.model_call import ModelCallPurpose
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _CHAT_LIVE_THINKING_FIELDS = frozenset(
@@ -178,6 +186,8 @@ class OpenAIChatCompletionsTransport:
                     builder=ProviderLiveItemBuilder(),
                     route_wire_profile=model.route_wire_profile,
                 )
+                stream_closed = False
+                stream_close_failed = False
                 try:
                     stream = await admit_provider_request(
                         credential_boundary=credential_boundary,
@@ -192,23 +202,72 @@ class OpenAIChatCompletionsTransport:
                             ),
                         ),
                     )
-                    async for raw_chunk in stream:
-                        model_identity.observe(
-                            chat_completion_reported_model(raw_chunk)
-                        )
-                        for event in accumulator.apply(raw_chunk):
-                            yield event
+                    try:
+                        async for raw_chunk in stream:
+                            model_identity.observe(
+                                chat_completion_reported_model(raw_chunk)
+                            )
+                            for event in accumulator.apply(raw_chunk):
+                                yield event
+                    finally:
+                        # SDK AsyncStream owns the HTTP response lifecycle.
+                        # Async generators used by injected transports own
+                        # the standard aclose() lifecycle instead.
+                        closer = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+                        if closer is not None:
+                            try:
+                                await closer()
+                            except BaseException:
+                                stream_close_failed = True
+                                raise
+                            stream_closed = True
                     completed_model_identity = model_identity.reported_model_id
                     break
                 except Exception as exc:
+                    regenerate = (
+                        call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP
+                        and stream_closed
+                        and isinstance(exc, LLMTransportContractError)
+                        and exc.reason_code == "transport_tool_arguments_invalid"
+                    )
+                    if regenerate:
+                        try:
+                            # Scrub before serializing. Arguments are themselves
+                            # JSON text, so include JSON-escaped credential values.
+                            scrub = self.settings.read().credential_scrub_set()
+                            for value in error_scrubber.values:
+                                scrub.observe(value)
+                            for value in scrub.values:
+                                for ensure_ascii in (False, True):
+                                    scrub.observe(json.dumps(os.fsdecode(value), ensure_ascii=ensure_ascii)[1:-1])
+                            diagnostic = scrub.scrub_json({
+                                "arguments": {
+                                    key: "".join(parts)
+                                    for key, parts in accumulator.builder.tool_call_argument_parts.items()
+                                },
+                                "terminal_chunk": sdk_event_to_dict(raw_chunk),
+                                "parse_error": str(exc.__cause__ or exc),
+                            })
+                            LOGGER.warning(
+                                "Invalid tool arguments attempt=%s diagnostic=%s",
+                                attempt, json.dumps(diagnostic, ensure_ascii=False),
+                            )
+                        except Exception:
+                            # Diagnostic failure cannot authorize unsafe output
+                            # or prevent the original recovery decision.
+                            LOGGER.warning("Invalid tool arguments attempt=%s diagnostic_unavailable", attempt)
                     decision = apply_retry_after_cap(
-                        classify_llm_error(exc),
+                        LLMRetryDecision(kind=RetryDecisionKind.DO_NOT_RETRY, reason="stream_close_failed")
+                        if stream_close_failed else
+                        LLMRetryDecision(kind=RetryDecisionKind.RETRY, reason="tool_arguments_invalid")
+                        if regenerate else classify_llm_error(exc),
                         config=self.retry_config,
                     )
                     can_retry = (
                         self.retry_config.enabled
+                        and not stream_close_failed
                         and decision.kind is RetryDecisionKind.RETRY
-                        and not accumulator.builder.has_semantic_output
+                        and (regenerate or not accumulator.builder.has_semantic_output)
                         and accumulator.terminal is None
                         and attempt < max_attempts
                     )
@@ -232,6 +291,8 @@ class OpenAIChatCompletionsTransport:
                             trace=trace,
                             has_semantic_output=accumulator.builder.has_semantic_output,
                         )
+                        if regenerate:
+                            yield ProviderGenerationRetry()
                         await self.retry_sleep(delay)
                         attempt += 1
                         continue
@@ -239,7 +300,7 @@ class OpenAIChatCompletionsTransport:
                     skipped_reason = _retry_skipped_reason(
                         retry_config=self.retry_config,
                         decision=decision,
-                        has_semantic_output=accumulator.builder.has_semantic_output,
+                        has_semantic_output=accumulator.builder.has_semantic_output and not regenerate,
                         attempt=attempt,
                         max_attempts=max_attempts,
                     )
@@ -269,7 +330,7 @@ class OpenAIChatCompletionsTransport:
                             exhausted=(
                                 self.retry_config.enabled
                                 and decision.kind is RetryDecisionKind.RETRY
-                                and not accumulator.builder.has_semantic_output
+                                and (regenerate or not accumulator.builder.has_semantic_output)
                                 and attempt >= max_attempts
                             ),
                             skipped_reason=skipped_reason,

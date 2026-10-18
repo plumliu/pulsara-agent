@@ -173,6 +173,29 @@ function submissionFromReceipt(
   return { ...shared, status: receipt.status === 'rejected' ? 'rejected' : 'synchronizing' };
 }
 
+function requirePromptReceipt(
+  commandId: string,
+  receipt: CommandReceipt,
+  queueItemId?: string,
+): void {
+  if (receipt.commandId !== commandId
+    || (queueItemId && receipt.promptDelivery?.queueItemId !== queueItemId)) {
+    throw new RuntimeApiError('PROMPT_RECEIPT_MISMATCH', '输入状态与原始输入身份不一致，请稍后重试核对。', false);
+  }
+}
+
+function canonicalInputMatches(
+  message: RuntimeProjection['messages'][number],
+  submission: LocalPromptSubmission,
+): boolean {
+  return message.inputSource?.commandId === submission.commandId
+    && (!submission.queueItemId || message.inputSource.queueItemId === submission.queueItemId);
+}
+
+function canonicalBodyReady(message: RuntimeProjection['messages'][number]): boolean {
+  return message.contentState === undefined || message.contentState === 'ready';
+}
+
 function promptWasAccepted(receipt: CommandReceipt): boolean {
   const queueStatus = receipt.promptDelivery?.queueStatus.toUpperCase();
   if (queueStatus === 'CONSUMED' || queueStatus === 'PENDING') return true;
@@ -254,6 +277,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const userCapabilityAttempt = useRef(0);
   const [connection, setConnection] = useState<RuntimeConnection>();
   const historyRef = useRef<CanonicalHistoryView | undefined>(undefined);
+  const historyReadAbort = useRef(new AbortController());
   const [workspaceObservation, setWorkspaceObservation] = useState<{sessionId: string; value: WorkspaceAvailability}>();
   const [workspaceRecoveryBusy, setWorkspaceRecoveryBusy] = useState(false);
   const [workspaceRecoveryError, setWorkspaceRecoveryError] = useState<string>();
@@ -312,10 +336,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
   const canCreateSession = runtimeStatus === 'online' && databaseState === 'ready';
 
-  const ownsHistoryReader = (reader: RuntimeConnection | CanonicalHistoryView): boolean => (
+  const ownsHistoryReader = useCallback((reader: RuntimeConnection | CanonicalHistoryView): boolean => (
     activeSessionIdRef.current === reader.sessionId
     && (reader instanceof CanonicalHistoryView ? historyRef.current === reader : connectionRef.current === reader)
-  );
+  ), []);
 
   const ownsConnection = useCallback((expected: RuntimeConnection): boolean => (
     connectionRef.current === expected
@@ -379,19 +403,21 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   const publishProjection = useCallback((next: RuntimeProjection, owner?: RuntimeConnection) => {
     setProjection(next);
-    const consumedCommandIds = new Set(next.messages.flatMap((message) => (
-      message.inputSource?.commandId ? [message.inputSource.commandId] : []
-    )));
     const queuedByCommand = new Map(next.queuedPrompts.map((item) => [item.commandId, item]));
     const transitionByCommand = new Map(next.promptTransitions.map((item) => (
       [item.commandId, item]
     )));
     setLocalSubmissions((current) => {
       const projected: LocalPromptSubmission[] = current.flatMap((item) => {
-        if (owner && item.sessionId !== owner.sessionId) return [item];
-        if (consumedCommandIds.has(item.commandId)) return [];
+        if (item.sessionId !== (owner?.sessionId ?? activeSessionIdRef.current)) return [item];
+        const canonical = next.messages.find(message => canonicalInputMatches(message, item));
+        if (canonical && canonicalBodyReady(canonical)) return [];
+        if (canonical) return [{ ...item, status: 'consumed' as const, consumedEntryId: canonical.id }];
+        // A history/body publication can precede the committed queue suffix.
+        // It cannot downgrade an exact terminal receipt to older pending state.
+        if (['consumed', 'cancelled', 'rejected'].includes(item.status)) return [item];
         const queued = queuedByCommand.get(item.commandId);
-        if (queued) {
+        if (queued && (!item.queueItemId || queued.queueItemId === item.queueItemId)) {
           return [{
             ...item,
             connectionGeneration: owner?.generation ?? item.connectionGeneration,
@@ -404,7 +430,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           }];
         }
         const transition = transitionByCommand.get(item.commandId);
-        if (transition) {
+        if (transition && (!item.queueItemId || transition.queueItemId === item.queueItemId)) {
           return [{
             ...item,
             ...transition,
@@ -465,6 +491,32 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         : session
     )));
   }, []);
+
+  const activeReader = connection ?? historyRef.current;
+  useEffect(() => {
+    if (!activeReader || !ownsHistoryReader(activeReader)) return;
+    const publish = () => {
+      if (ownsHistoryReader(activeReader)) {
+        publishProjection(activeReader.current(), activeReader instanceof CanonicalHistoryView ? undefined : activeReader);
+      }
+    };
+    const unsubscribe = activeReader.subscribe?.(publish);
+    // A context/body read may have completed between connect and subscribing.
+    publish();
+    return unsubscribe;
+  }, [activeReader, ownsHistoryReader, publishProjection]);
+
+  const readConsumedInput = useCallback((owner: RuntimeConnection, receipt: CommandReceipt) => {
+    const entryId = receipt.promptDelivery?.consumedEntryId;
+    if (!entryId || receipt.promptDelivery?.queueStatus.toUpperCase() !== 'CONSUMED' || !owner.locateEntry) return;
+    const signal = historyReadAbort.current.signal;
+    // This read never changes the accepted receipt or blocks continued observe.
+    void owner.locateEntry(entryId, signal).then(next => {
+      if (!signal.aborted && ownsConnection(owner)) publishProjection(next, owner);
+    }).catch(() => {
+      // Keep the local known content and exact receipt while history is unavailable.
+    });
+  }, [ownsConnection, publishProjection]);
 
   const mergeTaskTotal = useCallback((total: number, sequence: number) => {
     if (sequence < taskTotalWatermark.current) return;
@@ -555,7 +607,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       activities.push({ ...activity, body });
     }
     return { ...page, activities };
-  }, [adapter]);
+  }, [adapter, ownsHistoryReader]);
 
   const loadTaskBackgroundProcesses = useCallback(async (cursor?: string) => {
     const active = connectionRef.current;
@@ -696,6 +748,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     setFocusSourceEntry(current => current?.sessionId === sessionId ? undefined : current);
     if (readSavedSessionId() === sessionId) saveSessionId('');
     if (requestedSession.current !== sessionId) return;
+    historyReadAbort.current.abort();
     const previous = connectionRef.current;
     const previousHistory = historyRef.current;
     historyRef.current = undefined;
@@ -835,6 +888,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   ): Promise<RuntimeConnection | undefined> => {
     if (deletingSession.current === sessionId || archivingSession.current === sessionId) return undefined;
     requestedSession.current = sessionId;
+    historyReadAbort.current.abort();
+    historyReadAbort.current = new AbortController();
     const attempt = ++connectionAttempt.current;
     setOpeningSessionId(current => current === sessionId ? current : '');
     taskInventoryAttempt.current += 1;
@@ -1098,6 +1153,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     })();
     return () => {
       disposed = true;
+      historyReadAbort.current.abort();
       connectionAttempt.current += 1;
       const active = connectionRef.current;
       const history = historyRef.current;
@@ -1182,6 +1238,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           )));
           return;
         }
+        requirePromptReceipt(candidate.commandId, receipt, candidate.queueItemId);
         setLocalSubmissions((current) => current.map((item) => (
           item.sessionId === candidate.sessionId
           && item.connectionGeneration === candidate.connectionGeneration
@@ -1199,8 +1256,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         if (receipt.promptDelivery?.queueStatus.toUpperCase() !== 'PENDING') {
           notifyPromptReceipt(receipt, '输入状态已核对', '已按原始输入身份同步本地服务状态。');
         }
-        const next = await connection.snapshot();
-        if (connectionRef.current === connection) publishProjection(next, connection);
+        readConsumedInput(connection, receipt);
       } catch (error) {
         if (connectionRef.current !== connection) return;
         setLocalSubmissions((current) => current.map((item) => (
@@ -1229,7 +1285,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     localSubmissions,
     notifyPromptReceipt,
     projection.eventSequence,
-    publishProjection,
+    readConsumedInput,
   ]);
 
   const refreshTaskGroups = useCallback(async (sessionId: string, ids: readonly string[]) => {
@@ -1407,6 +1463,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   );
   const activeWorkspace = activeSession.workspace ?? emptyWorkspace;
   const openingSession = sessionList.find(session => session.id === openingSessionId);
+  // Context reads and observe keep running while the initial tail is prepared.
+  // The reader latches initialReady, so later page/context refreshes stay inline.
+  const initialHistoryPending = activeReader?.sessionId === activeSessionId && projection.history?.initialReady === false;
+  const loadingSession = openingSession ?? (initialHistoryPending ? activeSession : undefined);
   const isObserver = connection?.role === 'observer';
   const workspaceAvailability = workspaceObservation?.sessionId === activeSessionId ? workspaceObservation.value : undefined;
   const canControl = connection?.role === 'controller' && workspaceAvailability?.outcome === 'AVAILABLE' && runtimeStatus === 'online';
@@ -1822,6 +1882,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       }]);
       const receipt = await active.submitPrompt(commandId, content, permission);
       if (!ownsConnection(active)) return false;
+      requirePromptReceipt(commandId, receipt);
       setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
         ? submissionFromReceipt(item, receipt)
         : item));
@@ -1830,6 +1891,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         requestPlan ? '本轮将先制定计划' : projection.isRunning ? '输入将在下一轮处理' : '输入已接受',
         projection.isRunning ? '会在当前轮完成后自动开始。' : '已送达本地服务。',
       );
+      readConsumedInput(active, receipt);
       return promptWasAccepted(receipt);
     } catch (error) {
       if (!ownsConnection(active)) return false;
@@ -1861,13 +1923,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         const recovered = await recoveredConnection.queryCommand(commandId);
         if (!ownsConnection(recoveredConnection)) return false;
         if (recovered) {
+          requirePromptReceipt(commandId, recovered);
           setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
             ? submissionFromReceipt(item, recovered)
             : item));
           notifyPromptReceipt(recovered, '输入已接受', '正在同步本地服务中的精确队列状态。');
-          const next = await recoveredConnection.snapshot();
-          if (!ownsConnection(recoveredConnection)) return false;
-          publishProjection(next, recoveredConnection);
+          readConsumedInput(recoveredConnection, recovered);
           return promptWasAccepted(recovered);
         }
       } catch {
@@ -1929,7 +1990,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           query.status === 'OWNER_UNAVAILABLE' ? '原会话已不可控制' : '停止结果不可确认',
           query.status === 'OWNER_UNAVAILABLE'
             ? '原 Host 已失效；Pulsara 不会把这次操作改投新的 Host。'
-            : '原操作结果已不在当前 Host 的保留窗口内；Pulsara 不会自动重发。',
+            : `${productMessage(error instanceof Error ? error.message : undefined, '当前无法取得这次操作的结果。')} 未查到原操作结果；Pulsara 不会自动重发。`,
           'warning',
         );
         return;
@@ -2016,7 +2077,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           query.status === 'OWNER_UNAVAILABLE' ? '原会话已不可控制' : '取消结果不可确认',
           query.status === 'OWNER_UNAVAILABLE'
             ? '原 Host 已失效；Pulsara 不会把这次取消改投新的 Host。'
-            : '原操作结果已不在当前 Host 的保留窗口内；Pulsara 不会自动重发。',
+            : `${productMessage(error instanceof Error ? error.message : undefined, '当前无法取得这次操作的结果。')} 未查到原操作结果；Pulsara 不会自动重发。`,
           'warning',
         );
         return;
@@ -2547,17 +2608,47 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       throw new RuntimeApiError('TOOL_ARTIFACT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
     }
     return page;
-  }, []);
+  }, [ownsHistoryReader]);
 
   const locateAnnotationSource = useCallback(async (entryId: string, signal: AbortSignal) => {
     const active = connectionRef.current ?? historyRef.current;
     if (!active?.locateAnnotationSource) throw new Error('本地服务未连接。');
-    const next = await active.locateAnnotationSource(entryId, signal);
+    const readSignal = AbortSignal.any([signal, historyReadAbort.current.signal]);
+    const next = await active.locateAnnotationSource(entryId, readSignal);
+    readSignal.throwIfAborted();
+    if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
+    publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
+  }, [ownsHistoryReader, publishProjection]);
+
+  const locateSourceEntry = useCallback(async (entryId: string, signal: AbortSignal) => {
+    const active = connectionRef.current ?? historyRef.current;
+    if (!active?.locateEntry) throw new Error('本地服务未连接。');
+    const readSignal = AbortSignal.any([signal, historyReadAbort.current.signal]);
+    const next = await active.locateEntry(entryId, readSignal);
+    readSignal.throwIfAborted();
+    if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
+    publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
+  }, [ownsHistoryReader, publishProjection]);
+
+  const loadHistory = useCallback(async (windowId?: string, direction?: 'older' | 'newer') => {
+    const active = connectionRef.current ?? historyRef.current;
+    if (!active?.readHistory) throw new Error('本地服务未连接。');
+    const signal = historyReadAbort.current.signal;
+    const next = await active.readHistory(windowId, direction, signal);
     signal.throwIfAborted();
     if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
     publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
-    setFocusSourceEntry({ sessionId: active.sessionId, entryId });
-  }, [publishProjection]);
+  }, [ownsHistoryReader, publishProjection]);
+
+  const hydrateEntries = useCallback(async (ids: string[], includeReasoning = false) => {
+    const active = connectionRef.current ?? historyRef.current;
+    if (!active?.hydrateEntries) throw new Error('本地服务未连接。');
+    const signal = historyReadAbort.current.signal;
+    const next = await active.hydrateEntries(ids, signal, includeReasoning);
+    signal.throwIfAborted();
+    if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
+    publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
+  }, [ownsHistoryReader, publishProjection]);
 
   const readPromptImage = useCallback(async (image: CanonicalPromptImagePart) => {
     const active = connectionRef.current ?? historyRef.current;
@@ -2577,7 +2668,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       );
     }
     return bytes;
-  }, []);
+  }, [ownsHistoryReader]);
 
   const readVisualizationThumbnail = useCallback(async (
     entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal,
@@ -2587,7 +2678,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const image = await active.readVisualizationThumbnail(entryId, ordinal, digest, size, signal);
     if (!ownsHistoryReader(active)) throw new Error('可视化所属的会话已经改变。');
     return image;
-  }, []);
+  }, [ownsHistoryReader]);
 
   const readImageReference = useCallback(async (ref: string, signal: AbortSignal) => {
     const active = connectionRef.current ?? historyRef.current;
@@ -2595,7 +2686,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const image = await active.readImageReference(ref, signal);
     if (!ownsHistoryReader(active)) throw new Error('图片所属工作区已经改变。');
     return image;
-  }, []);
+  }, [ownsHistoryReader]);
 
   const readVisualization = useCallback(async (
     entryId: string, ordinal: number, digest: string, size: number, item?: import('../lib/pulsara-types').VisualizationOccurrence, signal?: AbortSignal,
@@ -2613,12 +2704,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       );
     }
     return html;
-  }, []);
+  }, [ownsHistoryReader]);
 
   return (
     <UserAvatarProvider adapter={adapter}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
-    <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !openingSession ? ' has-inspector' : ''}`}>
+    <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} />
 
       {activeView === 'workbench' && !databaseBlocked && (
@@ -2659,16 +2750,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           canCreateSession={canCreateSession}
         />
       )}
-      {activeView === 'workbench' && !databaseBlocked && openingSession && (
+      {activeView === 'workbench' && !databaseBlocked && loadingSession && (
         <SessionOpeningView
-          session={openingSession}
-          workspace={openingSession.workspace ?? emptyWorkspace}
-          error={runtimeError}
-          onRetry={() => openSession(openingSession.id)}
+          session={loadingSession}
+          workspace={loadingSession.workspace ?? emptyWorkspace}
+          error={openingSession ? runtimeError : projection.history?.initialError}
+          onRetry={() => { if (openingSession) openSession(openingSession.id); else void loadHistory().catch(() => {}); }}
           onOpenSidebar={() => setSidebarOpen(true)}
         />
       )}
-      {activeView === 'workbench' && !databaseBlocked && (
+      {activeView === 'workbench' && !databaseBlocked && !initialHistoryPending && (
         <div className="session-connected-views" hidden={Boolean(openingSession)}>
         <FilePreviewProvider imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
         <WorkbenchView
@@ -2676,6 +2767,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           workspace={activeWorkspace}
           session={activeSession}
           messages={renderedMessages}
+          history={projection.history}
+          onLoadHistory={loadHistory}
+          onHydrateEntries={hydrateEntries}
           interruptionNotices={mergedProjection.interruptionNotices}
           contextCompaction={mergedProjection.contextCompaction}
           contextCompactionInProgress={mergedProjection.liveControl.root_compaction_in_progress === true}
@@ -2697,7 +2791,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
             && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
             && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
             && (item.displayAsMessage || !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId))
-            && !projection.messages.some((message) => message.inputSource?.commandId === item.commandId)
+            && !projection.messages.some(message => canonicalInputMatches(message, item) && canonicalBodyReady(message))
           ))}
           runtimeStatus={runtimeStatus}
           runtimeError={runtimeError}
@@ -2748,6 +2842,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onReadToolArtifact={readToolArtifact}
           onReadPromptImage={readPromptImage}
           onLocateAnnotation={locateAnnotationSource}
+          onLocateEntry={locateSourceEntry}
           onReadVisualization={readVisualization}
           onReadVisualizationThumbnail={readVisualizationThumbnail}
           promptDraftStore={promptDraftStore}

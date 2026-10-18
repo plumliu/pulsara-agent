@@ -7,8 +7,9 @@ import { createPortal } from 'react-dom';
 import type { PromptAnnotationPart } from '../lib/prompt-content';
 import { usePromptHover } from '../lib/prompt-hover';
 import { AnnotationQuote } from './annotation-quote';
+import { AnnotationSourceButton } from './response-annotations';
 
-/** Read the submitted snapshot without entering the draft or resolving its source. */
+/** Read the submitted snapshot; exact source location is an explicit action. */
 export function SentAnnotationChip({ value, number }: { value: PromptAnnotationPart; number: number }) {
   const { trigger, details, position, show, hide, keep, dismiss } = usePromptHover<HTMLButtonElement, HTMLDivElement>(350);
   const id = useId();
@@ -47,6 +48,7 @@ export function SentAnnotationChip({ value, number }: { value: PromptAnnotationP
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget) && !trigger.current?.contains(event.relatedTarget)) hide(); }}
       onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); trigger.current?.focus(); dismiss(); } }}>
       <div id={`${id}-title`} className="sent-annotation-preview__title">Annotation {number}</div>
+      <AnnotationSourceButton source={value.source} beforeLocate={dismiss} />
       <AnnotationQuote quote={value.quote} />
       {value.comment && <p className="sent-annotation-preview__comment">{value.comment}</p>}
     </div>, document.body)}

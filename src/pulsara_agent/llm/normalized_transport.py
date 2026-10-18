@@ -36,6 +36,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderNormalizedTerminalKind,
     ProviderPhysicalCompletion,
     ProviderPhysicalCompletionStatus,
+    ProviderGenerationRetry,
     ProviderStreamFailure,
     ProviderStreamTerminal,
 )
@@ -77,7 +78,7 @@ class NormalizedProviderTransportExecution:
         """Current logical response observation, also inspectable after cancellation."""
         return self._usage
 
-    async def read_next(self) -> ProviderStreamPayload | ProviderStreamTerminal | None:
+    async def read_next(self) -> ProviderStreamPayload | ProviderGenerationRetry | ProviderStreamTerminal | None:
         if self._terminal_delivered:
             return None
         while True:
@@ -101,6 +102,18 @@ class NormalizedProviderTransportExecution:
                     ),
                 )
 
+            if isinstance(item, ProviderGenerationRetry):
+                # Only an unaccepted attempt can be replaced. The adapter has
+                # already joined its physical stream before yielding this.
+                if self._adapter_terminal_seen:
+                    return self._terminal_error(
+                        "Provider retried after its semantic terminal.",
+                        "transport_protocol_error",
+                    )
+                self._open.clear()
+                self._seen.clear()
+                self._usage = None
+                return item
             if isinstance(item, TransportUsageReport):
                 if self._usage is not None:
                     return self._terminal_error(

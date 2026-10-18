@@ -19,6 +19,7 @@ import type {
   RuntimeInteractionSummary,
   RuntimeProjection,
   UserControlQueryResult,
+  UserControlCommandRef,
   CanonicalPromptContent,
   CanonicalPromptImagePart,
   EditablePromptContent,
@@ -293,6 +294,7 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
   return {
     messages: [{
       id: 'assistant-1',
+      turnId: 'turn-1',
       role: 'assistant',
       time: '现在',
       body,
@@ -338,6 +340,19 @@ class FakeConnection implements RuntimeConnection {
   readonly generation: number;
   private value: RuntimeProjection;
   private observer?: (value: RuntimeProjection) => void;
+  private listeners = new Set<() => void>();
+  subscribe = vi.fn((listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  });
+  publishRead(value: RuntimeProjection) {
+    this.value = value;
+    for (const listener of this.listeners) listener();
+  }
+  readHistory = vi.fn(async (_windowId?: string, _direction?: 'older' | 'newer', _signal?: AbortSignal) => this.value);
+  hydrateEntries = vi.fn(async (_ids: string[], _signal?: AbortSignal, _includeReasoning?: boolean) => this.value);
+  locateEntry = vi.fn(async (_entryId: string, _signal?: AbortSignal) => this.value);
+  locateAnnotationSource = vi.fn(async (_entryId: string, _signal?: AbortSignal) => this.value);
   closed = false;
 
   constructor(
@@ -392,7 +407,7 @@ class FakeConnection implements RuntimeConnection {
     return { commandId, status: 'succeeded' };
   }
 
-  async stopActiveTurn(): Promise<CommandReceipt> {
+  async stopActiveTurn(_reference: UserControlCommandRef): Promise<CommandReceipt> {
     return { commandId: 'command-3', status: 'succeeded' };
   }
 
@@ -404,7 +419,7 @@ class FakeConnection implements RuntimeConnection {
     return { commandId: 'command-terminate-process', status: 'succeeded' };
   }
 
-  async queryControlCommand(): Promise<UserControlQueryResult> {
+  async queryControlCommand(_reference: UserControlCommandRef): Promise<UserControlQueryResult> {
     return { status: 'RESULT_UNAVAILABLE' };
   }
 
@@ -496,11 +511,11 @@ class FakeConnection implements RuntimeConnection {
     };
   });
 
-  queryCommand = vi.fn<RuntimeConnection['queryCommand']>(async () => {
+  queryCommand = vi.fn<RuntimeConnection['queryCommand']>(async (commandId) => {
     if (this.closed) {
       throw new RuntimeApiError('CONNECTION_CLOSED', '本地连接已经关闭。', true);
     }
-    return this.queryCommandResult;
+    return this.queryCommandResult ? { ...this.queryCommandResult, commandId } : undefined;
   });
 
   async close() { this.closed = true; }
@@ -883,6 +898,26 @@ function renderWorkbench(ui: Parameters<typeof render>[0]) {
 }
 
 describe('PulsaraApp', () => {
+  it('keeps the original stop error when its command result is unavailable, without resending', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(), hostSessionId: 'host:stop-error', controlAdmissionDeadlineMs: 42_000,
+    };
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    const active = adapter.lastConnection!;
+    const stop = vi.spyOn(active, 'stopActiveTurn').mockRejectedValue(
+      new RuntimeApiError('BAD_REQUEST', '请求内容不正确。', false),
+    );
+    const query = vi.spyOn(active, 'queryControlCommand');
+    fireEvent.click(screen.getByRole('button', { name: '停止本轮运行' }));
+    expect(await screen.findByText(/请求内容不正确。 未查到原操作结果/)).toBeTruthy();
+    expect(screen.queryByText(/原操作结果已不在当前 Host 的保留窗口/)).toBeNull();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledWith(stop.mock.calls[0][0]);
+  });
+
   const archivedTargets = (count: number): SessionSummary[] => Array.from({length: count}, (_, index) => ({
     ...initialSession, id: `archived-${index + 1}`, title: `归档批次 ${index + 1}`, lifecycle: 'ARCHIVED', live: false,
   }));
@@ -1968,6 +2003,9 @@ describe('PulsaraApp', () => {
         time: '10:01',
         body: '压缩后的消息',
       }],
+      history: { initialReady: true, hasOlder: false, loading: false, windows: [], compactions: [{
+        eventId: 'adoption-1', turnId: 'turn-1', adoptedAfterEntrySequence: 1, displayAfterEntryId: 'before-compaction',
+      }] },
       contextCompaction: {
         contextBindingRevisionId: 'revision-1',
         turnId: 'turn-1',
@@ -2041,13 +2079,14 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.user-steer')).toHaveLength(1);
     expect(screen.getByText('引导')).toBeTruthy();
     expect(screen.queryByText('你 · 引导')).toBeNull();
-    expect(screen.getByLabelText('reader 的结果已加入本轮对话')).toBeTruthy();
+    expect(screen.queryByLabelText('reader 的结果已加入本轮对话')).toBeNull();
     expect(container.querySelectorAll('.assistant-heading')).toHaveLength(2);
     expect(container.querySelectorAll('.assistant-heading--run-start')).toHaveLength(1);
     expect(container.querySelectorAll('.assistant-heading--response')).toHaveLength(1);
     expect(container.querySelectorAll('.conversation-run > .assistant-heading--run-start')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(screen.getByLabelText('reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByText('读取文件')).toBeTruthy();
     expect(screen.getByRole('button', { name: '展开思考摘要' })).toBeTruthy();
 
@@ -2183,7 +2222,7 @@ describe('PulsaraApp', () => {
 
     fireEvent.click(collapse);
     expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
-    expect(screen.getByLabelText('工具原始结果').closest('.animated-disclosure')?.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.queryByLabelText('工具原始结果')).toBeNull();
   });
 
   it('invalidates an in-flight artifact page when the whole tool card is collapsed', async () => {
@@ -2373,14 +2412,14 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''),
       messages: [{
-        id: 'assistant-intermediate', role: 'assistant', assistantKind: 'tool-request',
+        id: 'assistant-intermediate', turnId: 'turn-copy', role: 'assistant', assistantKind: 'tool-request',
         time: '18:11', body: '我先检查文件，然后继续处理。', status: 'completed',
         traces: [{
           id: 'trace-intermediate', kind: 'read', toolName: 'read_file', title: '读取文件',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
         }],
       }, {
-        id: 'assistant-terminal-response', role: 'assistant', assistantKind: 'terminal',
+        id: 'assistant-terminal-response', turnId: 'turn-copy', role: 'assistant', assistantKind: 'terminal',
         rootFinal: true, forkEligible: true, time: '18:12', body: '最终结果已经准备好。', status: 'completed',
       }],
       isRunning: false,
@@ -2388,6 +2427,7 @@ describe('PulsaraApp', () => {
     };
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     const intermediate = (await screen.findByText('我先检查文件，然后继续处理。')).closest('.assistant-copy');
     const terminal = screen.getByText('最终结果已经准备好。').closest('.assistant-copy');
 
@@ -2696,21 +2736,21 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''),
       messages: [{
-        id: 'assistant-edit', role: 'assistant', assistantKind: 'tool-request',
+        id: 'assistant-edit', role: 'assistant', assistantKind: 'tool-request', turnId: 'turn-rails', historyGroupId: 'group-rails', historyWindowId: 'page-rails',
         time: '18:11', body: '我先修正测试。', status: 'completed',
         traces: [{
           id: 'trace-edit', kind: 'edit', toolName: 'edit_file', title: '更新文件',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
         }],
       }, {
-        id: 'assistant-terminal', role: 'assistant', assistantKind: 'tool-request',
+        id: 'assistant-terminal', role: 'assistant', assistantKind: 'tool-request', turnId: 'turn-rails', historyGroupId: 'group-rails', historyWindowId: 'page-rails',
         time: '18:12', body: '', status: 'completed',
         traces: [{
           id: 'trace-terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
         }],
       }, {
-        id: 'assistant-reasoning-boundary', role: 'assistant', assistantKind: 'tool-request',
+        id: 'assistant-reasoning-boundary', role: 'assistant', assistantKind: 'tool-request', turnId: 'turn-rails', historyGroupId: 'group-rails', historyWindowId: 'page-rails',
         time: '18:13', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-boundary', kind: 'full', body: '我需要先分析结果。' }],
         traces: [{
@@ -2723,6 +2763,7 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     await screen.findByText('我先修正测试。');
     const turns = container.querySelectorAll('.assistant-turn');
 
@@ -2748,7 +2789,7 @@ describe('PulsaraApp', () => {
         sourceSubagentRelation: 'previous',
         status: 'completed',
       }, {
-        id: 'assistant-after-result', role: 'assistant', time: '18:15',
+        id: 'assistant-after-result', turnId: 'turn-target', role: 'assistant', time: '18:15',
         body: '我会基于子任务结果继续。', status: 'completed',
       }],
       isRunning: false,
@@ -2756,10 +2797,10 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
     expect(await screen.findByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.queryByRole('tooltip')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     fireEvent.mouseEnter(screen.getByRole('article', { name: '上一轮 reader 的结果已加入本轮对话' }));
     expect(screen.getByRole('tooltip').textContent).toContain('已记录到当前对话');
     expect(screen.queryByText(/用于当前处理|会结合这项工作的结果/)).toBeNull();
@@ -4030,8 +4071,8 @@ describe('PulsaraApp', () => {
     };
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
-    adapter.lastConnection?.submitPrompt.mockResolvedValueOnce({
-      commandId: 'ignored-by-mock',
+    adapter.lastConnection?.submitPrompt.mockImplementationOnce(async commandId => ({
+      commandId,
       status: 'rejected',
       publicCode: 'TURN_INTERRUPTED',
       publicMessage: 'The turn was interrupted and will not be replayed.',
@@ -4039,7 +4080,7 @@ describe('PulsaraApp', () => {
         queueItemId: 'queue-consumed', queueStatus: 'CONSUMED',
         consumedEntryId: 'entry-consumed', deliveryMode: 'new-turn',
       },
-    });
+    }));
 
     await typeComposer('已经被消费的输入');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -4060,19 +4101,19 @@ describe('PulsaraApp', () => {
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const active = adapter.lastConnection!;
-    active.submitPrompt.mockResolvedValueOnce({
-      commandId: 'ignored-by-mock', status: 'pending',
+    active.submitPrompt.mockImplementationOnce(async commandId => ({
+      commandId, status: 'pending',
       promptDelivery: {
         queueItemId: 'queue-terminal', queueStatus: 'PENDING', deliveryMode: 'new-turn',
       },
-    });
-    active.queryCommand.mockResolvedValue({
-      commandId: 'ignored-by-mock', status: 'rejected', publicCode: 'USER_CANCELLED',
+    }));
+    active.queryCommand.mockImplementation(async commandId => ({
+      commandId, status: 'rejected', publicCode: 'USER_CANCELLED',
       publicMessage: 'The queued prompt was cancelled.',
       promptDelivery: {
         queueItemId: 'queue-terminal', queueStatus: 'CANCELLED', deliveryMode: 'new-turn',
       },
-    });
+    }));
 
     await typeComposer('随后被取消的输入');
     fireEvent.click(screen.getByRole('button', { name: '排队发送' }));
@@ -4271,6 +4312,7 @@ describe('PulsaraApp', () => {
         status: 'completed',
         traces: [{id:'spawn',kind:'mcp',toolName:'spawn_agent',title:'创建子任务',subtitle:'',status:'running'}],
       }],
+      taskCreators: { 'task-readme': 'assistant-subagents' },
       subagentRuns: [{
           id: 'task-readme',
           label: '检查 README',
@@ -4298,8 +4340,8 @@ describe('PulsaraApp', () => {
     fireEvent.click(await screen.findByRole('button', {name: '任务'}));
     fireEvent.click(await screen.findByRole('button', {name: /检查 README/}));
 
-    expect(await screen.findByText('任务执行')).toBeTruthy();
     fireEvent.click(within(screen.getByRole('main', {hidden: true})).getByRole('button', { name: '展开中间过程', hidden: true }));
+    expect(await screen.findByText('任务执行')).toBeTruthy();
     const task = within(screen.getByLabelText('任务执行')).getByRole('button', { name: /检查 README/, hidden: true });
     expect(task).toBeTruthy();
     fireEvent.click(task);
@@ -5194,4 +5236,199 @@ it('opens the unique ACTIVE schedule from the session header and hides the alarm
     await screen.findByRole('heading', { name: initialSession.title });
     await waitFor(() => expect(screen.queryByRole('button', { name: '查看此会话的活跃定时任务' })).toBeNull());
   } finally { list.mockRestore(); }
+});
+
+it('publishes asynchronous reader readiness while observe is waiting and preserves the unsent draft', async () => {
+  const adapter = new FakeAdapter();
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
+  await screen.findByText('我已经开始检查。');
+  const active = adapter.lastConnection!;
+  await typeComposer('保留草稿');
+  await act(async () => active.publishRead(projection('正文读取完成')));
+  expect(await screen.findByText('正文读取完成')).toBeTruthy();
+  expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('保留草稿');
+  expect(active.subscribe).toHaveBeenCalledTimes(1);
+  expect(active.submitPrompt).not.toHaveBeenCalled();
+  act(() => active.emit(projection('后续实时进展')));
+  expect(await screen.findByText('后续实时进展')).toBeTruthy();
+});
+
+it('keeps known submitted text through canonical metadata and releases it only after ready body', async () => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = { ...projection(''), messages: [], isRunning: false, activeTurnId: undefined };
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
+  await screen.findByRole('heading', { name: '准备发布' });
+  const active = adapter.lastConnection!;
+  active.submitPrompt.mockImplementationOnce(async commandId => ({ commandId, status: 'pending', promptDelivery: {
+    queueItemId: 'queue-body', queueStatus: 'PENDING', deliveryMode: 'new-turn',
+  } }));
+  await typeComposer('本地唯一的已知正文');
+  fireEvent.click(screen.getByRole('button', { name: '发送' }));
+  await waitFor(() => expect(active.submitPrompt).toHaveBeenCalledTimes(1));
+  const commandId = active.submitPrompt.mock.calls[0][0];
+  await waitFor(() => expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe(''));
+  await typeComposer('下一条尚未发送');
+  const metadata: RuntimeProjection = { ...projection(''), eventSequence: 3, messages: [{
+    id: 'entry-body', role: 'user', userKind: 'prompt', time: '现在', body: '', contentState: 'loading', historyContextState:'loading',
+    inputSource: { commandId, queueItemId: 'queue-body', deliveryMode: 'new-turn' },
+  }] };
+  act(() => active.emit(metadata));
+  expect(await screen.findByText('本地唯一的已知正文')).toBeTruthy();
+  expect(screen.getAllByText('本地唯一的已知正文')).toHaveLength(1);
+  expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('下一条尚未发送');
+  await act(async () => active.publishRead({ ...metadata, messages: [{ ...metadata.messages[0],
+    body: '校验后的正式正文', promptContent: textPrompt('校验后的正式正文'), contentState: 'ready', historyContextState:'ready',
+  }] }));
+  expect(await screen.findByText('校验后的正式正文')).toBeTruthy();
+  expect(screen.queryByText('本地唯一的已知正文')).toBeNull();
+  expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('下一条尚未发送');
+  expect(active.submitPrompt).toHaveBeenCalledTimes(1);
+});
+
+it.each(['command', 'queue'])('rejects mismatched %s receipts without fetching or replaying a consumed entry', async mismatch => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = { ...projection(''), messages: [], queuedCount: 1, queuedPrompts: [{
+    queueItemId: 'queue-exact', commandId: 'command-exact', sequence: 1, status: 'pending',
+    deliveryMode: 'new-turn', content: textPrompt('保留精确队列正文'),
+  }] };
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
+  await screen.findByText('保留精确队列正文');
+  const active = adapter.lastConnection!;
+  const snapshot = vi.spyOn(active, 'snapshot');
+  active.queryCommand.mockResolvedValue({ commandId: mismatch === 'command' ? 'wrong' : 'command-exact', status: 'succeeded',
+    promptDelivery: { queueItemId: mismatch === 'queue' ? 'wrong' : 'queue-exact', queueStatus: 'CONSUMED',
+      deliveryMode: 'new-turn', consumedEntryId: 'unrelated-entry' } });
+  act(() => active.emit({ ...projection(''), messages: [], eventSequence: 2 }));
+  await waitFor(() => expect(active.queryCommand).toHaveBeenCalledWith('command-exact'));
+  expect(await screen.findByText('输入状态与原始输入身份不一致，请稍后重试核对。')).toBeTruthy();
+  expect(screen.getByText('保留精确队列正文')).toBeTruthy();
+  expect(active.locateEntry).not.toHaveBeenCalled();
+  expect(snapshot).not.toHaveBeenCalled();
+  expect(active.submitPrompt).not.toHaveBeenCalled();
+});
+
+it('loads the exact consumed entry without snapshot and cancels its read when the session changes', async () => {
+  const adapter = new FakeAdapter();
+  const second = { ...initialSession, id: 'session:hrluejkx3v2ajzf4ec6bb3ierm', title: '另一个会话', live: false };
+  adapter.sessions = [initialSession, second];
+  adapter.connectionValues.set(second.id, projection('新会话的正文'));
+  adapter.connectionValue = { ...projection(''), messages: [], queuedCount: 1, queuedPrompts: [{
+    queueItemId: 'queue-consumed', commandId: 'command-consumed', sequence: 1, status: 'pending',
+    deliveryMode: 'new-turn', content: textPrompt('待交接正文'),
+  }] };
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
+  await screen.findByText('待交接正文');
+  const active = adapter.lastConnection!;
+  const snapshot = vi.spyOn(active, 'snapshot');
+  const read = deferred<RuntimeProjection>();
+  active.locateEntry.mockReturnValue(read.promise);
+  active.queryCommand.mockResolvedValue({ commandId: 'command-consumed', status: 'succeeded', promptDelivery: {
+    queueItemId: 'queue-consumed', queueStatus: 'CONSUMED', deliveryMode: 'new-turn', consumedEntryId: 'entry-exact',
+  } });
+  act(() => active.emit({ ...projection(''), messages: [], eventSequence: 2 }));
+  await waitFor(() => expect(active.locateEntry).toHaveBeenCalledWith('entry-exact', expect.any(AbortSignal)));
+  expect(snapshot).not.toHaveBeenCalled();
+  const signal = active.locateEntry.mock.calls[0][1]!;
+  act(() => active.emit(projection('读取正文期间仍有实时进展')));
+  expect(await screen.findByText('读取正文期间仍有实时进展')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+  await screen.findByText('新会话的正文');
+  expect(signal.aborted).toBe(true);
+  await act(async () => { read.resolve(projection('迟到的旧正文')); active.publishRead(projection('旧订阅迟到')); });
+  expect(screen.queryByText('迟到的旧正文')).toBeNull();
+  expect(screen.queryByText('旧订阅迟到')).toBeNull();
+  expect(screen.getByText('新会话的正文')).toBeTruthy();
+  expect(active.submitPrompt).not.toHaveBeenCalled();
+});
+
+it('passes an explicit process reasoning read through the active session reader', async () => {
+  const originalObserver = globalThis.IntersectionObserver;
+  const observed: Array<{node: Element; notify: IntersectionObserverCallback}> = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private notify: IntersectionObserverCallback) {}
+    observe(node: Element) { observed.push({node, notify:this.notify}); }
+    disconnect() {}
+  });
+  try {
+    const adapter = new FakeAdapter();
+    const completed = projection('最后已核验的回复');
+    adapter.connectionValue = {...completed, isRunning:false, activeTurnId:undefined, messages:[{
+      ...completed.messages[0], assistantKind:'terminal', status:'completed', rootFinal:true, reasoningContentState:'unloaded',
+    }]};
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByText('最后已核验的回复');
+    const active = adapter.lastConnection!;
+    expect(active.hydrateEntries).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
+    const thought = observed.find(item => item.node.getAttribute('data-reasoning-entry') === 'assistant-1') ?? observed[0];
+    expect(thought).toBeTruthy();
+    act(() => thought.notify([{target:thought.node,isIntersecting:true}] as IntersectionObserverEntry[],{} as IntersectionObserver));
+    await waitFor(()=>expect(active.hydrateEntries).toHaveBeenCalledExactlyOnceWith(['assistant-1'],expect.any(AbortSignal),true));
+    expect(active.submitPrompt).not.toHaveBeenCalled();
+  } finally {
+    vi.stubGlobal('IntersectionObserver',originalObserver);
+  }
+});
+
+
+it('keeps the initial history context in the opening page while subscription and observe already run', async () => {
+  const adapter = new FakeAdapter();
+  const pending: RuntimeProjection = { ...projection('初始正文'), history: {
+    initialReady: false, hasOlder: false, loading: true, windows: [], compactions: [],
+  } };
+  pending.messages = pending.messages.map(message => ({ ...message, historyContextState: 'loading' }));
+  adapter.connectionValue = pending;
+  const observe = vi.spyOn(FakeConnection.prototype, 'observe');
+  try {
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('region', { name: '会话加载页' });
+    await waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+    const active = adapter.lastConnection!;
+    expect(active.subscribe).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('正在读取记录分组…')).toBeNull();
+    expect(document.querySelector('[data-source-entry]')).toBeNull();
+    expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
+    const ready: RuntimeProjection = { ...projection('初始正文'), history: { ...pending.history!, initialReady: true, loading: false } };
+    await act(async () => active.publishRead(ready));
+    expect(await screen.findByText('初始正文')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
+    await typeComposer('后续刷新保留草稿');
+    await act(async () => active.emit({ ...ready, history: { ...ready.history!, loading: true } }));
+    expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
+    expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('后续刷新保留草稿');
+    expect(adapter.connectCalls).toHaveLength(1);
+  } finally { observe.mockRestore(); }
+});
+
+it('retries only initial context from the opening error page and keeps the returning session draft', async () => {
+  const adapter = new FakeAdapter();
+  const other = { ...initialSession, id: 'session:hrluejkx3v2ajzf4ec6bb3ierm', title: '另一会话' };
+  adapter.sessions.push(other);
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
+  await screen.findByText('我已经开始检查。');
+  await typeComposer('恢复后保留的草稿');
+  fireEvent.click(screen.getByRole('button', { name: /另一会话.*可恢复/ }));
+  await waitFor(() => expect(adapter.lastConnection?.sessionId).toBe(other.id));
+  await screen.findByLabelText('发送给 Pulsara');
+  const failed: RuntimeProjection = { ...projection('重试后正文'), history: {
+    initialReady: false, initialError: '首次分组读取失败', hasOlder: false, loading: false, windows: [], compactions: [],
+  } };
+  adapter.connectionValue = failed;
+  fireEvent.click(screen.getByRole('button', { name: /准备发布/ }));
+  const loading = await screen.findByRole('region', { name: '会话加载页' });
+  await within(loading).findByText('首次分组读取失败');
+  const active = adapter.lastConnection!;
+  const ready: RuntimeProjection = { ...failed, history: { ...failed.history!, initialReady: true, initialError: undefined } };
+  const read = deferred<RuntimeProjection>();
+  active.readHistory.mockImplementationOnce(async () => read.promise);
+  const connects = adapter.connectCalls.length;
+  fireEvent.click(within(loading).getByRole('button', { name: '重试', exact: true }));
+  await waitFor(() => expect(active.readHistory).toHaveBeenCalledExactlyOnceWith(undefined, undefined, expect.any(AbortSignal)));
+  expect(active.subscribe).toHaveBeenCalledTimes(1);
+  expect(adapter.connectCalls).toHaveLength(connects);
+  await act(async () => read.resolve(ready));
+  expect(await screen.findByText('重试后正文')).toBeTruthy();
+  expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
+  expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('恢复后保留的草稿');
+  expect(adapter.connectCalls).toHaveLength(connects);
 });

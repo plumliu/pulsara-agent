@@ -254,6 +254,7 @@ export interface TurnInterruptionNotice {
   displayAfterEntrySequence: number;
   /** Disposable render position for entries presented inside an existing tool trace. */
   displayAfterMessageId?: string;
+  displayAfterEntryId?: string;
 }
 interface ProtocolTurnInterruptionNotice {
   owner_kind: TurnInterruptionNotice['ownerKind'];
@@ -269,9 +270,12 @@ export interface RuntimeProjection {
   subagentRuns?: SubagentRun[];
   /** Advisory live text; canonical task status remains authoritative. */
   subagentProgress?: Record<string, string>;
-  /** Canonical ROOT admission order, before lossy transcript presentation. */
+  /** Canonical ROOT order within loaded windows; absence does not establish adjacency. */
   canonicalRootTurnIds?: readonly string[];
   messages: Message[];
+  history?: BrowserHistoryState;
+  taskCreators?: Record<string, string>;
+  taskBatchCreators?: Record<string, string>;
   interruptionNotices?: TurnInterruptionNotice[];
   presentationNotices?: string[];
   contextCompaction?: ContextCompactionBoundary;
@@ -304,6 +308,7 @@ export interface QueuedPrompt {
   commandId: string;
   sequence: number;
   status: 'pending';
+  contentUnavailable?: boolean;
   inputOrigin?: string;
   deliveryMode: 'new-turn' | 'steer';
   targetTurnId?: string;
@@ -859,7 +864,6 @@ export function projectAgentTaskConversation(
     }
 
     if (record.entryKind === 'TERMINAL_OBSERVATION') {
-      const target = [...messages].reverse().find((message) => message.role === 'assistant');
       const trace: ToolTrace = {
         id: record.entryId,
         kind: 'terminal',
@@ -868,8 +872,7 @@ export function projectAgentTaskConversation(
         status: 'completed',
         resultText: body,
       };
-      if (target) target.traces = [...(target.traces ?? []), trace];
-      else messages.push({
+      messages.push({
         id: record.entryId,
         turnId: record.turnId,
         entrySequence: record.entrySequence,
@@ -912,6 +915,10 @@ function taskAssistantBody(entryKind: string, body: string): string {
 }
 
 export interface RuntimeConnection {
+  readHistory?: (windowId?: string, direction?: 'older' | 'newer', signal?: AbortSignal) => Promise<RuntimeProjection>;
+  hydrateEntries?: (ids: string[], signal?: AbortSignal, includeReasoning?: boolean) => Promise<RuntimeProjection>;
+  locateEntry?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
+  subscribe?: (listener: () => void) => () => void;
   locateAnnotationSource?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   readonly filePreview: FilePreviewApi;
   importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath>;
@@ -1205,6 +1212,7 @@ interface ProtocolTodoRunSnapshot {
 interface ProtocolCanonicalSnapshot {
   session_id: string;
   writer_generation?: string | number;
+  entry_sequence_cut?: string | number;
   event_sequence_cut?: string | number;
   entries?: ProtocolEntry[];
   interruption_notices?: ProtocolTurnInterruptionNotice[];
@@ -1215,7 +1223,7 @@ interface ProtocolCanonicalSnapshot {
 interface ProtocolHistoryCursor {
   session_id: string;
   cut_sequence: string | number;
-  event_sequence_cut: string | number;
+  event_sequence_cut?: string | number;
   entry_sequence: string | number;
 }
 
@@ -1224,6 +1232,59 @@ interface ProtocolHistoryPage {
   interruption_notices?: ProtocolTurnInterruptionNotice[];
   older_history_cursor?: ProtocolHistoryCursor;
   has_more?: boolean;
+}
+
+export interface BrowserHistoryState {
+  initialReady: boolean;
+  initialError?: string;
+  hasOlder: boolean;
+  loading: boolean;
+  error?: string;
+  windows: Array<{id: string; firstEntryId?: string; lastEntryId?: string; entryIds: string[]; hasOlder: boolean; hasNewer: boolean; loading: boolean; error?: string; contextState: 'loading' | 'ready' | 'error'; contextError?: string}>;
+  compactions: Array<{eventId: string; adoptedAfterEntrySequence: number; turnId: string; displayAfterEntryId?: string}>;
+}
+interface BrowserWindowCursor extends ProtocolHistoryCursor { direction: 'older' | 'newer' }
+interface BrowserWindow {
+  session_id: string;
+  cut_sequence: string;
+  event_sequence_cut: string;
+  entries: ProtocolEntry[];
+  older_cursor?: BrowserWindowCursor;
+  newer_cursor?: BrowserWindowCursor;
+}
+interface BrowserPageContext {
+  session_id: string; cut_sequence: string; event_sequence_cut: string; entry_ids: string[];
+  groups: Array<{owner_kind: string; owner_id: string; initial_entry_id: string; previous_root_owner_id?: string; next_root_owner_id?: string}>;
+  entry_contexts: Array<{entry_id: string; owner_kind: string; owner_id: string; root_owner_id?: string; parent_turn_id?: string; segment_id: string; segment_start_entry_id: string; previous_entry_id?: string; next_entry_id?: string}>;
+  tasks: Array<{task_id: string; parent_turn_id: string; parent_initial_entry_id: string; batch_id?: string}>;
+  batches: Array<{batch_id: string; parent_turn_id: string; creator_entry_id: string; creator_tool_call_id: string; task_count: string}>;
+  interruption_notices: ProtocolTurnInterruptionNotice[];
+  boundary_entries?: Array<{event_id: string; event_sequence: string; entry_id: string; entry_sequence: string}>;
+  compactions: Array<{event_id: string; event_sequence: string; turn_id: string; context_binding_revision_id: string; source_through_sequence: string; adopted_after_entry_sequence: string; accepted_at_utc: string}>;
+}
+interface BrowserHistoryPage {
+  id: string; entryIds: string[]; cut?: {cut_sequence: string; event_sequence_cut: string};
+  older?: ProtocolHistoryCursor | BrowserWindowCursor; newer?: BrowserWindowCursor;
+  loading: boolean; error?: string; read?: Promise<void>;
+  contextState: 'loading' | 'ready' | 'error'; contextError?: string; context?: BrowserPageContext; contextRead?: Promise<void>; needsFreshContext?: boolean; requiredContextEventCut?: string;
+}
+function waitForRead<T>(read: Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  if (!signal) return read;
+  return new Promise<T>((resolve, reject) => {
+    const cancel = () => reject(signal.reason);
+    signal.addEventListener('abort', cancel, {once: true});
+    read.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
+  });
+}
+function decimal(value: string | number | undefined): string {
+  if (value === undefined || (typeof value === 'number' && !Number.isSafeInteger(value)) || !/^(0|[1-9][0-9]*)$/.test(String(value))) throw new RuntimeApiError('HISTORY_SEQUENCE_INVALID', '会话游标格式无效。', false);
+  const result = BigInt(value);
+  if (result > BigInt('18446744073709551615')) throw new RuntimeApiError('HISTORY_SEQUENCE_INVALID', '会话游标超出协议范围。', false);
+  return result.toString();
+}
+function compareSequence(a: string | number | undefined, b: string | number | undefined): number {
+  const left = BigInt(decimal(a)), right = BigInt(decimal(b)); return left < right ? -1 : left > right ? 1 : 0;
 }
 
 interface ConnectPayload {
@@ -1244,6 +1305,9 @@ interface ObservationPayload {
   through_event_sequence?: string | number;
   committed?: Array<{
     projection_kind: string;
+    event_id?: string;
+    event_type?: string;
+    event_sequence?: string | number;
     entry?: ProtocolEntry;
     current_control?: ProtocolCanonicalControl;
     interruption_notice?: ProtocolTurnInterruptionNotice;
@@ -2149,6 +2213,7 @@ abstract class CanonicalHistoryReader {
   protected entries = new Map<string, ProtocolEntry>();
   protected control: ProtocolCanonicalControl = {};
   protected eventSequence = 0;
+  protected eventSequenceCursor = "0";
   protected writerGeneration = 0;
   protected interruptionNotices = new Map<string, ProtocolTurnInterruptionNotice>();
   protected mergeInterruptionNotices(notices: ProtocolTurnInterruptionNotice[]) {
@@ -2173,18 +2238,366 @@ abstract class CanonicalHistoryReader {
     for (const notice of this.interruptionNotices.values()) {
       const sequence = numeric(notice.display_after_entry_sequence);
       if (![...this.entries.values()].some(entry => numeric(entry.entry_sequence) === sequence)) continue;
-      const message = messages.filter(m => m.entrySequence !== undefined && m.entrySequence <= sequence).at(-1);
+      const source = [...this.entries.values()].find(entry => numeric(entry.entry_sequence) === sequence);
+      const message = source && messages.find(message => message.id === source.entry_id || message.sourceEntryIds?.includes(source.entry_id));
       mounted.push({ownerKind: notice.owner_kind, ownerId: notice.owner_id, reason: notice.reason,
         publicDetail: notice.public_detail, terminalAtUtc: notice.terminal_at_utc,
-        displayAfterEntrySequence: sequence, displayAfterMessageId: message?.id});
+        displayAfterEntrySequence: sequence, displayAfterEntryId: source?.entry_id, displayAfterMessageId: message?.id});
     }
     return mounted.sort((a,b) => a.displayAfterEntrySequence-b.displayAfterEntrySequence || a.ownerId.localeCompare(b.ownerId));
   }
-  protected olderHistoryCursor?: ProtocolHistoryCursor;
-  protected historyPageRead?: { promise: Promise<void>; signal?: AbortSignal };
   abstract readonly sessionId: string;
   protected abstract post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T>;
   protected abstract project(): RuntimeProjection;
+  protected pages: BrowserHistoryPage[] = [];
+  private listeners = new Set<() => void>();
+  private contentReads = new Map<string, Promise<void>>();
+  private contentErrors = new Map<string, string>();
+  private immutableReads = new Map<string, Promise<string>>();
+  private immutableBodies = new Map<string, string>();
+  protected readerClosed = false;
+  protected controlReadSequence = '0';
+  private pageCounter = 0;
+  private initialContextReady = false;
+  private knownQueuedContent = new Map<string, CanonicalPromptContent>();
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  protected changed() { if (!this.readerClosed) for (const listener of this.listeners) listener(); }
+  protected disposeReader() { this.readerClosed = true; this.listeners.clear(); }
+  protected historyPost<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T> {
+    if (this.readerClosed) throw new RuntimeApiError('HISTORY_CLOSED', '会话已切换。', false);
+    return apiRequest<T>(`/api/sessions/${encodeURIComponent(this.sessionId)}/history/${suffix}`, {
+      method: 'POST', body: JSON.stringify(body), signal,
+    });
+  }
+  protected mergeEntries(entries: ProtocolEntry[], observed = false) {
+    for (const entry of entries) {
+      const old = this.entries.get(entry.entry_id);
+      // A stale page cannot discard verified immutable bytes or overwrite
+      // dynamic metadata already installed by the ordered observation owner.
+      if (old) {
+        const preserve = (next?: ProtocolContent, previous?: ProtocolContent) => {
+          if (next && previous?.inline_content !== undefined && next.digest === previous.digest && String(next.size ?? 0) === String(previous.size ?? 0)) next.inline_content = previous.inline_content;
+        };
+        preserve(entry.content, old.content);
+        for (const block of [...entry.blocks ?? [], ...entry.reasoning_blocks ?? []]) {
+          preserve(block.content, [...old.blocks ?? [], ...old.reasoning_blocks ?? []].find(value => value.block_id === block.block_id)?.content);
+        }
+        if (!observed) { entry.root_final = old.root_final; entry.fork_eligible = old.fork_eligible; }
+      }
+      this.entries.set(entry.entry_id, entry);
+    }
+  }
+  protected installPage(entries: ProtocolEntry[], cut?: {cut_sequence: string | number; event_sequence_cut?: string | number}, older?: ProtocolHistoryCursor | BrowserWindowCursor, newer?: BrowserWindowCursor): BrowserHistoryPage | undefined {
+    if (!entries.length) return;
+    const ids = entries.map(entry => entry.entry_id);
+    const same = this.pages.find(page => page.entryIds.length === ids.length && page.entryIds.every((id, index) => id === ids[index]));
+    if (same) return same;
+    const page: BrowserHistoryPage = {id: `history:${++this.pageCounter}`, entryIds: ids,
+      cut: cut && cut.event_sequence_cut !== undefined ? {cut_sequence: decimal(cut.cut_sequence), event_sequence_cut: decimal(cut.event_sequence_cut)} : undefined,
+      older, newer, loading: false, contextState: 'loading'};
+    this.pages.push(page);
+    void this.loadPageContext(page);
+    return page;
+  }
+  protected installTail(snapshot: ProtocolCanonicalSnapshot) {
+    const entries = snapshot.entries ?? [];
+    if (!entries.length) this.initialContextReady = true;
+    this.mergeEntries(entries, true);
+    this.mergeInterruptionNotices(snapshot.interruption_notices ?? []);
+    this.installPage(entries, snapshot.entry_sequence_cut !== undefined ? {cut_sequence: snapshot.entry_sequence_cut, event_sequence_cut: snapshot.event_sequence_cut} : snapshot.older_history_cursor, snapshot.older_history_cursor);
+  }
+  protected async loadPageContext(page: BrowserHistoryPage, refresh = false, requiredEventCut?: string): Promise<void> {
+    if (refresh) page.needsFreshContext = true;
+    if (requiredEventCut && (!page.requiredContextEventCut || compareSequence(requiredEventCut, page.requiredContextEventCut) > 0)) page.requiredContextEventCut = requiredEventCut;
+    if (page.contextRead) {
+      await page.contextRead;
+      if (this.readerClosed || page.contextState === 'error') return;
+      if (page.needsFreshContext || (page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) < 0)) return this.loadPageContext(page, true, this.presentationBoundaryEventSequence);
+      return;
+    }
+    if (!refresh && page.contextState === 'ready' && !page.needsFreshContext && page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) >= 0) return;
+    const fresh = page.needsFreshContext === true;
+    const operation = (async () => {
+      page.contextState = 'loading'; page.contextError = undefined;
+      try {
+        const value = await this.historyPost<BrowserPageContext>('context', {
+          entry_ids: page.entryIds, ...(!fresh ? page.cut : undefined), maximum_serialized_bytes: 2 << 20,
+        });
+        if (this.readerClosed || !this.pages.includes(page)) return;
+        if (value.session_id !== this.sessionId || value.entry_ids.length !== page.entryIds.length
+          || !page.entryIds.every(id => value.entry_ids.includes(id))) throw new Error('历史展示上下文身份不一致。');
+        decimal(value.cut_sequence); decimal(value.event_sequence_cut);
+        if (fresh && page.requiredContextEventCut && compareSequence(value.event_sequence_cut, page.requiredContextEventCut) < 0) throw new Error('历史展示上下文早于已观察到的边界。');
+        if (!page.context || compareSequence(value.event_sequence_cut, page.context.event_sequence_cut) >= 0) page.context = value;
+        if (fresh && (!page.requiredContextEventCut || compareSequence(value.event_sequence_cut, page.requiredContextEventCut) >= 0)) page.needsFreshContext = false;
+        page.contextState = page.needsFreshContext ? 'loading' : 'ready';
+        if (page === this.pages[0] && page.contextState === 'ready') this.initialContextReady = true;
+        this.mergeInterruptionNotices(value.interruption_notices ?? []);
+      } catch (error) {
+        if (this.readerClosed) return;
+        page.contextState = 'error'; page.contextError = error instanceof Error ? error.message : '历史分组暂时无法读取。';
+      }
+      this.changed();
+    })();
+    page.contextRead = operation;
+    // Publish only after installing the in-flight read so a retry caused by a
+    // subscriber joins this request rather than advancing the history cursor.
+    this.changed();
+    try { await operation; } finally { if (page.contextRead === operation) page.contextRead = undefined; }
+    if (!this.readerClosed && page.contextState !== 'error' && page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) < 0) {
+      return this.loadPageContext(page, true, this.presentationBoundaryEventSequence);
+    }
+  }
+  protected presentationBoundaryEventSequence = "0";
+  private pendingBoundaryEvents = new Set<string>();
+  private boundaryRead?: Promise<void>;
+  private boundaryError?: string;
+  protected refreshBoundaryOccurrences(eventIds: string[]) {
+    for (const id of eventIds) this.pendingBoundaryEvents.add(id);
+    if (this.boundaryRead || !this.pendingBoundaryEvents.size || this.readerClosed) return;
+    const ids = [...this.pendingBoundaryEvents].slice(0, 128); // Existing observe event admission.
+    const operation = (async () => {
+      this.boundaryError = undefined;
+      try {
+        const value = await this.historyPost<BrowserPageContext>('context', {entry_ids: [], boundary_event_ids: ids, maximum_serialized_bytes: 2 << 20});
+        if (this.readerClosed) return;
+        if (value.session_id !== this.sessionId || !ids.every(id => value.boundary_entries?.some(boundary => boundary.event_id === id))) throw new Error('历史边界身份不一致。');
+        const edges = new Set(value.boundary_entries!.map(boundary => boundary.entry_id));
+        for (const page of this.pages) if (page.entryIds.some(id => edges.has(id))) void this.loadPageContext(page, true, value.event_sequence_cut);
+        for (const id of ids) this.pendingBoundaryEvents.delete(id);
+      } catch (error) { if (!this.readerClosed) this.boundaryError = error instanceof Error ? error.message : '历史边界暂时无法读取，请重试。'; }
+      this.changed();
+    })();
+    this.boundaryRead = operation;
+    void operation.finally(() => {
+      if (this.boundaryRead === operation) this.boundaryRead = undefined;
+      if (!this.boundaryError && this.pendingBoundaryEvents.size) this.refreshBoundaryOccurrences([]);
+    });
+  }
+  private connectedWindows(): BrowserHistoryPage[][] {
+    const ordered = this.pages.filter(page => page.entryIds.length).sort((a,b) => compareSequence(this.entries.get(a.entryIds[0])!.entry_sequence, this.entries.get(b.entryIds[0])!.entry_sequence));
+    const clusters: BrowserHistoryPage[][] = [];
+    for (const page of ordered) {
+      const cluster = clusters.at(-1);
+      const lastSequence = cluster && cluster.reduce((max, item) => {
+        const value = BigInt(decimal(this.entries.get(item.entryIds.at(-1)!)!.entry_sequence)); return value > max ? value : max;
+      }, BigInt(0));
+      if (cluster && BigInt(decimal(this.entries.get(page.entryIds[0])!.entry_sequence)) <= lastSequence! + BigInt(1)) cluster.push(page);
+      else clusters.push([page]);
+    }
+    return clusters;
+  }
+  protected historyState(): BrowserHistoryState {
+    const windows = this.connectedWindows().map(cluster => {
+      const ids = [...new Set(cluster.flatMap(page => page.entryIds))].sort((a,b) => compareSequence(this.entries.get(a)!.entry_sequence, this.entries.get(b)!.entry_sequence));
+      const first = cluster.find(page => page.entryIds[0] === ids[0])!;
+      const last = cluster.findLast(page => page.entryIds.at(-1) === ids.at(-1))!;
+      return {id: this.pages.find(page => cluster.includes(page))!.id, firstEntryId: ids[0], lastEntryId: ids.at(-1), entryIds: ids,
+        hasOlder: Boolean(first.older), hasNewer: Boolean(last.newer), loading: cluster.some(page => page.loading),
+        error: cluster.find(page => page.error || page.contextError)?.error ?? cluster.find(page => page.contextError)?.contextError,
+        contextState: cluster.some(page => page.contextState === 'error') ? 'error' as const : cluster.some(page => page.contextState !== 'ready') ? 'loading' as const : 'ready' as const,
+        contextError: cluster.find(page => page.contextError)?.contextError};
+    });
+    const compactions = new Map<string, BrowserPageContext['compactions'][number]>();
+    for (const page of this.pages) for (const item of page.context?.compactions ?? []) {
+      // A boundary belongs here only when the actual canonical edge is held.
+      if (page.entryIds.some(id => compareSequence(this.entries.get(id)!.entry_sequence, item.adopted_after_entry_sequence) === 0)) compactions.set(item.event_id, item);
+    }
+    return {initialReady: this.initialContextReady || !this.pages.length, initialError: this.initialContextReady ? undefined : this.pages[0]?.contextError, windows, hasOlder: Boolean(windows[0]?.hasOlder), loading: windows.some(window => window.loading), error: this.boundaryError ?? windows.find(window => window.error)?.error,
+      compactions: [...compactions.values()].map(item => ({eventId: item.event_id, adoptedAfterEntrySequence: numeric(item.adopted_after_entry_sequence), turnId: item.turn_id, displayAfterEntryId: [...this.entries.values()].find(entry => compareSequence(entry.entry_sequence, item.adopted_after_entry_sequence) === 0)?.entry_id}))};
+  }
+  async readHistory(windowId?: string, direction: 'older' | 'newer' = 'older', signal?: AbortSignal): Promise<RuntimeProjection> {
+    signal?.throwIfAborted();
+    if (this.boundaryError) { this.refreshBoundaryOccurrences([]); await this.boundaryRead; return this.project(); }
+    const cluster = this.connectedWindows().find(pages => pages.some(page => page.id === windowId)) ?? this.connectedWindows()[0];
+    if (!cluster) return this.project();
+    const pendingContext = cluster.filter(page => page.contextRead || page.contextState !== 'ready');
+    if (pendingContext.length) {
+      await waitForRead(Promise.all(pendingContext.map(page => this.loadPageContext(page))), signal);
+      return this.project();
+    }
+    const ordered = [...cluster].sort((a,b) => compareSequence(this.entries.get(a.entryIds[0])!.entry_sequence, this.entries.get(b.entryIds[0])!.entry_sequence));
+    const page = direction === 'older' ? ordered[0] : ordered.at(-1)!;
+    if (page.read) { await page.read; signal?.throwIfAborted(); return this.project(); }
+    const cursor = direction === 'older' ? page.older : page.newer;
+    if (!cursor) return this.project();
+    const operation = (async () => {
+      page.loading = true; page.error = undefined; this.changed();
+      try {
+        let entries: ProtocolEntry[], older: ProtocolHistoryCursor | BrowserWindowCursor | undefined, newer: BrowserWindowCursor | undefined;
+        if ('direction' in cursor) {
+          const window = await this.historyPost<BrowserWindow>('window', {cursor, maximum_entries: 128, maximum_serialized_bytes: 2 << 20}, signal);
+          if (window.session_id !== this.sessionId) throw new Error('历史窗口身份不一致。');
+          entries = window.entries; older = window.older_cursor; newer = window.newer_cursor;
+        } else {
+          const frame = await this.historyPost<{history_page?: ProtocolHistoryPage; error?: ProtocolError}>('history', {cursor, maximum_entries: 128, maximum_serialized_bytes: 2 << 20}, signal);
+          assertProtocolFrame(frame);
+          if (!frame.history_page) throw new Error('较早的会话内容暂时无法加载。');
+          const next = frame.history_page.older_history_cursor;
+          if (frame.history_page.has_more && (!next || next.session_id !== cursor.session_id
+            || compareSequence(next.cut_sequence, cursor.cut_sequence) !== 0
+            || (next.event_sequence_cut === undefined) !== (cursor.event_sequence_cut === undefined)
+            || compareSequence(next.event_sequence_cut ?? '0', cursor.event_sequence_cut ?? '0') !== 0
+            || compareSequence(next.entry_sequence, cursor.entry_sequence) >= 0)) throw new Error('历史游标没有向前推进。');
+          entries = frame.history_page.entries ?? []; older = frame.history_page.has_more ? next : undefined;
+        }
+        signal?.throwIfAborted();
+        if (this.readerClosed || !this.pages.includes(page)) return;
+        if (direction === 'older' ? page.older !== cursor : page.newer !== cursor) return;
+        this.mergeEntries(entries);
+        this.installPage(entries, cursor, older, newer);
+        if (direction === 'older') page.older = undefined; else page.newer = undefined;
+      } catch (error) {
+        if (!signal?.aborted && !this.readerClosed) page.error = error instanceof Error ? error.message : '历史暂时无法加载。';
+        if (signal?.aborted) throw error;
+      } finally { page.loading = false; this.changed(); }
+    })();
+    page.read = operation;
+    try { await operation; } finally { if (page.read === operation) page.read = undefined; }
+    return this.project();
+  }
+  async locateEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    signal.throwIfAborted();
+    if (!this.entries.has(entryId)) {
+      const window = await this.historyPost<BrowserWindow>('window', {anchor_entry_id: entryId, maximum_entries: 128, maximum_serialized_bytes: 2 << 20}, signal);
+      signal.throwIfAborted();
+      if (this.readerClosed) throw new RuntimeApiError('HISTORY_CLOSED', '会话已切换。', false);
+      if (window.session_id !== this.sessionId || !window.entries.some(entry => entry.entry_id === entryId)) throw new RuntimeApiError('HISTORY_ANCHOR_MISSING', '找不到来源记录。', false);
+      this.mergeEntries(window.entries);
+      this.installPage(window.entries, window, window.older_cursor, window.newer_cursor);
+    }
+    for (const page of this.pages.filter(page => page.entryIds.includes(entryId))) {
+      await waitForRead(this.loadPageContext(page), signal);
+      if (page.contextRead) await waitForRead(page.contextRead, signal);
+    }
+    signal.throwIfAborted();
+    const contextPage = this.pages.find(page => page.entryIds.includes(entryId) && page.contextState === 'ready');
+    if (!contextPage) throw new RuntimeApiError('HISTORY_CONTEXT_UNAVAILABLE', '来源区域的展示上下文暂时无法读取，请重试。', true);
+    await this.hydrateEntries([entryId], signal);
+    signal.throwIfAborted();
+    return this.project();
+  }
+  async locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    await this.locateEntry(entryId, signal);
+    const entry = this.entries.get(entryId);
+    if (!entry || !['ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'].includes(entry.entry_kind)) throw new RuntimeApiError('ANNOTATION_SOURCE_MISSING', '当前会话中找不到来源回复。', false);
+    if (this.entryContentState(entryId) !== 'ready') throw new RuntimeApiError('ANNOTATION_SOURCE_UNAVAILABLE', this.contentErrors.get(entryId) ?? '来源正文暂时无法读取。', true);
+    return this.project();
+  }
+  protected entryContentState(entryId: string, reasoning = false): 'unloaded' | 'loading' | 'ready' | 'error' {
+    const key = reasoning ? `${entryId}:reasoning` : entryId;
+    if (this.contentErrors.has(key)) return 'error';
+    if (this.contentReads.has(key)) return 'loading';
+    const entry = this.entries.get(entryId);
+    const refs = entry ? reasoning ? entry.reasoning_blocks?.map(block => block.content) ?? [] : [entry.content, ...entry.blocks?.map(block => block.content) ?? []] : [];
+    return refs.some(ref => ref && ref.inline_content === undefined && numeric(ref.size) > 0) ? 'unloaded' : 'ready';
+  }
+  async hydrateEntries(entryIds: string[], signal?: AbortSignal, includeReasoning = false): Promise<RuntimeProjection> {
+    await waitForRead(Promise.all(entryIds.map(async entryId => {
+      signal?.throwIfAborted();
+      const key = includeReasoning ? `${entryId}:reasoning` : entryId;
+      const pending = this.contentReads.get(key);
+      if (pending) { await waitForRead(pending, signal); return; }
+      const entry = this.entries.get(entryId);
+      if (!entry || (this.entryContentState(entryId) === 'ready' && (!includeReasoning || this.entryContentState(entryId, true) === 'ready'))) return;
+      this.contentErrors.delete(key);
+      const operation = (async () => {
+        try {
+          await this.hydrateContentReference(entry.content, {entry_id: entryId}, '这条会话内容暂时无法完整读取。');
+          for (const block of [...entry.blocks ?? [], ...(includeReasoning ? entry.reasoning_blocks ?? [] : [])]) await this.hydrateContentReference(block.content, {entry_id: entryId, block_id: block.block_id}, '这段正文暂时无法完整读取。');
+        } catch (error) { if (!this.readerClosed) this.contentErrors.set(key, error instanceof Error ? error.message : '正文暂时无法读取。'); }
+      })();
+      this.contentReads.set(key, operation); this.changed();
+      try { await operation; } finally { if (this.contentReads.get(key) === operation) this.contentReads.delete(key); this.changed(); }
+    })), signal);
+    signal?.throwIfAborted();
+    return this.project();
+  }
+  protected presentationHistory(messages: Message[]): BrowserHistoryState {
+    const state = this.historyState();
+    const host = (id?: string) => messages.find(message => message.id === id || message.sourceEntryIds?.includes(id ?? ''))?.id;
+    for (const window of state.windows) {
+      window.firstEntryId = host(window.firstEntryId) ?? window.entryIds.map(id => host(id)).find(Boolean);
+      window.lastEntryId = host(window.lastEntryId) ?? window.entryIds.map(id => host(id)).filter(Boolean).at(-1);
+    }
+    for (const item of state.compactions) item.displayAfterEntryId = host(item.displayAfterEntryId);
+    return state;
+  }
+  protected windowJoinPredicate(): (a: string, b: string) => boolean {
+    const membership = new Map<string, number>();
+    this.connectedWindows().forEach((cluster, index) => { for (const page of cluster) for (const id of page.entryIds) membership.set(id, index); });
+    return (a,b) => membership.has(a) && membership.get(a) === membership.get(b);
+  }
+  protected decorateSubagentRuns(runs: SubagentRun[]) {
+    const tasks = this.pages.flatMap(page => page.context?.tasks ?? []);
+    const originalActivities = runs.flatMap(run => run.activities);
+    const activities: Message[] = originalActivities.map(activity => ({...activity, role: 'assistant', status: undefined}));
+    this.decorateHistory(activities);
+    for (const run of runs) run.parentId ??= tasks.find(task => task.task_id === run.id)?.parent_turn_id;
+    activities.forEach((activity, index) => Object.assign(originalActivities[index], {
+        sourceEntryIds: activity.sourceEntryIds, historyContextState: activity.historyContextState, historyContextError: activity.historyContextError,
+        contentState: activity.contentState, contentError: activity.contentError, reasoningContentState: activity.reasoningContentState, reasoningContentError: activity.reasoningContentError,
+      }));
+  }
+  protected rememberQueueContent(control: ProtocolCanonicalControl) {
+    for (const item of control.prompt_queue ?? []) if (item.command_id && item.queue_item_id && item.content?.inline_content !== undefined) {
+      this.knownQueuedContent.set(`${item.command_id}:${item.queue_item_id}`, decodePromptContent(item.content, {kind:'queue', queueItemId: item.queue_item_id}));
+    }
+  }
+  protected decorateHistory(messages: Message[]): Message[] {
+    const contexts = new Map<string, {entry: BrowserPageContext['entry_contexts'][number]; page: BrowserHistoryPage}>();
+    for (const page of this.pages) for (const entry of page.context?.entry_contexts ?? []) {
+      const previous = contexts.get(entry.entry_id);
+      if (!previous || compareSequence(page.context!.event_sequence_cut, previous.page.context!.event_sequence_cut) >= 0) contexts.set(entry.entry_id, {entry, page});
+    }
+    const windows = this.historyState().windows;
+    for (const message of messages) {
+      const sourceIds = message.sourceEntryIds ?? [message.id];
+      message.sourceEntryIds = sourceIds;
+      const context = contexts.get(message.id);
+      const page = context?.page ?? this.pages.find(page => page.entryIds.includes(message.id));
+      message.historyGroupId = context?.entry.segment_id;
+      // Installed exact-entry context remains usable while its page refreshes.
+      // The page/window owns refresh loading and errors; new entries without
+      // installed context still wait before receiving a semantic group.
+      message.historyContextState = context ? 'ready' : page?.contextState;
+      message.historyContextError = context ? undefined : page?.contextError;
+      message.historyWindowId = windows.find(window => window.entryIds.includes(message.id))?.id;
+      message.historyEarlierUnloaded = Boolean(context && context.entry.segment_start_entry_id && !this.entries.has(context.entry.segment_start_entry_id));
+      // Live observations keep their advisory presentation until canonical
+      // metadata supplies a stable host; they are never verified bodies.
+      if (!this.entries.has(message.id)) continue;
+      const states = sourceIds.map(id => this.entryContentState(id));
+      message.contentState = states.includes('error') ? 'error' : states.includes('loading') ? 'loading' : states.includes('unloaded') ? 'unloaded' : 'ready';
+      message.contentError = sourceIds.map(id => this.contentErrors.get(id)).find(Boolean);
+      if (message.inputSource) {
+        const key = `${message.inputSource.commandId}:${message.inputSource.queueItemId}`;
+        if (message.contentState === 'ready') this.knownQueuedContent.delete(key);
+        else message.pendingContent = this.knownQueuedContent.get(key);
+      }
+      message.reasoningContentState = this.entryContentState(message.id, true);
+      message.reasoningContentError = this.contentErrors.get(`${message.id}:reasoning`);
+      if (message.userKind === 'subagent-completion' && message.sourceSubagentTaskId) {
+        const task = [...this.pages].flatMap(page => page.context?.tasks ?? []).find(task => task.task_id === message.sourceSubagentTaskId);
+        const group = page?.context?.groups.find(group => group.owner_id === context?.entry.root_owner_id);
+        message.sourceSubagentRelation = task?.parent_turn_id === message.turnId ? 'current' : task && group?.previous_root_owner_id === task.parent_turn_id ? 'previous' : task && group ? 'earlier' : undefined;
+      }
+    }
+    return messages;
+  }
+  protected taskCreators(): Record<string, string> {
+    const batches = this.pages.flatMap(page => page.context?.batches ?? []);
+    const tasks = this.pages.flatMap(page => page.context?.tasks ?? []);
+    return Object.fromEntries(tasks.flatMap(task => {
+      const batch = batches.find(batch => batch.batch_id === task.batch_id && batch.parent_turn_id === task.parent_turn_id);
+      return batch ? [[task.task_id, batch.creator_entry_id]] : [];
+    }));
+  }
+
   async readCanonicalEntryContent(
     entryId: string,
     digest: string,
@@ -2206,7 +2619,7 @@ abstract class CanonicalHistoryReader {
   }
 
   async readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string> {
-    const result = await this.post<{ image: string }>('visualization-thumbnail', {
+    const result = await this.historyPost<{ image: string }>('visualization-thumbnail', {
       entry_id: entryId, ordinal, digest, size,
     }, signal);
     if (!result.image?.startsWith('data:image/png;base64,')) throw new Error('缩略图暂时无法生成。');
@@ -2262,7 +2675,7 @@ abstract class CanonicalHistoryReader {
     offsetChars: number,
     maxChars = 32_000,
   ): Promise<ToolArtifactPage> {
-    const frame = await this.post<{
+    const frame = await this.historyPost<{
       tool_artifact?: {
         result_entry_id?: string; text?: string; offset_chars?: string | number;
         returned_chars?: string | number; total_chars?: string | number;
@@ -2288,101 +2701,6 @@ abstract class CanonicalHistoryReader {
     };
   }
 
-  protected async readOlderHistoryPage(signal?: AbortSignal): Promise<void> {
-    signal?.throwIfAborted();
-    if (this.historyPageRead) {
-      const pending = this.historyPageRead;
-      try {
-        // A waiter owns its cancellation, without aborting another caller's read.
-        await new Promise<void>((resolve, reject) => {
-          const aborted = () => reject(signal!.reason);
-          signal?.addEventListener('abort', aborted, { once: true });
-          pending.promise.then(resolve, reject).finally(() => signal?.removeEventListener('abort', aborted));
-        });
-      } catch (error) {
-        signal?.throwIfAborted();
-        if (!pending.signal?.aborted) throw error;
-        // A replacement lookup resumes from the unchanged owner cursor after
-        // the preceding lookup's canceled operation has settled.
-        if (this.historyPageRead === pending) this.historyPageRead = undefined;
-        return this.readOlderHistoryPage(signal);
-      }
-      signal?.throwIfAborted(); return;
-    }
-    const cursor = this.olderHistoryCursor;
-    if (!cursor) return;
-    const operation = (async () => {
-      const frame = await this.post<{ history_page?: ProtocolHistoryPage; error?: ProtocolError }>('history', {
-        cursor, maximum_entries: 256, maximum_serialized_bytes: 2 << 20,
-      }, signal);
-      signal?.throwIfAborted();
-      assertProtocolFrame(frame);
-      const page = frame.history_page;
-      if (!page) throw new RuntimeApiError('HISTORY_RESPONSE_INVALID', '较早的会话内容暂时无法加载。', true);
-      // A replacement snapshot owns a different cursor and cut.
-      if (this.olderHistoryCursor !== cursor) return;
-      const next = page.older_history_cursor;
-      if (page.has_more && (!next || next.session_id !== cursor.session_id
-        || numeric(next.cut_sequence) !== numeric(cursor.cut_sequence)
-        || numeric(next.event_sequence_cut) !== numeric(cursor.event_sequence_cut)
-        || numeric(next.entry_sequence) >= numeric(cursor.entry_sequence))) {
-        throw new RuntimeApiError('HISTORY_CURSOR_INVALID', '较早的会话内容无法继续加载。', true);
-      }
-      this.mergeInterruptionNotices(page.interruption_notices ?? []);
-      for (const entry of page.entries ?? []) this.entries.set(entry.entry_id, entry);
-      this.olderHistoryCursor = page.has_more ? next : undefined;
-    })();
-    const pending = { promise: operation, signal };
-    this.historyPageRead = pending;
-    try { await operation; } finally { if (this.historyPageRead === pending) this.historyPageRead = undefined; }
-  }
-
-  protected async backfillOlderHistory(): Promise<void> {
-    while (this.olderHistoryCursor) await this.readOlderHistoryPage();
-  }
-
-  async locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
-    signal.throwIfAborted();
-    while (!this.entries.has(entryId) && this.olderHistoryCursor) {
-      await this.readOlderHistoryPage(signal); signal.throwIfAborted();
-    }
-    const entry = this.entries.get(entryId);
-    if (!entry || !['ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'].includes(entry.entry_kind ?? '')) {
-      throw new RuntimeApiError('ANNOTATION_SOURCE_MISSING', '当前会话中找不到来源回复。', false);
-    }
-    for (const block of entry.blocks ?? []) {
-      signal.throwIfAborted();
-      if (block.block_kind === 'TEXT') await this.hydrateContentReference(block.content,
-        { entry_id: entryId, block_id: block.block_id }, '来源回复暂时无法完整读取。', signal);
-    }
-    signal.throwIfAborted();
-    return this.project();
-  }
-
-  protected async hydrateCanonicalContent(): Promise<void> {
-    for (const entry of this.entries.values()) {
-      await this.hydrateContentReference(
-        entry.content,
-        { entry_id: entry.entry_id },
-        '这条会话内容暂时无法完整读取。',
-      );
-      for (const block of entry.blocks ?? []) {
-        await this.hydrateContentReference(
-          block.content,
-          { entry_id: entry.entry_id, block_id: block.block_id },
-          '这条模型回复暂时无法完整读取。',
-        );
-      }
-      for (const block of entry.reasoning_blocks ?? []) {
-        await this.hydrateContentReference(
-          block.content,
-          { entry_id: entry.entry_id, block_id: block.block_id },
-          '这段思考内容暂时无法完整读取。',
-        );
-      }
-    }
-  }
-
   protected async hydrateContentReference(
     reference: ProtocolContent | undefined,
     target: { entry_id: string; block_id?: string } | { queue_item_id: string },
@@ -2392,15 +2710,29 @@ abstract class CanonicalHistoryReader {
     if (!reference || reference.inline_content !== undefined || numeric(reference.size) === 0) return;
     const expectedSize = numeric(reference.size);
     const expectedDigest = reference.digest ?? '';
-    const complete = await this.readExactContentBytes(
-      target,
-      expectedDigest,
-      expectedSize,
-      publicMessage,
-      true,
-      signal,
-    );
-    reference.inline_content = encodeBase64Bytes(complete);
+    const key = JSON.stringify([target, expectedDigest, expectedSize]);
+    const cached = this.immutableBodies.get(key);
+    if (cached !== undefined) { reference.inline_content = cached; return; }
+    let pending = this.immutableReads.get(key);
+    if (!pending) {
+      pending = this.readExactContentBytes(target, expectedDigest, expectedSize, publicMessage, true)
+        .then(bytes => {
+          const encoded = encodeBase64Bytes(bytes);
+          if (!this.readerClosed) this.immutableBodies.set(key, encoded);
+          return encoded;
+        });
+      this.immutableReads.set(key, pending);
+      void pending.finally(() => { if (this.immutableReads.get(key) === pending) this.immutableReads.delete(key); }).catch(() => undefined);
+    }
+    const body = await waitForRead(pending, signal);
+    signal?.throwIfAborted();
+    if (this.readerClosed) return;
+    reference.inline_content = body;
+    if ('entry_id' in target) {
+      const current = this.entries.get(target.entry_id);
+      const currentRef = target.block_id ? [...current?.blocks ?? [], ...current?.reasoning_blocks ?? []].find(block => block.block_id === target.block_id)?.content : current?.content;
+      if (currentRef?.digest === expectedDigest && numeric(currentRef.size) === expectedSize) currentRef.inline_content = body;
+    }
   }
 
   protected async readExactContentBytes(
@@ -2422,7 +2754,7 @@ abstract class CanonicalHistoryReader {
     let frozenMedia: ContentMedia | undefined;
     while (true) {
       signal?.throwIfAborted();
-      const frame = await this.post<{
+      const frame = await this.historyPost<{
         content?: {
           digest?: string; complete_size?: string | number; offset_bytes?: string | number;
           content?: string; complete?: boolean; media_type?: string; codec?: string; image_ref?: string; width?: number; height?: number;
@@ -2499,11 +2831,10 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
   constructor(readonly sessionId: string, readonly availability: WorkspaceAvailability,
               snapshot: ProtocolCanonicalSnapshot) {
     super();
-    this.entries = new Map((snapshot.entries ?? []).map(entry => [entry.entry_id, entry]));
-    this.mergeInterruptionNotices(snapshot.interruption_notices ?? []);
+    this.installTail(snapshot);
     this.control = snapshot.control ?? {};
-    this.olderHistoryCursor = snapshot.older_history_cursor;
     this.eventSequence = numeric(snapshot.event_sequence_cut);
+    this.controlReadSequence = decimal(snapshot.event_sequence_cut ?? 0);
   }
   protected post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T> {
     if (this.closed) throw new RuntimeApiError('HISTORY_CLOSED', '会话已切换。', false);
@@ -2512,29 +2843,31 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
     });
   }
   async initialize() {
-    await this.backfillOlderHistory();
-    await this.hydrateCanonicalContent();
+    // Only metadata is installed here. The observer and composer do not wait
+    // for page context or immutable content reads.
+    void this.hydrateReadonlyQueue();
+  }
+  private async hydrateReadonlyQueue() {
     for (const item of this.control.prompt_queue ?? []) {
-      try {
-        await this.hydrateContentReference(item.content, {queue_item_id: item.queue_item_id!}, '待运行输入暂时无法读取。');
-      } catch (error) {
-        if (!(error instanceof RuntimeApiError) || error.code !== 'CONTENT_QUEUE_NOT_PENDING') throw error;
-        // The snapshot cut still retains this queue observation. Its content
-        // edge has since retired; show the existing unavailable presentation.
-      }
+      try { await this.hydrateContentReference(item.content, {queue_item_id: item.queue_item_id!}, '待运行输入暂时无法读取。'); }
+      catch { /* An unavailable retired queue body does not resume a Host. */ }
     }
+    this.changed();
   }
   current(): RuntimeProjection { return this.project(); }
-  async close() { this.closed = true; }
+  async close() { this.closed = true; this.disposeReader(); }
   protected project(): RuntimeProjection {
     const canonical = [...this.entries.values()].sort((a,b) => numeric(a.entry_sequence) - numeric(b.entry_sequence));
     const agentTasks: AgentTask[] = [];
-    const messages = projectEntries(canonical, new Set());
+    const sameWindow = this.windowJoinPredicate();
+    const messages = projectEntries(canonical, new Set(), sameWindow);
     const canonicalRootTurnIds = orderedRootTurnIdsFromEntries(canonical);
-    annotateSubagentCompletionSources(messages, agentTasks, canonicalRootTurnIds);
-    const subagentRuns = projectSubagentRuns(canonical, agentTasks, []);
-    attachSubagentRuns(messages, subagentRuns);
-    return {messages, interruptionNotices: this.projectInterruptionNotices(messages), canonicalRootTurnIds, subagentRuns, agentTasks, subagentProgress: {},
+    annotateSubagentCompletionSources(messages, agentTasks);
+    const subagentRuns = projectSubagentRuns(canonical, agentTasks, [], sameWindow);
+    this.decorateSubagentRuns(subagentRuns);
+    attachSubagentRuns(messages, subagentRuns, this.taskCreators());
+    this.decorateHistory(messages);
+    return {messages, history: this.presentationHistory(messages), taskCreators: this.taskCreators(), taskBatchCreators: Object.fromEntries(this.pages.flatMap(page => (page.context?.batches ?? []).map(batch => [batch.batch_id, batch.creator_entry_id]))), interruptionNotices: this.projectInterruptionNotices(messages), canonicalRootTurnIds, subagentRuns, agentTasks, subagentProgress: {},
       presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base, isRunning: false,
       queuedCount: numeric(this.control.prompt_queue_total_count), queuedPrompts: projectQueuedPrompts(this.control),
@@ -2632,10 +2965,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     });
   }
 
-  async initialize(): Promise<void> {
-    await this.backfillOlderHistory();
-    await this.hydrateProjectionContent();
-  }
+  async initialize(): Promise<void> { void this.hydrateQueuedPromptContent(); }
 
   async importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath> {
     if (this.closed || this.role !== 'controller') throw new RuntimeApiError('IMPORT_CONTROLLER_REQUIRED', '当前页面没有文件导入控制权。', true);
@@ -2664,24 +2994,30 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     return this.project();
   }
 
-  async snapshot(): Promise<RuntimeProjection> {
-    const frame = await this.post<{
-      snapshot?: { snapshot?: ProtocolCanonicalSnapshot };
-      error?: ProtocolError;
-    }>('snapshot', {});
-    assertProtocolFrame(frame);
-    if (!frame.snapshot?.snapshot) {
-      throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务返回的数据不完整。', true);
-    }
-    this.replaceSnapshot(frame.snapshot.snapshot);
-    await this.backfillOlderHistory();
-    await this.hydrateProjectionContent();
-    return this.project();
+  private observationOwner: Promise<unknown> = Promise.resolve();
+  private observationInstalled = false;
+  private ordered<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.observationOwner.then(operation);
+    this.observationOwner = next.catch(() => undefined);
+    return next;
   }
-
-  async observe(signal?: AbortSignal): Promise<RuntimeProjection> {
+  snapshot(): Promise<RuntimeProjection> {
+    return this.ordered(async () => {
+      const frame = await apiRequest<{snapshot?: {snapshot?: ProtocolCanonicalSnapshot}; error?: ProtocolError}>(`/api/sessions/${encodeURIComponent(this.sessionId)}/history-snapshot`);
+      assertProtocolFrame(frame);
+      const snapshot = frame.snapshot?.snapshot;
+      if (!snapshot) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务返回的数据不完整。', true);
+      this.replaceSnapshot(snapshot);
+      void this.hydrateQueuedPromptContent();
+      return this.project();
+    });
+  }
+  observe(signal?: AbortSignal): Promise<RuntimeProjection> {
+    return this.ordered(() => this.observeNext(signal));
+  }
+  private async observeNext(signal?: AbortSignal): Promise<RuntimeProjection> {
     const frame = await this.post<{ observation?: ObservationPayload; error?: ProtocolError }>('observe', {
-      after_event_sequence: this.eventSequence,
+      after_event_sequence: this.eventSequenceCursor,
       live_owner_epoch: this.liveOwnerEpoch,
       after_live_revision: this.liveRevision,
       live_control_owner_epoch: this.liveControlOwnerEpoch,
@@ -2695,10 +3031,20 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务暂时没有返回更新。', true);
     }
     const observation = frame.observation;
-    if (observation.gap?.kind) {
+    const liveRingGap = observation.gap?.kind === 'LIVE_GAP'
+      && observation.gap.reason === 'LIVE_RING_OVERFLOW';
+    if (observation.gap?.kind && !liveRingGap) {
       throw new RuntimeGapError(observation.gap.kind, '连接状态需要刷新。');
     }
     this.presentationNotices = [...(observation.presentation_notices ?? [])];
+    if (liveRingGap) {
+      // A fresh advisory cut cannot reconstruct the missing process.
+      // Preserve canonical entries, hydrated content and the controller owner.
+      this.drafts.clear();
+      this.liveResults.clear();
+      this.taskProgress.clear();
+      this.presentationNotices.push('部分临时进展已丢失，已从当前进展继续；已保存的会话记录不受影响。');
+    }
     this.liveControl.root_compaction_in_progress = observation.root_compaction_in_progress === true;
     this.taskInvalidations = [...new Set((observation.committed ?? [])
       .map((item) => item.affected_subagent_task_id)
@@ -2706,13 +3052,15 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.taskGroupInvalidations = [...new Set((observation.committed ?? [])
       .map((item) => item.affected_subagent_batch_id)
       .filter((item): item is string => Boolean(item)))];
+    this.rememberQueueContent(this.control);
     for (const committed of observation.committed ?? []) {
       if (committed.interruption_notice) this.mergeInterruptionNotices([committed.interruption_notice]);
       if (committed.projection_kind === 'IMMUTABLE_ENTRY' && committed.entry) {
-        this.entries.set(committed.entry.entry_id, committed.entry);
+        this.mergeEntries([committed.entry], true);
       }
-      if (committed.current_control) {
+      if (committed.current_control && compareSequence(committed.control_read_event_sequence ?? observation.through_event_sequence ?? 0, this.controlReadSequence) >= 0) {
         this.control = committed.current_control;
+        this.controlReadSequence = decimal(committed.control_read_event_sequence ?? observation.through_event_sequence ?? 0);
       }
     }
     this.applyLive(observation.live ?? [], observation.settlements ?? []);
@@ -2729,12 +3077,41 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       }
       else if (event.interaction) this.liveControl.current_interaction = event.interaction;
     }
-    this.eventSequence = numeric(observation.through_event_sequence ?? this.eventSequence);
+    this.eventSequenceCursor = decimal(observation.through_event_sequence ?? this.eventSequenceCursor);
+    this.eventSequence = numeric(this.eventSequenceCursor);
+    const appended = (observation.committed ?? []).flatMap(item => item.projection_kind === 'IMMUTABLE_ENTRY' && item.entry ? [item.entry] : []);
+    if (appended.length) this.installPage(appended);
+    const boundaryOccurrences = (observation.committed ?? []).filter(item => ['COMPACTION_ADOPTED', 'TURN_INTERRUPTED'].includes(item.event_type ?? '') && item.event_id);
+    for (const occurrence of boundaryOccurrences) if (compareSequence(occurrence.event_sequence ?? this.eventSequenceCursor, this.presentationBoundaryEventSequence) > 0) this.presentationBoundaryEventSequence = decimal(occurrence.event_sequence ?? this.eventSequenceCursor);
+    this.refreshBoundaryOccurrences(boundaryOccurrences.map(item => item.event_id!));
     this.liveOwnerEpoch = numeric(observation.live_owner_epoch ?? this.liveOwnerEpoch);
     this.liveRevision = numeric(observation.through_live_revision ?? this.liveRevision);
     this.liveControlOwnerEpoch = numeric(observation.live_control_owner_epoch ?? this.liveControlOwnerEpoch);
     this.liveControlRevision = numeric(observation.through_live_control_revision ?? this.liveControlRevision);
-    await this.hydrateProjectionContent();
+    const todosInvalidated = (observation.live ?? []).some(
+      event => event.event_type === 'TODO_SNAPSHOT_UPDATED',
+    );
+    if (liveRingGap || todosInvalidated) {
+      // TODO live events invalidate the owner snapshot; their separate stream
+      // can lag a previously read baseline, including across run changes.
+      const controlFrame = await this.post<{
+        live_control_snapshot?: { snapshot?: ProtocolLiveControlSnapshot };
+        error?: ProtocolError;
+      }>('live-control-snapshot', {}, signal);
+      assertProtocolFrame(controlFrame);
+      const baseline = controlFrame.live_control_snapshot?.snapshot;
+      if (!baseline) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '当前运行状态暂时无法读取。', true);
+      if (liveRingGap) {
+        this.liveControl = baseline;
+        this.liveControlOwnerEpoch = numeric(baseline.owner_epoch);
+        this.liveControlRevision = numeric(baseline.live_revision);
+      } else {
+        // Keep interaction state and its cursor together: the ordinary control
+        // suffix still owns those transitions after this TODO-only refresh.
+        this.liveControl.current_todos = baseline.current_todos ?? [];
+      }
+    }
+    void this.hydrateQueuedPromptContent();
     return this.project();
   }
 
@@ -3153,6 +3530,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.disposeReader();
     try {
       await apiRequest(`/api/connections/${encodeURIComponent(this.connectionId)}`, {
         method: 'DELETE',
@@ -3234,80 +3612,47 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
 
   private replaceSnapshot(snapshot: ProtocolCanonicalSnapshot) {
-    if (numeric(snapshot.event_sequence_cut) < this.eventSequence) return;
-    this.entries = new Map((snapshot.entries ?? []).map((entry) => [entry.entry_id, entry]));
-    this.mergeInterruptionNotices(snapshot.interruption_notices ?? []);
-    this.olderHistoryCursor = snapshot.older_history_cursor;
-    this.control = snapshot.control ?? {};
+    if (compareSequence(snapshot.event_sequence_cut ?? 0, this.eventSequenceCursor) < 0) return;
+    this.rememberQueueContent(this.control);
+    this.installTail(snapshot);
+    if (compareSequence(snapshot.event_sequence_cut ?? 0, this.controlReadSequence) >= 0) {
+      this.control = snapshot.control ?? {};
+      this.controlReadSequence = decimal(snapshot.event_sequence_cut ?? 0);
+    }
     this.taskInvalidations = [];
     this.taskGroupInvalidations = [];
     this.taskSnapshotRevision += 1;
-    this.eventSequence = numeric(snapshot.event_sequence_cut);
+    if (!this.observationInstalled) {
+      this.eventSequenceCursor = decimal(snapshot.event_sequence_cut ?? 0);
+      this.eventSequence = numeric(snapshot.event_sequence_cut);
+      this.observationInstalled = true;
+    }
     this.writerGeneration = numeric(snapshot.writer_generation);
   }
 
-
-
-
-
-
-
-
-
-  private async hydrateProjectionContent(): Promise<void> {
-    while (true) {
-      await this.hydrateCanonicalContent();
-      const transitioned = await this.hydrateQueuedPromptContent();
-      if (!transitioned) return;
-      await this.refreshCanonicalAfterQueueTransition();
-      await this.reconcilePromptQueueTransition(transitioned);
-    }
-  }
-
-  private async refreshCanonicalAfterQueueTransition(): Promise<void> {
-    const frame = await this.post<{
-      snapshot?: { snapshot?: ProtocolCanonicalSnapshot };
-      error?: ProtocolError;
-    }>('snapshot', {});
-    assertProtocolFrame(frame);
-    if (!frame.snapshot?.snapshot) {
-      throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务返回的数据不完整。', true);
-    }
-    this.replaceSnapshot(frame.snapshot.snapshot);
-    await this.backfillOlderHistory();
-  }
-
-
-
-  private async hydrateQueuedPromptContent(): Promise<
-    NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] | undefined
-  > {
-    for (const item of this.control.prompt_queue ?? []) {
-      if (!item.queue_item_id) {
-        throw new RuntimeApiError(
-          'CONTENT_REFERENCE_MISSING',
-          '等待处理的输入缺少精确身份。',
-          true,
-        );
-      }
-      try {
-        await this.hydrateContentReference(
-          item.content,
-          { queue_item_id: item.queue_item_id },
-          '等待处理的输入暂时无法完整读取。',
-        );
-      } catch (error) {
-        if (error instanceof RuntimeApiError && error.code === 'CONTENT_QUEUE_NOT_PENDING') {
-          return item;
+  private queueRead?: Promise<void>;
+  private async hydrateQueuedPromptContent(): Promise<void> {
+    if (this.queueRead) return this.queueRead;
+    const operation = (async () => {
+      for (const item of this.control.prompt_queue ?? []) {
+        if (['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.command_id ?? '')?.status ?? '')) continue;
+        try { await this.hydrateContentReference(item.content, {queue_item_id: item.queue_item_id!}, '等待处理的输入暂时无法完整读取。'); }
+        catch (error) {
+          if (error instanceof RuntimeApiError && error.code === 'CONTENT_QUEUE_NOT_PENDING') {
+            try { await this.reconcilePromptQueueTransition(item, true); } catch { /* Exact status remains unknown; never resubmit. */ }
+          }
         }
-        throw error;
       }
-    }
-    return undefined;
+      this.rememberQueueContent(this.control);
+      this.changed();
+    })();
+    this.queueRead = operation;
+    try { await operation; } finally { if (this.queueRead === operation) this.queueRead = undefined; }
   }
 
   private async reconcilePromptQueueTransition(
     item: NonNullable<ProtocolCanonicalControl['prompt_queue']>[number],
+    retiredContent = false,
   ): Promise<void> {
     const commandId = item.command_id ?? '';
     const queueItemId = item.queue_item_id ?? '';
@@ -3327,7 +3672,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       && candidate.queue_item_id === queueItemId
       && candidate.status === 'PENDING'
     ));
-    if (consumed || pending) {
+    if (consumed || (pending && !retiredContent)) {
       this.promptTransitions.delete(commandId);
       return;
     }
@@ -3367,6 +3712,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       receipt.publicMessage,
       receipt.promptDelivery.consumedEntryId,
     ));
+    if (status === 'consumed' && receipt.promptDelivery.consumedEntryId) {
+      void this.locateEntry(receipt.promptDelivery.consumedEntryId, new AbortController().signal).then(() => this.changed()).catch(() => undefined);
+    }
   }
 
   private queueTransitionSubmission(
@@ -3424,7 +3772,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         continue;
       }
       if (event.event_type === 'TODO_SNAPSHOT_UPDATED') {
-        this.applyTodoSnapshot(event, payload.todo_snapshot_updated ?? {});
+        // The current owner snapshot, not retained live payloads, owns TODOs.
         continue;
       }
       if (event.event_type === 'SUBAGENT_PROGRESS') {
@@ -3643,50 +3991,6 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.liveResults.set(key, current);
   }
 
-  private applyTodoSnapshot(
-    event: ProtocolLiveEvent,
-    payload: Record<string, unknown>,
-  ) {
-    const todoRunId = String(payload.todo_run_id ?? '');
-    if (!todoRunId) return;
-    const current = [...(this.liveControl.current_todos ?? [])];
-    const disposition = String(payload.disposition ?? '');
-    if (disposition === 'CLOSED') {
-      this.liveControl.current_todos = current.filter((item) => item.todo_run_id !== todoRunId);
-      return;
-    }
-
-    const snapshot: ProtocolTodoRunSnapshot = {
-      todo_run_id: todoRunId,
-      todo_revision: payload.todo_revision as string | number | undefined,
-      scope_kind: event.scope_kind,
-      scope_subagent_task_id: event.scope_subagent_task_id,
-      disposition,
-      ordered_items: Array.isArray(payload.ordered_items)
-        ? payload.ordered_items.map((item) => ({
-          ordinal: numeric((item as Record<string, unknown>).ordinal),
-          text: String((item as Record<string, unknown>).text ?? ''),
-          status: String((item as Record<string, unknown>).status ?? ''),
-        }))
-        : [],
-      pending_count: payload.pending_count as string | number | undefined,
-      in_progress_count: payload.in_progress_count as string | number | undefined,
-      completed_count: payload.completed_count as string | number | undefined,
-    };
-    const sameScope = current.findIndex((item) => (
-      item.scope_kind === snapshot.scope_kind
-      && (item.scope_subagent_task_id ?? '') === (snapshot.scope_subagent_task_id ?? '')
-    ));
-    if (sameScope >= 0) current[sameScope] = snapshot;
-    else current.push(snapshot);
-    current.sort((left, right) => {
-      if (left.scope_kind === 'ROOT') return right.scope_kind === 'ROOT' ? 0 : -1;
-      if (right.scope_kind === 'ROOT') return 1;
-      return (left.scope_subagent_task_id ?? '').localeCompare(right.scope_subagent_task_id ?? '');
-    });
-    this.liveControl.current_todos = current;
-  }
-
   protected project(): RuntimeProjection {
     this.reconcileLiveToolResults();
     const canonical = [...this.entries.values()].sort(
@@ -3704,15 +4008,15 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       }
       return Boolean(draft.turnId) && activeTurnIds.has(draft.turnId);
     });
+    const sameWindow = this.windowJoinPredicate();
     const messages = projectEntries(
       canonical,
-      activeTurnIds,
+      activeTurnIds, sameWindow,
     );
     const canonicalRootTurnIds = orderedRootTurnIdsFromEntries(canonical);
     annotateSubagentCompletionSources(
       messages,
       agentTasks,
-      canonicalRootTurnIds,
     );
     for (const draft of visibleDrafts) {
       if (draft.scopeKind === 'SUBAGENT_TASK' || draft.taskId) continue;
@@ -3730,8 +4034,10 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         traces: draft.traces.length ? draft.traces : undefined,
       });
     }
-    const subagentRuns = projectSubagentRuns(canonical, agentTasks, visibleDrafts);
-    attachSubagentRuns(messages, subagentRuns);
+    const subagentRuns = projectSubagentRuns(canonical, agentTasks, visibleDrafts, sameWindow);
+    this.decorateSubagentRuns(subagentRuns);
+    attachSubagentRuns(messages, subagentRuns, this.taskCreators());
+    this.decorateHistory(messages);
     this.applyProjectedLiveResults(messages, subagentRuns, activeTurnIds);
     const hasActiveDraft = visibleDrafts.length > 0;
     const activeTurn = (this.control.active_turns ?? []).find(
@@ -3741,6 +4047,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const interaction = projectInteraction(this.liveControl, this.control);
     return {
       messages,
+      history: this.presentationHistory(messages),
+      taskCreators: this.taskCreators(), taskBatchCreators: Object.fromEntries(this.pages.flatMap(page => (page.context?.batches ?? []).map(batch => [batch.batch_id, batch.creator_entry_id]))),
       interruptionNotices: this.projectInterruptionNotices(messages),
       canonicalRootTurnIds,
       subagentRuns,
@@ -3750,7 +4058,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       initialContextBase: this.control.initial_context_base,
       isRunning: Boolean(activeTurn) || hasActiveDraft,
       queuedCount: numeric(this.control.prompt_queue_total_count),
-      queuedPrompts: projectQueuedPrompts(this.control),
+      queuedPrompts: projectQueuedPrompts(this.control).filter(item => !['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.commandId)?.status ?? '') && !canonical.some(entry => entry.input_source?.command_id === item.commandId && entry.input_source.queue_item_id === item.queueItemId)),
       promptTransitions: this.projectPromptTransitions(),
       planMode: Boolean(
         this.control.active_plan_workflow
@@ -3785,9 +4093,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       item.status === 'PENDING' && item.command_id ? [item.command_id] : []
     )));
     for (const commandId of this.promptTransitions.keys()) {
-      if (consumedCommands.has(commandId) || pendingCommands.has(commandId)) {
-        this.promptTransitions.delete(commandId);
-      }
+      const transition = this.promptTransitions.get(commandId)!;
+      const ready = [...this.entries.values()].some(entry => entry.input_source?.command_id === commandId && this.entryContentState(entry.entry_id) === 'ready');
+      if ((consumedCommands.has(commandId) && ready) || (pendingCommands.has(commandId) && !['consumed', 'cancelled', 'rejected'].includes(transition.status))) this.promptTransitions.delete(commandId);
     }
     return [...this.promptTransitions.values()];
   }
@@ -4283,6 +4591,7 @@ function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
 function projectEntries(
   entries: ProtocolEntry[],
   activeTurnIds: ReadonlySet<string>,
+  sameWindow: (a: string, b: string) => boolean = () => true,
 ): Message[] {
   const messages: Message[] = [];
   for (const entry of entries) {
@@ -4315,7 +4624,7 @@ function projectEntries(
           : entry.scheduled_input ? 'scheduled' : 'prompt';
       const promptContent = entry.entry_kind === 'PLAN_CONTINUATION'
         ? undefined
-        : decodePromptContent(entry.content, { kind: 'entry', entryId: entry.entry_id });
+        : entry.content?.inline_content !== undefined ? decodePromptContent(entry.content, { kind: 'entry', entryId: entry.entry_id }) : undefined;
       messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
@@ -4326,7 +4635,7 @@ function projectEntries(
         time: formatTime(entry.accepted_at_utc),
         body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? projectPlanContinuation(decodeContent(entry.content))
-          : promptContentTextProjection(promptContent!),
+          : promptContent ? promptContentTextProjection(promptContent) : '',
         promptContent,
         inputSource: entry.input_source?.queue_item_id && entry.input_source.command_id
           ? {
@@ -4373,7 +4682,7 @@ function projectEntries(
       const resultRef = entry.tool_result;
       const projectedResult = decodeToolResultContent(entry);
       const target = resultRef
-        ? messages.find((message) => message.id === resultRef.assistant_entry_id)
+        ? messages.find((message) => message.id === resultRef.assistant_entry_id && sameWindow(message.id, entry.entry_id))
         : undefined;
       const pendingTrace = target?.traces?.find((item) => item.id === resultRef?.tool_call_id);
       if (pendingTrace) {
@@ -4387,6 +4696,7 @@ function projectEntries(
         pendingTrace.resultText = result;
         pendingTrace.resultContent = projectedResult.content;
         pendingTrace.resultEntryId = entry.entry_id;
+        target!.sourceEntryIds = [...(target!.sourceEntryIds ?? [target!.id]), entry.entry_id];
         pendingTrace.resultState = resultState;
         pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, result);
         pendingTrace.artifact = projectToolArtifact(resultRef);
@@ -4421,7 +4731,6 @@ function projectEntries(
       continue;
     }
     if (entry.entry_kind === 'TERMINAL_OBSERVATION') {
-      const target = [...messages].reverse().find((message) => message.role === 'assistant');
       const trace: ToolTrace = {
         id: entry.entry_id,
         kind: 'terminal',
@@ -4430,8 +4739,7 @@ function projectEntries(
         status: 'completed',
         resultText: decodeContent(entry.content),
       };
-      if (target) target.traces = [...(target.traces ?? []), trace];
-      else {
+      {
         messages.push({
           id: entry.entry_id,
           turnId: entry.turn_id,
@@ -4459,6 +4767,7 @@ function projectSubagentRuns(
   entries: ProtocolEntry[],
   tasks: AgentTask[],
   drafts: LiveDraft[],
+  sameWindow: (a: string, b: string) => boolean = () => true,
 ): SubagentRun[] {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const runs = new Map<string, SubagentRun>();
@@ -4549,7 +4858,7 @@ function projectSubagentRuns(
     if (entry.entry_kind === 'TOOL_RESULT') {
       const resultRef = entry.tool_result;
       const target = resultRef
-        ? run.activities.find((activity) => activity.id === resultRef.assistant_entry_id)
+        ? run.activities.find((activity) => activity.id === resultRef.assistant_entry_id && sameWindow(activity.id, entry.entry_id))
         : undefined;
       const pendingTrace = target?.traces?.find((item) => item.id === resultRef?.tool_call_id);
       if (pendingTrace) {
@@ -4562,6 +4871,7 @@ function projectSubagentRuns(
         pendingTrace.resultText = content;
         pendingTrace.resultContent = projectedToolResult?.content;
         pendingTrace.resultEntryId = entry.entry_id;
+        target!.sourceEntryIds = [...(target!.sourceEntryIds ?? [target!.id]), entry.entry_id];
         pendingTrace.resultState = resultState;
         pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, content);
         pendingTrace.artifact = projectToolArtifact(resultRef);
@@ -4585,7 +4895,6 @@ function projectSubagentRuns(
       continue;
     }
     if (entry.entry_kind === 'TERMINAL_OBSERVATION') {
-      const target = run.activities.at(-1);
       const trace: ToolTrace = {
         id: entry.entry_id,
         kind: 'terminal',
@@ -4594,8 +4903,7 @@ function projectSubagentRuns(
         status: 'completed',
         resultText: content,
       };
-      if (target) target.traces = [...(target.traces ?? []), trace];
-      else run.activities.push({
+      run.activities.push({
         id: entry.entry_id,
         time: formatTime(entry.accepted_at_utc),
         body: '',
@@ -4647,59 +4955,10 @@ function settleHistoricalTrace(trace: ToolTrace): void {
   trace.resultSummary = '原运行已结束，操作结果尚未记录；需要核实实际状态。';
 }
 
-function createsSubagentTasks(trace: ToolTrace): boolean {
-  const name = trace.toolName?.toLowerCase() ?? '';
-  return name === 'create_agent_tasks' || name === 'spawn_agent';
-}
-
-function createdSubagentTaskIds(trace: ToolTrace): ReadonlySet<string> | undefined {
-  if (!createsSubagentTasks(trace)) return new Set();
-  if (trace.resultState === undefined) return undefined;
-  if (trace.resultState !== 'SUCCESS') return new Set();
-  if (!trace.resultText) return undefined;
-  try {
-    const result = JSON.parse(trace.resultText) as Record<string, unknown>;
-    if (trace.toolName?.toLowerCase() === 'spawn_agent') {
-      return new Set(typeof result.task_id === 'string' ? [result.task_id] : []);
-    }
-    if (!Array.isArray(result.tasks)) return new Set();
-    return new Set(result.tasks.flatMap((task) => {
-      if (!task || typeof task !== 'object' || Array.isArray(task)) return [];
-      const taskId = (task as Record<string, unknown>).task_id;
-      return typeof taskId === 'string' ? [taskId] : [];
-    }));
-  } catch {
-    return undefined;
-  }
-}
-
-function attachSubagentRuns(messages: Message[], runs: SubagentRun[]): void {
-  if (!runs.length) return;
-  const groups = new Map<string, SubagentRun[]>();
+function attachSubagentRuns(messages: Message[], runs: SubagentRun[], creators: Record<string, string> = {}): void {
   for (const run of runs) {
-    const key = run.parentId || '';
-    groups.set(key, [...(groups.get(key) ?? []), run]);
-  }
-  for (const [parentId, group] of groups) {
-    if (!parentId) continue;
-    const creators = messages.flatMap((message) => {
-      if (message.role !== 'assistant' || message.turnId !== parentId) return [];
-      return (message.traces ?? [])
-        .filter(createsSubagentTasks)
-        .map((trace) => ({ message, taskIds: createdSubagentTaskIds(trace) }));
-    });
-    for (const run of group) {
-      const exact = creators.find((creator) => creator.taskIds?.has(run.id));
-      const unresolvedMessages = [...new Set(
-        creators
-          .filter((creator) => creator.taskIds === undefined)
-          .map((creator) => creator.message),
-      )];
-      const target = exact?.message
-        ?? (unresolvedMessages.length === 1 ? unresolvedMessages[0] : undefined);
-      if (!target) continue;
-      target.subagentRuns = [...(target.subagentRuns ?? []), run];
-    }
+    const target = messages.find(message => message.id === creators[run.id] && message.turnId === run.parentId);
+    if (target) target.subagentRuns = [...(target.subagentRuns ?? []), run];
   }
 }
 
@@ -4795,7 +5054,8 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
         inputOrigin: item.input_origin,
         deliveryMode: deliveryMode(item.delivery_mode),
         targetTurnId: item.target_turn_id || undefined,
-        content: decodePromptContent(item.content, { kind: 'queue', queueItemId }),
+        content: item.content?.inline_content !== undefined ? decodePromptContent(item.content, { kind: 'queue', queueItemId }) : {parts: []},
+        contentUnavailable: item.content?.inline_content === undefined,
         permission: protocolPermission(item.permission?.effective_mode),
         submittedAt: item.accepted_at_utc || undefined,
         requestedPermission: protocolPermission(item.permission?.requested_mode),
@@ -4859,7 +5119,7 @@ function projectReasoningBlocks(entry: ProtocolEntry): ReasoningBlock[] {
       kind: reasoningKind(block.presentation_kind ?? ''),
       body: decodeContent(block.content),
     }))
-    .filter((block) => Boolean(block.body));
+    .filter(block => Boolean(block.body) || (entry.reasoning_blocks ?? []).some(reference => reference.block_id === block.id && reference.content?.inline_content === undefined && numeric(reference.content?.size) > 0));
 }
 
 function reasoningKind(value: string): ReasoningBlock['kind'] {
@@ -5121,13 +5381,12 @@ function orderedRootTurnIdsFromEntries(entries: ProtocolEntry[]): string[] {
 function annotateSubagentCompletionSources(
   messages: Message[],
   tasks: AgentTask[],
-  rootTurnIds: readonly string[],
 ): void {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
-  const turnIndex = new Map(rootTurnIds.map((turnId, index) => [turnId, index]));
+
   for (const message of messages) {
     if (message.userKind !== 'subagent-completion' || !message.sourceSubagentTaskId) continue;
-    message.sourceSubagentRelation = undefined;
+
     const source = taskById.get(message.sourceSubagentTaskId);
     if (!source) continue;
     message.sourceSubagentLabel = source.label;
@@ -5136,10 +5395,8 @@ function annotateSubagentCompletionSources(
       message.sourceSubagentRelation = 'current';
       continue;
     }
-    const sourceIndex = turnIndex.get(source.parentId);
-    const targetIndex = turnIndex.get(message.turnId);
-    if (sourceIndex === undefined || targetIndex === undefined || sourceIndex >= targetIndex) continue;
-    message.sourceSubagentRelation = sourceIndex + 1 === targetIndex ? 'previous' : 'earlier';
+    // Non-current relations are supplied by the canonical page context.
+    // Array adjacency in a partial history is not ROOT adjacency.
   }
 }
 
@@ -5192,7 +5449,6 @@ export function mergeRuntimeTaskInventory(
   annotateSubagentCompletionSources(
     messages,
     merged,
-    projection.canonicalRootTurnIds ?? [],
   );
   // Only join rows that the user actually loaded. Derived activity remains
   // available for the next open without making its absence execution truth.
@@ -5208,7 +5464,9 @@ export function mergeRuntimeTaskInventory(
     });
   }
   for (const message of messages) message.subagentRuns = undefined;
-  attachSubagentRuns(messages, attached);
+  const creators = {...projection.taskCreators};
+  for (const task of merged) if (task.batchId && projection.taskBatchCreators?.[task.batchId]) creators[task.id] = projection.taskBatchCreators[task.batchId];
+  attachSubagentRuns(messages, attached, creators);
   return { ...projection, messages, agentTasks: merged };
 }
 
@@ -5335,7 +5593,7 @@ function decodeToolResultContent(entry: ProtocolEntry): {
   text: string;
   content?: CanonicalPromptContent;
 } {
-  if (entry.content?.media_type !== PROMPT_BODY_MEDIA_TYPE) {
+  if (entry.content?.media_type !== PROMPT_BODY_MEDIA_TYPE || entry.content.inline_content === undefined) {
     return { text: decodeContent(entry.content) };
   }
   const content = decodePromptContent(entry.content, {

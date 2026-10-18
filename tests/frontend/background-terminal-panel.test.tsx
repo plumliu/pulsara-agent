@@ -18,6 +18,32 @@ const process: BackgroundProcess = {
 };
 
 describe('BackgroundTerminalPanel PR03 controls', () => {
+  it('does not infer retention expiry from an unavailable control result or resend termination', async () => {
+    const terminate = vi.fn(async (_reference: UserControlCommandRef): Promise<CommandReceipt> => {
+      throw new Error('请求内容不正确。');
+    });
+    const query = vi.fn(async (_reference: UserControlCommandRef) => ({
+      status: 'RESULT_UNAVAILABLE' as const,
+    }));
+    render(<BackgroundTerminalPanel
+      ownerKey="session-a:1:host-a"
+      sessionId="session-a"
+      hostSessionId="host-a"
+      controlAdmissionDeadlineMs={42_000}
+      canControl
+      loadProcesses={vi.fn(async () => ({ processes: [process] }))}
+      readLog={vi.fn()}
+      terminateProcess={terminate}
+      queryControl={query}
+    />);
+    fireEvent.click(await screen.findByRole('button', { name: '终止 printf long-output' }));
+    expect(await screen.findByText(/请求内容不正确/)).toBeTruthy();
+    expect(await screen.findByText('当前无法取得这次操作的结果；不会自动重发。', {}, { timeout: 2500 })).toBeTruthy();
+    expect(screen.queryByText(/原操作结果已不在/)).toBeNull();
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledWith(terminate.mock.calls[0][0]);
+  });
+
   it('does not present the unknown-exit placeholder as a real exit code', async () => {
     const unknownExit: BackgroundProcess = {
       ...process, processId: 'process-unknown', command: 'unknown exit',

@@ -1,10 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import type { PromptAnnotationPart } from '../../frontend/lib/prompt-content';
 import { MarkdownBody } from '../../frontend/components/markdown-body';
 import { PromptComposer } from '../../frontend/components/prompt-composer';
-import { AnnotationBody, ResponseAnnotations } from '../../frontend/components/response-annotations';
+import { PromptContentView } from '../../frontend/components/prompt-content-view';
+import { AnnotationBody, AnnotationCard, ResponseAnnotations } from '../../frontend/components/response-annotations';
 
 vi.mock('@floating-ui/dom', async importOriginal => ({
   ...await importOriginal<typeof import('@floating-ui/dom')>(),
@@ -184,5 +185,82 @@ describe('draft annotation UI', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByRole('button', { name: '添加注释' })).toBeNull();
     expect(highlights.size).toBe(0);
+  });
+});
+
+describe('history annotation location completion', () => {
+  it('waits for actual body registration after a page read and clears the highlight when switching sessions', async () => {
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true });
+    const read = vi.fn(async () => {});
+    const notify = vi.fn();
+    const tree = (loaded: boolean, sessionId = 'one') => <ResponseAnnotations sessionId={sessionId} store={store} canAnnotate={true} onNotify={notify} onLocate={read}>
+      <AnnotationCard value={first} />
+      {loaded && <AnnotationBody entryId="entry:a" body={body}><MarkdownBody annotationSource body={body} onNotify={notify} /></AnnotationBody>}
+    </ResponseAnnotations>;
+    const view = render(tree(false));
+    fireEvent.click(screen.getByRole('button', { name: '引用回复' }));
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    expect(scroll).not.toHaveBeenCalled();
+    expect(highlights.has('annotation-source')).toBe(false);
+    view.rerender(tree(true));
+    await waitFor(() => expect(highlights.get('annotation-source')?.ranges[0].toString()).toBe(first.quote));
+    expect(scroll).toHaveBeenCalledOnce();
+    view.rerender(tree(true, 'two'));
+    expect(highlights.has('annotation-source')).toBe(false);
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+
+  it('does not scroll a late source after the reference location was cancelled', async () => {
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true });
+    const read = vi.fn(async () => {});
+    const tree = (loaded: boolean) => <ResponseAnnotations sessionId="one" store={store} canAnnotate={true} onNotify={vi.fn()} onLocate={read}>
+      <AnnotationCard value={first} />
+      {loaded && <AnnotationBody entryId="entry:a" body={body}><MarkdownBody annotationSource body={body} onNotify={() => {}} /></AnnotationBody>}
+    </ResponseAnnotations>;
+    const view = render(tree(false));
+    fireEvent.click(screen.getByRole('button', { name: '引用回复' }));
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    fireEvent.keyDown(document, { key: 'Escape' });
+    view.rerender(tree(true));
+    await act(async () => {});
+    expect(scroll).not.toHaveBeenCalled();
+    expect(highlights.has('annotation-source')).toBe(false);
+    expect(view.container.querySelector('.prompt-annotation blockquote')?.textContent).toBe(first.quote);
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+});
+
+describe('real annotation preview source actions', () => {
+  it.each(['sent', 'draft'] as const)('locates an unloaded source from the %s preview and closes it without aborting the new request', async variant => {
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true });
+    const read = vi.fn(async (_entryId: string, _signal: AbortSignal) => {});
+    const notify = vi.fn();
+    if (variant === 'draft') store.addAnnotation('one', first);
+    const tree = (loaded: boolean) => <ResponseAnnotations sessionId="one" store={store} canAnnotate={true} onNotify={notify} onLocate={read}>
+      {variant === 'sent'
+        ? <PromptContentView content={{ parts: [first] }} variant="message" onReadImage={vi.fn()} />
+        : <PromptComposer sessionId="one" store={store} disabled={false} placeholder="正文" onSubmit={() => {}} onNotify={notify} />}
+      {loaded && <AnnotationBody entryId="entry:a" body={body}><MarkdownBody annotationSource body={body} onNotify={notify} /></AnnotationBody>}
+    </ResponseAnnotations>;
+    const view = render(tree(false));
+    fireEvent.click(screen.getByRole('button', { name: variant === 'sent' ? '查看批注 1' : '编辑批注 1' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.querySelector('blockquote')?.textContent).toBe(first.quote);
+    expect(read).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: '引用回复' }));
+    await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith('entry:a', expect.any(AbortSignal)));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(read.mock.calls[0][1].aborted).toBe(false);
+    expect(scroll).not.toHaveBeenCalled();
+    view.rerender(tree(true));
+    await waitFor(() => expect(highlights.get('annotation-source')?.ranges[0].toString()).toBe(first.quote));
+    expect(scroll).toHaveBeenCalledOnce();
+    expect(read.mock.calls[0][1].aborted).toBe(false);
+    if (variant === 'draft') expect(store.annotations('one')[0].value).toEqual(first);
+    else expect(store.annotations('one')).toHaveLength(0);
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 });

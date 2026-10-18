@@ -32,6 +32,15 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderGenerationRetry:
+    """Discard unaccepted output after its physical stream has closed.
+
+    This process-local control value is not a live event or a model terminal.
+    The installed request and its single retry budget remain unchanged.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderStreamFailure:
     message: str
     code_hint: str | None = None
@@ -111,6 +120,7 @@ class ProviderAdapterTerminal:
 
 ProviderAdapterStreamItem: TypeAlias = (
     ProviderStreamPayload
+    | ProviderGenerationRetry
     | ProviderStreamFailure
     | TransportUsageReport
     | ProviderAdapterTerminal
@@ -179,7 +189,7 @@ class ProviderModelExecutionFailed(RuntimeError):
         )
 
 
-ProviderNormalizedStreamItem: TypeAlias = ProviderStreamPayload | ProviderStreamTerminal
+ProviderNormalizedStreamItem: TypeAlias = ProviderStreamPayload | ProviderGenerationRetry | ProviderStreamTerminal
 
 
 class ProviderPhysicalCompletionStatus(StrEnum):
@@ -201,6 +211,7 @@ __all__ = [
     "ProviderAdapterTransport",
     "ProviderModelExecutionFailed",
     "ProviderModelOutputIncomplete",
+    "ProviderGenerationRetry",
     "ProviderNormalizedStreamItem",
     "ProviderNormalizedTerminalKind",
     "ProviderOutputIncompleteReason",

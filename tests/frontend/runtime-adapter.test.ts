@@ -11,12 +11,52 @@ import {
 } from '../../frontend/lib/runtime-adapter';
 import type { AgentTask } from '../../frontend/lib/pulsara-types';
 
-afterEach(() => vi.unstubAllGlobals());
+let historyOwnerFixture: Record<string, unknown> = {};
+afterEach(() => { vi.unstubAllGlobals(); historyOwnerFixture = {}; });
+
+// Page-context requests are an independent owner read, not another frame in
+// a command/content fixture's ordered response queue. Capture the fixture's
+// canonical metadata and return its explicit per-entry owner context here.
+function stubRuntimeFetch(fetcher: typeof fetch) {
+  const entries = new Map<string, Record<string, unknown>>();
+  const tasks = new Map<string, Record<string, unknown>>();
+  const collect = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach(collect); return; }
+    const item = value as Record<string, unknown>;
+    if (typeof item.entry_id === 'string' && item.entry_kind) entries.set(item.entry_id, item);
+    if (typeof item.task_id === 'string' && typeof item.parent_turn_id === 'string') tasks.set(item.task_id, item);
+    Object.values(item).forEach(collect);
+  };
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path.endsWith('/history/context')) {
+      const request = JSON.parse(String(init?.body));
+      const ids = request.entry_ids as string[];
+      const selected = ids.map(id => entries.get(id) ?? {entry_id: id, turn_id: id});
+      const owners = [...new Set(selected.map(entry => String(entry.turn_id ?? entry.entry_id)))];
+      return new Response(JSON.stringify({
+        session_id: decodeURIComponent(path.split('/sessions/')[1].split('/')[0]),
+        cut_sequence: String(request.cut_sequence ?? '1000'), event_sequence_cut: String(request.event_sequence_cut ?? '1000'),
+        entry_ids: ids,
+        groups: owners.map((id, index) => ({owner_kind:'EXECUTED_TURN',owner_id:id,previous_root_owner_id:owners[index - 1],initial_entry_id:String(selected.find(entry => String(entry.turn_id ?? entry.entry_id) === id)!.entry_id)})),
+        entry_contexts: selected.map(entry => ({entry_id:entry.entry_id,owner_kind:'EXECUTED_TURN',owner_id:entry.turn_id ?? entry.entry_id,
+          root_owner_id:entry.turn_id ?? entry.entry_id,segment_id:entry.turn_id ?? entry.entry_id,segment_start_entry_id:entry.entry_id})),
+        tasks: [...tasks.values()].map(task => ({task_id:task.task_id,parent_turn_id:task.parent_turn_id,parent_initial_entry_id:task.parent_turn_id,batch_id:task.batch_id})), batches: [], interruption_notices: [], compactions: [],
+        ...historyOwnerFixture,
+      }), {status:200});
+    }
+    const response = await fetcher(input, init);
+    try { collect(await response.clone().json()); } catch { /* Error fixtures retain their actual response. */ }
+    return response;
+  });
+}
+
 
 it('conditionally deletes a cold archived session and retains cleanup warnings', async () => {
   const payload = {status: 'NOT_ARCHIVED', session_id: 'session:cold/a', cleanup_warning: {code: 'SESSION_DELETE_QUARANTINED', message: '请重启 Pulsara'}};
   const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), {status: 200}));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   expect(await new LocalHttpRuntimeAdapter().deleteArchivedSession('session:cold/a')).toEqual(payload);
   expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session%3Acold%2Fa/archived', expect.objectContaining({
     method: 'DELETE', body: JSON.stringify({confirm_permanent_delete: true}), credentials: 'same-origin',
@@ -27,7 +67,7 @@ it('conditionally deletes a cold archived session and retains cleanup warnings',
 it('reads a disposable context preview with cancellation and an encoded session identity', async () => {
   const payload = { state: 'ready', connection_id: 'selected-model', input_tokens: 1000, input_budget_tokens: 2000 };
   const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   const controller = new AbortController();
   expect(await new LocalHttpRuntimeAdapter().contextUsage('session:usage/a', controller.signal)).toEqual(payload);
   expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session%3Ausage%2Fa/context-usage', expect.objectContaining({ signal: controller.signal }));
@@ -41,7 +81,7 @@ it('bootstraps the app without assigning a working directory', async () => {
     local_settings: {}, model_configurations: [],
   };
   const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   const bootstrap = await new LocalHttpRuntimeAdapter().bootstrap();
   expect(bootstrap).toEqual(payload);
   expect(bootstrap).not.toHaveProperty('workspace');
@@ -52,7 +92,7 @@ it('requests a native directory selection and distinguishes cancellation', async
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(new Response(JSON.stringify({ path: '/tmp/项目 ' }), { status: 200 }))
     .mockResolvedValueOnce(new Response(JSON.stringify({ path: null }), { status: 200 }));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
   const controller = new AbortController();
   expect(await adapter.pickWorkspaceDirectory('/tmp/current', controller.signal)).toBe('/tmp/项目 ');
@@ -216,7 +256,7 @@ it('preserves PR03 exact control/query identities and typed query retirement sta
     } },
   ];
   const requests: Array<{ operation: string; body: Record<string, unknown> }> = [];
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const operation = String(input).split('/').at(-1) ?? '';
     if (operation !== 'connections') {
       requests.push({
@@ -295,7 +335,7 @@ it('binds PR03 background list and log reads to the exact Host and process', asy
     } },
   ];
   const calls: Array<{ operation: string; body: Record<string, unknown> }> = [];
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const operation = String(input).split('/').at(-1) ?? '';
     if (operation !== 'connections') calls.push({
       operation,
@@ -334,7 +374,7 @@ it('binds PR03 background list and log reads to the exact Host and process', asy
 it('requests Plugin discovery using only the source directory', async () => {
   const result = {candidates: []};
   const fetcher = vi.fn(async () => new Response(JSON.stringify(result), {status: 200}));
-  vi.stubGlobal('fetch', fetcher);
+  stubRuntimeFetch(fetcher);
   expect(await new LocalHttpRuntimeAdapter().previewPluginImport('/source')).toEqual(result);
   expect(fetcher).toHaveBeenCalledWith('/api/capabilities/plugins/preview-import', expect.objectContaining({
     method: 'POST', body: JSON.stringify({source_path: '/source'}),
@@ -342,7 +382,7 @@ it('requests Plugin discovery using only the source directory', async () => {
 });
 
 it('preserves pending safe-point adoption from a user capability mutation', async () => {
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
     operation: { status: 'CREATED', success: true },
     adoption: { updated_sessions: 0, pending_sessions: 2, attention_sessions: 0 },
     capabilities: { skills: {}, mcp: {}, plugins: {} },
@@ -369,7 +409,7 @@ describe('exact prompt projection', () => {
         },
       } },
     ];
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return new Response(JSON.stringify(responses.shift()), {
         status: 200, headers: { 'Content-Type': 'application/json' },
@@ -416,7 +456,7 @@ describe('exact prompt projection', () => {
       }]),
       contentBytes(bytes),
     ];
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith('/read-content')) {
         requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       }
@@ -442,7 +482,7 @@ describe('exact prompt projection', () => {
         ? inlinePrompt('text')
         : inlineContent('text'),
     });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', event_sequence_cut: '8', entries: [
@@ -457,6 +497,7 @@ describe('exact prompt projection', () => {
       live_control_snapshot: { snapshot: {} },
     }), { status: 200 })));
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
     const projection = connection.current();
     expect(projection.messages.find(message => message.id === 'completion')?.sourceSubagentTaskId).toBe('reader');
     const merged = mergeRuntimeTaskInventory(projection, [inventoryTask('reader', 'reader', 'completed', 'A')]);
@@ -477,7 +518,7 @@ describe('exact prompt projection', () => {
       entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: content('plain text is not a success verdict'),
       tool_result: { assistant_entry_id: assistant, tool_call_id: call, result_state: state },
     });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: { snapshot: {
@@ -511,7 +552,7 @@ describe('exact prompt projection', () => {
         },
       ],
     });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload([
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([
       {
         entry_id: 'request', turn_id: 'turn', entry_sequence: '1',
         entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
@@ -539,7 +580,7 @@ describe('exact prompt projection', () => {
       kind: 'INLINE',
       inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
     });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
@@ -569,6 +610,7 @@ describe('exact prompt projection', () => {
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
 
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
     expect(connection.current().messages.map((message) => ({
       body: message.body,
       userKind: message.userKind,
@@ -585,7 +627,7 @@ describe('exact prompt projection', () => {
     });
   });
 
-  it('loads every older history page before exposing a resumed connection', async () => {
+  it.each(['0', '9007199254740993'])('exposes only the tail then loads requested history pages preserving event cut %s', async (eventCut) => {
     const historyBodies: Array<Record<string, unknown>> = [];
     const entry = (sequence: number, body: string) => ({
       entry_id: `entry-${sequence}`,
@@ -605,11 +647,12 @@ describe('exact prompt projection', () => {
           snapshot: {
             session_id: 'session-1',
             writer_generation: '1',
-            event_sequence_cut: '0',
+            event_sequence_cut: eventCut,
             entries: [entry(3, 'latest')],
             older_history_cursor: {
               session_id: 'session-1',
               cut_sequence: '3',
+              event_sequence_cut: eventCut,
               entry_sequence: '3',
             },
             control: {},
@@ -624,13 +667,14 @@ describe('exact prompt projection', () => {
           older_history_cursor: {
             session_id: 'session-1',
             cut_sequence: '3',
+            event_sequence_cut: eventCut,
             entry_sequence: '2',
           },
         },
       },
       { history_page: { entries: [entry(1, 'oldest')], has_more: false } },
     ];
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith('/history') && init?.body) {
         historyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       }
@@ -643,18 +687,31 @@ describe('exact prompt projection', () => {
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
 
+    expect(connection.current().messages.map(message => message.body)).toEqual(['latest']);
+    expect(historyBodies).toHaveLength(0);
+    await vi.waitFor(() => expect(connection.current().history?.initialReady).toBe(true));
+    await connection.readHistory!();
+    expect(connection.current().messages.map(message => message.body)).toEqual(['middle', 'latest']);
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window => window.contextState === 'ready')).toBe(true));
+    await connection.readHistory!();
     expect(connection.current().messages.map((message) => message.body)).toEqual([
       'oldest',
       'middle',
       'latest',
     ]);
     expect(historyBodies).toHaveLength(2);
-    expect(historyBodies[0]).toMatchObject({
-      maximum_entries: 256,
+    expect(historyBodies[0]).toEqual({
+      maximum_entries: 128,
       maximum_serialized_bytes: 2 << 20,
-      cursor: { entry_sequence: '3' },
+      cursor: {
+        session_id: 'session-1', cut_sequence: '3',
+        event_sequence_cut: eventCut, entry_sequence: '3',
+      },
     });
-    expect(historyBodies[1]).toMatchObject({ cursor: { entry_sequence: '2' } });
+    expect(historyBodies[1]?.cursor).toEqual({
+      session_id: 'session-1', cut_sequence: '3',
+      event_sequence_cut: eventCut, entry_sequence: '2',
+    });
   });
 
   it('treats the manual context action as an explicit forced request', async () => {
@@ -680,7 +737,7 @@ describe('exact prompt projection', () => {
       },
     ];
     vi.stubGlobal('crypto', { getRandomValues: webcrypto.getRandomValues.bind(webcrypto), randomUUID: () => 'test' });
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.body) bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return new Response(JSON.stringify(responses.shift()), {
         status: 200,
@@ -729,7 +786,7 @@ describe('exact prompt projection', () => {
         }],
       },
     }];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -770,7 +827,7 @@ describe('exact prompt projection', () => {
     }, {
       observation: { through_event_sequence: '0' },
     }];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -782,7 +839,7 @@ describe('exact prompt projection', () => {
   });
 
   it('projects provider reasoning and distinguishes full text from a summary', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
@@ -825,7 +882,7 @@ describe('exact prompt projection', () => {
   });
 
   it('keeps the provider presentation kind on a live reasoning stream', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: {
@@ -866,7 +923,7 @@ describe('exact prompt projection', () => {
   });
 
   it('projects the exact live tool name and terminal command when arguments close', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: {
@@ -907,7 +964,7 @@ describe('exact prompt projection', () => {
     });
   });
 
-  it('projects the root TODO and applies live updates without attaching it to a message', async () => {
+  it('projects the root TODO from owner snapshots after live invalidation without attaching it to a message', async () => {
     const responses = [
       {
         connection_id: 'connection-1', connection_generation: 1,
@@ -965,7 +1022,21 @@ describe('exact prompt projection', () => {
         },
       },
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    responses.splice(2, 0, {
+      live_control_snapshot: { snapshot: {
+        owner_epoch: '1', live_revision: '0', current_todos: [{
+          todo_run_id: 'todo-root', todo_revision: '2', scope_kind: 'ROOT', disposition: 'ACTIVE',
+          ordered_items: [
+            { ordinal: 0, text: '检查契约', status: 'completed' },
+            { ordinal: 1, text: '目视验证', status: 'in_progress' },
+          ],
+        }],
+      } },
+    });
+    responses.push({ live_control_snapshot: { snapshot: {
+      owner_epoch: '1', live_revision: '0', current_todos: [],
+    } } });
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -1024,7 +1095,7 @@ describe('exact prompt projection', () => {
         },
       },
     ];
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return new Response(JSON.stringify(responses.shift()), {
         status: 200, headers: { 'Content-Type': 'application/json' },
@@ -1033,6 +1104,10 @@ describe('exact prompt projection', () => {
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
 
+    expect(connection.current().messages[0]).toMatchObject({contentState:'ready',reasoningContentState:'unloaded'});
+    await connection.hydrateEntries!(['assistant-1']);
+    expect(requests).toHaveLength(1); // Connect only; default body reads do not fetch thought.
+    await connection.hydrateEntries!(['assistant-1'], undefined, true);
     expect(connection.current().messages[0].reasoning?.[0].body).toBe(reasoning);
     expect(requests.at(-1)).toMatchObject({
       entry_id: 'assistant-1', block_id: 'assistant-1:provider-reasoning:0', offset_bytes: 0,
@@ -1066,33 +1141,34 @@ describe('exact prompt projection', () => {
         assistant_entry_id: 'assistant-blob', tool_call_id: 'call-blob', result_state: 'SUCCESS',
       },
     }];
-    const responses = [
-      connectPayload(entries),
-      contentChunk(promptBody(queuedBody)),
-      contentChunk(assistantBody),
-      contentChunk(toolBody),
-    ];
     const reads: Array<Record<string, unknown>> = [];
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith('/read-content')) {
         reads.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       }
-      return new Response(JSON.stringify(responses.shift()), {
+      const target = JSON.parse(String(init?.body ?? '{}'));
+      const value = String(input).endsWith('/connections') ? connectPayload(entries)
+        : contentChunk(target.entry_id === 'consumed-prompt' ? promptBody(queuedBody) : target.entry_id === 'assistant-blob' ? assistantBody : toolBody);
+      return new Response(JSON.stringify(value), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       });
     }));
 
-    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(reads).toEqual([]);
+    await connection.hydrateEntries!(['consumed-prompt', 'assistant-blob', 'result-blob']);
+    const projection = connection.current();
 
     expect(projection.messages.find((message) => message.id === 'consumed-prompt')?.body).toBe(queuedBody);
     expect(projection.messages.find((message) => message.id === 'assistant-blob')?.body).toBe(assistantBody);
     expect(projection.messages.find((message) => message.id === 'assistant-blob')?.traces?.[0].resultText)
       .toBe(toolBody);
-    expect(reads).toEqual([
+    expect(reads).toHaveLength(3);
+    expect(reads).toEqual(expect.arrayContaining([
       expect.objectContaining({ entry_id: 'consumed-prompt' }),
       expect.objectContaining({ entry_id: 'assistant-blob', block_id: 'assistant-text' }),
       expect.objectContaining({ entry_id: 'result-blob' }),
-    ]);
+    ]));
   });
 
   it('refreshes an exact consumed entry when a blob queue item is consumed during hydration', async () => {
@@ -1114,21 +1190,21 @@ describe('exact prompt projection', () => {
     const responses = [
       connectPayload([], pending),
       { error: { stable_code: 'CONTENT_QUEUE_NOT_PENDING', public_message: 'Queue item is no longer pending.' } },
-      { snapshot: { snapshot: {
-        session_id: 'session-1', writer_generation: '1', event_sequence_cut: '1',
-        entries: [consumed], control: { prompt_queue_total_count: '0', prompt_queue: [] },
-      } } },
+      {query_command:{found:true,outcome:{command_id:'command-race',status:'SUCCEEDED',prompt_delivery:{queue_item_id:'queue-race',queue_status:'CONSUMED',delivery_mode:'NEW_TURN',consumed_entry_id:'entry-race'}}}},
+      {session_id:'session-1',cut_sequence:'1',event_sequence_cut:'1',entries:[consumed]},
       contentChunk(promptBody(body)),
     ];
     const operations: string[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL) => {
       operations.push(String(input).split('/').at(-1) ?? '');
       return new Response(JSON.stringify(responses.shift()), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       });
     }));
 
-    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await vi.waitFor(() => expect(connection.current().messages[0]?.body).toBe(body));
+    const projection = connection.current();
 
     expect(projection.queuedPrompts).toEqual([]);
     expect(projection.messages).toEqual([
@@ -1137,7 +1213,7 @@ describe('exact prompt projection', () => {
         inputSource: expect.objectContaining({ queueItemId: 'queue-race', commandId: 'command-race' }),
       }),
     ]);
-    expect(operations.slice(1)).toEqual(['read-content', 'snapshot', 'read-content']);
+    expect(operations.slice(1)).toEqual(['read-content', 'query-command', 'window', 'read-content']);
   });
 
   it.each([
@@ -1161,10 +1237,6 @@ describe('exact prompt projection', () => {
       const responses = [
         connectPayload([], pending),
         { error: { stable_code: 'CONTENT_QUEUE_NOT_PENDING', public_message: 'Queue item is no longer pending.' } },
-        { snapshot: { snapshot: {
-          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
-          entries: [], control: { prompt_queue_total_count: '0', prompt_queue: [] },
-        } } },
         { query_command: { found: true, outcome: {
           command_id: 'command-terminal-race', status: 'REJECTED',
           public_code: publicCode, public_message: detail,
@@ -1175,14 +1247,16 @@ describe('exact prompt projection', () => {
         } } },
       ];
       const operations: string[] = [];
-      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL) => {
         operations.push(String(input).split('/').at(-1) ?? '');
         return new Response(JSON.stringify(responses.shift()), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       }));
 
-      const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+      const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+      await vi.waitFor(() => expect(connection.current().promptTransitions[0]?.status).toBe(expectedStatus));
+      const projection = connection.current();
       expect(projection.queuedPrompts).toEqual([]);
       expect(projection.promptTransitions).toEqual([expect.objectContaining({
         sessionId: 'session-1', connectionGeneration: 1,
@@ -1191,7 +1265,7 @@ describe('exact prompt projection', () => {
         content: undefined, contentUnavailable: true, status: expectedStatus,
         outcomeCode: publicCode, detail,
       })]);
-      expect(operations.slice(1)).toEqual(['read-content', 'snapshot', 'query-command']);
+      expect(operations.slice(1)).toEqual(['read-content', 'query-command']);
     },
   );
 
@@ -1207,13 +1281,18 @@ describe('exact prompt projection', () => {
       }]),
       contentBytes(tampered, reference.digest),
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
-    await expect(new LocalHttpRuntimeAdapter().connect('session-1')).rejects.toMatchObject({
-      code: 'CONTENT_INTEGRITY_INVALID',
-    });
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages[0].contentState).toBe('unloaded');
+    const result = await connection.hydrateEntries!(['entry-corrupt']);
+    expect(result.messages[0]).toMatchObject({body:'',contentState:'error',contentError:expect.any(String)});
+    expect(result.messages[0].contentError).toBe('这条会话内容暂时无法完整读取。');
+    responses.push(contentBytes(tampered, reference.digest));
+    await expect(connection.readCanonicalEntryContent('entry-corrupt',reference.digest,Number(reference.size)))
+      .rejects.toMatchObject({code:'CONTENT_INTEGRITY_INVALID'});
   });
 
   it('rejects canonical blob bytes that are not valid UTF-8', async () => {
@@ -1226,16 +1305,22 @@ describe('exact prompt projection', () => {
       }]),
       contentBytes(invalidUtf8),
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
-    await expect(new LocalHttpRuntimeAdapter().connect('session-1')).rejects.toMatchObject({
-      code: 'CONTENT_INTEGRITY_INVALID',
-    });
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages[0].contentState).toBe('unloaded');
+    const result = await connection.hydrateEntries!(['entry-invalid-utf8']);
+    expect(result.messages[0]).toMatchObject({body:'',contentState:'error',contentError:expect.any(String)});
+    expect(result.messages[0].contentError).toBe('这条会话内容暂时无法完整读取。');
+    responses.push(contentBytes(invalidUtf8));
+    await expect(connection.readCanonicalEntryContent('entry-invalid-utf8',reference.digest,Number(reference.size)))
+      .rejects.toMatchObject({code:'CONTENT_INTEGRITY_INVALID'});
   });
 
   it('joins retained worker activities only after an exact task page and settles only canonical terminal facts', async () => {
+    historyOwnerFixture = {tasks:Array.from({length:144},(_,i)=>({task_id:`worker-${i}`,parent_turn_id:'root',parent_initial_entry_id:'create',batch_id:'workers'})),batches:[{batch_id:'workers',parent_turn_id:'root',creator_entry_id:'create',creator_tool_call_id:'spawn',task_count:144}]};
     const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
     const payload = connectPayload([
       {entry_id:'create',turn_id:'root',entry_sequence:'1',entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'ROOT',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'create_agent_tasks'}]},
@@ -1244,8 +1329,10 @@ describe('exact prompt projection', () => {
     ], {active_turns:[{turn_id:'root',scope_kind:'ROOT',status:'RUNNING'}]}, [{
       live_revision:'1', event_type:'TEXT_DELTA', draft_identity:'worker-live', turn_id:'turn-worker-143', scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:'worker-143',payload:{text_delta:{delta:'still working'}},
     }]);
-    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
-    const raw = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
+    const raw = connection.current();
     expect(raw.subagentRuns).toHaveLength(144);
     expect(raw.subagentRuns?.[0].status).toBe('unknown');
     expect(raw.subagentRuns?.[0].activities[0].traces?.[0].status).toBe('running');
@@ -1264,6 +1351,7 @@ describe('exact prompt projection', () => {
   });
 
   it.each(['start', 'delta', 'end'])('keeps the 144th worker result %s and progress outside bounded control', async phase => {
+    historyOwnerFixture = {tasks:Array.from({length:144},(_,i)=>({task_id:`worker-${i}`,parent_turn_id:'root',parent_initial_entry_id:'create',batch_id:'workers'})),batches:[{batch_id:'workers',parent_turn_id:'root',creator_entry_id:'create',creator_tool_call_id:'spawn',task_count:144}]};
     const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
     const target = ids[143];
     const event = {turn_id: `turn-${target}`, scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: target,
@@ -1280,8 +1368,10 @@ describe('exact prompt projection', () => {
       active_turns: ids.slice(0,128).map(id=>({turn_id:`turn-${id}`,scope_kind:'SUBAGENT_TASK',status:'RUNNING'})),
       tool_attempts: ids.slice(0,128).map((id,i)=>({attempt_id:`attempt-${i}`,assistant_entry_id:`entry-${id}`,tool_call_id:'same-call-id'})),
     }, [...events, {live_revision:'4',event_type:'SUBAGENT_PROGRESS',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:target,payload:{subagent_progress:{task_id:target,status:'ACTIVE',public_summary:'examining last worker'}}}]);
-    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
-    const raw = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
+    const raw = connection.current();
     const task = inventoryTask(target,'last worker','running','root');
     const merged = mergeRuntimeTaskInventory(raw,[task]);
     const trace = merged.messages[0].subagentRuns?.[0].activities[0].traces?.[0];
@@ -1294,6 +1384,7 @@ describe('exact prompt projection', () => {
   });
 
   it('projects successful orchestration results and exposes child execution', async () => {
+    historyOwnerFixture = {tasks:['task-1','task-2'].map(task_id=>({task_id,parent_turn_id:'turn-root',parent_initial_entry_id:'root-create',batch_id:'created'})),batches:[{batch_id:'created',parent_turn_id:'turn-root',creator_entry_id:'root-create',creator_tool_call_id:'call-create',task_count:2}]};
     const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
     const toolRequest = (
       sequence: number,
@@ -1396,7 +1487,7 @@ describe('exact prompt projection', () => {
       },
       toolRequest(17, 'root-orphan-tool', 'wait_agent', 'call-orphan'),
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1',
       connection_generation: 1,
       session_id: 'session-1',
@@ -1431,6 +1522,7 @@ describe('exact prompt projection', () => {
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
     const projected = mergeRuntimeTaskInventory(connection.current(), [
       { ...inventoryTask('task-1', '读取标题', 'completed', 'turn-root', 'Read README.md.'), summary: '# Pulsara' },
       inventoryTask('task-2', '等待槽位', 'pending', 'turn-root', 'Wait for capacity.'),
@@ -1476,6 +1568,7 @@ describe('exact prompt projection', () => {
   });
 
   it('attaches child execution to the successful creator instead of an earlier failed call', async () => {
+    historyOwnerFixture = {tasks:[{task_id:'task-success',parent_turn_id:'turn-root',parent_initial_entry_id:'create-invalid',batch_id:'batch-success'}],batches:[{batch_id:'batch-success',parent_turn_id:'turn-root',creator_entry_id:'create-success',creator_tool_call_id:'call-success',task_count:1}]};
     const entries = [{
       entry_id: 'create-invalid', turn_id: 'turn-root', entry_sequence: '1',
       entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
@@ -1512,7 +1605,7 @@ describe('exact prompt projection', () => {
         tasks: [{ task_id: 'task-success', status: 'active' }],
       })),
     }];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(
       entries,
       { subagent_tasks: [{
         task_id: 'task-success', parent_turn_id: 'turn-root', batch_id: 'batch-success',
@@ -1521,7 +1614,9 @@ describe('exact prompt projection', () => {
       }] },
     )), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
-    const projection = mergeRuntimeTaskInventory((await new LocalHttpRuntimeAdapter().connect('session-1')).current(), [
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
+    const projection = mergeRuntimeTaskInventory(connection.current(), [
       { ...inventoryTask('task-success', 'reader', 'completed', 'turn-root', 'Read the target file.'), batchId: 'batch-success' },
     ]);
     const invalid = projection.messages.find((message) => message.id === 'create-invalid');
@@ -1544,7 +1639,7 @@ describe('exact prompt projection', () => {
       items: [{ kind: 'MCP_SERVER', name: 'firecrawl', target: { kind: 'MCP_SERVER', runtime_server_id: 'firecrawl' }, source: null, status: '连接已就绪。' }],
     });
     const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
@@ -1586,7 +1681,7 @@ describe('exact prompt projection', () => {
   });
 
   it('keeps detached child result data without inferring active membership or showing unloaded tasks', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: {
@@ -1654,7 +1749,7 @@ describe('exact prompt projection', () => {
         payload: { tool_result_end: { tool_call_id: 'call-b', result_state: 'APPLICATION_ERROR', final_text: 'b failed' } },
       },
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(
       connectPayload(entries, control, liveEvents),
     ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
@@ -1703,7 +1798,7 @@ describe('exact prompt projection', () => {
         }],
       } },
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -1752,7 +1847,7 @@ describe('exact prompt projection', () => {
         }],
       } },
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -1812,7 +1907,7 @@ describe('exact prompt projection', () => {
         }],
       } },
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -1843,7 +1938,7 @@ describe('exact prompt projection', () => {
         },
       ],
     };
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(
       connectPayload([], control),
     ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
@@ -1864,7 +1959,7 @@ describe('exact prompt projection', () => {
 describe('LocalHttpRuntimeAdapter connection ownership', () => {
   it('sends the stable page identity with an explicit takeover request', async () => {
     let requestBody: unknown;
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       requestBody = init?.body ? JSON.parse(String(init.body)) : undefined;
       return new Response(JSON.stringify({
         connection_id: 'connection-takeover', connection_generation: 2,
@@ -1895,7 +1990,7 @@ describe('LocalHttpRuntimeAdapter connection ownership', () => {
 describe('subagent completion continuation', () => {
   it('carries the selected permission into the new root turn command', async () => {
     let commandBody: Record<string, unknown> | undefined;
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/command')) {
         commandBody = JSON.parse(String(init?.body));
@@ -1929,7 +2024,7 @@ describe('subagent completion continuation', () => {
 
 describe('session summaries', () => {
   it('keeps process-loaded state structured for the sidebar', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       sessions: [{
         id: 'session-loaded',
         title: '会话 loaded',
@@ -1991,7 +2086,7 @@ describe('session task inventory', () => {
       total_count: 51, remaining_count: 50, next_cursor: 'page-2',
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     });
-    vi.stubGlobal('fetch', fetchMock);
+    stubRuntimeFetch(fetchMock);
 
     const page = await new LocalHttpRuntimeAdapter().listSessionTasks('session-1');
 
@@ -2035,7 +2130,7 @@ describe('session task inventory', () => {
     expect(merged.messages).toEqual([]);
   });
 
-  it('classifies completion sources by exact canonical ROOT order', () => {
+  it('preserves owner-classified completion sources through inventory merges', () => {
     const baseTask = {
       role: '研究', objective: '检查结果', status: 'completed' as const,
       completionAccepted: true, dependencyIds: [], color: 'blue' as const,
@@ -2046,9 +2141,9 @@ describe('session task inventory', () => {
         { id: 'root-1', turnId: 'turn-1', entrySequence: 1, role: 'user', time: '1', body: '一' },
         { id: 'root-2', turnId: 'turn-2', entrySequence: 2, role: 'user', time: '2', body: '二' },
         { id: 'root-3', turnId: 'turn-3', entrySequence: 3, role: 'user', time: '3', body: '三' },
-        { id: 'accepted-old', turnId: 'turn-3', entrySequence: 4, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-old' },
-        { id: 'accepted-previous', turnId: 'turn-3', entrySequence: 5, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-previous' },
-        { id: 'accepted-current', turnId: 'turn-3', entrySequence: 6, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-current' },
+        { id: 'accepted-old', turnId: 'turn-3', entrySequence: 4, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-old', sourceSubagentRelation: 'earlier' },
+        { id: 'accepted-previous', turnId: 'turn-3', entrySequence: 5, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-previous', sourceSubagentRelation: 'previous' },
+        { id: 'accepted-current', turnId: 'turn-3', entrySequence: 6, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-current', sourceSubagentRelation: 'current' },
       ],
       isRunning: false, queuedCount: 0, queuedPrompts: [], promptTransitions: [], planMode: false,
       control: {}, liveControl: {}, agentTasks: [], eventSequence: 6,
@@ -2070,13 +2165,13 @@ describe('session task inventory', () => {
     ]);
     const withoutOrder = mergeRuntimeTaskInventory({ ...merged, canonicalRootTurnIds: undefined }, merged.agentTasks);
     expect(withoutOrder.messages.slice(-3).map(message => message.sourceSubagentRelation))
-      .toEqual([undefined, undefined, 'current']);
+      .toEqual(['earlier', 'previous', 'current']);
   });
 });
 
 describe('capability catalog adapter', () => {
   it('projects Skill activation facts and the complete ready MCP tool detail', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       session_id: 'session-1',
       workspace_path: '/tmp/project',
       skills: {
@@ -2141,7 +2236,7 @@ describe('capability catalog adapter', () => {
         },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     });
-    vi.stubGlobal('fetch', fetchMock);
+    stubRuntimeFetch(fetchMock);
 
     const result = await new LocalHttpRuntimeAdapter().setUserSkillEnabled(
       '/Users/test/.agents/skills/review/SKILL.md',
@@ -2165,7 +2260,7 @@ describe('capability catalog adapter', () => {
 describe('source text fidelity hard cut', () => {
   it('projects ordered canonical Text parts without exposing their storage JSON', async () => {
     const texts = ['', '第一段\n原换行', '', '最后一段🙂'];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload([{
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([{
       entry_id: 'multipart-text', turn_id: 'turn-1', entry_sequence: '1',
       entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: inlinePrompt(...texts),
     }])), { status: 200, headers: { 'Content-Type': 'application/json' } })));
@@ -2193,7 +2288,7 @@ describe('source text fidelity hard cut', () => {
         queue_item_id: 'queue-image', command_id: 'command-image', queue_sequence: '1',
         status: 'PENDING', delivery_mode: 'NEW_TURN', content,
       }] });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(payload), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
     const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
@@ -2217,7 +2312,7 @@ describe('source text fidelity hard cut', () => {
       entry_id: `user-${index}`, turn_id: 'turn-user', entry_sequence: String(index + 1),
       entry_kind: entryKind, scope_kind: 'ROOT', content: inlinePrompt(SOURCE_FIDELITY_TEXT),
     }));
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -2241,7 +2336,7 @@ describe('source text fidelity hard cut', () => {
         block_id: `text-${index}`, block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT),
       }],
     }));
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -2291,7 +2386,7 @@ describe('source text fidelity hard cut', () => {
       } } },
       connectPayload([canonicalEntry]),
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -2327,7 +2422,7 @@ describe('source text fidelity hard cut', () => {
       turn_id: 'turn-live', scope_kind: 'ROOT', block_id: 'reasoning-live',
       payload: { thinking_delta: { block_identity: 'reasoning-live', delta: SOURCE_FIDELITY_TEXT } },
     }];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(
       entries,
       { active_turns: [{ turn_id: 'turn-live', status: 'RUNNING' }] },
       liveEvents,
@@ -2362,7 +2457,7 @@ describe('source text fidelity hard cut', () => {
         allow_free_text: true,
       },
     }];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -2404,7 +2499,7 @@ describe('source text fidelity hard cut', () => {
         next_offset_utf8_bytes: new TextEncoder().encode(SOURCE_FIDELITY_TEXT).length, eof: true,
       },
     }];
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    stubRuntimeFetch(vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return new Response(JSON.stringify(responses.shift()), {
         status: 200, headers: { 'Content-Type': 'application/json' },
@@ -2434,7 +2529,7 @@ describe('source text fidelity hard cut', () => {
         offset_utf8_bytes: 0, body: 'partial', next_offset_utf8_bytes: 0, eof: false,
       },
     }];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
@@ -2445,6 +2540,7 @@ describe('source text fidelity hard cut', () => {
   });
 
   it('preserves task inventory, dependencies, progress, TODOs, results, and child activities', async () => {
+    historyOwnerFixture = {tasks:[{task_id:'task-1',parent_turn_id:'turn-root',parent_initial_entry_id:'root-create',batch_id:'batch-1'}],batches:[{batch_id:'batch-1',parent_turn_id:'turn-root',creator_entry_id:'root-create',creator_tool_call_id:'create-call',task_count:1}]};
     const visualizations = [{ordinal:0,state:'READY',content_digest:'sha256:'+'a'.repeat(64),content_size:16,media_type:'image/png',codec:'binary',image_ref:'image:'+'a'.repeat(26),width:7,height:5}];
     const task = {
       id: 'task-1', parent_turn_id: 'turn-root', batch_id: 'batch-1', task_key: 'source-task',
@@ -2505,7 +2601,7 @@ describe('source text fidelity hard cut', () => {
         ordered_items: [{ ordinal: 0, text: SOURCE_FIDELITY_TEXT, status: 'IN_PROGRESS' }],
       }] },
     );
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
       String(input).includes('/activities?')
         ? { activities: [{ entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2', entry_kind: 'INTER_AGENT_MESSAGE', accepted_at: '2026-09-01T00:00:00Z', objective: SOURCE_FIDELITY_TEXT, content: inlineContent(SOURCE_FIDELITY_TEXT) }, {...childEntries[1], content:inlineContent(SOURCE_FIDELITY_TEXT), accepted_at:'2026-09-01T00:00:00Z', inherited:true, turn_status:'COMPLETED'}] }
         : String(input).includes('/tasks?')
@@ -2515,7 +2611,9 @@ describe('source text fidelity hard cut', () => {
 
     const adapter = new LocalHttpRuntimeAdapter();
     const inventory = (await adapter.listSessionTasks('session-1')).tasks[0];
-    const projection = mergeRuntimeTaskInventory((await adapter.connect('session-1')).current(), [inventory]);
+    const connection = await adapter.connect('session-1');
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
+    const projection = mergeRuntimeTaskInventory(connection.current(), [inventory]);
     const liveTask = projection.agentTasks.find((item) => item.id === 'task-1');
     const activityPage = await adapter.listSessionTaskActivities('session-1', 'task-1');
     const run = projection.messages.find((message) => message.id === 'root-create')?.subagentRuns
@@ -2581,7 +2679,7 @@ describe('source text fidelity hard cut', () => {
         tool_result: { assistant_entry_id: 'edit-request', tool_call_id: 'edit-call', result_state: 'SUCCESS' },
       },
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -2614,7 +2712,7 @@ describe('source text fidelity hard cut', () => {
         assistant_entry_id: 'process-request', tool_call_id: 'process-call', result_state: 'SUCCESS',
       },
     }];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -2662,7 +2760,7 @@ describe('source text fidelity hard cut', () => {
         total_lines: 800, diff: '@@ remote data, not a filesystem edit @@',
       }),
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
 
@@ -2686,7 +2784,7 @@ it('PR05 projects the original deadline/busy view and sends only the app command
     },
   }), { command_outcome: { command_id: 'command:original', status: 'SUCCEEDED', public_code: 'INTERACTION_ALLOW' } }];
   const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
-  vi.stubGlobal('fetch', fetcher);
+  stubRuntimeFetch(fetcher);
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   const interaction = connection.current().interaction!;
   expect(interaction).toEqual({ id: 'interaction:original', kind: 'tool-confirmation',
@@ -2708,7 +2806,7 @@ it('PR05 preserves explicit confirmed non-acceptance from the protocol', async (
     },
   }), {error: {stable_code: 'INTERACTION_NOT_ACCEPTED', public_message: 'confirmed not accepted'}}];
   const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), {status: 200}));
-  vi.stubGlobal('fetch', fetcher);
+  stubRuntimeFetch(fetcher);
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   await expect(connection.resolveInteraction(connection.current().interaction!, {
     kind: 'tool', decision: 'allow', commandId: 'command:original',
@@ -2728,7 +2826,7 @@ it.each([undefined, 'interaction:expired', 'unrecognized-reason'])('PR05 removes
     } }] : [],
     live_control: [{ kind: 'LIVE_INTERACTION_CLOSED' }],
   } }, { observation: {} }];
-  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
+  stubRuntimeFetch(vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   expect(connection.current().interaction?.id).toBe('interaction:original');
   const closed = await connection.observe();
@@ -2754,7 +2852,7 @@ it.each([
     } }],
     live_control: [{ kind: 'LIVE_INTERACTION_CLOSED' }],
   } }];
-  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
+  stubRuntimeFetch(vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   expect(connection.current().interaction?.kind).toBe('capability-form');
   const closed = await connection.observe();
@@ -2765,7 +2863,7 @@ it.each([
 
 it('imports raw file bytes and multipart directories outside JSON commands using current controller generation', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
-  vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+  stubRuntimeFetch(vi.fn(async (url, init) => {
     calls.push({ url: String(url), init });
     return new Response(JSON.stringify(String(url).endsWith('/connections') ? connectPayload()
       : { path: '/tmp/imported/测试.pdf', name: '测试.pdf', bytes: 3, file_count: 1 }), { status: 200 });
@@ -2796,7 +2894,7 @@ it('imports raw file bytes and multipart directories outside JSON commands using
 it('lists cwd path candidates for the selected session with paging and cancellation', async () => {
   const result = { directory: '/workspace/文档', items: [], next_cursor: 'report.pdf' };
   const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(result), { status: 200 }));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   const controller = new AbortController();
   expect(await new LocalHttpRuntimeAdapter().completeWorkspacePaths('session/selected', '文档/', 'prev.pdf', controller.signal)).toEqual(result);
   expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session%2Fselected/path-candidates', expect.objectContaining({
@@ -2805,32 +2903,26 @@ it('lists cwd path candidates for the selected session with paging and cancellat
 });
 
 describe('annotation source history ownership', () => {
-  const cursor = (sequence: number) => ({ session_id: 'session-1', cut_sequence: '3', entry_sequence: String(sequence) });
   const source = (id: string, body = 'source') => ({
     entry_id: id, entry_sequence: '2', entry_kind: 'ASSISTANT_MESSAGE', turn_id: 'turn-source',
     blocks: [{ block_id: `block-${id}`, block_kind: 'TEXT', block_ordinal: 0, content: inlineContent(body) }],
   });
   async function windowedConnection() {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(connectPayload()))));
+    stubRuntimeFetch(vi.fn().mockResolvedValue(new Response(JSON.stringify(connectPayload()))));
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    // Seed an existing owner window without changing ordinary full-backfill startup.
-    (connection as unknown as { replaceSnapshot(value: unknown): void }).replaceSnapshot({
-      session_id: 'session-1', entries: [], older_history_cursor: cursor(3), control: {},
-    });
     return connection;
   }
-  it('stops at the source page, reuses loaded content, and reports exhaustion', async () => {
+  it('reads the exact source window, reuses loaded content, and reports a missing anchor', async () => {
     const connection = await windowedConnection();
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ history_page: {
-      entries: [source('wanted')], has_more: true, older_history_cursor: cursor(2),
-    } }))).mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [], has_more: false } })));
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({session_id:'session-1',cut_sequence:'3',event_sequence_cut:'3',entries:[source('wanted')]}))).mockResolvedValueOnce(new Response(JSON.stringify({session_id:'session-1',cut_sequence:'3',event_sequence_cut:'3',entries:[]})));
+    stubRuntimeFetch(fetchMock);
     const signal = new AbortController().signal;
     expect((await connection.locateAnnotationSource!('wanted', signal)).messages.some(message => message.body === 'source')).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session-1/history/window',expect.objectContaining({body:JSON.stringify({anchor_entry_id:'wanted',maximum_entries:128,maximum_serialized_bytes:2<<20})}));
     await connection.locateAnnotationSource!('wanted', signal);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    await expect(connection.locateAnnotationSource!('missing', signal)).rejects.toThrow('找不到来源回复');
+    await expect(connection.locateAnnotationSource!('missing', signal)).rejects.toMatchObject({code:'HISTORY_ANCHOR_MISSING'});
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
   it('allows a replacement lookup to continue after its predecessor was canceled', async () => {
@@ -2838,8 +2930,8 @@ describe('annotation source history ownership', () => {
     const a = new AbortController(); const b = new AbortController();
     const fetchMock = vi.fn().mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
       init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
-    })).mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [source('b')], has_more: false } })));
-    vi.stubGlobal('fetch', fetchMock);
+    })).mockResolvedValueOnce(new Response(JSON.stringify({session_id:'session-1',cut_sequence:'3',event_sequence_cut:'3',entries:[source('b')]})));
+    stubRuntimeFetch(fetchMock);
     const canceled = connection.locateAnnotationSource!('a', a.signal).catch(error => error.name);
     a.abort();
     const replacement = connection.locateAnnotationSource!('b', b.signal);
@@ -2848,22 +2940,23 @@ describe('annotation source history ownership', () => {
     expect(b.signal.aborted).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
-  it('cancels multi-chunk hydration without installing a partial body and permits retry', async () => {
+  it('cancels a locator while shared multi-chunk hydration completes without installing partial bytes', async () => {
     const connection = await windowedConnection(); const controller = new AbortController();
     const entry = source('wanted'); const bytes = new TextEncoder().encode('完整来源');
     const blobEntry = { ...entry, blocks: [{ ...entry.blocks[0], content: blobBytes(bytes) }] };
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [blobEntry], has_more: false } })))
-      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
-        expect(init.signal).toBe(controller.signal);
-        controller.abort();
-        return new Response(JSON.stringify({ content: { digest: sha256Digest(bytes), complete_size: bytes.length, offset_bytes: 0, content: btoa('a'), complete: false } }));
-      });
-    vi.stubGlobal('fetch', fetchMock);
-    await expect(connection.locateAnnotationSource!('wanted', controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(contentBytes(bytes))));
-    const result = await connection.locateAnnotationSource!('wanted', new AbortController().signal);
-    expect(result.messages.some(message => message.body === '完整来源')).toBe(true);
+    let release!: (response: Response) => void;
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({session_id:'session-1',cut_sequence:'3',event_sequence_cut:'3',entries:[blobEntry]})))
+      .mockResolvedValueOnce(new Response(JSON.stringify({content:{digest:sha256Digest(bytes),complete_size:bytes.length,offset_bytes:0,content:Buffer.from(bytes.subarray(0,3)).toString('base64'),complete:false}})))
+      .mockImplementationOnce(() => new Promise<Response>(resolve => {release=resolve;}));
+    stubRuntimeFetch(fetchMock);
+    const pending = connection.locateAnnotationSource!('wanted',controller.signal);
+    await vi.waitFor(()=>expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(connection.current().messages[0].body).toBe('');
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({name:'AbortError'});
+    const retry = connection.locateAnnotationSource!('wanted',new AbortController().signal);
+    release(new Response(JSON.stringify({content:{digest:sha256Digest(bytes),complete_size:bytes.length,offset_bytes:3,content:Buffer.from(bytes.subarray(3)).toString('base64'),complete:true}})));
+    expect((await retry).messages[0]).toMatchObject({body:'完整来源',contentState:'ready'});
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
@@ -2874,7 +2967,7 @@ it('does not let a pre-rename session list response overwrite a confirmed title'
     .mockImplementationOnce(() => new Promise<Response>(resolve => { deliverOld = resolve; }))
     .mockResolvedValueOnce(new Response(JSON.stringify({ session_id: 'session:one', title: 'new title' })))
     .mockResolvedValueOnce(new Response(JSON.stringify({ sessions: [{ id: 'session:one', title: 'new title' }] })));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
   const pending = adapter.listSessions();
   await adapter.renameSession('session:one', 'new title');
@@ -2890,7 +2983,7 @@ it('searches sessions through the scoped paginated endpoint with cancellation', 
     session: { id: 'session:one', title: '自定义标题', lifecycle: 'ARCHIVED', workspace_id: 'workspace:one' },
     match_kind: 'assistant', snippet: '中间 commentary 命中',
   }], next_cursor: 'page-two' })));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   const signal = new AbortController().signal;
   const result = await new LocalHttpRuntimeAdapter().searchSessions('中文', 'ARCHIVED', 'page-one', signal);
   expect(fetchMock).toHaveBeenCalledWith('/api/sessions/search', expect.objectContaining({
@@ -2903,7 +2996,7 @@ it('searches sessions through the scoped paginated endpoint with cancellation', 
 
 it.each(['ALL', 'OPEN', 'ARCHIVED'] as const)('requests five recent sessions within %s for an empty query', async lifecycle => {
   const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], next_cursor: null })));
-  vi.stubGlobal('fetch', fetchMock);
+  stubRuntimeFetch(fetchMock);
   await new LocalHttpRuntimeAdapter().searchSessions('  ', lifecycle);
   expect(fetchMock).toHaveBeenCalledWith('/api/sessions/search', expect.objectContaining({
     body: JSON.stringify({ query: '  ', lifecycle, limit: 5 }),
@@ -2920,7 +3013,7 @@ it.each(['live', 'history'])('keeps the current write owner when an earlier %s c
     return payload;
   };
   const writes: string[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url === '/api/sessions/A/connections') return delayed;
     if (url === '/api/sessions/B/connections') return new Response(JSON.stringify(live('B')));
@@ -2951,7 +3044,7 @@ it('retains deduplicated interruption history across continued turns and an olde
     live_hello:{live_owner_epoch:'1',live_revision:'0',live_snapshot:{}},snapshot:{snapshot},live_control_snapshot:{snapshot:{}}},
     {observation:{through_event_sequence:'3',committed:[{projection_kind:'CURRENT_CONTROL',interruption_notice:notice},{projection_kind:'CURRENT_CONTROL',interruption_notice:notice}]}},
     {snapshot:{snapshot}}];
-  vi.stubGlobal('fetch',vi.fn(async () => new Response(JSON.stringify(responses.shift()),{status:200})));
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()),{status:200})));
   const connection=await new LocalHttpRuntimeAdapter().connect('session-1');
   expect(connection.current().interruptionNotices).toEqual([]);
   await connection.observe();
@@ -2965,6 +3058,7 @@ it('projects a notice from a cold feedback-only page without requiring a visible
   const view=new CanonicalHistoryView('cold',{path:'/missing',outcome:'MISSING',reason:null},{session_id:'cold',event_sequence_cut:'4',
     entries:[{entry_id:'feedback',entry_sequence:'3',turn_id:'stopped',entry_kind:'USER_CONTROL_FEEDBACK'}],
     interruption_notices:[{owner_kind:'EXECUTED_TURN',owner_id:'stopped',reason:'USER_STOPPED',terminal_at_utc:'2026-10-05T00:00:00Z',display_after_entry_sequence:'3'}]});
+  await view.initialize();
   expect(view.current().messages).toEqual([]);
   expect(view.current().interruptionNotices).toHaveLength(1);
   expect(view.current().interruptionNotices![0].displayAfterMessageId).toBeUndefined();
@@ -2976,7 +3070,7 @@ it('reads ROOT compaction progress on connect and every observation without inve
     { observation: { root_compaction_in_progress: true } },
     { observation: { root_compaction_in_progress: false } }];
   const fetch = vi.fn(async () => new Response(JSON.stringify(responses.shift()), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-  vi.stubGlobal('fetch', fetch);
+  stubRuntimeFetch(fetch);
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   expect(connection.current().liveControl.root_compaction_in_progress).toBe(true);
   for (const expected of [false, true, false]) {
@@ -2997,7 +3091,7 @@ it('reads a cold image reference from first-chunk metadata and rejects changed f
     {content:{...metadata,offset_bytes:0,content:bytes.subarray(0,5).toString('base64'),complete:false}},
     {content:{...metadata,offset_bytes:5,content:bytes.subarray(5).toString('base64'),complete:true}},
   ];
-  const fetcher=vi.fn(async()=>new Response(JSON.stringify(frames.shift()),{status:200}));vi.stubGlobal('fetch',fetcher);
+  const fetcher=vi.fn(async()=>new Response(JSON.stringify(frames.shift()),{status:200}));stubRuntimeFetch(fetcher);
   const view=new CanonicalHistoryView('cold',{path:'/missing',outcome:'MISSING',reason:null},{session_id:'cold',event_sequence_cut:'0',entries:[],control:{}});
   const result=await view.readImageReference(imageRef);
   expect([...result.bytes]).toEqual([...bytes]);expect(result.mediaType).toBe('image/png');expect(result.width).toBe(7);
@@ -3005,4 +3099,191 @@ it('reads a cold image reference from first-chunk metadata and rejects changed f
   frames.push({content:{...metadata,offset_bytes:0,content:bytes.subarray(0,5).toString('base64'),complete:false}},
     {content:{...metadata,width:8,offset_bytes:5,content:bytes.subarray(5).toString('base64'),complete:true}});
   await expect(view.readImageReference(imageRef)).rejects.toThrow('图片暂时无法读取');
+});
+
+it('refreshes only advisory live state after ring overflow with a fresh empty live cut', async () => {
+  vi.stubGlobal('crypto', webcrypto);
+  const entry = {
+    entry_id: 'kept', turn_id: 'old-turn', entry_sequence: '1',
+    entry_kind: 'ASSISTANT_MESSAGE', content: blobContent('already hydrated'),
+  };
+  const live = (id: string, text: string) => ({
+    event_type: 'TEXT_DELTA', draft_identity: id, turn_id: 'running',
+    scope_kind: 'ROOT', payload: { text_delta: { delta: text } },
+  });
+  const payload = connectPayload(
+    [entry],
+    { active_turns: [{ turn_id: 'running', status: 'RUNNING' }] },
+    [
+      live('old-draft', 'stale draft'),
+      {
+        event_type: 'SUBAGENT_PROGRESS',
+        payload: { subagent_progress: { task_id: 'old-task', public_summary: 'stale progress' } },
+      },
+    ],
+    { owner_epoch: '2', live_revision: '3' },
+  );
+  const frames = [
+    payload,
+    contentChunk('already hydrated'),
+    { observation: {
+      through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '900',
+      gap: { kind: 'LIVE_GAP', reason: 'LIVE_RING_OVERFLOW' },
+      committed: [{
+        projection_kind: 'IMMUTABLE_ENTRY',
+        entry: {
+          entry_id: 'new', turn_id: 'new-turn', entry_sequence: '2',
+          entry_kind: 'USER_MESSAGE', content: inlinePrompt('new committed input'),
+        },
+      }],
+      live: [],
+    } },
+    { live_control_snapshot: { snapshot: {
+      owner_epoch: '2', live_revision: '8', root_compaction_in_progress: true,
+      current_todos: [],
+    } } },
+    { observation: {
+      through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '901',
+      live_control_owner_epoch: '2', through_live_control_revision: '8',
+      live: [live('next-draft', 'next live')],
+    } },
+  ];
+  const fetch = vi.fn(async () => new Response(JSON.stringify(frames.shift()), { status: 200 }));
+  stubRuntimeFetch(fetch);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await connection.hydrateEntries!(['kept']);
+  const identity = connection.chatWriteHeaders();
+  expect(connection.current().messages.some(m => m.body === 'stale draft')).toBe(true);
+
+  const restored = await connection.observe();
+  expect(connection.chatWriteHeaders()).toEqual(identity);
+  expect(connection.role).toBe('controller');
+  expect(restored.messages.map(m => m.body)).toContain('already hydrated');
+  expect(restored.messages.map(m => m.body)).toContain('new committed input');
+  expect(restored.messages.map(m => m.body)).not.toContain('stale draft');
+  expect(restored.subagentProgress).toEqual({});
+  expect(restored.liveControl.current_todos).toEqual([]);
+  expect(restored.liveControl.root_compaction_in_progress).toBe(true);
+  expect(restored.presentationNotices[0]).toContain('临时进展已丢失');
+  expect(restored.eventSequence).toBe(2);
+  expect(restored.liveRevision).toBe(900);
+
+  const next = await connection.observe();
+  expect(next.messages.map(m => m.body)).toContain('next live');
+  expect(next.presentationNotices).toEqual([]);
+  const paths = fetch.mock.calls.map(call => String(call[0]));
+  expect(paths.filter(path => path.endsWith('/connections'))).toHaveLength(1);
+  expect(paths.filter(path => path.endsWith('/read-content'))).toHaveLength(1);
+  expect(paths.some(path => path.endsWith('/history') || path.endsWith('/snapshot'))).toBe(false);
+  expect(JSON.parse(fetch.mock.calls.at(-1)![1]!.body as string)).toMatchObject({
+    after_event_sequence: '2', after_live_revision: 900,
+    live_control_owner_epoch: 2, after_live_control_revision: 8,
+  });
+});
+
+it.each(['COMMITTED_GAP', 'LIVE_CONTROL_GAP', 'LIVE_GAP'])('keeps other gap semantics: %s', async kind => {
+  const frames = [connectPayload(), { observation: { gap: {
+    kind, reason: kind === 'LIVE_GAP' ? 'LIVE_OWNER_EPOCH_CHANGED' : 'OTHER',
+  } } }];
+  const fetch = vi.fn(async () => new Response(JSON.stringify(frames.shift()), { status: 200 }));
+  stubRuntimeFetch(fetch);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await expect(connection.observe()).rejects.toMatchObject({ code: 'PROTOCOL_GAP', gapKind: kind });
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+const todoOwnerSnapshot = (run: string, revision: number, disposition = 'ACTIVE') => ({
+  todo_run_id: run, todo_revision: String(revision), scope_kind: 'ROOT', disposition,
+  ordered_items: disposition === 'ACTIVE'
+    ? [{ ordinal: 0, text: `${run} revision ${revision}`, status: 'IN_PROGRESS' }] : [],
+});
+const todoInvalidation = (snapshot: Record<string, unknown>) => ({
+  event_type: 'TODO_SNAPSHOT_UPDATED', scope_kind: snapshot.scope_kind,
+  payload: { todo_snapshot_updated: snapshot },
+});
+
+it.each([
+  ['same-run revision', [todoOwnerSnapshot('A', 2)], todoOwnerSnapshot('A', 1)],
+  ['new ROOT run', [todoOwnerSnapshot('B', 0, 'CLEARED')], todoOwnerSnapshot('A', 99)],
+  ['same-run CLEARED', [todoOwnerSnapshot('A', 2, 'CLEARED')], todoOwnerSnapshot('A', 1)],
+  ['closed run absent from owner', [], todoOwnerSnapshot('A', 1)],
+  ['old CLOSED after new ROOT', [todoOwnerSnapshot('B', 0, 'CLEARED')], todoOwnerSnapshot('A', 100, 'CLOSED')],
+])('retains owner TODO truth after gap and a lagging live page: %s', async (_name, current, older) => {
+  const baseline = { owner_epoch: '2', live_revision: '8', current_todos: current };
+  const frames = [
+    connectPayload([], {}, [], { owner_epoch: '2', live_revision: '1' }),
+    { observation: {
+      through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '900',
+      gap: { kind: 'LIVE_GAP', reason: 'LIVE_RING_OVERFLOW' }, committed: [], live: [],
+    } },
+    { live_control_snapshot: { snapshot: baseline } },
+    { observation: {
+      through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '901',
+      live_control_owner_epoch: '2', through_live_control_revision: '8',
+      live: [todoInvalidation(older)],
+    } },
+    { live_control_snapshot: { snapshot: baseline } },
+  ];
+  const fetch = vi.fn(async () => new Response(JSON.stringify(frames.shift()), { status: 200 }));
+  stubRuntimeFetch(fetch);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect((await connection.observe()).liveControl.current_todos).toEqual(current);
+  expect((await connection.observe()).liveControl.current_todos).toEqual(current);
+  expect(fetch.mock.calls.filter(call => String(call[0]).endsWith('/live-control-snapshot'))).toHaveLength(2);
+});
+
+it('preserves the connection owner TODO baseline over retained live payloads', async () => {
+  const current = [todoOwnerSnapshot('B', 0, 'CLEARED')];
+  const fetch = vi.fn(async () => new Response(JSON.stringify(connectPayload([], {}, [
+    todoInvalidation(todoOwnerSnapshot('A', 99)),
+    todoInvalidation(todoOwnerSnapshot('A', 100, 'CLOSED')),
+  ], { owner_epoch: '2', live_revision: '8', current_todos: current })), { status: 200 }));
+  stubRuntimeFetch(fetch);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().liveControl.current_todos).toEqual(current);
+  expect(connection.current().todo).toBeUndefined();
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('refreshes TODOs once per live batch without jumping interaction state or its cursor', async () => {
+  const previousInteraction = { interaction_id: 'interaction-old', interaction_kind: 'TOOL_CONFIRMATION' };
+  const nextInteraction = { interaction_id: 'interaction-new', interaction_kind: 'TOOL_CONFIRMATION' };
+  const current = [todoOwnerSnapshot('B', 1)];
+  const frames = [
+    connectPayload([], {}, [], {
+      owner_epoch: '2', live_revision: '3', current_interaction: previousInteraction,
+      current_todos: [todoOwnerSnapshot('A', 1)],
+    }),
+    { observation: {
+      through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '3',
+      live_control_owner_epoch: '2', through_live_control_revision: '3',
+      live: [todoInvalidation(todoOwnerSnapshot('A', 2)),
+        todoInvalidation(todoOwnerSnapshot('A', 3, 'CLOSED')),
+        todoInvalidation(todoOwnerSnapshot('B', 1))],
+    } },
+    { live_control_snapshot: { snapshot: {
+      owner_epoch: '2', live_revision: '5', current_todos: current,
+      current_interaction: nextInteraction,
+    } } },
+    { observation: {
+      through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '3',
+      live_control_owner_epoch: '2', through_live_control_revision: '5',
+      live_control: [{ kind: 'LIVE_INTERACTION_CLOSED' }, { kind: 'LIVE_INTERACTION_OPENED', interaction: nextInteraction }],
+    } },
+  ];
+  const fetch = vi.fn(async () => new Response(JSON.stringify(frames.shift()), { status: 200 }));
+  stubRuntimeFetch(fetch);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const updated = await connection.observe();
+  expect(updated.liveControl.current_todos).toEqual(current);
+  expect(updated.liveControl.current_interaction).toEqual(previousInteraction);
+  expect(updated.liveControl.live_revision).toBe('3');
+  const next = await connection.observe();
+  expect(next.liveControl.current_interaction).toEqual(nextInteraction);
+  expect(next.presentationNotices).toContain('这项确认已结束；原因暂不可确认。');
+  expect(JSON.parse(fetch.mock.calls.at(-1)![1]!.body as string)).toMatchObject({
+    live_control_owner_epoch: 2, after_live_control_revision: 3,
+  });
+  expect(fetch.mock.calls.filter(call => String(call[0]).endsWith('/live-control-snapshot'))).toHaveLength(1);
+  expect(fetch).toHaveBeenCalledTimes(4);
 });

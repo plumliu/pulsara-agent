@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.interruption import (
 from dataclasses import asdict
 
 import codecs
+import json
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,6 +24,7 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 from google.protobuf.message import Message
+from google.protobuf.json_format import MessageToDict
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
@@ -64,6 +66,35 @@ MAXIMUM_SNAPSHOT_BYTES = STAGE2_LIMITS.snapshot_hard_bytes
 MAXIMUM_HISTORY_PAGE_BYTES = STAGE2_LIMITS.history_page_hard_bytes
 MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES = STAGE2_LIMITS.tool_argument_display_hard_bytes
 MAXIMUM_REASONING_INLINE_BYTES = STAGE2_LIMITS.inline_content_hard_bytes
+
+
+def browser_history_uint64(value: object, label: str) -> int:
+    """Accept exact JSON/protobuf integers, never rounded floats or booleans."""
+    if type(value) is int:
+        result = value
+    elif isinstance(value, str) and value.isascii() and value.isdecimal():
+        result = int(value)
+    else:
+        raise ValueError(f"{label} must be an exact uint64")
+    if not 0 <= result <= (1 << 64) - 1:
+        raise ValueError(f"{label} must be an exact uint64")
+    return result
+
+
+def _browser_wire(message: Message) -> dict[str, object]:
+    return MessageToDict(message, preserving_proto_field_name=True)
+
+
+def _browser_json_size(value: object) -> int:
+    # Match aiohttp's default JSON encoder, including escaping and separators.
+    return len(json.dumps(value).encode("utf-8"))
+
+
+def _browser_coverage(rows) -> dict[str, str]:
+    return {
+        "first_entry_sequence": str(rows[0]["entry_sequence"]) if rows else "0",
+        "last_entry_sequence": str(rows[-1]["entry_sequence"]) if rows else "0",
+    }
 
 
 class CanonicalProtocolResourceExhausted(RuntimeError):
@@ -381,6 +412,561 @@ class CanonicalProtocolReader:
                 notices.extend(mounted)
                 response = candidate
             return response
+
+    def browser_history_window(
+        self,
+        *,
+        session_id: str,
+        memory_domain_id: str,
+        deadline_monotonic: float,
+        anchor_entry_id: str | None = None,
+        cursor: Mapping[str, object] | None = None,
+        maximum_entries: int = STAGE2_LIMITS.history_page_default_entries,
+        maximum_serialized_bytes: int = MAXIMUM_HISTORY_PAGE_BYTES,
+    ) -> dict[str, object]:
+        """A disposable browser window, independent of all execution cursors.
+
+        SQL owns keyset selection; the existing canonical converter owns entry
+        identity/content. The only adaptation is a JSON envelope with two edges.
+        The anchor is admitted first, so neighbours cannot displace the target.
+        """
+        _bounded(maximum_entries, MAXIMUM_SNAPSHOT_ENTRIES, "history entries")
+        _bounded_bytes(maximum_serialized_bytes, MAXIMUM_HISTORY_PAGE_BYTES, "history page bytes")
+        if (anchor_entry_id is None) == (cursor is None):
+            raise ValueError("exactly one history anchor or cursor is required")
+        if anchor_entry_id is not None and (not isinstance(anchor_entry_id, str) or not anchor_entry_id):
+            raise ValueError("history anchor must be an entry ID")
+        with self._connection(deadline_monotonic) as connection:
+            session = self.authorized_session(connection, session_id, memory_domain_id)
+            if cursor is None:
+                cut = int(session["latest_entry_sequence"])
+                event_cut = int(session["latest_event_sequence"])
+                direction = "anchor"
+                anchor = connection.execute(
+                    "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
+                    (session_id, anchor_entry_id),
+                ).fetchone()
+                if anchor is None:
+                    raise KeyError(anchor_entry_id)
+                edge = int(anchor["entry_sequence"])
+                before = connection.execute(
+                    """SELECT * FROM pulsara_v3.transcript_entries
+                       WHERE session_id=%s AND entry_sequence<%s
+                       ORDER BY entry_sequence DESC LIMIT %s""",
+                    (session_id, edge, maximum_entries - 1),
+                ).fetchall()
+                after = connection.execute(
+                    """SELECT * FROM pulsara_v3.transcript_entries
+                       WHERE session_id=%s AND entry_sequence>%s AND entry_sequence<=%s
+                       ORDER BY entry_sequence LIMIT %s""",
+                    (session_id, edge, cut, maximum_entries - 1),
+                ).fetchall()
+                candidates = [anchor]
+                for index in range(max(len(before), len(after))):
+                    if index < len(before):
+                        candidates.append(before[index])
+                    if index < len(after):
+                        candidates.append(after[index])
+                candidates = candidates[:maximum_entries]
+            else:
+                if cursor.get("session_id") != session_id:
+                    raise ValueError("history cursor session conflicts")
+                direction = cursor.get("direction")
+                if direction not in {"older", "newer"}:
+                    raise ValueError("history cursor direction is invalid")
+                cut = browser_history_uint64(cursor.get("cut_sequence"), "history cut")
+                event_cut = browser_history_uint64(cursor.get("event_sequence_cut"), "history event cut")
+                edge = browser_history_uint64(cursor.get("entry_sequence"), "history edge")
+                self._validate_browser_history_cut(connection, session, cut, event_cut)
+                if not 1 <= edge <= cut:
+                    raise ValueError("history edge is outside its cut")
+                edge_row = connection.execute(
+                    "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_sequence=%s",
+                    (session_id, edge),
+                ).fetchone()
+                if edge_row is None:
+                    raise KeyError("history cursor edge")
+                # These SQL fragments are a closed server-side enum, not input.
+                comparison, order = ("<", "DESC") if direction == "older" else (">", "ASC")
+                candidates = connection.execute(
+                    f"""SELECT * FROM pulsara_v3.transcript_entries
+                        WHERE session_id=%s AND entry_sequence {comparison} %s AND entry_sequence<=%s
+                        ORDER BY entry_sequence {order} LIMIT %s""",
+                    (session_id, edge, cut, maximum_entries),
+                ).fetchall()
+            bounds = connection.execute(
+                """SELECT min(entry_sequence) AS first, max(entry_sequence) AS last
+                   FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_sequence<=%s""",
+                (session_id, cut),
+            ).fetchone()
+            selected: list[Mapping[str, object]] = []
+            entries: dict[str, dict[str, object]] = {}
+
+            def envelope() -> dict[str, object]:
+                ordered = sorted(selected, key=lambda row: int(row["entry_sequence"]))
+                value: dict[str, object] = {
+                    "session_id": session_id, "cut_sequence": str(cut),
+                    "event_sequence_cut": str(event_cut), "direction": direction,
+                    "entries": [entries[str(row["id"])] for row in ordered],
+                    "coverage": _browser_coverage(ordered),
+                }
+                if anchor_entry_id is not None:
+                    value["anchor_entry_id"] = anchor_entry_id
+                for name, position, more in (
+                    ("older", ordered[0] if ordered else None, bool(ordered and int(ordered[0]["entry_sequence"]) > bounds["first"])),
+                    ("newer", ordered[-1] if ordered else None, bool(ordered and int(ordered[-1]["entry_sequence"]) < bounds["last"])),
+                ):
+                    if more:
+                        value[name + "_cursor"] = {
+                            "session_id": session_id, "cut_sequence": str(cut),
+                            "event_sequence_cut": str(event_cut), "direction": name,
+                            "entry_sequence": str(position["entry_sequence"]),
+                        }
+                return value
+
+            response = envelope()
+            if _browser_json_size(response) > maximum_serialized_bytes:
+                raise CanonicalProtocolResourceExhausted("history window envelope cannot fit byte bound")
+            for row in candidates:
+                entries[str(row["id"])] = _browser_wire(self._entry(connection, row))
+                selected.append(row)
+                candidate = envelope()
+                if _browser_json_size(candidate) > maximum_serialized_bytes:
+                    selected.pop()
+                    if not selected:
+                        raise CanonicalProtocolResourceExhausted("history anchor or next entry cannot fit byte bound")
+                    break
+                response = candidate
+            return response
+
+    def browser_history_context(
+        self,
+        *,
+        session_id: str,
+        memory_domain_id: str,
+        entry_ids: list[str],
+        deadline_monotonic: float,
+        boundary_event_ids: list[str] | None = None,
+        cut_sequence: int | None = None,
+        event_sequence_cut: int | None = None,
+        maximum_serialized_bytes: int = MAXIMUM_HISTORY_PAGE_BYTES,
+    ) -> dict[str, object]:
+        """Enrich one bounded exact entry set, without reading transcript bodies.
+
+        Initial/older/window pages and committed observation batches all call
+        this same builder. Omitting both cuts asks for a fresh legal pair, not
+        a synthetic maximum taken from a partial browser cache.
+        """
+        if not isinstance(entry_ids, list) or any(not isinstance(item, str) or not item for item in entry_ids):
+            raise ValueError("history context entry IDs must be strings")
+        if boundary_event_ids is None:
+            boundary_event_ids = []
+        if not isinstance(boundary_event_ids, list) or any(not isinstance(item, str) or not item for item in boundary_event_ids):
+            raise ValueError("history context boundary event IDs must be strings")
+        if len(entry_ids) + len(boundary_event_ids) > MAXIMUM_SNAPSHOT_ENTRIES:
+            raise ValueError("history context exceeds the Protocol v3 entry bound")
+        if len(set(entry_ids)) != len(entry_ids):
+            raise ValueError("history context entry IDs must be unique")
+        if len(set(boundary_event_ids)) != len(boundary_event_ids):
+            raise ValueError("history context boundary event IDs must be unique")
+        if (cut_sequence is None) != (event_sequence_cut is None):
+            raise ValueError("history context requires both cuts or neither")
+        _bounded_bytes(maximum_serialized_bytes, MAXIMUM_HISTORY_PAGE_BYTES, "history context bytes")
+        with self._connection(deadline_monotonic) as connection:
+            session = self.authorized_session(connection, session_id, memory_domain_id)
+            if cut_sequence is None:
+                cut_sequence = int(session["latest_entry_sequence"])
+                event_sequence_cut = int(session["latest_event_sequence"])
+            else:
+                self._validate_browser_history_cut(connection, session, cut_sequence, event_sequence_cut)
+            rows = connection.execute(
+                """SELECT id, entry_sequence, entry_owner_kind, turn_id, imported_history_group_id,
+                          conversation_scope_kind, scope_subagent_task_id, source_subagent_task_id
+                   FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=ANY(%s)
+                   ORDER BY entry_sequence""",
+                (session_id, entry_ids),
+            ).fetchall()
+            if len(rows) != len(entry_ids):
+                raise KeyError("history context entry does not belong to session")
+            if any(int(row["entry_sequence"]) > cut_sequence for row in rows):
+                raise CanonicalProtocolGap("history context target is beyond its cut")
+            response: dict[str, object] = {
+                "session_id": session_id, "cut_sequence": str(cut_sequence),
+                "event_sequence_cut": str(event_sequence_cut),
+                "entry_ids": [str(row["id"]) for row in rows],
+                "coverage": _browser_coverage(rows), "groups": [], "entry_contexts": [],
+                "tasks": [], "batches": [], "interruption_notices": [], "compactions": [],
+                "boundary_entries": [],
+            }
+            encoded_bytes = _browser_json_size(response)
+            measured_lengths = {name: 0 for name in (
+                "groups", "entry_contexts", "tasks", "batches", "interruption_notices", "compactions",
+                "boundary_entries",
+            )}
+
+            def check_budget() -> None:
+                nonlocal encoded_bytes
+                # Sections only append complete values. Charge each item once,
+                # including JSON's comma-space, rather than re-encoding a long
+                # occurrence list quadratically before reporting its bound.
+                for name, measured in measured_lengths.items():
+                    values = response[name]
+                    for index in range(measured, len(values)):
+                        encoded_bytes += _browser_json_size(values[index]) + (2 if index else 0)
+                    measured_lengths[name] = len(values)
+                if encoded_bytes > maximum_serialized_bytes:
+                    raise CanonicalProtocolResourceExhausted("necessary history context cannot fit byte bound")
+
+            check_budget()
+            self._browser_context_boundary_entries(
+                connection, session_id, event_sequence_cut, boundary_event_ids, response, check_budget,
+            )
+            if not rows:
+                return response
+            self._browser_context_groups(connection, session_id, cut_sequence, event_sequence_cut, rows, response, check_budget)
+            self._browser_context_tasks(connection, session_id, event_sequence_cut, rows, response, check_budget)
+            sequences = tuple(int(row["entry_sequence"]) for row in rows)
+            response["interruption_notices"] = [
+                _browser_wire(self._notice_wire(notice)) for notice in (
+                    *read_executed_notices(connection, session_id=session_id, event_cut=event_sequence_cut,
+                                           entry_sequences=sequences, root_only=False),
+                    *read_imported_notices(connection, session_id=session_id, entry_sequences=sequences),
+                )
+            ]
+            check_budget()
+            # Find each occurrence's actual ROOT mount. In particular an adoption
+            # after the original page cut can still mount in that same old page.
+            # Repeated adoptions may share one edge. Stream them so the byte
+            # outcome stops the read without materializing an unbounded result.
+            with connection.cursor(name="browser_history_compactions") as events:
+                events.itersize = MAXIMUM_SNAPSHOT_ENTRIES
+                events.execute(
+                    """SELECT ev.event_id, ev.event_sequence, ev.accepted_at,
+                              r.turn_id, r.id AS context_binding_revision_id, r.source_through_sequence,
+                              coalesce(mount.entry_sequence, 0) AS adopted_after_entry_sequence
+                       FROM pulsara_v3.agent_events ev
+                       JOIN pulsara_v3.turn_context_binding_revisions r
+                         ON r.session_id=ev.session_id AND r.id=ev.subject_context_binding_revision_id
+                       JOIN pulsara_v3.turns t ON t.session_id=r.session_id AND t.id=r.turn_id
+                       LEFT JOIN LATERAL (
+                         SELECT e.entry_sequence FROM pulsara_v3.agent_events prior
+                         JOIN pulsara_v3.transcript_entries e ON e.session_id=prior.session_id AND e.id=prior.subject_entry_id
+                         WHERE prior.session_id=ev.session_id AND prior.event_sequence<ev.event_sequence
+                           AND e.entry_owner_kind='EXECUTED_TURN' AND e.conversation_scope_kind='ROOT'
+                         ORDER BY e.entry_sequence DESC LIMIT 1
+                       ) mount ON true
+                       WHERE ev.session_id=%s AND ev.event_type='CompactionAdopted'
+                         AND ev.event_sequence<=%s AND t.conversation_scope_kind='ROOT'
+                         AND (mount.entry_sequence=ANY(%s::bigint[]) OR
+                              (mount.entry_sequence IS NULL AND EXISTS (
+                                SELECT 1 FROM pulsara_v3.transcript_entries first_entry
+                                WHERE first_entry.session_id=ev.session_id AND first_entry.id=ANY(%s)
+                                  AND NOT EXISTS (SELECT 1 FROM pulsara_v3.transcript_entries earlier
+                                    WHERE earlier.session_id=first_entry.session_id
+                                      AND earlier.entry_sequence<first_entry.entry_sequence))))
+                       ORDER BY ev.event_sequence""",
+                    (session_id, event_sequence_cut, list(sequences), entry_ids),
+                )
+                for event in events:
+                    response["compactions"].append({
+                        "event_id": str(event["event_id"]), "event_sequence": str(event["event_sequence"]),
+                        "turn_id": str(event["turn_id"]), "context_binding_revision_id": str(event["context_binding_revision_id"]),
+                        "source_through_sequence": str(event["source_through_sequence"]),
+                        "adopted_after_entry_sequence": str(event["adopted_after_entry_sequence"]),
+                        "accepted_at_utc": _utc(event["accepted_at"]),
+                    })
+                    check_budget()
+            return response
+
+    @staticmethod
+    def _browser_context_boundary_entries(connection, session_id, event_cut, event_ids, response, check_budget):
+        if not event_ids:
+            return
+        # Exact committed occurrence IDs locate the page to invalidate. Current
+        # coalesced control (in particular its latest adoption) is not evidence
+        # that an earlier occurrence has been observed or its page refreshed.
+        events = connection.execute(
+            """SELECT ev.event_id, ev.event_sequence, ev.event_type,
+                      t.id AS owner_turn_id, t.conversation_scope_kind,
+                      mount.id AS entry_id, mount.entry_sequence
+               FROM pulsara_v3.agent_events ev
+               LEFT JOIN pulsara_v3.turn_context_binding_revisions r
+                 ON r.session_id=ev.session_id AND r.id=ev.subject_context_binding_revision_id
+               LEFT JOIN pulsara_v3.turns t ON t.session_id=ev.session_id
+                 AND t.id=coalesce(ev.subject_turn_id, r.turn_id)
+               LEFT JOIN LATERAL (
+                 SELECT e.id, e.entry_sequence FROM pulsara_v3.transcript_entries e
+                 JOIN pulsara_v3.agent_events accepted
+                   ON accepted.session_id=e.session_id AND accepted.subject_entry_id=e.id
+                 WHERE e.session_id=ev.session_id AND e.entry_owner_kind='EXECUTED_TURN'
+                   AND accepted.event_sequence<ev.event_sequence
+                   AND ((ev.event_type='TurnInterrupted' AND e.turn_id=t.id)
+                     OR (ev.event_type='CompactionAdopted' AND (
+                       (t.conversation_scope_kind='ROOT' AND e.conversation_scope_kind='ROOT')
+                       OR (t.conversation_scope_kind='SUBAGENT_TASK' AND e.turn_id=t.id))))
+                 ORDER BY e.entry_sequence DESC LIMIT 1
+               ) mount ON true
+               WHERE ev.session_id=%s AND ev.event_id=ANY(%s)
+               ORDER BY ev.event_sequence""", (session_id, event_ids),
+        ).fetchall()
+        if len(events) != len(event_ids):
+            raise KeyError("history boundary occurrence does not belong to session")
+        for event in events:
+            if int(event["event_sequence"]) > event_cut:
+                raise CanonicalProtocolGap("history boundary occurrence is beyond its cut")
+            if event["event_type"] not in {"CompactionAdopted", "TurnInterrupted"}:
+                raise ValueError("history boundary target is not a boundary occurrence")
+            if event["owner_turn_id"] is None or event["entry_id"] is None:
+                raise ValueError("history boundary occurrence has no canonical owner mount")
+            response["boundary_entries"].append({
+                "event_id": str(event["event_id"]), "event_sequence": str(event["event_sequence"]),
+                "entry_id": str(event["entry_id"]), "entry_sequence": str(event["entry_sequence"]),
+            })
+            check_budget()
+
+    def _validate_browser_history_cut(self, connection, session, cut, event_cut):
+        self.validate_history_cut(connection, session, cut, event_cut)
+        # A legal pair describes the full entry head at that event cut. Imported
+        # entries are present at genesis and have no entry-acceptance occurrence.
+        # Do not accept a browser's arbitrary partial-cache maximum as a cut.
+        head = connection.execute(
+            """SELECT coalesce(max(e.entry_sequence), 0) AS head
+               FROM pulsara_v3.transcript_entries e WHERE e.session_id=%s
+                 AND (e.entry_owner_kind='IMPORTED_HISTORY' OR EXISTS (
+                   SELECT 1 FROM pulsara_v3.agent_events ev
+                   WHERE ev.session_id=e.session_id AND ev.subject_entry_id=e.id
+                     AND ev.event_sequence<=%s))""", (session["id"], event_cut),
+        ).fetchone()
+        if int(head["head"]) != cut:
+            raise CanonicalProtocolGap("history entry and event cuts are not a paired head")
+
+    def _browser_context_groups(self, connection, session_id, cut, event_cut, rows, response, check_budget):
+        groups: dict[tuple[str, str], dict[str, object]] = {}
+        imported_interruptions: dict[str, int] = {}
+
+        def group(kind: str, owner_id: str) -> dict[str, object]:
+            key = (kind, owner_id)
+            if key in groups:
+                return groups[key]
+            owner_column = "turn_id" if kind == "EXECUTED_TURN" else "imported_history_group_id"
+            owner_table = "turns" if kind == "EXECUTED_TURN" else "imported_history_groups"
+            interruption = "NULL" if kind == "EXECUTED_TURN" else "owner.interruption_outcome"
+            boundary = connection.execute(
+                f"""SELECT first_entry.id AS initial_entry_id, first_entry.entry_sequence AS first_sequence,
+                           first_entry.conversation_scope_kind, first_entry.scope_subagent_task_id,
+                           last_entry.entry_sequence AS last_sequence, owner.final_entry_id,
+                           {interruption} AS interruption_outcome
+                    FROM pulsara_v3.{owner_table} owner
+                    JOIN LATERAL (SELECT * FROM pulsara_v3.transcript_entries e
+                      WHERE e.session_id=owner.session_id AND e.{owner_column}=owner.id AND e.entry_sequence<=%s
+                      ORDER BY e.entry_sequence LIMIT 1) first_entry ON true
+                    JOIN LATERAL (SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
+                      WHERE e.session_id=owner.session_id AND e.{owner_column}=owner.id AND e.entry_sequence<=%s
+                      ORDER BY e.entry_sequence DESC LIMIT 1) last_entry ON true
+                    WHERE owner.session_id=%s AND owner.id=%s""",
+                (cut, cut, session_id, owner_id),
+            ).fetchone()
+            if boundary is None:
+                raise KeyError("history context owner has no entry at cut")
+            value: dict[str, object] = {
+                "owner_kind": kind, "owner_id": owner_id,
+                "scope_kind": str(boundary["conversation_scope_kind"]),
+                "initial_entry_id": str(boundary["initial_entry_id"]),
+                "first_entry_sequence": str(boundary["first_sequence"]),
+                "last_entry_sequence": str(boundary["last_sequence"]),
+            }
+            if boundary["scope_subagent_task_id"]:
+                value["scope_subagent_task_id"] = str(boundary["scope_subagent_task_id"])
+            if boundary["final_entry_id"]:
+                value["final_entry_id"] = str(boundary["final_entry_id"])
+            if boundary["interruption_outcome"]:
+                imported_interruptions[owner_id] = int(boundary["interruption_outcome"]["display_after_entry_sequence"])
+            if value["scope_kind"] == "ROOT":
+                # Ordering is by canonical group starts, not last activity or
+                # adjacency in the browser's partial ROOT array.
+                for direction, comparison, order in (("previous", "<", "DESC"), ("next", ">", "ASC")):
+                    neighbour = connection.execute(
+                        f"""WITH roots AS (
+                          SELECT t.id AS owner_id, e.entry_sequence FROM pulsara_v3.turns t
+                          JOIN pulsara_v3.transcript_entries e ON e.session_id=t.session_id AND e.id=t.initial_entry_id
+                          WHERE t.session_id=%s AND t.conversation_scope_kind='ROOT'
+                          UNION ALL
+                          SELECT g.id AS owner_id, first_entry.entry_sequence FROM pulsara_v3.imported_history_groups g
+                          JOIN LATERAL (SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
+                            WHERE e.session_id=g.session_id AND e.imported_history_group_id=g.id
+                            ORDER BY e.entry_sequence LIMIT 1) first_entry ON true
+                          WHERE g.session_id=%s)
+                        SELECT owner_id FROM roots WHERE entry_sequence {comparison} %s AND entry_sequence<=%s
+                        ORDER BY entry_sequence {order} LIMIT 1""",
+                        (session_id, session_id, boundary["first_sequence"], cut),
+                    ).fetchone()
+                    if neighbour:
+                        value[direction + "_root_owner_id"] = str(neighbour["owner_id"])
+            groups[key] = value
+            response["groups"].append(value)
+            check_budget()
+            return value
+
+        root_cache: dict[str, tuple[str, str | None]] = {}
+        for row in rows:
+            kind = str(row["entry_owner_kind"])
+            owner_id = str(row["turn_id"] if kind == "EXECUTED_TURN" else row["imported_history_group_id"])
+            owner = group(kind, owner_id)
+            context: dict[str, object] = {
+                "entry_id": str(row["id"]), "owner_kind": kind, "owner_id": owner_id,
+                "segment_id": f"{kind}:{owner_id}:initial",
+                "segment_start_entry_id": owner["initial_entry_id"],
+            }
+            if row["conversation_scope_kind"] == "ROOT":
+                context["root_owner_id"] = owner_id
+            elif kind == "EXECUTED_TURN":
+                if owner_id not in root_cache:
+                    ancestry = connection.execute(
+                        """WITH RECURSIVE parents AS (
+                          SELECT t.id, t.conversation_scope_kind, task.parent_turn_id
+                          FROM pulsara_v3.turns t LEFT JOIN pulsara_v3.subagent_tasks task
+                            ON task.session_id=t.session_id AND task.id=t.scope_subagent_task_id
+                          WHERE t.session_id=%s AND t.id=%s
+                          UNION ALL
+                          SELECT t.id, t.conversation_scope_kind, task.parent_turn_id
+                          FROM parents p JOIN pulsara_v3.turns t ON t.id=p.parent_turn_id AND t.session_id=%s
+                          LEFT JOIN pulsara_v3.subagent_tasks task ON task.session_id=t.session_id AND task.id=t.scope_subagent_task_id)
+                        SELECT (SELECT id FROM parents WHERE conversation_scope_kind='ROOT') AS root_id,
+                               (SELECT parent_turn_id FROM parents WHERE id=%s) AS parent_id""",
+                        (session_id, owner_id, session_id, owner_id),
+                    ).fetchone()
+                    if ancestry["root_id"] is None:
+                        raise ValueError("canonical task owner has no ROOT ancestor")
+                    root_cache[owner_id] = (str(ancestry["root_id"]), ancestry["parent_id"])
+                root_id, parent_id = root_cache[owner_id]
+                context["root_owner_id"] = root_id
+                if parent_id:
+                    context["parent_turn_id"] = str(parent_id)
+                group("EXECUTED_TURN", root_id)
+            owner_column = "turn_id" if kind == "EXECUTED_TURN" else "imported_history_group_id"
+            neighbours = connection.execute(
+                f"""SELECT
+                    (SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND {owner_column}=%s
+                     AND entry_sequence<%s ORDER BY entry_sequence DESC LIMIT 1) AS previous_id,
+                    (SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND {owner_column}=%s
+                     AND entry_sequence>%s AND entry_sequence<=%s ORDER BY entry_sequence LIMIT 1) AS next_id""",
+                (session_id, owner_id, row["entry_sequence"], session_id, owner_id, row["entry_sequence"], cut),
+            ).fetchone()
+            if neighbours["previous_id"]:
+                context["previous_entry_id"] = str(neighbours["previous_id"])
+            if neighbours["next_id"]:
+                context["next_entry_id"] = str(neighbours["next_id"])
+            if kind == "EXECUTED_TURN":
+                segment = connection.execute(
+                    """SELECT ev.event_id, coalesce(mount.entry_sequence, 0) AS boundary
+                       FROM pulsara_v3.agent_events ev
+                       LEFT JOIN pulsara_v3.turn_context_binding_revisions r
+                         ON r.session_id=ev.session_id AND r.id=ev.subject_context_binding_revision_id
+                       LEFT JOIN LATERAL (
+                         SELECT e.entry_sequence FROM pulsara_v3.agent_events prior
+                         JOIN pulsara_v3.transcript_entries e ON e.session_id=prior.session_id AND e.id=prior.subject_entry_id
+                         WHERE prior.session_id=ev.session_id AND prior.event_sequence<ev.event_sequence
+                           AND e.turn_id=%s ORDER BY e.entry_sequence DESC LIMIT 1
+                       ) mount ON true
+                       WHERE ev.session_id=%s AND ev.event_sequence<=%s
+                         AND ((ev.event_type='CompactionAdopted' AND r.turn_id=%s) OR
+                              (ev.event_type='TurnInterrupted' AND ev.subject_turn_id=%s))
+                         AND coalesce(mount.entry_sequence, 0)<%s
+                       ORDER BY ev.event_sequence DESC LIMIT 1""",
+                    (owner_id, session_id, event_cut, owner_id, owner_id, row["entry_sequence"]),
+                ).fetchone()
+                if segment:
+                    first = connection.execute(
+                        """SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND turn_id=%s
+                           AND entry_sequence>%s AND entry_sequence<=%s ORDER BY entry_sequence LIMIT 1""",
+                        (session_id, owner_id, segment["boundary"], cut),
+                    ).fetchone()
+                    context["segment_id"] = f"{kind}:{owner_id}:{segment['event_id']}"
+                    context["segment_start_entry_id"] = str(first["id"])
+            elif owner_id in imported_interruptions and int(row["entry_sequence"]) > imported_interruptions[owner_id]:
+                first = connection.execute(
+                    """SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND imported_history_group_id=%s
+                       AND entry_sequence>%s AND entry_sequence<=%s ORDER BY entry_sequence LIMIT 1""",
+                    (session_id, owner_id, imported_interruptions[owner_id], cut),
+                ).fetchone()
+                context["segment_id"] = f"{kind}:{owner_id}:interruption"
+                context["segment_start_entry_id"] = str(first["id"])
+            response["entry_contexts"].append(context)
+            check_budget()
+        # Completion notifications can reference a task created in an earlier
+        # ROOT. Supply that exact parent's relation, even when its entries are
+        # outside this page; never infer "previous" from visible ROOTs.
+        task_ids = {
+            str(row[field]) for row in rows if row["entry_owner_kind"] == "EXECUTED_TURN"
+            for field in ("scope_subagent_task_id", "source_subagent_task_id") if row[field]
+        }
+        for parent in connection.execute(
+            """SELECT DISTINCT parent_turn_id FROM pulsara_v3.subagent_tasks
+               WHERE session_id=%s AND id=ANY(%s)""", (session_id, list(task_ids)),
+        ):
+            group("EXECUTED_TURN", str(parent["parent_turn_id"]))
+
+    @staticmethod
+    def _browser_context_tasks(connection, session_id, event_cut, rows, response, check_budget):
+        from pulsara_agent.identity import derive_id
+
+        # Imported source labels are provenance only; they cannot authorize a
+        # task lookup or synthesize a child owner in the forked session.
+        task_ids = {
+            str(row[field]) for row in rows if row["entry_owner_kind"] == "EXECUTED_TURN"
+            for field in ("scope_subagent_task_id", "source_subagent_task_id") if row[field]
+        }
+        for task in connection.execute(
+            """SELECT task.id, task.parent_turn_id, task.batch_id, parent.initial_entry_id
+               FROM pulsara_v3.subagent_tasks task JOIN pulsara_v3.turns parent
+                 ON parent.session_id=task.session_id AND parent.id=task.parent_turn_id
+               WHERE task.session_id=%s AND task.id=ANY(%s) ORDER BY task.id""",
+            (session_id, list(task_ids)),
+        ):
+            value = {
+                "task_id": str(task["id"]), "parent_turn_id": str(task["parent_turn_id"]),
+                "parent_initial_entry_id": str(task["initial_entry_id"]),
+            }
+            if task["batch_id"]:
+                value["batch_id"] = str(task["batch_id"])
+            response["tasks"].append(value)
+            check_budget()
+        entry_ids = [str(row["id"]) for row in rows if row["entry_owner_kind"] == "EXECUTED_TURN"]
+        # Forward-only batch derivation from the unique physical attempt. No
+        # transcript JSON decoding, inverse hashes, or scan of the entire ROOT.
+        with connection.cursor(name="browser_history_creators") as attempts:
+            attempts.itersize = MAXIMUM_SNAPSHOT_ENTRIES
+            attempts.execute(
+                """SELECT a.id, a.assistant_entry_id, a.tool_call_id, e.turn_id
+                   FROM pulsara_v3.tool_execution_attempts a
+                   JOIN pulsara_v3.transcript_entries e ON e.session_id=a.session_id AND e.id=a.assistant_entry_id
+                   JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=a.session_id
+                     AND b.assistant_entry_id=a.assistant_entry_id AND b.tool_call_id=a.tool_call_id
+                   WHERE a.session_id=%s AND e.entry_owner_kind='EXECUTED_TURN'
+                     AND b.tool_name IN ('spawn_agent', 'create_agent_tasks')
+                     AND (a.assistant_entry_id=ANY(%s) OR a.assistant_entry_id IN (
+                       SELECT r.tool_call_entry_id FROM pulsara_v3.tool_results r
+                       WHERE r.session_id=a.session_id AND r.result_entry_id=ANY(%s)))
+                   ORDER BY a.assistant_entry_id, a.tool_call_id""",
+                (session_id, entry_ids, entry_ids),
+            )
+            for attempt in attempts:
+                batch_id = derive_id("batch", "spawn", str(attempt["id"]))
+                count = connection.execute(
+                    """SELECT count(*) AS count FROM pulsara_v3.subagent_tasks task
+                       WHERE task.session_id=%s AND task.parent_turn_id=%s AND task.batch_id=%s
+                         AND EXISTS (SELECT 1 FROM pulsara_v3.agent_events ev
+                           WHERE ev.session_id=task.session_id AND ev.subject_subagent_task_id=task.id
+                             AND ev.event_type='SubagentTaskAccepted' AND ev.event_sequence<=%s)""",
+                    (session_id, attempt["turn_id"], batch_id, event_cut),
+                ).fetchone()["count"]
+                if count:
+                    response["batches"].append({
+                        "batch_id": batch_id, "parent_turn_id": str(attempt["turn_id"]),
+                        "creator_entry_id": str(attempt["assistant_entry_id"]),
+                        "creator_tool_call_id": str(attempt["tool_call_id"]), "task_count": str(count),
+                    })
+                    check_budget()
 
     def subagent_activity_page(
         self,

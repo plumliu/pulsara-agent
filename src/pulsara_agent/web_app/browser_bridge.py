@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from google.protobuf.json_format import MessageToDict
+from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 from google.protobuf.message import Message
 
 from pulsara_agent.terminal_protocol.generated_v3 import (
@@ -24,7 +24,9 @@ from pulsara_agent.primitives.plan_workflow import (
     MAXIMUM_PLAN_CHUNK_BYTES,
     MINIMUM_PLAN_CHUNK_BYTES,
 )
-from pulsara_agent.terminal_protocol.canonical_v3 import MAXIMUM_CONTROL_ITEMS
+from pulsara_agent.terminal_protocol.canonical_v3 import (
+    MAXIMUM_CONTROL_ITEMS, browser_history_uint64,
+)
 from pulsara_agent.terminal_protocol.v3_gateway import (
     MAXIMUM_OBSERVATION_EVENTS,
     MAXIMUM_OBSERVATION_WAIT_MS,
@@ -553,7 +555,7 @@ class LocalBrowserBridge:
                     or connection.generation != generation
                     or self._controller_by_session.get(connection.session_id) != connection_id
                     or connection.session_id in self._quarantined_sessions):
-                raise ProtocolBridgeError("IMPORT_CONTROLLER_REQUIRED", "当前页面没有文件导入控制权，请重新连接。")
+                raise ProtocolBridgeError("CHAT_CONTROLLER_REQUIRED", "当前窗口没有会话控制权，请重新连接。")
     async def require_import_controller(self, connection_id: str, generation: int) -> None:
         await self.require_chat_controller(connection_id, generation)
 
@@ -575,12 +577,14 @@ class LocalBrowserBridge:
         cursor = body.get("cursor")
         if not isinstance(cursor, dict):
             raise ValueError("history cursor is required")
+        try:
+            # This is the snapshot's protobuf JSON cursor, including uint64
+            # strings and optional event-cut presence (an explicit zero counts).
+            parsed_cursor = ParseDict(cursor, wire.HistoryCursor())
+        except ParseError as exc:
+            raise ValueError("history cursor is invalid") from exc
         request = wire.HistoryPageRequest(
-            cursor=wire.HistoryCursor(
-                session_id=str(cursor.get("session_id", "")),
-                cut_sequence=_uint(cursor.get("cut_sequence"), "cut_sequence"),
-                entry_sequence=_uint(cursor.get("entry_sequence"), "entry_sequence"),
-            ),
+            cursor=parsed_cursor,
             maximum_entries=_bounded_uint(
                 body.get("maximum_entries", 128),
                 "maximum_entries",
@@ -603,7 +607,7 @@ class LocalBrowserBridge:
     ) -> dict[str, object]:
         connection = await self._connection(connection_id)
         request = wire.ObserveRequest(
-            after_event_sequence=_uint(
+            after_event_sequence=browser_history_uint64(
                 body.get("after_event_sequence", 0), "after_event_sequence"
             ),
             live_owner_epoch=_uint(body.get("live_owner_epoch", 0), "live_owner_epoch"),
@@ -664,6 +668,7 @@ class LocalBrowserBridge:
             "force",
             "expected_session_id",
             "expected_host_session_id",
+            "control_admission_deadline_ms",
             "target_process_id",
             "prompt_content",
         }

@@ -7,7 +7,7 @@ import { MessageSquarePlus, CornerUpLeft, Trash2, X } from 'lucide-react';
 import { closeHistory } from '@tiptap/pm/history';
 import type { PromptAnnotationPart, PromptAnnotationSource } from '../lib/prompt-content';
 import type { DraftAnnotation, PromptDraftStore } from '../lib/prompt-draft';
-import { annotationSourceRange, highlightAnnotationSource, mapResponseSelection, registerAnnotationBody, showAnnotationHighlight } from '../lib/response-selection';
+import { annotationSourceRange, highlightAnnotationSource, mapResponseSelection, registerAnnotationBody, showAnnotationHighlight, waitForAnnotationBody } from '../lib/response-selection';
 import type { MarkdownNotify } from './markdown-body';
 import { AnnotationQuote } from './annotation-quote';
 import { DraftAnnotationContext } from './annotation-interactions';
@@ -16,14 +16,26 @@ const AnnotationContext = createContext<(source: PromptAnnotationSource | null) 
 
 export function AnnotationBody({ entryId, body, children }: { entryId?: string; body: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (ref.current && entryId) return registerAnnotationBody(ref.current, body); }, [body, entryId]);
+  useLayoutEffect(() => { if (ref.current && entryId) return registerAnnotationBody(ref.current, body); }, [body, entryId]);
   return <div ref={ref} data-annotation-entry={entryId}>{children}</div>;
 }
 
-export function AnnotationCard({ value }: { value: PromptAnnotationPart }) {
+export function AnnotationSourceButton({ source, beforeLocate }: {
+  source: PromptAnnotationSource | null;
+  beforeLocate?: () => void;
+}) {
   const locate = useContext(AnnotationContext);
+  return <button type="button" className="prompt-annotation__source" onClick={() => {
+    // Closing a draft editor cancels its previous location; close it before
+    // starting the new request so the new locator keeps its cancellation owner.
+    beforeLocate?.();
+    locate(source);
+  }}><CornerUpLeft size={13} />{source ? '引用回复' : '来源不可定位'}</button>;
+}
+
+export function AnnotationCard({ value }: { value: PromptAnnotationPart }) {
   return <div className="prompt-annotation prompt-annotation--saved">
-    <button type="button" className="prompt-annotation__source" onClick={() => locate(value.source)}><CornerUpLeft size={13} />{value.source ? '引用回复' : '来源不可定位'}</button>
+    <AnnotationSourceButton source={value.source} />
     <AnnotationQuote quote={value.quote} />
     {value.comment && <p>{value.comment}</p>}
   </div>;
@@ -149,6 +161,7 @@ function AnnotationEditor({ item, anchor, store, sessionId, onClose }: {
       <button type="button" aria-label="删除此批注" onClick={() => { store.removeAnnotation(sessionId, item.id); onClose(true); }}><Trash2 size={14} /></button>
       <button type="button" aria-label="关闭批注编辑" onClick={() => onClose(true)}><X size={15} /></button>
     </div></div>
+    <AnnotationSourceButton source={item.value.source} beforeLocate={() => onClose()} />
     <AnnotationQuote quote={item.value.quote} /></>}
     <textarea ref={input} rows={1} aria-label="批注内容" placeholder="添加评论…" value={item.value.comment ?? ''}
       onChange={event => store.updateAnnotation(sessionId, item.id, event.target.value)}
@@ -174,8 +187,11 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   const [hovered, setHovered] = useState<string>();
   const active = canAnnotate && editing?.sessionId === sessionId ? items.find(item => item.id === editing.id) : undefined;
   const preview = canAnnotate ? items.find(item => item.id === hovered) : undefined;
+  const locateController = useRef<AbortController | undefined>(undefined);
+  const sourceHighlight = useRef<(() => void) | undefined>(undefined);
   const hideMenu = useCallback(() => setMenu(undefined), []);
   const closeEditor = useCallback((focus = false) => {
+    locateController.current?.abort(); sourceHighlight.current?.();
     setEditing(undefined); setHovered(undefined);
     if (focus) store.getEditor(sessionId).commands.focus('end', { scrollIntoView: false });
   }, [sessionId, store]);
@@ -197,9 +213,12 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     }
     return () => { cleanups.forEach(cleanup => cleanup()); };
   });
-  const locateController = useRef<AbortController | undefined>(undefined);
+  useLayoutEffect(() => () => {
+    locateController.current?.abort(); sourceHighlight.current?.();
+  }, [sessionId]);
   const locate = useCallback((source: PromptAnnotationSource | null) => {
     locateController.current?.abort();
+    sourceHighlight.current?.();
     if (!source) { onNotify('来源不可定位', '引用内容仍然完整保留。'); return; }
     const controller = new AbortController(); locateController.current = controller;
     void (async () => {
@@ -207,14 +226,14 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
         if (!sourceRoot(source)) onNotify('正在定位原文');
         if (onLocate) {
           await onLocate(source.entry_id, controller.signal);
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+
         } else if (!sourceRoot(source)) throw new Error('来源消息暂时无法读取。');
         if (controller.signal.aborted) return;
-        const root = sourceRoot(source);
-        if (!root) throw new Error('当前会话中找不到来源消息。');
-        highlightAnnotationSource(root, source);
+        const root = await waitForAnnotationBody(source.entry_id, controller.signal);
+        if (controller.signal.aborted) return;
+        sourceHighlight.current = highlightAnnotationSource(root, source);
       } catch (error) {
-        if (!controller.signal.aborted) onNotify('无法定位原文', `${error instanceof Error ? error.message : '读取失败。'} 可再次点击引用重试。`, 'warning');
+        if (!controller.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) onNotify('无法定位原文', `${error instanceof Error ? error.message : '读取失败。'} 可再次点击引用重试。`, 'warning');
       }
     })();
   }, [onLocate, onNotify]);
@@ -227,7 +246,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     };
     const hide = () => setMenu(undefined);
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { hide(); closeEditor(); locateController.current?.abort(); }
+      if (event.key === 'Escape') { hide(); closeEditor(); locateController.current?.abort(); sourceHighlight.current?.(); }
     };
     const pointerdown = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { MarkdownBody, normalizeMathMarkdown } from '../../frontend/components/markdown-body';
 import { FileLinkContext } from '../../frontend/components/file-link-context';
 import { AnnotationBody } from '../../frontend/components/response-annotations';
-import { mapResponseSelection } from '../../frontend/lib/response-selection';
+import { highlightAnnotationSource, mapResponseSelection } from '../../frontend/lib/response-selection';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 
 vi.mock('../../frontend/components/mermaid-block', () => ({ MermaidBlock: () => <section><div data-source-decoration=""><button>源码</button></div><img alt="图" /></section> }));
@@ -205,4 +205,31 @@ describe('annotation drafts', () => {
     expect((await store.capture('other')).content).toEqual(captured.content);
     store.destroy();
   });
+});
+
+it('centers the first quoted line of a long reply instead of the entire reply body', () => {
+  const body = '首段引用。\n\n后续正文。'.repeat(90);
+  const view = render(<div className="thread-scroll"><AnnotationBody entryId="long-answer" body={body}>
+    <MarkdownBody annotationSource body={body} onNotify={() => {}} />
+  </AnnotationBody></div>);
+  const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  const root = view.container.querySelector<HTMLElement>('[data-annotation-entry]')!;
+  const wholeReplyScroll = vi.fn();
+  Object.defineProperty(root, 'scrollIntoView', { value: wholeReplyScroll });
+  Object.defineProperty(thread, 'clientHeight', { value: 600 });
+  const threadRect = vi.spyOn(thread, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 100, 700, 600));
+  const rootRect = vi.spyOn(root, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, -567, 650, 1859));
+  // The reference spans multiple lines; only its start must be brought into view.
+  const sourceRects = vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([
+    new DOMRect(20, -550, 120, 20), new DOMRect(20, -530, 600, 1000),
+  ] as unknown as DOMRectList);
+  thread.scrollTop = 1400;
+  const clear = highlightAnnotationSource(root, { entry_id: 'long-answer', start: 0, end: 80 });
+  expect(thread.scrollTop).toBe(460);
+  const quoteTopAfterScroll = -550 + (1400 - thread.scrollTop);
+  expect(quoteTopAfterScroll).toBe(390);
+  expect(quoteTopAfterScroll).toBeGreaterThanOrEqual(100);
+  expect(quoteTopAfterScroll + 20).toBeLessThanOrEqual(700);
+  expect(wholeReplyScroll).not.toHaveBeenCalled();
+  clear(); sourceRects.mockRestore(); rootRect.mockRestore(); threadRect.mockRestore();
 });

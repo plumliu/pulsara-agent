@@ -34,7 +34,8 @@ it('keeps each notice outside intermediate results while the next turn runs and 
 });
 
 it('renders a standalone mounted notice even when its feedback entry has no visible message', () => {
-  const view=render(<ConversationMessages messages={[]} interruptionNotices={[{...notice,displayAfterMessageId:undefined}]}
+  const view=render(<ConversationMessages messages={[]} interruptionNotices={[{...notice,displayAfterMessageId:undefined,displayAfterEntryId:'feedback'}]}
+    history={{hasOlder:false,loading:false,windows:[{id:'feedback-window',entryIds:['feedback'],hasOlder:false,hasNewer:false,loading:false}]}}
     artifactOwnerKey="feedback-only" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
   expect(screen.getAllByText('本轮回复已中断。')).toHaveLength(1);
   expect(view.container.querySelector('.conversation-interruption')?.closest('.conversation-run')).toBeNull();

@@ -355,6 +355,13 @@ export interface ToolTrace {
 }
 
 export interface SubagentActivity {
+  sourceEntryIds?: string[];
+  historyContextState?: 'loading' | 'ready' | 'error';
+  historyContextError?: string;
+  contentState?: 'unloaded' | 'loading' | 'ready' | 'error';
+  contentError?: string;
+  reasoningContentState?: 'unloaded' | 'loading' | 'ready' | 'error';
+  reasoningContentError?: string;
   visualizations?: VisualizationOccurrence[];
   id: string;
   time: string;
@@ -385,6 +392,17 @@ export interface SubagentRun {
 }
 
 export interface Message {
+  sourceEntryIds?: string[];
+  historyGroupId?: string;
+  historyWindowId?: string;
+  historyEarlierUnloaded?: boolean;
+  historyContextState?: 'loading' | 'ready' | 'error';
+  historyContextError?: string;
+  historyIncludeReasoning?: boolean;
+  reasoningContentState?: 'unloaded' | 'loading' | 'ready' | 'error';
+  reasoningContentError?: string;
+  contentState?: 'unloaded' | 'loading' | 'ready' | 'error';
+  contentError?: string;
   id: string;
   forkEligible?: boolean;
   rootFinal?: boolean;
@@ -406,6 +424,7 @@ export interface Message {
   time: string;
   body: string;
   promptContent?: CanonicalPromptContent;
+  pendingContent?: CanonicalPromptContent;
   reasoning?: ReasoningBlock[];
   model?: string;
   status?: SessionStatus;

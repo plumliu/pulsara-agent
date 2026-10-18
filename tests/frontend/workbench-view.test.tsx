@@ -2,6 +2,7 @@ import { ToolResultDisplayContext } from '../../frontend/lib/tool-result-display
 import type { ReactElement, PropsWithChildren } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../../frontend/lib/runtime-adapter';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
@@ -657,6 +658,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       }],
     })} />);
 
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     expect(screen.getByLabelText('builder 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByLabelText('此前 reviewer 的结果已加入本轮对话')).toBeTruthy();
@@ -718,6 +720,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
         }],
       }],
     })} />);
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     expect(view.container.querySelector('.trace-summary-title strong')?.textContent).toBe('标记记忆关系');
     expect(view.container.querySelector('.trace-summary-copy small')?.textContent).toBe('已标记取代关系');
     expect(view.container.querySelector('.trace-card')?.textContent).not.toMatch(/private-|mark_memory_relation/);
@@ -914,7 +917,8 @@ describe('completed reply process disclosure', () => {
     expect(screen.queryByText('中间过程')).toBeNull();
     expect(screen.getByText('历史最终回复').closest('.conversation-run__step')).toBeNull();
     expect(screen.getByText('分叉锚点回复').closest('.conversation-run__step')).toBeNull();
-    expect(container.querySelectorAll('.conversation-run__step[aria-hidden="true"]')).toHaveLength(2);
+    expect(container.querySelectorAll('.conversation-run__step')).toHaveLength(0);
+    expect(container.querySelectorAll('.trace-card')).toHaveLength(0);
     expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(2);
     expect(screen.getAllByRole('button', { name: '从此处分叉' })).toHaveLength(1);
   });
@@ -934,7 +938,8 @@ describe('completed reply process disclosure', () => {
     assistantKind: 'terminal' as const, time: '13:03', body: '已完成，并保留原来的配色。',
     rootFinal: true, forkEligible: true, status: 'completed' as const,
   };
-  const hiddenProgress = () => screen.getByText(progress.body).closest('.conversation-run__step')?.getAttribute('aria-hidden') === 'true';
+  // Collapsed processes must unmount their complex bodies, not merely hide them.
+  const hiddenProgress = () => screen.queryByText(progress.body) === null;
 
   it.each([1, 3])('folds %s leading completion notifications without an earlier assistant step', count => {
     const notices = Array.from({ length: count }, (_, i) => ({
@@ -972,26 +977,26 @@ describe('completed reply process disclosure', () => {
     expect(screen.getByRole('tooltip')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '收起中间过程' }));
     expect(screen.queryByRole('tooltip')).toBeNull();
-    expect(card.closest('[inert]')).toBeTruthy();
+    expect(card.isConnected).toBe(false);
     expect(screen.getByText(final.body).closest('.conversation-run__step')).toBeNull();
   });
 
   it('keeps streaming and steer in order, closes only on a confirmed final, and preserves manual expansion', () => {
-    const view = renderWithRawResults(<WorkbenchView {...props({ messages: [progress, steer] })} />);
+    const view = renderWithRawResults(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer] })} />);
     expect(hiddenProgress()).toBe(false);
     const draft = { ...final, id: 'live-final', assistantKind: 'live' as const, status: 'running' as const, rootFinal: false, forkEligible: false };
-    view.rerender(<WorkbenchView {...props({ messages: [progress, steer, draft] })} />);
+    view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, draft] })} />);
     expect(hiddenProgress()).toBe(false);
     expect(screen.getByText(draft.body).closest('.assistant-markdown')?.classList.contains('assistant-markdown--pretty')).toBe(false);
     // A committed assistant text without terminal-final eligibility is not enough.
-    view.rerender(<WorkbenchView {...props({ messages: [progress, steer, { ...final, rootFinal: false, forkEligible: false }] })} />);
+    view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, { ...final, rootFinal: false, forkEligible: false }] })} />);
     expect(hiddenProgress()).toBe(false);
     expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
     view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [progress, steer, final] })} />);
     expect(hiddenProgress()).toBe(true);
     expect(screen.getByText(final.body).closest('.assistant-markdown')?.classList.contains('assistant-markdown--pretty')).toBe(true);
-    expect(screen.getByText(steer.body).closest('.conversation-run__step')?.getAttribute('aria-hidden')).toBe('false');
-    expect(screen.getByText(progress.body).closest('[inert]')).toBeTruthy();
+    expect(screen.getByText(steer.body).closest('.conversation-run__step')?.hasAttribute('inert')).toBe(false);
+    expect(screen.queryByText(progress.body)).toBeNull();
     expect(screen.getByText(steer.body).closest('[inert]')).toBeNull();
     expect(screen.getByText(final.body).closest('.conversation-run__step')).toBeNull();
     expect(screen.getByRole('button', { name: '复制回复' })).toBeTruthy();
@@ -1022,12 +1027,12 @@ describe('completed reply process disclosure', () => {
   });
 
   it('does not fold the next running turn with a previous completed one', () => {
-    render(<WorkbenchView {...props({ messages: [progress, final,
+    render(<WorkbenchView {...props({ activeTurnId: 'turn-two', messages: [progress, final,
       { id: 'next-user', turnId: 'turn-two', role: 'user', userKind: 'prompt', time: '13:04', body: '接着做' },
       { ...progress, id: 'next-progress', turnId: 'turn-two', body: '正在处理第二轮。' },
     ] })} />);
     expect(hiddenProgress()).toBe(true);
-    expect(screen.getByText('正在处理第二轮。').closest('.conversation-run__step')?.getAttribute('aria-hidden')).toBe('false');
+    expect(screen.getByText('正在处理第二轮。').closest('.conversation-run__step')?.hasAttribute('inert')).toBe(false);
   });
 
   it('keeps interrupted history available without presenting an answer or a successful completion', () => {
@@ -1041,8 +1046,8 @@ describe('completed reply process disclosure', () => {
 
   it('keeps compaction visible and opens a collapsed process for an explicit history location', () => {
     const common = {
-      messages: [progress, steer, final], artifactOwnerKey: 'session-one',
-      onReadToolArtifact: vi.fn(), onNotify: vi.fn(), contextCompactionIndex: 2,
+      messages: [{ ...progress, historyGroupId: 'before-adoption' }, { ...steer, historyGroupId: 'before-adoption' }, { ...final, historyGroupId: 'after-adoption' }], artifactOwnerKey: 'session-one',
+      onReadToolArtifact: vi.fn(), onNotify: vi.fn(), history: { hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 3, displayAfterEntryId: 'steer' }] },
     };
     const view = renderWithRawResults(<ConversationMessages {...common} />);
     expect(hiddenProgress()).toBe(true);
@@ -1306,7 +1311,7 @@ describe('shared workspace read-only dock', () => {
       workspaceAvailability: {outcome:'MISSING', path:'/tmp/pr03'},
       onRestoreWorkspace: restore,
       messages:[{id:'answer', role:'assistant', time:'现在', body:'saved history',
-        status:'completed', forkEligible:true}],
+        status:'completed', assistantKind:'terminal', rootFinal:true, forkEligible:true}],
     });
     const view = render(<WorkbenchView {...original} />);
     expect(screen.getByText('saved history')).toBeTruthy();
@@ -1373,11 +1378,11 @@ describe('ROOT context compaction progress', () => {
     const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages: [{ id: 'q', role: 'user' as const, time: '', body: '问题' }] };
     const view = render(<ConversationMessages {...base} contextCompactionInProgress />);
     expect(screen.getByRole('status', { name: '上下文正在压缩' })).toBeTruthy();
-    view.rerender(<ConversationMessages {...base} contextCompactionIndex={1} />);
+    view.rerender(<ConversationMessages {...base} history={{ hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 1, displayAfterEntryId: 'q' }] }} />);
     expect(screen.queryByRole('status', { name: '上下文正在压缩' })).toBeNull();
     expect(screen.getAllByRole('separator', { name: '上下文已压缩' })).toHaveLength(1);
     // A second attempt leaves the old adopted marker intact.
-    view.rerender(<ConversationMessages {...base} contextCompactionIndex={1} contextCompactionInProgress />);
+    view.rerender(<ConversationMessages {...base} history={{ hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 1, displayAfterEntryId: 'q' }] }} contextCompactionInProgress />);
     expect(screen.getAllByRole('separator', { name: '上下文已压缩' })).toHaveLength(1);
     expect(screen.getByRole('status', { name: '上下文正在压缩' })).toBeTruthy();
   });
@@ -1402,8 +1407,384 @@ it('binds only real worker messages to visualizations, never the repeated result
     id:'task-1',label:'worker',role:'worker',color:'sage',status:'running',summary:'结果\n'+body,
     activities:[{id:'worker-real-entry',kind:'assistant',status:'completed',body,visualizations:[{ordinal:0,state:'READY',contentDigest:'sha256:'+'a'.repeat(64),contentSize:15,mediaType:'text/html',codec:'utf-8'}]}],
   }]}]} artifactOwnerKey="session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read}/>);
+  expect(read).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
   await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
   expect(read.mock.calls[0][0]).toBe('worker-real-entry');
   expect(view.container.querySelectorAll('.inline-visualization')).toHaveLength(1);
   expect(view.container.querySelector('.subagent-summary .inline-visualization')).toBeNull();
+});
+
+describe('bounded history reading and DOM locations', () => {
+  const answer = (id: string, group = 'root-one') => ({ id, turnId: group, historyGroupId: group,
+    historyWindowId: 'tail', role: 'assistant' as const, assistantKind: 'terminal' as const,
+    time: '', body: `正文 ${id}`, rootFinal: true, status: 'completed' as const, contentState: 'ready' as const });
+  const history = { hasOlder: true, loading: false,
+    windows: [{ id: 'tail', firstEntryId: 'answer', lastEntryId: 'answer', hasOlder: true, hasNewer: false, loading: false }] };
+
+  it('starts with the tail and merges repeated explicit page demands without walking older pages', async () => {
+    let finish!: () => void;
+    const read = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+    const base = props({ isRunning: false, messages: [answer('answer')], history, onLoadHistory: read });
+    const view = render(<WorkbenchView {...base} />);
+    expect(read).not.toHaveBeenCalled();
+    const button = screen.getByRole('button', { name: '加载更早记录' });
+    fireEvent.click(button); fireEvent.click(button);
+    await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith('tail', 'older'));
+    await act(async () => finish());
+    view.rerender(<WorkbenchView {...base} messages={[answer('older', 'root-old'), answer('answer')]}
+      history={{ ...history, windows: [{ ...history.windows[0], firstEntryId: 'older' }] }} />);
+    expect(read).toHaveBeenCalledOnce();
+    expect(screen.getByText('正文 older')).toBeTruthy();
+  });
+
+  it('keeps disconnected windows explicit and routes each boundary to its own reader cursor', async () => {
+    const read = vi.fn(async () => {});
+    const windows = [
+      { id: 'anchor', firstEntryId: 'old', lastEntryId: 'old', hasOlder: true, hasNewer: true, loading: false },
+      { id: 'tail', firstEntryId: 'answer', lastEntryId: 'answer', hasOlder: true, hasNewer: false, loading: false },
+    ];
+    render(<WorkbenchView {...props({ isRunning: false, messages: [{ ...answer('old', 'root-old'), historyWindowId: 'anchor' }, answer('answer')],
+      history: { ...history, windows }, onLoadHistory: read })} />);
+    expect(screen.getByRole('region', { name: '中间记录尚未加载' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '加载后续记录' }));
+    await waitFor(() => expect(read).toHaveBeenCalledWith('anchor', 'newer'));
+    fireEvent.click(within(screen.getByRole('region', { name: '中间记录尚未加载' })).getByRole('button', { name: '加载更早记录' }));
+    await waitFor(() => expect(read).toHaveBeenCalledWith('tail', 'older'));
+  });
+
+  it('shows one loading status at the older boundary and restores the keyboard page action afterwards', async () => {
+    const read = vi.fn(async () => {});
+    const messages = [{ ...answer('middle'), assistantKind: 'tool-request' as const, rootFinal: false,
+      body: '中间步骤', historyEarlierUnloaded: true }, answer('answer')];
+    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages, onLoadHistory: read };
+    const view = render(<ConversationMessages {...base} history={history} />);
+    expect(screen.getByText('本轮较早过程尚未加载')).toBeTruthy();
+    view.rerender(<ConversationMessages {...base} history={{ ...history, loading: true, windows: [{ ...history.windows[0], loading: true }] }} />);
+    expect(screen.getAllByText('正在加载…')).toHaveLength(1);
+    expect(screen.queryByText('较早记录尚未加载')).toBeNull();
+    expect(screen.queryByText('本轮较早过程尚未加载')).toBeNull();
+    expect(screen.queryByRole('button', { name: '加载更早记录' })).toBeNull();
+    // The entries request has ended, but its context is still pending. Keep the
+    // existing final body and known user content; aggregate the new entry shells.
+    view.rerender(<ConversationMessages {...base} messages={[
+      { ...answer('pending-one'), historyContextState: 'loading' },
+      { ...answer('pending-two'), historyContextState: 'loading' },
+      { id: 'known-pending', historyWindowId: 'tail', role: 'user', time: '', body: '',
+        historyContextState: 'loading', contentState: 'unloaded', pendingContent: { parts: [{ type: 'text', text: '本地仍可读' }] } },
+      ...messages,
+    ]} history={{ ...history, windows: [{ ...history.windows[0], loading: false, contextState: 'loading' }] }} />);
+    expect(screen.getAllByText('正在加载…')).toHaveLength(1);
+    expect(screen.queryByText('正在读取记录分组…')).toBeNull();
+    expect(screen.queryByText('本轮较早过程尚未加载')).toBeNull();
+    expect(screen.getByText('正文 answer')).toBeTruthy();
+    expect(screen.getByText('本地仍可读')).toBeTruthy();
+    expect(view.container.querySelector('[data-source-entry="pending-one"]')).toBeNull();
+    view.rerender(<ConversationMessages {...base} history={history} />);
+    expect(screen.queryByText('正在加载…')).toBeNull();
+    expect(screen.getByText('本轮较早过程尚未加载')).toBeTruthy();
+    const button = screen.getByRole('button', { name: '加载更早记录' });
+    button.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(read).toHaveBeenCalledExactlyOnceWith('tail', 'older');
+  });
+
+  it('keeps the real group disclosure identity when an earlier part of the same turn is prepended', () => {
+    const process = { ...answer('middle'), assistantKind: 'tool-request' as const, rootFinal: false, body: '中间步骤', historyEarlierUnloaded: true };
+    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+    const view = render(<ConversationMessages {...base} messages={[process, answer('answer')]} />);
+    expect(screen.queryByText('中间步骤')).toBeNull();
+    expect(screen.getByText('本轮较早过程尚未加载')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    const host = view.container.querySelector('.conversation-run');
+    view.rerender(<ConversationMessages {...base} messages={[{ ...process, id: 'earlier', body: '较早步骤' }, process, answer('answer')]} />);
+    expect(view.container.querySelector('.conversation-run')).toBe(host);
+    expect(screen.getByText('较早步骤')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '收起中间过程' }));
+    expect(screen.queryByText('较早步骤')).toBeNull();
+    expect(screen.queryByText('中间步骤')).toBeNull();
+  });
+
+  it('waits for a committed source host after the reader completes, and cancels an older location', async () => {
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true });
+    const read = vi.fn(async () => {});
+    const target = { sessionId: 'session-one', entryId: 'old' };
+    const base = props({ isRunning: false, messages: [answer('answer')], onLocateEntry: read });
+    const view = render(<WorkbenchView {...base} focusSourceEntry={target} />);
+    await waitFor(() => expect(read).toHaveBeenCalledWith('old', expect.any(AbortSignal)));
+    expect(scroll).not.toHaveBeenCalled();
+    const newerTarget = { sessionId: 'session-one', entryId: 'newer' };
+    view.rerender(<WorkbenchView {...base} focusSourceEntry={newerTarget} />);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    view.rerender(<WorkbenchView {...base} focusSourceEntry={newerTarget} messages={[answer('old', 'old-root'), answer('newer', 'newer-root'), answer('answer')]} />);
+    await waitFor(() => expect(scroll).toHaveBeenCalledOnce());
+    const scrolled = scroll.mock.instances[0] as HTMLElement;
+    expect(scrolled.textContent).toContain('正文 newer');
+    expect(read.mock.calls[0][1].aborted).toBe(true);
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+
+  it('requests only intersecting bodies, keeps failures local, and preserves known input until verification', async () => {
+    let notify!: IntersectionObserverCallback;
+    const observed: Element[] = [];
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: IntersectionObserverCallback) { notify = callback; }
+      observe(node: Element) { observed.push(node); }
+      disconnect() {}
+    });
+    const read = vi.fn(async () => {});
+    const message = { id: 'input', role: 'user' as const, time: '', body: '', contentState: 'unloaded' as const,
+      inputSource: { commandId: 'command', queueItemId: 'queue', deliveryMode: 'new-turn' as const } };
+    const local: import('../../frontend/lib/runtime-adapter').LocalPromptSubmission = {
+      sessionId: 'session-one', connectionGeneration: 1, commandId: 'command', queueItemId: 'queue',
+      deliveryMode: 'new-turn', status: 'synchronizing', displayAsMessage: true, content: textPrompt('保留本地原文'),
+    };
+    const base = props({ isRunning: false, messages: [message], localSubmissions: [local], onHydrateEntries: read });
+    const view = render(<WorkbenchView {...base} />);
+    expect(read).not.toHaveBeenCalled();
+    expect(screen.getAllByText('保留本地原文')).toHaveLength(1);
+    expect(view.container.querySelector('[data-pending-message]')).toBeNull();
+    expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+    act(() => notify([{ target: observed[0], isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+    await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith(['input'], false));
+    view.rerender(<WorkbenchView {...base} messages={[{ ...message, historyContextState: 'loading' }]} />);
+    expect(screen.getAllByText('保留本地原文')).toHaveLength(1);
+    expect(screen.getByText('正在读取记录分组…')).toBeTruthy();
+    view.rerender(<WorkbenchView {...base} messages={[{ ...message, contentState: 'error', contentError: '读取失败' }]} />);
+    expect(screen.getAllByText('保留本地原文')).toHaveLength(1);
+    expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '重试正文' }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not request a final answer’s reasoning until its process is explicitly expanded', async () => {
+    const observed: Array<{ node: Element; notify: IntersectionObserverCallback }> = [];
+    vi.stubGlobal('IntersectionObserver', class {
+      notify: IntersectionObserverCallback;
+      constructor(callback: IntersectionObserverCallback) { this.notify = callback; }
+      observe(node: Element) { observed.push({ node, notify: this.notify }); }
+      disconnect() {}
+    });
+    const read = vi.fn(async () => {});
+    render(<WorkbenchView {...props({ isRunning: false, messages: [{ ...answer('answer'), reasoningContentState: 'unloaded' }], onHydrateEntries: read })} />);
+    expect(screen.getByText('正文 answer')).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
+    expect(observed).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(observed).toHaveLength(1);
+    act(() => observed[0].notify([{ target: observed[0].node, isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+    await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith(['answer'], true));
+  });
+
+  it('keeps a tail containing only task records reachable without pretending the conversation is empty', () => {
+    const read = vi.fn(async () => {});
+    const view = render(<WorkbenchView {...props({ isRunning: false, messages: [], onLoadHistory: read,
+      history: { ...history, windows: [{ ...history.windows[0], firstEntryId: undefined, lastEntryId: undefined, entryIds: ['task-entry'] }] } })} />);
+    expect(screen.getByText('此区域有已保存记录，暂无主对话正文。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '加载更早记录' })).toBeTruthy();
+    expect(view.container.querySelector('.is-welcome')).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('keeps reading intent when new output arrives and follows only after an explicit return', () => {
+    const base = props({ isRunning: false, messages: [answer('answer')] });
+    const view = render(<WorkbenchView {...base} />);
+    const thread = view.container.querySelector('.thread-scroll')! as HTMLElement;
+    Object.defineProperty(thread, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(thread, 'clientHeight', { value: 500, configurable: true });
+    thread.scrollTop = 600;
+    fireEvent.wheel(thread, { deltaY: -100 });
+    fireEvent.scroll(thread);
+    view.rerender(<WorkbenchView {...base} messages={[answer('answer'), answer('new', 'new-root')]} />);
+    expect(thread.scrollTop).toBe(600);
+    fireEvent.click(screen.getByRole('button', { name: '回到最新' }));
+    expect(thread.scrollTop).toBe(2000);
+    expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
+  });
+
+  it('places only context-backed compaction boundaries, never a latest summary outside the loaded window', () => {
+    const base = props({ isRunning: false, messages: [answer('answer')], history,
+      contextCompaction: { contextBindingRevisionId: 'binding', turnId: 'earlier', sourceThroughSequence: 1, adoptedAfterEntrySequence: 2, acceptedAt: '' } });
+    const view = render(<WorkbenchView {...base} />);
+    expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
+    view.rerender(<WorkbenchView {...base} history={{ ...history, compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 2, displayBeforeEntryId: 'answer' }] }} />);
+    expect(screen.getAllByRole('separator', { name: '上下文已压缩' })).toHaveLength(1);
+  });
+});
+
+describe('independent interruption timeline rows', () => {
+  const notice = { ownerKind: 'EXECUTED_TURN' as const, ownerId: 'stopped-root', reason: 'USER_STOPPED',
+    terminalAtUtc: '2026-10-18T00:00:00Z', displayAfterEntrySequence: 20, displayAfterEntryId: 'feedback' };
+  const window = { id: 'feedback-window', firstEntryId: undefined, lastEntryId: undefined,
+    entryIds: ['feedback'], hasOlder: true, hasNewer: true, loading: false };
+
+  it('shows a feedback-only page in its own window with both paging directions', async () => {
+    const read = vi.fn(async () => {});
+    render(<WorkbenchView {...props({ isRunning: false, messages: [], interruptionNotices: [notice], onLoadHistory: read,
+      history: { hasOlder: true, loading: false, windows: [window] } })} />);
+    expect(screen.getByText('本轮回复已中断。')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: '加载更早记录' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: '加载后续记录' }));
+    await waitFor(() => expect(read).toHaveBeenCalledWith('feedback-window', 'newer'));
+  });
+
+  it('orders an independent notice by its exact retained window without attaching to an unrelated ROOT', () => {
+    const messages = [
+      { id: 'before', role: 'user' as const, body: '之前ROOT', time: '', entrySequence: 10, historyWindowId: 'before-window' },
+      { id: 'after', role: 'user' as const, body: '之后ROOT', time: '', entrySequence: 30, historyWindowId: 'after-window' },
+    ];
+    const view = render(<ConversationMessages messages={messages} interruptionNotices={[notice]}
+      artifactOwnerKey="one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
+      history={{ hasOlder: false, loading: false, windows: [
+        { ...window, id: 'before-window', entryIds: ['before'], firstEntryId: 'before', lastEntryId: 'before', hasOlder: false },
+        window,
+        { ...window, id: 'after-window', entryIds: ['after'], firstEntryId: 'after', lastEntryId: 'after', hasNewer: false },
+      ] }} />);
+    const before = screen.getByText('之前ROOT'); const after = screen.getByText('之后ROOT'); const marker = screen.getByText('本轮回复已中断。');
+    expect(before.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(marker.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(marker.closest('[data-source-entry]')?.getAttribute('data-source-entry')).toBe('feedback');
+    expect(view.container.querySelectorAll('[data-interruption-owner]')).toHaveLength(1);
+  });
+});
+
+describe('activity and pending-input body demands', () => {
+  it('reads inline subagent activity only when its task is expanded and near the viewport', async () => {
+    const observed: Array<{ node: Element; notify: IntersectionObserverCallback }> = [];
+    vi.stubGlobal('IntersectionObserver', class {
+      notify: IntersectionObserverCallback;
+      constructor(callback: IntersectionObserverCallback) { this.notify = callback; }
+      observe(node: Element) { observed.push({ node, notify: this.notify }); }
+      disconnect() {}
+    });
+    const read = vi.fn(async () => {});
+    render(<WorkbenchView {...props({ isRunning: false, onHydrateEntries: read, messages: [{
+      id: 'final-task', role: 'assistant', assistantKind: 'terminal', time: '', body: '任务完成', rootFinal: true, contentState: 'ready',
+      subagentRuns: [{ id: 'worker', label: '审查worker', role: 'builder', color: 'blue', status: 'completed', objective: '核对', activities: [{
+        id: 'worker-entry', time: '', body: '', contentState: 'unloaded', sourceEntryIds: ['worker-entry'], reasoningContentState: 'unloaded',
+      }] }],
+    }] })} />);
+    expect(read).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(read).not.toHaveBeenCalled(); expect(observed).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: /审查worker/ }));
+    expect(observed).toHaveLength(1);
+    act(() => observed[0].notify([{ target: observed[0].node, isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+    await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith(['worker-entry'], true));
+  });
+
+  it('retains reader-held known queue text during canonical and context hydration with no local submission', () => {
+    render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [], messages: [{
+      id: 'consumed-entry', role: 'user', time: '', body: '', contentState: 'loading', historyContextState: 'loading',
+      pendingContent: textPrompt('已知队列原文'), inputSource: { commandId: 'old-command', queueItemId: 'old-queue', deliveryMode: 'new-turn' },
+    }] })} />);
+    expect(screen.getAllByText('已知队列原文')).toHaveLength(1);
+    expect(screen.getByText('本地已知内容')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+  });
+});
+
+it.each(['wheel', 'Home'])('restores the semantic anchor after an edge gesture with no scroll event: %s', async gesture => {
+  const message = { id: 'kept', role: 'user' as const, time: '', body: '保持位置', historyWindowId: 'tail' };
+  const history = { hasOlder: true, loading: false, windows: [{ id: 'tail', firstEntryId: 'kept', lastEntryId: 'kept', entryIds: ['kept'], hasOlder: true, hasNewer: false, loading: false }] };
+  const base = props({ isRunning: false, messages: [message], history, onLoadHistory: vi.fn(async () => {}) });
+  const view = render(<WorkbenchView {...base} />);
+  const thread = view.container.querySelector('.thread-scroll')! as HTMLElement;
+  vi.spyOn(thread, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 600, 500));
+  const source = screen.getByText('保持位置').closest('article')!;
+  let sourceTop = 20;
+  vi.spyOn(source, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, sourceTop, 600, 80));
+  if (gesture === 'wheel') fireEvent.wheel(thread, { deltaY: -100 });
+  else fireEvent.keyDown(thread, { key: 'Home' });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '加载更早记录' })); });
+  sourceTop = 220;
+  view.rerender(<WorkbenchView {...base} messages={[{ ...message, id: 'earlier', body: '更早内容' }, message]}
+    history={{ ...history, windows: [{ ...history.windows[0], firstEntryId: 'earlier', entryIds: ['earlier', 'kept'] }] }} />);
+  expect(thread.scrollTop).toBe(200);
+});
+
+describe('independent history context errors', () => {
+  it('keeps messages and composer usable and retries boundary metadata even without an older page', async () => {
+    const retry = vi.fn(async () => {});
+    const reconnect = vi.fn();
+    const history = { hasOlder: false, loading: false, error: '历史边界查询暂时失败', windows: [{
+      id: 'tail', firstEntryId: 'answer', lastEntryId: 'answer', entryIds: ['answer'],
+      hasOlder: false, hasNewer: false, loading: false,
+    }] };
+    const base = props({ isRunning: false, history, onLoadHistory: retry, onReconnect: reconnect,
+      messages: [{ id: 'answer', role: 'assistant', assistantKind: 'terminal', rootFinal: true, time: '', body: '正常回复仍然可读' }] });
+    const view = render(<WorkbenchView {...base} />);
+    expect(screen.getByText('正常回复仍然可读')).toBeTruthy();
+    expect(screen.getByLabelText('发送给 Pulsara').getAttribute('contenteditable')).toBe('true');
+    expect(screen.getByRole('alert').textContent).toBe('历史边界查询暂时失败');
+    fireEvent.click(screen.getByRole('button', { name: '重试历史上下文' }));
+    await waitFor(() => expect(retry).toHaveBeenCalledExactlyOnceWith(undefined, 'older'));
+    expect(reconnect).not.toHaveBeenCalled();
+    view.rerender(<WorkbenchView {...base} history={{ ...history, error: undefined }} />);
+    expect(screen.queryByRole('region', { name: '历史上下文读取失败' })).toBeNull();
+    expect(screen.getByText('正常回复仍然可读')).toBeTruthy();
+  });
+
+  it('keeps a window error in its existing retry region without duplicating a global error', () => {
+    render(<ConversationMessages messages={[{ id: 'answer', role: 'user', time: '', body: '正文' }]}
+      artifactOwnerKey="one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onLoadHistory={vi.fn(async () => {})}
+      history={{ hasOlder: false, loading: false, error: '此页上下文读取失败', windows: [{
+        id: 'tail', firstEntryId: 'answer', lastEntryId: 'answer', entryIds: ['answer'],
+        hasOlder: false, hasNewer: false, loading: false, error: '此页上下文读取失败',
+      }] }} />);
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重试历史上下文' })).toBeNull();
+  });
+});
+
+describe('source location disclosure demand', () => {
+  const final = { id: 'final', role: 'assistant' as const, assistantKind: 'terminal' as const,
+    historyGroupId: 'root', historyWindowId: 'tail', turnId: 'root', time: '', body: '最终回复正文', rootFinal: true,
+    contentState: 'ready' as const, reasoningContentState: 'unloaded' as const, sourceEntryIds: ['final'] };
+  const process = { id: 'process', role: 'assistant' as const, assistantKind: 'tool-request' as const,
+    historyGroupId: 'root', historyWindowId: 'tail', turnId: 'root', time: '', body: '',
+    contentState: 'unloaded' as const, sourceEntryIds: ['process', 'tool-result'],
+    traces: [{ id: 'tool-call', kind: 'read' as const, title: '读取文件', subtitle: '已完成', toolName: 'read_file', status: 'completed' as const, resultEntryId: 'tool-result' }] };
+
+  it('locates a final answer without expanding or hydrating its earlier tools and reasoning', async () => {
+    const observe = vi.fn();
+    vi.stubGlobal('IntersectionObserver', class { observe = observe; disconnect() {} });
+    const hydrate = vi.fn(async () => {});
+    const read = vi.fn(async () => {});
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true });
+    const view = render(<WorkbenchView {...props({ isRunning: false, messages: [process, final], onHydrateEntries: hydrate,
+      onLocateEntry: read, focusSourceEntry: { sessionId: 'session-one', entryId: 'final' } })} />);
+    await waitFor(() => expect(scroll).toHaveBeenCalledOnce());
+    expect(read).toHaveBeenCalledWith('final', expect.any(AbortSignal));
+    expect(screen.getByText('最终回复正文')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '展开中间过程' })).toBeTruthy();
+    expect(view.container.querySelector('[data-source-entry="process"]')).toBeNull();
+    expect(view.container.querySelector('[data-source-entry="final:process"]')).toBeNull();
+    expect(observe).not.toHaveBeenCalled();
+    expect(hydrate).not.toHaveBeenCalled();
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+
+  it('still expands the process for an exact tool-result alias and preserves that choice when locating the final body', () => {
+    const base = { messages: [{ ...process, contentState: 'ready' as const }, { ...final, reasoningContentState: 'ready' as const }],
+      artifactOwnerKey: 'one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+    const view = render(<ConversationMessages {...base} focusSourceEntry={{ sessionId: 'one', entryId: 'tool-result' }} />);
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+    expect(view.container.querySelector('[data-result-entry="tool-result"]')).toBeTruthy();
+    view.rerender(<ConversationMessages {...base} focusSourceEntry={{ sessionId: 'one', entryId: 'final' }} />);
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+  });
+
+  it('still expands tasks attached to a final answer when the task itself is the target', () => {
+    const view = render(<ConversationMessages messages={[{ ...final, reasoningContentState: 'ready', subagentRuns: [{
+      id: 'worker', label: '目标worker', role: 'reviewer', objective: '核对', status: 'completed', color: 'blue', activities: [],
+    }] }]} artifactOwnerKey="one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
+      focusTaskId="worker" focusTaskHighlighted focusTaskRevision={1} />);
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+    expect(view.container.querySelector('[data-task-id="worker"]')).toBeTruthy();
+  });
 });

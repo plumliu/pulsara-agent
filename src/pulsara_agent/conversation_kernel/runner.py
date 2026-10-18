@@ -108,6 +108,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
     ProviderOutputIncompleteReason,
+    ProviderGenerationRetry,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -2230,6 +2231,7 @@ class ConversationKernelRunner:
                         proposed_entry_id=entry_id,
                     )
                     completed = collected.completed
+                    entry_id = completed.draft_identity
                     calls = tuple(
                         item
                         for item in completed.blocks
@@ -3105,20 +3107,51 @@ class ConversationKernelRunner:
         permit: ProcessLocalProviderInputInstallPermit,
         proposed_entry_id: str,
     ) -> _CollectedModelResponse:
-        assembler = ProviderStreamAssembler(
-            session_id=request.session_id,
-            turn_id=request.turn_id,
-            live_bus=self._live_bus,
-            proposed_entry_id=proposed_entry_id,
-            conversation_scope_kind=(
-                request.compiled_input.canonical_input_identity.conversation_scope_kind.value
-            ),
-            scope_subagent_task_id=(
-                request.compiled_input.canonical_input_identity.scope_subagent_task_id
-            ),
-        )
+        def new_assembler() -> ProviderStreamAssembler:
+            return ProviderStreamAssembler(
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                live_bus=self._live_bus,
+                proposed_entry_id=proposed_entry_id,
+                conversation_scope_kind=(
+                    request.compiled_input.canonical_input_identity.conversation_scope_kind.value
+                ),
+                scope_subagent_task_id=(
+                    request.compiled_input.canonical_input_identity.scope_subagent_task_id
+                ),
+            )
+
+        def abort_generation(reason: str) -> None:
+            self._live_bus.offer_settlement_nowait(
+                kind=LiveSettlementKind.ABORTED,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                draft_identity=proposed_entry_id,
+                reason_code=reason,
+                scope_kind=(
+                    request.compiled_input.canonical_input_identity.conversation_scope_kind.value
+                ),
+                scope_subagent_task_id=(
+                    request.compiled_input.canonical_input_identity.scope_subagent_task_id
+                ),
+                channel_kind=LiveChannelKind.MODEL_OUTPUT,
+                generation_id=derive_id("generation", "draft", proposed_entry_id),
+                proposed_entry_id=proposed_entry_id,
+            )
+
+        assembler = new_assembler()
         try:
             async for item in execution.open_once(permit):
+                if isinstance(item, ProviderGenerationRetry):
+                    # No assistant settlement or tool dispatch has happened.
+                    # Replace only disposable output, keeping the installed
+                    # provider request and its one-shot authority intact.
+                    abort_generation("TOOL_ARGUMENTS_REGENERATING")
+                    proposed_entry_id = random_id("entry")
+                    assembler = new_assembler()
+                    if self._presentation_notice_sink is not None:
+                        self._presentation_notice_sink("工具参数格式异常，正在重新生成。")
+                    continue
                 assembler.apply(item)
             provider_completion = execution.take_completed_result_once()
             completed = assembler.complete()
@@ -3173,22 +3206,7 @@ class ConversationKernelRunner:
                 provider_replay=provider_replay,
             )
         except BaseException as exc:
-            self._live_bus.offer_settlement_nowait(
-                kind=LiveSettlementKind.ABORTED,
-                session_id=request.session_id,
-                turn_id=request.turn_id,
-                draft_identity=proposed_entry_id,
-                reason_code=f"MODEL_STREAM_{type(exc).__name__.upper()}",
-                scope_kind=(
-                    request.compiled_input.canonical_input_identity.conversation_scope_kind.value
-                ),
-                scope_subagent_task_id=(
-                    request.compiled_input.canonical_input_identity.scope_subagent_task_id
-                ),
-                channel_kind=LiveChannelKind.MODEL_OUTPUT,
-                generation_id=derive_id("generation", "draft", proposed_entry_id),
-                proposed_entry_id=proposed_entry_id,
-            )
+            abort_generation(f"MODEL_STREAM_{type(exc).__name__.upper()}")
             raise
 
     def _offer_compile_observation(

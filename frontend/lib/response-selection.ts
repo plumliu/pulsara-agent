@@ -1,8 +1,27 @@
 import type { PromptAnnotationPart, PromptAnnotationSource } from './prompt-content';
 
 const bodies = new WeakMap<HTMLElement, string>();
+const bodyListeners = new Set<() => void>();
+
+/** Resolve only after React has registered the actual, verified source body. */
+export function waitForAnnotationBody(entryId: string, signal: AbortSignal): Promise<HTMLElement> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { bodyListeners.delete(check); signal.removeEventListener('abort', abort); };
+    const abort = () => { cleanup(); reject(new DOMException('定位已取消', 'AbortError')); };
+    const check = () => {
+      if (signal.aborted) { abort(); return; }
+      const root = [...document.querySelectorAll<HTMLElement>('[data-annotation-entry]')]
+        .find(node => node.dataset.annotationEntry === entryId && node.isConnected && bodies.has(node));
+      if (root) { cleanup(); resolve(root); }
+    };
+    bodyListeners.add(check);
+    signal.addEventListener('abort', abort, { once: true });
+    check();
+  });
+}
 export function registerAnnotationBody(element: HTMLElement, body: string): () => void {
   bodies.set(element, body);
+  for (const listener of bodyListeners) listener();
   return () => { bodies.delete(element); };
 }
 
@@ -126,8 +145,26 @@ export function showAnnotationHighlight(root: HTMLElement, source: PromptAnnotat
   };
 }
 
-export function highlightAnnotationSource(root: HTMLElement, source: PromptAnnotationSource): void {
-  root.scrollIntoView({ block: 'center', behavior: 'smooth' });
+export function highlightAnnotationSource(root: HTMLElement, source: PromptAnnotationSource): () => void {
+  const body = bodies.get(root);
+  const range = annotationSourceRange(root, source);
+  if (body === undefined || source.start < 0 || source.end > body.length || source.start >= source.end
+    || !range) throw new Error('引用原文范围无法在已读取正文中定位。');
+  const thread = root.closest<HTMLElement>('.thread-scroll');
+  const firstRect = [...range.getClientRects()].find(rect => rect.height > 0);
+  if (thread && firstRect) {
+    // Center the first quoted line, so even a quote spanning a long reply
+    // starts inside the viewport. Native scroll events keep the reading anchor
+    // in sync with this precise position after the entry-level locator settles.
+    const viewportTop = thread.getBoundingClientRect().top + thread.clientTop;
+    thread.scrollTop = Math.max(0, thread.scrollTop + firstRect.top - viewportTop
+      - Math.max(0, thread.clientHeight - Math.min(firstRect.height, thread.clientHeight)) / 2);
+  } else {
+    const start = range.startContainer instanceof Element
+      ? range.startContainer.childNodes[range.startOffset] ?? range.startContainer : range.startContainer;
+    element(start)?.scrollIntoView({ block: 'center', behavior: 'instant' });
+  }
   const cleanup = showAnnotationHighlight(root, source, 'annotation-source');
-  window.setTimeout(cleanup, 3500);
+  const timer = window.setTimeout(cleanup, 3500);
+  return () => { window.clearTimeout(timer); cleanup(); };
 }

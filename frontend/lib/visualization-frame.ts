@@ -23,9 +23,9 @@ export const visualizationFrameMeasurementScript = `<script>
   const resize = new ResizeObserver(schedule);
   const observeRoot = (root) => {
     if (root === observedRoot) return;
-    if (observedRoot) resize.unobserve(observedRoot);
+    if (observedRoot && observedRoot !== document.documentElement) resize.unobserve(observedRoot);
     observedRoot = root;
-    if (root) resize.observe(root);
+    if (root && root !== document.documentElement) resize.observe(root);
   };
   const report = () => {
     pending = false;
