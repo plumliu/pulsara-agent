@@ -42,6 +42,7 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     RunPermissionOverlay,
 )
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import PlanHandoffKind
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.steer import (
@@ -162,11 +163,6 @@ class _PromptOperations:
             ).fetchone()
             if target is None or target["conversation_scope_kind"] != "ROOT" or target["status"] != "RUNNING":
                 raise QueuedPromptActionRejected("STEER_TARGET_CLOSED")
-            if any(source[key] is not None for key in (
-                "pending_plan_handoff_workflow_id",
-                "pending_plan_handoff_interaction_id", "pending_plan_handoff_kind",
-            )):
-                raise QueuedPromptActionRejected("PROMPT_HAS_PLAN_HANDOFF")
         connection.execute(
             """INSERT INTO pulsara_v3.session_commands (
                    session_id, command_id, command_kind, request_schema_version,
@@ -438,7 +434,7 @@ class _PromptOperations:
                 if queue["permission_snapshot_id"] is None
                 else str(queue["permission_snapshot_id"])
             )
-            == candidate.permission_snapshot_id
+            == (candidate.permission_snapshot_id if candidate.scheduled is not None else None)
             and (
                 None
                 if queue["requested_permission_mode"] is None
@@ -553,7 +549,7 @@ class _PromptOperations:
                     if row["permission_snapshot_id"] is None
                     else str(row["permission_snapshot_id"])
                 )
-                != candidate.permission_snapshot_id
+                != (candidate.permission_snapshot_id if candidate.scheduled is not None else None)
                 or (
                     None
                     if row["requested_permission_mode"] is None
@@ -678,7 +674,7 @@ class _PromptOperations:
             )
         handoff = (
             None
-            if candidate.delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
+            if candidate.scheduled is None
             else self._eligible_plan_handoff(
                 connection, session_id=guard.session_id
             )
@@ -756,7 +752,11 @@ class _PromptOperations:
                 *(
                     (None,) * 12
                     if permission is None
-                    else self._permission_columns(permission)
+                    else (
+                        self._permission_columns(permission)
+                        if candidate.scheduled is not None
+                        else (None, permission.requested_mode.value, *((None,) * 10))
+                    )
                 ),
                 None if handoff is None else handoff.workflow_id,
                 None if handoff is None else handoff.interaction_id,
@@ -799,6 +799,28 @@ class _PromptOperations:
             reasoning_preference_reset,
         )
 
+
+    def _queue_delivery_permission(self, connection, item):
+        if item["input_origin"] == CanonicalInputOriginKind.SCHEDULED_TASK.value:
+            return self._permission_from_row(item)
+        identity = build_queued_root_turn_identity(str(item["session_id"]), str(item["id"]))
+        return self._freeze_root_permission_snapshot(
+            connection, session_id=str(item["session_id"]),
+            snapshot_id=identity.permission_snapshot_id,
+            requested_mode=PermissionMode(str(item["requested_permission_mode"])),
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
+
+    def _queue_delivery_handoff(self, connection, item):
+        if item["input_origin"] == CanonicalInputOriginKind.SCHEDULED_TASK.value:
+            return tuple(item[key] for key in (
+                "pending_plan_handoff_workflow_id", "pending_plan_handoff_interaction_id",
+                "pending_plan_handoff_kind",
+            ))
+        handoff = self._eligible_plan_handoff(connection, session_id=str(item["session_id"]))
+        return (None, None, None) if handoff is None else (
+            handoff.workflow_id, handoff.interaction_id, handoff.kind.value,
+        )
 
     def prepare_prompt_head_consumption(
         self,
@@ -846,7 +868,8 @@ class _PromptOperations:
                 row=item,
                 queue_item_id=str(item["id"]),
             )
-            permission = self._permission_from_row(item)
+            permission = self._queue_delivery_permission(connection, item)
+            handoff_workflow, handoff_interaction, handoff_kind = self._queue_delivery_handoff(connection, item)
             model_call_binding = model_call_binding_from_dict(
                 item["model_call_binding"]
             )
@@ -901,21 +924,9 @@ class _PromptOperations:
                 context_base_kind=ContextBindingBaseKind(base_kind),
                 context_snapshot_id=snapshot_id,
                 source_through_sequence=source_through,
-                pending_plan_handoff_workflow_id=(
-                    None
-                    if item["pending_plan_handoff_workflow_id"] is None
-                    else str(item["pending_plan_handoff_workflow_id"])
-                ),
-                pending_plan_handoff_interaction_id=(
-                    None
-                    if item["pending_plan_handoff_interaction_id"] is None
-                    else str(item["pending_plan_handoff_interaction_id"])
-                ),
-                pending_plan_handoff_kind=(
-                    None
-                    if item["pending_plan_handoff_kind"] is None
-                    else str(item["pending_plan_handoff_kind"])
-                ),
+                pending_plan_handoff_workflow_id=handoff_workflow,
+                pending_plan_handoff_interaction_id=handoff_interaction,
+                pending_plan_handoff_kind=handoff_kind,
                 unpublished_plan_workflow_fact=None,
                 unpublished_plan_handoff_fact=None,
                 unpublished_approved_plan_fact=None,
@@ -934,21 +945,9 @@ class _PromptOperations:
             permission_snapshot=permission,
             model_call_binding=model_call_binding,
             provider_input_candidate=provider_input_candidate,
-            pending_plan_handoff_workflow_id=(
-                None
-                if item["pending_plan_handoff_workflow_id"] is None
-                else str(item["pending_plan_handoff_workflow_id"])
-            ),
-            pending_plan_handoff_interaction_id=(
-                None
-                if item["pending_plan_handoff_interaction_id"] is None
-                else str(item["pending_plan_handoff_interaction_id"])
-            ),
-            pending_plan_handoff_kind=(
-                None
-                if item["pending_plan_handoff_kind"] is None
-                else str(item["pending_plan_handoff_kind"])
-            ),
+            pending_plan_handoff_workflow_id=handoff_workflow,
+            pending_plan_handoff_interaction_id=handoff_interaction,
+            pending_plan_handoff_kind=handoff_kind,
             occurred_at=occurred_at,
             actor_id=actor_id,
         )
@@ -1007,7 +1006,7 @@ class _PromptOperations:
                 raise ConversationKernelConflict("queued ROOT FIFO candidate drifted")
             if self._open_plan_interaction(connection, guard.session_id) is not None:
                 return None
-            permission = self._permission_from_row(item)
+            permission = self._queue_delivery_permission(connection, item)
             latest_plan = connection.execute(
                 """
                 SELECT id, workflow_ordinal, status
@@ -1025,7 +1024,7 @@ class _PromptOperations:
                 if latest_plan is None or str(latest_plan["status"]) != "ACTIVE"
                 else str(latest_plan["id"])
             )
-            incompatible = (
+            incompatible = item["input_origin"] == CanonicalInputOriginKind.SCHEDULED_TASK.value and (
                 latest_ordinal != permission.plan_context_ordinal_at_admission
                 or (
                     permission.overlay is RunPermissionOverlay.NONE
@@ -1065,6 +1064,12 @@ class _PromptOperations:
                 )
                 return None
             prospective = candidate.provider_input_candidate
+            if self._queue_delivery_handoff(connection, item) != (
+                candidate.pending_plan_handoff_workflow_id,
+                candidate.pending_plan_handoff_interaction_id,
+                candidate.pending_plan_handoff_kind,
+            ):
+                raise ConversationKernelConflict("queued ROOT Plan handoff changed before delivery")
             session = connection.execute(
                 "SELECT workspace_id, latest_entry_sequence "
                 "FROM pulsara_v3.sessions WHERE id=%s",
@@ -1456,7 +1461,11 @@ class _PromptOperations:
                     expected=candidate.canonical_prompt,
                     queue_item_id=candidate.queue_item_id,
                 )
-                and self._permission_from_row(row) == candidate.permission_snapshot
+                and (
+                    self._permission_from_row(row) == candidate.permission_snapshot
+                    if candidate.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK
+                    else row["requested_permission_mode"] == candidate.permission_snapshot.requested_mode.value
+                )
                 and model_call_binding_from_dict(row["model_call_binding"])
                 == candidate.model_call_binding
                 and (
@@ -1464,19 +1473,19 @@ class _PromptOperations:
                     if row["pending_plan_handoff_workflow_id"] is None
                     else str(row["pending_plan_handoff_workflow_id"])
                 )
-                == candidate.pending_plan_handoff_workflow_id
+                == (candidate.pending_plan_handoff_workflow_id if candidate.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK else None)
                 and (
                     None
                     if row["pending_plan_handoff_interaction_id"] is None
                     else str(row["pending_plan_handoff_interaction_id"])
                 )
-                == candidate.pending_plan_handoff_interaction_id
+                == (candidate.pending_plan_handoff_interaction_id if candidate.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK else None)
                 and (
                     None
                     if row["pending_plan_handoff_kind"] is None
                     else str(row["pending_plan_handoff_kind"])
                 )
-                == candidate.pending_plan_handoff_kind
+                == (candidate.pending_plan_handoff_kind if candidate.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK else None)
             )
         except (KeyError, TypeError, ValueError):
             return False

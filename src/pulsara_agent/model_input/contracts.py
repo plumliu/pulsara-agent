@@ -1393,7 +1393,7 @@ class FrozenPlanHandoffCompileFact:
         ):
             raise ValueError("compiled Plan handoff sequence is invalid")
         if (
-            self.handoff_kind is PlanHandoffKind.ENTERED_PLAN
+            self.handoff_kind in {PlanHandoffKind.ENTERED_PLAN, PlanHandoffKind.EXITED_PLAN}
             and self.interaction_id is not None
         ) or (
             self.handoff_kind
@@ -1406,6 +1406,7 @@ class FrozenPlanHandoffCompileFact:
             raise ValueError("compiled Plan handoff interaction is invalid")
         expected_status = {
             PlanHandoffKind.ENTERED_PLAN: PlanWorkflowStatus.ACTIVE,
+            PlanHandoffKind.EXITED_PLAN: PlanWorkflowStatus.EXITED,
             PlanHandoffKind.REVISION_REQUESTED: PlanWorkflowStatus.ACTIVE,
             PlanHandoffKind.APPROVED_PLAN: PlanWorkflowStatus.APPROVED,
             PlanHandoffKind.CANCELLED_PLAN: PlanWorkflowStatus.CANCELLED,
@@ -1782,6 +1783,7 @@ class FrozenCanonicalCompileSnapshot:
                 in {
                     PlanHandoffKind.CANCELLED_PLAN,
                     PlanHandoffKind.FORCE_EXITED_PLAN,
+                    PlanHandoffKind.REVISION_REQUESTED,
                 }
                 else FrozenProviderInputItemKind.PLAN_CONTINUATION
             )

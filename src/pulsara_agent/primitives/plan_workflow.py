@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
+from pulsara_agent.primitives.permission import PermissionMode
 
 
 MAXIMUM_PLAN_ENTRY_REASON_BYTES = 4 * 1024
@@ -23,6 +24,7 @@ MAXIMUM_PLAN_CHUNK_BYTES = 64 * 1024
 
 class PlanWorkflowStatus(StrEnum):
     ACTIVE = "ACTIVE"
+    EXITED = "EXITED"
     APPROVED = "APPROVED"
     CANCELLED = "CANCELLED"
     FORCE_EXITED = "FORCE_EXITED"
@@ -40,6 +42,7 @@ class PlanInteractionKind(StrEnum):
 
 class PlanHandoffKind(StrEnum):
     ENTERED_PLAN = "ENTERED_PLAN"
+    EXITED_PLAN = "EXITED_PLAN"
     REVISION_REQUESTED = "REVISION_REQUESTED"
     APPROVED_PLAN = "APPROVED_PLAN"
     CANCELLED_PLAN = "CANCELLED_PLAN"
@@ -74,8 +77,8 @@ PLAN_INTERACTION_CONTRACTS: dict[tuple[str, str, str], str] = {
     ): "ask_plan_question",
     (
         "pulsara.workflow.exit_plan",
-        "v1",
-        "sha256:98849b9f64ec6170cb509cdc9c4ff1292f99c0b98c657d518117340466dab336",
+        "v2",
+        "sha256:9e77c16295c1ec7059729498b26c5665b494e49002113485bbebfa3d739165d1",
     ): "exit_plan",
 }
 PLAN_ENTRY_CONTRACT = (
@@ -317,18 +320,26 @@ def extract_plan_question(
     )
 
 
-def parse_plan_draft_arguments(
-    *, binding: PlanInteractionBinding, arguments: FrozenJsonObjectFact,
-) -> tuple[bytes, str | None]:
-    """Validate content without manufacturing a draft identity."""
+def parse_plan_exit_arguments(
+    *,
+    binding: PlanInteractionBinding,
+    arguments: FrozenJsonObjectFact,
+) -> tuple[bytes | None, str | None]:
+    """A missing or blank proposal exits planning without a review interaction."""
     require_plan_interaction_contract(binding, expected_tool_name="exit_plan")
     raw = thaw_json(arguments)
     if not isinstance(raw, dict) or set(raw) - {"plan", "summary"}:
         raise ValueError("Plan draft arguments are invalid")
-    plan = _bounded_text(
-        raw.get("plan"),
-        name="plan",
-        maximum_bytes=MAXIMUM_PLAN_DRAFT_BYTES,
+    value = raw.get("plan")
+    plan = (
+        None
+        if value is None
+        else _bounded_text(
+            value,
+            name="plan",
+            maximum_bytes=MAXIMUM_PLAN_DRAFT_BYTES,
+            allow_empty=True,
+        )
     )
     summary_value = raw.get("summary")
     summary = (
@@ -341,7 +352,18 @@ def parse_plan_draft_arguments(
             allow_empty=True,
         )
     )
-    body = plan.encode("utf-8")
+    body = None if plan is None or not plan.strip() else plan.encode("utf-8")
+    return body, summary
+
+
+def parse_plan_draft_arguments(
+    *,
+    binding: PlanInteractionBinding,
+    arguments: FrozenJsonObjectFact,
+) -> tuple[bytes, str | None]:
+    body, summary = parse_plan_exit_arguments(binding=binding, arguments=arguments)
+    if body is None:
+        raise ValueError("Plan draft requires a nonblank proposal")
     return body, summary
 
 
@@ -413,7 +435,7 @@ def project_plan_continuation_for_provider(
 ) -> str:
     """Validate one canonical continuation carrier and render its provider value."""
 
-    if transition not in {"ENTERED_PLAN", "REVISION_REQUESTED", "APPROVED_PLAN"}:
+    if transition not in {"ENTERED_PLAN", "APPROVED_PLAN", "EXITED_PLAN"}:
         raise ValueError("Plan continuation transition is invalid")
     try:
         value = json.loads(storage_text)
@@ -421,7 +443,10 @@ def project_plan_continuation_for_provider(
         raise ValueError("Plan continuation storage carrier is invalid") from exc
     if not isinstance(value, dict) or str(value.get("transition") or "") != transition:
         raise ValueError("Plan continuation storage transition conflicts")
-    if value.get("workflow_id") is not None and str(value["workflow_id"]) != workflow_id:
+    if (
+        value.get("workflow_id") is not None
+        and str(value["workflow_id"]) != workflow_id
+    ):
         raise ValueError("Plan continuation workflow conflicts")
     if value.get("interaction_id") is not None and str(value["interaction_id"]) != str(
         interaction_id
@@ -429,18 +454,18 @@ def project_plan_continuation_for_provider(
         raise ValueError("Plan continuation interaction conflicts")
 
     projected: dict[str, object] = {
-        "status": "APPROVED" if transition == "APPROVED_PLAN" else "ACTIVE",
+        "status": {
+            "APPROVED_PLAN": "APPROVED",
+            "ENTERED_PLAN": "ACTIVE",
+            "EXITED_PLAN": "EXITED",
+        }[transition],
         "transition": transition,
     }
-    if transition == "REVISION_REQUESTED":
-        feedback = value.get("feedback")
-        if feedback is not None and not isinstance(feedback, str):
-            raise ValueError("Plan revision feedback is invalid")
-        projected["feedback"] = (
-            {"presence": "ABSENT"}
-            if feedback is None
-            else {"presence": "PRESENT", "text": feedback}
-        )
+    if transition == "EXITED_PLAN":
+
+        projected["resume_permission_mode"] = PermissionMode(
+            value.get("resume_permission_mode")
+        ).value
     if transition == "APPROVED_PLAN" and not isinstance(
         value.get("approved_plan"), dict
     ):

@@ -570,6 +570,8 @@ class PreparedToolResultAcceptance:
             "APPLICATION_ERROR",
             "SYSTEM_ERROR",
             "CANCELLED",
+            # Admission may commit before Steer wins the physical dispatch race.
+            "CANCELLED_BEFORE_DISPATCH",
         }
         no_attempt_states = {
             "INVALID_ARGUMENTS",
@@ -764,6 +766,7 @@ class PlanToolControlKind(StrEnum):
     ENTER = "ENTER"
     QUESTION = "QUESTION"
     DRAFT = "DRAFT"
+    EXIT = "EXIT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -806,6 +809,7 @@ class PreparedPlanToolBatch:
     actor_id: str
     idempotent_existing: bool = False
     selected_disposition: PlanToolBatchDisposition = PlanToolBatchDisposition.APPLY
+    resume_permission_mode: PermissionMode | None = None
     candidate_fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -818,6 +822,7 @@ class PreparedPlanToolBatch:
             PlanToolControlKind.ENTER: "enter_plan",
             PlanToolControlKind.QUESTION: "ask_plan_question",
             PlanToolControlKind.DRAFT: "exit_plan",
+            PlanToolControlKind.EXIT: "exit_plan",
         }[self.control_kind]
         if selected.tool_name != expected_name:
             raise ValueError("prepared Plan selected call kind conflicts")
@@ -831,9 +836,14 @@ class PreparedPlanToolBatch:
         if len({item.tool_call_id for item in self.calls}) != len(self.calls):
             raise ValueError("prepared Plan batch call identity is duplicated")
         rejected = self.selected_disposition is not PlanToolBatchDisposition.APPLY
+        if (not rejected and self.control_kind is PlanToolControlKind.EXIT) != (
+            self.resume_permission_mode is not None
+        ):
+            raise ValueError("Plan exit resume permission union is invalid")
         continuation = (
             not rejected
-            and self.control_kind is PlanToolControlKind.ENTER
+            and self.control_kind
+            in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
             and not self.idempotent_existing
         )
         if continuation != all(
@@ -914,6 +924,7 @@ class PreparedPlanToolBatch:
             "actor_id": self.actor_id,
             "idempotent_existing": self.idempotent_existing,
             "selected_disposition": self.selected_disposition.value,
+            "resume_permission_mode": self.resume_permission_mode,
         }
         object.__setattr__(
             self,
@@ -1423,7 +1434,7 @@ def plan_question_resolution_semantic_fingerprint(
     workflow_id: str,
     expected_workflow_revision: int,
     interaction_id: str,
-    answer: PlanQuestionAnswer,
+    answer: PlanQuestionAnswer | None,
     result_id: str,
     result_entry_id: str,
 ) -> str:
@@ -1433,7 +1444,7 @@ def plan_question_resolution_semantic_fingerprint(
             "workflow_id": workflow_id,
             "expected_workflow_revision": expected_workflow_revision,
             "interaction_id": interaction_id,
-            "answer": {
+            "answer": None if answer is None else {
                 "kind": answer.kind.value,
                 "option_ordinal": answer.option_ordinal,
                 "free_text": answer.free_text,
@@ -1468,41 +1479,36 @@ def plan_draft_review_semantic_candidate(
     expected_workflow_revision: int,
     interaction_id: str,
     decision: PlanDraftDecision,
-    feedback: str | None,
+    canonical_prompt: FrozenCanonicalPrompt | None,
     continuation_turn_id: str | None,
     continuation_entry_id: str | None,
     continuation_context_binding_revision_id: str | None,
-) -> tuple[str | None, tuple[str | None, str | None, str | None], str]:
-    normalized_feedback = None
-    if decision is PlanDraftDecision.REVISE and feedback:
-        if len(feedback.encode("utf-8")) > 32 * 1024:
-            raise ValueError("Plan revision feedback exceeds its bound")
-        normalized_feedback = feedback
-    elif decision is not PlanDraftDecision.REVISE and feedback is not None:
-        raise ValueError("Plan approve/cancel cannot carry feedback")
-    creates_turn = decision in {
-        PlanDraftDecision.APPROVE,
-        PlanDraftDecision.REVISE,
-    }
+    source_queue_item_id: str | None = None,
+) -> tuple[FrozenCanonicalPrompt | None, tuple[str | None, str | None, str | None], str]:
+    if (decision is PlanDraftDecision.REVISE) != (canonical_prompt is not None):
+        raise ValueError("Plan revision requires a complete canonical prompt")
+    if source_queue_item_id is not None and decision is not PlanDraftDecision.REVISE:
+        raise ValueError("Only a Plan revision can consume a queued prompt")
+    creates_turn = decision in {PlanDraftDecision.APPROVE, PlanDraftDecision.REVISE}
     continuation_values = (
-        continuation_turn_id,
-        continuation_entry_id,
+        continuation_turn_id, continuation_entry_id,
         continuation_context_binding_revision_id,
     )
     if creates_turn != all(value is not None for value in continuation_values):
         raise ValueError("Plan review continuation union is invalid")
     semantic_digest = canonical_digest(
-        "pulsara:resolve-plan-draft:v1",
+        "pulsara:resolve-plan-draft:v2",
         {
             "workflow_id": workflow_id,
             "expected_workflow_revision": expected_workflow_revision,
             "interaction_id": interaction_id,
             "decision": decision.value,
-            "feedback": normalized_feedback,
+            "prompt": None if canonical_prompt is None else _canonical_prompt_identity(canonical_prompt),
+            "source_queue_item_id": source_queue_item_id,
             "continuation": continuation_values,
         },
     )
-    return normalized_feedback, continuation_values, semantic_digest
+    return canonical_prompt, continuation_values, semantic_digest
 
 
 def _content_manifest(content: CanonicalContent) -> dict[str, object]:

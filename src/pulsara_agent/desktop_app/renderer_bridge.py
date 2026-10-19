@@ -682,6 +682,7 @@ class RendererBridge:
             kind_name,
             allowed={
                 "SUBMIT_PROMPT",
+                "STEER_ACTIVE_TURN",
                 "STOP_ACTIVE_TURN",
                 "DETACH",
                 "CLOSE_SESSION",
@@ -1012,11 +1013,12 @@ class RendererBridge:
                     "PLAN_DRAFT_CANCEL",
                 },
             )
-            feedback = body.get("feedback")
-            if feedback is not None:
-                if not isinstance(feedback, str):
-                    raise ValueError("feedback must be a string")
-                request.draft.feedback = feedback
+            if "feedback" in body:
+                raise ValueError("Plan revision requires revision_prompt, not feedback")
+            if "revision_prompt" in body:
+                request.draft.revision_prompt.CopyFrom(_prompt_content_from_json(body["revision_prompt"]))
+            if "source_queue_item_id" in body:
+                request.draft.source_queue_item_id = _required_string(body, "source_queue_item_id")
         else:
             raise ValueError("unsupported Plan interaction resolution")
         return protobuf_json(

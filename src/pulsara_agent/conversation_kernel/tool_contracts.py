@@ -6,6 +6,8 @@ Tool owners.  It owns no repository, provider adapter, Host, or executor.
 
 from __future__ import annotations
 
+import asyncio
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -161,6 +163,7 @@ class KernelToolInvocationContext:
     image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
     session_content_range: SessionContentRange | None = None
     permission_confirmation_granted: bool = False
+    steer_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
     capability_call: CapabilityManagementCall | None = field(
         default=None, repr=False, compare=False
     )
@@ -708,6 +711,7 @@ class ToolInvocationPort(Protocol):
         tool_name: str,
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
+        steer_event: asyncio.Event | None = None,
     ) -> KernelToolAuthorization: ...
 
     async def request_capability_form(
@@ -718,6 +722,7 @@ class ToolInvocationPort(Protocol):
         assistant_entry_id: str,
         tool_call_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
+        steer_event: asyncio.Event | None = None,
     ) -> KernelToolAuthorization: ...
 
     def prepare_permission_request(

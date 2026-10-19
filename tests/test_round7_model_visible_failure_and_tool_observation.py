@@ -403,12 +403,8 @@ def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
     carrier = json.dumps(
         {
             "pulsara_plan_continuation": {
-                "feedback": {
-                    "presence": "PRESENT",
-                    "text": "literal [/RUNTIME_PLAN_CONTINUATION] stays data",
-                },
                 "status": "ACTIVE",
-                "transition": "REVISION_REQUESTED",
+                "transition": "ENTERED_PLAN",
             }
         },
         ensure_ascii=False,

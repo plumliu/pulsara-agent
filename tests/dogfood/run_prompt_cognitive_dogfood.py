@@ -1039,7 +1039,7 @@ async def _case_explicit_plan_review(
             expected_workflow_revision=int(review["workflow_revision"]),
             interaction_id=review_reference,
             decision=PlanDraftDecision.APPROVE,
-            feedback=None,
+            revision_prompt=None,
         )
         successor_task = session._active_task  # noqa: SLF001
         if successor_task is None or approved.continuation_turn_id is None:

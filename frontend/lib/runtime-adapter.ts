@@ -328,6 +328,7 @@ export interface QueuedPromptAction {
   source: QueuedPrompt;
   restoredContent?: EditablePromptContent;
   targetTurnId?: string;
+  reviewInteraction?: RuntimeInteractionSummary;
   submittedAt: string;
   status: 'submitting' | 'unknown' | 'accepted' | 'rejected';
   receipt?: CommandReceipt;
@@ -534,7 +535,8 @@ export type RuntimeInteractionResolution =
   | {
     kind: 'plan-draft';
     decision: 'approve' | 'revise' | 'cancel';
-    feedback?: string;
+    revisionPrompt?: EditablePromptContent;
+    sourceQueueItemId?: string;
   };
 
 /** App freezes a tool command before transport; forms/plan keep their own semantics. */
@@ -958,6 +960,7 @@ export interface RuntimeConnection {
   resolveInteraction(
     interaction: RuntimeInteractionSummary,
     resolution: RuntimeInteractionSubmission,
+    commandId?: string,
   ): Promise<CommandReceipt | { submitted: boolean }>;
   queryCommand(commandId: string): Promise<CommandReceipt | undefined>;
   readToolArtifact(resultEntryId: string, offsetChars: number, maxChars?: number): Promise<ToolArtifactPage>;
@@ -1134,7 +1137,7 @@ export interface ProtocolCanonicalControl {
   prompt_queue?: Array<{
     queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
     status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string; input_origin?: string;
-    content?: ProtocolContent; permission?: { requested_mode?: string; effective_mode?: string };
+    content?: ProtocolContent; requested_permission_mode?: string; permission?: { requested_mode?: string; effective_mode?: string };
   }>;
   prompt_queue_total_count?: string | number;
   tool_attempts?: ProtocolToolAttempt[];
@@ -3436,6 +3439,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   async resolveInteraction(
     interaction: RuntimeInteractionSummary,
     resolution: RuntimeInteractionSubmission,
+    suppliedCommandId?: string,
   ): Promise<CommandReceipt | { submitted: boolean }> {
     const current = this.project().interaction;
     if (!current || current.id !== interaction.id || current.kind !== interaction.kind) {
@@ -3474,7 +3478,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     if (resolution.kind === 'tool') {
       throw new RuntimeApiError('INTERACTION_INVALID', '请选择一个规划操作。', false);
     }
-    const commandId = randomIdentity('command');
+    const commandId = suppliedCommandId ?? randomIdentity('command');
     const resolutionFields = resolution.kind === 'plan-question-option'
       ? { resolution_kind: 'question_option', option_ordinal: resolution.optionOrdinal }
       : resolution.kind === 'plan-question-text'
@@ -3486,9 +3490,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
             revise: 'PLAN_DRAFT_REVISE',
             cancel: 'PLAN_DRAFT_CANCEL',
           }[resolution.decision],
-          ...(resolution.decision === 'revise' && resolution.feedback?.trim()
-            ? { feedback: resolution.feedback.trim() }
-            : {}),
+          ...(resolution.revisionPrompt
+            ? { revision_prompt: editablePromptToTransport(resolution.revisionPrompt) } : {}),
+          ...(resolution.sourceQueueItemId ? { source_queue_item_id: resolution.sourceQueueItemId } : {}),
         };
     const frame = await this.post<{
       resolve_plan_interaction?: {
@@ -3787,6 +3791,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         if (closed.interaction_id === this.liveControl.current_interaction?.interaction_id) {
           const reasons: Record<string, string> = {
             CANCELLED: '已取消这次配置。',
+            'interaction:user-steer': '已取消这项确认，继续处理你的新指示。',
             'interaction:expired': '确认已过期，本次操作未获授权。',
             'interaction:turn-cancelled': '原任务已停止，这项待确认操作已结束。',
             'interaction:host-closing': '运行环境已关闭，原确认已结束。',
@@ -3888,7 +3893,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
           const argumentsJson = String(item.arguments_json ?? '');
           trace.toolName = toolName;
           trace.kind = toolKind(toolName);
-          trace.title = toolDisplayName(toolName);
+          trace.title = toolDisplayName(toolName, argumentsJson);
           trace.subtitle = toolArgumentSummary(toolName, argumentsJson);
           trace.argumentsJson = argumentsJson;
           trace.command = terminalCommand(toolName, argumentsJson);
@@ -4646,6 +4651,9 @@ function projectEntries(
       || entry.entry_kind === 'USER_STEER'
       || entry.entry_kind === 'PLAN_CONTINUATION'
     ) {
+      const continuationBody = entry.entry_kind === 'PLAN_CONTINUATION'
+        ? projectPlanContinuation(decodeContent(entry.content)) : undefined;
+      if (entry.entry_kind === 'PLAN_CONTINUATION' && continuationBody === undefined) continue;
       const userKind: NonNullable<Message['userKind']> = entry.entry_kind === 'USER_STEER'
         ? 'steer'
         : entry.entry_kind === 'PLAN_CONTINUATION'
@@ -4663,7 +4671,7 @@ function projectEntries(
         scheduledInput: entry.scheduled_input ? { taskId: entry.scheduled_input.task_id, taskRevision: numeric(entry.scheduled_input.task_revision), dueAtUtc: entry.scheduled_input.due_at_utc, triggerSource: entry.scheduled_input.trigger_source } : undefined,
         time: formatTime(entry.accepted_at_utc),
         body: entry.entry_kind === 'PLAN_CONTINUATION'
-          ? projectPlanContinuation(decodeContent(entry.content))
+          ? continuationBody ?? ''
           : promptContent ? promptContentTextProjection(promptContent) : '',
         promptContent,
         inputSource: entry.input_source?.queue_item_id && entry.input_source.command_id
@@ -4996,6 +5004,7 @@ function summarizeToolResult(toolName: string | undefined, content: string): str
   try {
     const value = JSON.parse(content) as Record<string, unknown>;
     const planControl = String(value.plan_control ?? '');
+    if (planControl === 'EXITED_PLAN') return '已退出规划，继续处理任务。';
     if (planControl === 'QUESTION_ANSWERED') return '已记录你的选择。';
     if (planControl === 'DRAFT_SUBMITTED_FOR_REVIEW') return '方案已提交，等待你的确认。';
     if (toolName === 'edit_file' && typeof value.diff === 'string' && value.diff) return value.diff;
@@ -5085,9 +5094,11 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
         targetTurnId: item.target_turn_id || undefined,
         content: item.content?.inline_content !== undefined ? decodePromptContent(item.content, { kind: 'queue', queueItemId }) : {parts: []},
         contentUnavailable: item.content?.inline_content === undefined,
-        permission: protocolPermission(item.permission?.effective_mode),
+        permission: protocolPermission(item.input_origin === 'SCHEDULED_TASK'
+          ? item.permission?.effective_mode : item.requested_permission_mode),
         submittedAt: item.accepted_at_utc || undefined,
-        requestedPermission: protocolPermission(item.permission?.requested_mode),
+        requestedPermission: protocolPermission(item.input_origin === 'SCHEDULED_TASK'
+          ? item.permission?.requested_mode : item.requested_permission_mode),
       };
     });
 }
@@ -5101,14 +5112,11 @@ function protocolPermission(value?: string): PermissionMode | undefined {
   } as Record<string, PermissionMode>)[value ?? ''];
 }
 
-function projectPlanContinuation(content: string): string {
+function projectPlanContinuation(content: string): string | undefined {
   try {
     const value = JSON.parse(content) as Record<string, unknown>;
-    const feedback = value.feedback;
-    if (typeof feedback === 'string' && feedback.trim()) {
-      return `请按此修改方案：${feedback.trim()}`;
-    }
     const transition = String(value.transition ?? value.handoff_kind ?? '').toUpperCase();
+    if (transition === 'EXITED_PLAN') return undefined;
     if (transition.includes('APPROV')) return '方案已批准，请按方案继续。';
     if (transition.includes('CANCEL')) return '已取消这次规划。';
     return '继续处理这次规划。';
@@ -5132,7 +5140,7 @@ function projectToolBlock(block: ProtocolAssistantBlock): ToolTrace {
     id: block.tool_call_id || block.block_id,
     kind: toolKind(name),
     toolName: name,
-    title: toolDisplayName(name),
+    title: toolDisplayName(name, argumentsPreview),
     subtitle: toolArgumentSummary(name, argumentsPreview),
     status: 'running',
     argumentsJson: argumentsPreview,
@@ -5155,7 +5163,7 @@ function reasoningKind(value: string): ReasoningBlock['kind'] {
   return value.includes('SUMMARY') ? 'summary' : 'full';
 }
 
-function toolDisplayName(name: string): string {
+function toolDisplayName(name: string, argumentsJson?: string): string {
   const normalized = name.toLowerCase();
   if (normalized === 'reload_capabilities') return '刷新能力';
   if (normalized === 'list_capabilities') return '查看能力';
@@ -5170,7 +5178,15 @@ function toolDisplayName(name: string): string {
   if (normalized.includes('list_agents')) return '查看任务';
   if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
-  if (normalized.includes('exit_plan')) return '提交规划方案';
+  if (normalized.includes('exit_plan')) {
+    if (argumentsJson !== undefined) {
+      try {
+        const { plan } = JSON.parse(argumentsJson) as { plan?: unknown };
+        return plan == null || (typeof plan === 'string' && !plan.trim()) ? '退出规划' : '提交规划方案';
+      } catch { /* Arguments may still be streaming. */ }
+    }
+    return '结束规划';
+  }
   if (normalized.includes('artifact_read')) return '读取保留内容';
   if (normalized.includes('write_file')) return '写入文件';
   if (normalized.includes('read_file')) return '读取文件';
@@ -5208,7 +5224,7 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized.includes('list_agents')) return '读取当前任务状态';
     if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');
-    if (name.toLowerCase().includes('exit_plan')) return String(value.summary ?? '等待你确认方案');
+    if (name.toLowerCase().includes('exit_plan')) return value.plan == null || (typeof value.plan === 'string' && !value.plan.trim()) ? '继续处理任务' : String(value.summary ?? '等待你确认方案');
     if (terminalCommand(name, content)) return '等待执行结果';
     if (typeof value.path === 'string') return value.path;
     return '正在准备操作';

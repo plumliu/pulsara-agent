@@ -7,6 +7,8 @@ keeps automatic continuation tasks alive when an origin request detaches.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.repository_errors import PlanControlSupersededBySteer
+
 from pulsara_agent.identity import derive_id
 
 import asyncio
@@ -56,7 +58,7 @@ from pulsara_agent.primitives.context import canonical_json_bytes, thaw_json
 from pulsara_agent.primitives.plan_workflow import (
     PlanInteractionBinding,
     PlanQuestionContent,
-    parse_plan_draft_arguments,
+    parse_plan_exit_arguments,
     extract_plan_entry_reason,
     parse_plan_question_arguments,
 )
@@ -174,15 +176,21 @@ class KernelPlanInteractionCoordinator:
             self._waiter = None
             self._open = None
 
-    async def abort_current(self, error: BaseException) -> None:
+    async def abort_current(
+        self, error: BaseException, *, origin_turn_id: str | None = None,
+    ) -> bool:
         """Settle the sole same-Host waiter after canonical interruption."""
 
         async with self._lock:
             waiter = self._waiter
+            if origin_turn_id is not None and (waiter is None or waiter.origin_turn_id != origin_turn_id):
+                return False
             self._waiter = None
             self._open = None
             if waiter is not None and not waiter._future.done():
                 waiter._future.set_exception(error)
+                return True
+            return False
 
     async def aclose(self) -> None:
         async with self._lock:
@@ -498,12 +506,27 @@ class PlanToolBatchCoordinator:
         hook_cwd: str = ".",
         continuity_epoch_nonce: object | None = None,
     ) -> AcceptedPlanToolBatch:
+        pending = await self._io.run(
+            self._repository.read_pending_prompt_steer_facts,
+            session_id=self._writer_lease.guard.session_id,
+            target_turn_id=canonical_facts.canonical_input.identity.turn_id,
+            maximum_items=1,
+            deadline_monotonic=deadline,
+        )
+        if pending:
+            raise PlanControlSupersededBySteer(
+                "pending Steer supersedes the undispatched Plan batch"
+            )
         selected = calls[selected_call_index]
         kind = {
             "enter_plan": PlanToolControlKind.ENTER,
             "ask_plan_question": PlanToolControlKind.QUESTION,
             "exit_plan": PlanToolControlKind.DRAFT,
         }[selected.tool_name]
+        if kind is PlanToolControlKind.DRAFT:
+            raw_plan = thaw_json(selected.arguments).get("plan")
+            if raw_plan is None or (isinstance(raw_plan, str) and not raw_plan.strip()):
+                kind = PlanToolControlKind.EXIT
         workflow_fact = canonical_facts.plan_workflow_fact
         if kind is PlanToolControlKind.ENTER:
             if workflow_fact is None:
@@ -525,7 +548,7 @@ class PlanToolBatchCoordinator:
             )
         provisional_interaction_id = (
             None
-            if kind is PlanToolControlKind.ENTER or workflow_id is None
+            if kind in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT} or workflow_id is None
             else derive_id('plan-interaction', 'tool', workflow_id, assistant_entry_id, selected.tool_call_id)
         )
         catalog_entry = builtin_tool_catalog_entry(selected.tool_name)
@@ -593,7 +616,7 @@ class PlanToolBatchCoordinator:
                         binding=request_binding, arguments=selected.arguments,
                     )
                 else:
-                    parse_plan_draft_arguments(
+                    parse_plan_exit_arguments(
                         binding=request_binding, arguments=selected.arguments,
                     )
             except ValueError:
@@ -606,8 +629,8 @@ class PlanToolBatchCoordinator:
             ):
                 disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
             elif (
-                kind is PlanToolControlKind.ENTER
-                and workflow_fact is None
+                kind in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
+                and (kind is PlanToolControlKind.EXIT or workflow_fact is None)
                 and self._automatic_plan_continuation is None
             ):
                 disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
@@ -644,17 +667,17 @@ class PlanToolBatchCoordinator:
         apply_control = disposition is PlanToolBatchDisposition.APPLY
         interaction_id = provisional_interaction_id if apply_control else None
         continuation_turn_id = (
-            derive_id('turn', 'plan-enter', self._writer_lease.guard.session_id, workflow_id, assistant_entry_id, selected.tool_call_id)
+            derive_id('turn', 'plan-exit' if kind is PlanToolControlKind.EXIT else 'plan-enter', self._writer_lease.guard.session_id, workflow_id, assistant_entry_id, selected.tool_call_id)
             if apply_control
-            and kind is PlanToolControlKind.ENTER
-            and workflow_fact is None
+            and kind in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
+            and (kind is PlanToolControlKind.EXIT or workflow_fact is None)
             else None
         )
         continuation_entry_id = (
-            derive_id('entry', 'plan-enter', continuation_turn_id)
+            derive_id('entry', 'plan-exit' if kind is PlanToolControlKind.EXIT else 'plan-enter', continuation_turn_id)
             if apply_control
-            and kind is PlanToolControlKind.ENTER
-            and workflow_fact is None
+            and kind in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
+            and (kind is PlanToolControlKind.EXIT or workflow_fact is None)
             else None
         )
         continuation_revision_id = (
@@ -712,6 +735,8 @@ class PlanToolBatchCoordinator:
                 and workflow_fact is not None
             ),
             selected_disposition=disposition,
+            resume_permission_mode=(workflow_fact.resume_permission_mode
+                if apply_control and kind is PlanToolControlKind.EXIT and workflow_fact is not None else None),
         )
         waiter: PlanQuestionWaiter | None = None
         if apply_control and kind is PlanToolControlKind.QUESTION:
@@ -724,7 +749,7 @@ class PlanToolBatchCoordinator:
         try:
             if (
                 apply_control
-                and kind is PlanToolControlKind.ENTER
+                and kind in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
                 and not candidate.idempotent_existing
             ):
                 assert self._automatic_plan_continuation is not None
@@ -809,6 +834,10 @@ class PlanToolBatchCoordinator:
             if pre_context_reservation is not None:
                 pre_context_reservation.retire()
             if waiter is not None and self._plan_interactions is not None:
+                if isinstance(error, PlanControlSupersededBySteer):
+                    # No QUESTION was published and nobody awaits this dormant
+                    # future. The old batch is settled by the ordinary executor.
+                    waiter._future.cancel()
                 await self._plan_interactions.abandon(waiter, error)
             raise
 

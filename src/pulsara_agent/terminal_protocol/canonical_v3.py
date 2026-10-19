@@ -1528,6 +1528,26 @@ class CanonicalProtocolReader:
                     command_id=str(source["command_id"]),
                     delivery_mode=str(source["delivery_mode"]),
                 ))
+            elif row["entry_kind"] == "USER_MESSAGE":
+                revision = connection.execute(
+                    """SELECT c.command_id
+                       FROM pulsara_v3.plan_interactions AS i
+                       JOIN pulsara_v3.session_commands AS c
+                         ON c.session_id = i.session_id
+                        AND c.target_plan_interaction_id = i.id
+                        AND c.command_id = i.resolution_command_id
+                        AND c.command_kind = 'RESOLVE_PLAN_INTERACTION'
+                       WHERE i.session_id = %s
+                         AND i.decision_continuation_entry_id = %s
+                         AND i.kind = 'DRAFT_REVIEW'
+                         AND i.status = 'REVISION_REQUESTED'""",
+                    (row["session_id"], entry_id),
+                ).fetchone()
+                if revision is not None:
+                    result.input_source.CopyFrom(wire.CanonicalInputSource(
+                        command_id=str(revision["command_id"]),
+                        delivery_mode="NEW_TURN",
+                    ))
         for ordinal, reasoning in enumerate(self._reasoning_blocks(connection, stored_row)):
             content = reasoning.text.encode("utf-8")
             target = result.reasoning_blocks.add(
@@ -1831,6 +1851,8 @@ class CanonicalProtocolReader:
                     task_id=str(row["scheduled_task_id"]), task_revision=int(row["scheduled_task_revision"]),
                     due_at_utc=_utc(row["scheduled_due_at"]),
                     trigger_source=row["scheduled_trigger_source"]))
+            elif row["input_origin"] == "HUMAN_MESSAGE":
+                target.requested_permission_mode = _permission_mode(str(row["requested_permission_mode"]))
             if row["permission_snapshot_id"] is not None:
                 target.permission.CopyFrom(_permission_projection(row))
         for row in attempts:

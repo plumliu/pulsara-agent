@@ -158,7 +158,7 @@ it.each(['approve', 'revise', 'cancel'] as const)('preserves the Markdown plan a
   }
   fireEvent.click(screen.getByRole('button', {name: decision === 'approve' ? '批准并继续' : decision === 'cancel' ? '取消规划' : '提交修改意见'}));
   await waitFor(() => expect(adapter.lastConnection!.resolveInteraction).toHaveBeenCalledTimes(1));
-  expect(adapter.lastConnection!.resolveInteraction.mock.calls[0]).toEqual([expect.objectContaining({workflowId: 'workflow:card', workflowRevision: 7}), {kind: 'plan-draft', decision, ...(decision === 'revise' ? {feedback: '保留会议记录原文'} : {})}]);
+  expect(adapter.lastConnection!.resolveInteraction.mock.calls[0]).toEqual([expect.objectContaining({workflowId: 'workflow:card', workflowRevision: 7}), {kind: 'plan-draft', decision, ...(decision === 'revise' ? {revisionPrompt: {parts: [{type: 'text', text: '保留会议记录原文'}]}} : {})}]);
 });
 
 

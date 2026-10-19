@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+from tests.support.model_config import frozen_test_prompt
+from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.identity import derive_id
 
 import asyncio
@@ -471,7 +474,7 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.APPROVE,
-        feedback=None,
+        canonical_prompt=None,
         continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
         continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
@@ -481,7 +484,7 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
-        feedback=None,
+        canonical_prompt=frozen_test_prompt("revise"),
         continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
         continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
@@ -491,7 +494,7 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
-        feedback="first",
+        canonical_prompt=frozen_test_prompt("first"),
         continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
         continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
@@ -501,7 +504,7 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
         expected_workflow_revision=4,
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
-        feedback="second",
+        canonical_prompt=frozen_test_prompt("second"),
         continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
         continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
         continuation_context_binding_revision_id="revision:review",
@@ -576,7 +579,7 @@ def test_round4_root_plan_tools_are_absent_from_subagent_surface(tmp_path: Path)
     asyncio.run(scenario())
 
 
-def test_round4_protocol_uses_true_question_oneof_and_feedback_presence() -> None:
+def test_round4_protocol_uses_question_oneof_and_typed_revision_presence() -> None:
     option = wire.PlanQuestionAnswer(option_ordinal=0)
     assert option.WhichOneof("answer") == "option_ordinal"
     assert option.option_ordinal == 0
@@ -587,11 +590,11 @@ def test_round4_protocol_uses_true_question_oneof_and_feedback_presence() -> Non
 
     missing = wire.PlanDraftResolution(decision=wire.PLAN_DRAFT_REVISE)
     present_empty = wire.PlanDraftResolution(
-        decision=wire.PLAN_DRAFT_REVISE, feedback=""
+        decision=wire.PLAN_DRAFT_REVISE, revision_prompt=wire.PromptContent()
     )
-    assert not missing.HasField("feedback")
-    assert present_empty.HasField("feedback")
-    assert present_empty.feedback == ""
+    assert not missing.HasField("revision_prompt")
+    assert present_empty.HasField("revision_prompt")
+    assert "feedback" not in wire.PlanDraftResolution.DESCRIPTOR.fields_by_name
 
 
 class _PlanProtocolHost:
@@ -603,10 +606,10 @@ class _PlanProtocolHost:
         import tempfile
         self.workspace_gate = WorkspaceExecutionGate(Path(tempfile.gettempdir()).resolve())
         self.questions: list[object] = []
-        self.drafts: list[tuple[PlanDraftDecision, str | None]] = []
+        self.drafts: list[tuple[PlanDraftDecision, PromptContent | None, str | None]] = []
         self._question_winners: dict[str, tuple[object, AcceptedPlanResolution]] = {}
         self._draft_winners: dict[
-            str, tuple[tuple[PlanDraftDecision, str | None], AcceptedPlanResolution]
+            str, tuple[tuple[PlanDraftDecision, PromptContent | None, str | None], AcceptedPlanResolution]
         ] = {}
         self.controller_attachment_id = 'attachment:5l6o6wokl63aqnv5llnyf34m6i'
 
@@ -632,11 +635,11 @@ class _PlanProtocolHost:
         self, **kwargs: object
     ) -> AcceptedPlanResolution:
         decision = kwargs["decision"]
-        feedback = kwargs["feedback"]
+        revision_prompt = kwargs["revision_prompt"]
         assert isinstance(decision, PlanDraftDecision)
-        assert feedback is None or isinstance(feedback, str)
+        assert revision_prompt is None or isinstance(revision_prompt, PromptContent)
         command_id = str(kwargs["command_id"])
-        candidate = (decision, feedback)
+        candidate = (decision, revision_prompt, kwargs["source_queue_item_id"])
         winner = self._draft_winners.get(command_id)
         if winner is not None:
             if winner[0] != candidate:
@@ -742,33 +745,30 @@ def test_round4_plan_resolution_requires_exact_current_controller_capability() -
     assert host.questions == []
 
 
-def test_round4_protocol_feedback_presence_matrix_is_closed() -> None:
+def test_round4_protocol_revision_input_matrix_is_closed() -> None:
     server, state = _plan_protocol_state()
     host = state.host_session
-    assert isinstance(host, _PlanProtocolHost)
-
+    prompt = wire.PromptContent(parts=[wire.PromptContentPart(text="revise this")])
     for decision in (wire.PLAN_DRAFT_APPROVE, wire.PLAN_DRAFT_CANCEL):
-        rejected = asyncio.run(
-            server._resolve_plan_interaction(
-                state,
-                _plan_resolution_request(
-                    wire.PlanDraftResolution(decision=decision, feedback="")
-                ),
-            )
-        )
-        assert rejected.error.stable_code == "PLAN_DRAFT_FEEDBACK_NOT_ALLOWED"
-
-    for draft in (
-        wire.PlanDraftResolution(decision=wire.PLAN_DRAFT_REVISE),
-        wire.PlanDraftResolution(decision=wire.PLAN_DRAFT_REVISE, feedback=""),
-    ):
-        accepted = asyncio.run(
-            server._resolve_plan_interaction(
-                state, _plan_resolution_request(draft)
-            )
-        )
+        for fields in ({"revision_prompt": prompt}, {"source_queue_item_id": "queue:source"}):
+            rejected = asyncio.run(server._resolve_plan_interaction(
+                state, _plan_resolution_request(wire.PlanDraftResolution(decision=decision, **fields)),
+            ))
+            assert rejected.error.stable_code == "PLAN_REVISION_INPUT_INVALID"
+    for fields in ({}, {"revision_prompt": prompt, "source_queue_item_id": "queue:source"}):
+        rejected = asyncio.run(server._resolve_plan_interaction(
+            state, _plan_resolution_request(wire.PlanDraftResolution(decision=wire.PLAN_DRAFT_REVISE, **fields)),
+        ))
+        assert rejected.error.stable_code == "PLAN_REVISION_INPUT_INVALID"
+    empty = asyncio.run(server._resolve_plan_interaction(state, _plan_resolution_request(
+        wire.PlanDraftResolution(decision=wire.PLAN_DRAFT_REVISE, revision_prompt=wire.PromptContent()),
+    )))
+    assert empty.error.stable_code == "PLAN_RESOLUTION_CONFLICT"
+    request = _plan_resolution_request(wire.PlanDraftResolution(decision=wire.PLAN_DRAFT_REVISE, revision_prompt=prompt))
+    for _ in range(2):
+        accepted = asyncio.run(server._resolve_plan_interaction(state, request))
         assert accepted.resolve_plan_interaction.draft_decision == wire.PLAN_DRAFT_REVISE
-    assert host.drafts == [(PlanDraftDecision.REVISE, None)]
+    assert host.drafts == [(PlanDraftDecision.REVISE, PromptContent.text("revise this"), None)]
 
 
 def test_round4_protocol_old_writer_can_query_exact_resolution_winner() -> None:
@@ -870,7 +870,7 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
                 expected_workflow_revision=3,
                 interaction_id="interaction:draft",
                 decision=PlanDraftDecision.APPROVE,
-                feedback=None,
+                revision_prompt=None,
                 write_expected_writer_generation=7,
             )
             assert observed == winner
@@ -913,6 +913,10 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
         host = object.__new__(KernelHostSession)
         host._closing = False  # type: ignore[attr-defined]
         host._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
+        from pulsara_agent.conversation_kernel.image_validation import HostPromptImageValidator
+        from types import SimpleNamespace
+        host._image_validator = HostPromptImageValidator()
+        host.workspace = SimpleNamespace(workspace_key=derive_id("workspace", "plan-test"))
         host._plan_exit_fence = True  # type: ignore[attr-defined]
         host._external_new_turn_accepting = False  # type: ignore[attr-defined]
         host._active_task = None  # type: ignore[attr-defined]
@@ -954,9 +958,32 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
                     expected_workflow_revision=4,
                     interaction_id="interaction:draft",
                     decision=decision,
-                    feedback=feedback,
+                    revision_prompt=PromptContent.text(feedback) if feedback is not None else None,
                 )
             await host._plan_continuations.aclose()  # noqa: SLF001
         assert Repository.writes == 0
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('arguments', [{}, {'plan': None}, {'plan': ''}, {'plan': ' \t\n\u3000'}])
+def test_exit_plan_empty_union_has_no_draft(arguments):
+    from jsonschema import validate
+    from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+    from pulsara_agent.primitives.plan_workflow import parse_plan_exit_arguments
+    entry = builtin_tool_catalog_entry('exit_plan')
+    assert entry.binding_contract.base.contract_version == 'v2'
+    validate(arguments, thaw_tool_json_object(entry.descriptor.input_schema))
+    assert parse_plan_exit_arguments(binding=_binding('exit_plan'), arguments=freeze_json(arguments)) == (None, None)
+    with pytest.raises(ValueError, match='nonblank'):
+        extract_plan_draft(interaction_id='no-draft', assistant_entry_id='no-assistant',
+            tool_call_id='no-call', binding=_binding('exit_plan'), request_semantic_digest='unused',
+            arguments=freeze_json(arguments))
+
+
+@pytest.mark.parametrize('arguments', [{'plan': False}, {'plan': 0}, {'plan': []}, {'plan': {}},
+                                      {'plan': None, 'unknown': 1}, {'summary': 4}])
+def test_exit_plan_empty_union_does_not_accept_malformed_arguments(arguments):
+    from pulsara_agent.primitives.plan_workflow import parse_plan_exit_arguments
+    with pytest.raises(ValueError):
+        parse_plan_exit_arguments(binding=_binding('exit_plan'), arguments=freeze_json(arguments))

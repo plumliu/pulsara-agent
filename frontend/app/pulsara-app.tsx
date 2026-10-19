@@ -1877,7 +1877,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     if (!ownsConnection(owner) || owner.sessionId !== action.sessionId) return;
     const delivery = receipt.promptDelivery;
     const accepted = action.kind === 'send'
-      ? Boolean(delivery && delivery.deliveryMode === 'steer' && ['PENDING', 'CONSUMED'].includes(delivery.queueStatus))
+      ? Boolean((receipt.status === 'succeeded' && receipt.planDraftDecision === 'revise' && receipt.planContinuationTurnId)
+        || (delivery && delivery.deliveryMode === 'steer' && ['PENDING', 'CONSUMED'].includes(delivery.queueStatus)))
       : receipt.status === 'succeeded' && receipt.publicCode === 'PROMPT_CANCELLED'
         && delivery?.queueItemId === action.source.queueItemId;
     if (receipt.commandId !== action.commandId) throw new Error('队列操作返回了不一致的身份。');
@@ -1899,10 +1900,12 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     if (!active || active.role !== 'controller' || !ownsConnection(active)) return;
     // CURRENT_CONTROL advances across FIFO ROOTs; the connection's initial
     // live-control snapshot can still name the ROOT present at reload.
-    const targetTurnId = active.current().control.active_turns?.find(
+    const current = active.current();
+    const reviewInteraction = current.interaction?.kind === 'plan-draft' ? current.interaction : undefined;
+    const targetTurnId = current.control.active_turns?.find(
       turn => turn.scope_kind === 'ROOT' && turn.status === 'RUNNING',
     )?.turn_id;
-    if (kind === 'send' && !targetTurnId) {
+    if (kind === 'send' && !targetTurnId && !reviewInteraction) {
       notify('当前任务已结束', '这条输入会按队列顺序自动处理。', 'warning');
       return;
     }
@@ -1935,12 +1938,15 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       commandId: randomIdentity('command'), source, kind,
       restoredContent,
       targetTurnId: kind === 'send' ? targetTurnId : undefined,
+      reviewInteraction: kind === 'send' ? reviewInteraction : undefined,
       submittedAt: new Date().toISOString(), status: 'submitting',
     };
     setQueueActions(current => [...current.filter(item => !(item.sessionId === action.sessionId && item.source.queueItemId === source.queueItemId)), action]);
     try {
       const receipt = kind === 'send'
-        ? await active.steerQueuedPrompt(action.commandId, source.queueItemId, targetTurnId!)
+        ? reviewInteraction
+          ? await active.resolveInteraction(reviewInteraction, { kind: 'plan-draft', decision: 'revise', sourceQueueItemId: source.queueItemId }, action.commandId) as CommandReceipt
+          : await active.steerQueuedPrompt(action.commandId, source.queueItemId, targetTurnId!)
         : await active.cancelQueuedPrompt(action.commandId, source.queueItemId);
       if (!ownsConnection(active)) return;
       settleQueueAction(action, receipt, active);
@@ -1973,6 +1979,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         return [];
       }
       const delivery = item.receipt?.promptDelivery;
+      if (item.kind === 'send' && item.status === 'accepted' && item.receipt?.planDraftDecision === 'revise'
+        && projection.messages.some(message => message.inputSource?.commandId === item.commandId)) return [];
       if (item.kind === 'send' && delivery) {
         if (projection.messages.some(message => message.userKind === 'steer'
           && message.inputSource?.commandId === item.commandId
@@ -1991,9 +1999,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       item.status === 'unknown' || (item.kind === 'send' && item.status === 'accepted'
         && !projection.queuedPrompts.some(prompt => prompt.commandId === item.commandId
           && prompt.queueItemId === item.receipt?.promptDelivery?.queueItemId)
-        && !projection.messages.some(message => message.userKind === 'steer'
-          && message.inputSource?.commandId === item.commandId
-          && message.inputSource.queueItemId === item.receipt?.promptDelivery?.queueItemId))
+        && !projection.messages.some(message => message.inputSource?.commandId === item.commandId
+          && (item.receipt?.planDraftDecision === 'revise'
+            || message.inputSource.queueItemId === item.receipt?.promptDelivery?.queueItemId)))
     ) && !promptReconciliationInFlight.current.has(queryKey(item))
       && (item.lastCheckedEventSequence !== projection.eventSequence || item.lastCheckedConnectionGeneration !== connection.generation));
     if (!candidate) return;
@@ -2084,7 +2092,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         deliveryMode,
         permission,
         status: 'sending',
-        displayAsMessage: !projection.isRunning && projection.queuedCount === 0
+        displayAsMessage: !projection.isRunning && !projection.interaction && projection.queuedCount === 0
           && !localSubmissions.some(item => item.sessionId === active.sessionId
             && ['sending', 'synchronizing', 'queued', 'unknown'].includes(item.status)),
       }]);

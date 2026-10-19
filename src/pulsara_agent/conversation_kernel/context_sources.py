@@ -105,6 +105,8 @@ class ContextSourceCollectorPort(Protocol):
     @property
     def registry_fingerprint(self) -> str: ...
 
+    def freeze_exited_plan_source_upper(self, resume_permission_mode: PermissionMode) -> tuple[LLMMessage, ...]: ...
+
     def freeze_skill_capability_source_snapshot(
         self,
         *,
@@ -716,6 +718,42 @@ class KernelContextSourceCollector:
                 kind=ContextSourceKind.PLAN_WORKFLOW,
                 lifecycle=SourceObservationLifecycle.SNAPSHOT,
                 body=workflow_full,
+            ),
+            self._value_observation_message(
+                kind=ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+                lifecycle=SourceObservationLifecycle.TURN,
+                body=freshness,
+            ),
+        )
+
+    def freeze_exited_plan_source_upper(
+        self, resume_permission_mode: PermissionMode
+    ) -> tuple[LLMMessage, ...]:
+        """Quote the restored permission and exit handoff at the automatic turn boundary."""
+        permission, _ = _render_run_permission_values(
+            requested_mode=resume_permission_mode,
+            effective_mode=resume_permission_mode,
+            overlay=RunPermissionOverlay.NONE,
+        )
+        handoff, _ = _render_plan_handoff_kind(PlanHandoffKind.EXITED_PLAN)
+        freshness = json.dumps(
+            {
+                "current_turn_ref": "turn:" + "a" * 26,
+                "immediate_predecessor_turn_ref": "turn:" + "a" * 26,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (
+            self._value_observation_message(
+                kind=ContextSourceKind.RUN_PERMISSION,
+                lifecycle=SourceObservationLifecycle.TURN,
+                body=permission,
+            ),
+            self._value_observation_message(
+                kind=ContextSourceKind.PLAN_HANDOFF,
+                lifecycle=SourceObservationLifecycle.ONE_SHOT,
+                body=handoff,
             ),
             self._value_observation_message(
                 kind=ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
@@ -2099,6 +2137,10 @@ def _render_plan_handoff_kind(
     handoff_kind: PlanHandoffKind,
 ) -> tuple[str, str]:
     full_guidance = {
+        PlanHandoffKind.EXITED_PLAN: (
+            "Planning has ended without a proposal. Continue the user's task now "
+            "within the restored permissions. No plan approval is pending."
+        ),
         PlanHandoffKind.ENTERED_PLAN: (
             "Planning is now active. Continue by inspecting what you need without "
             "making changes. Ask the user only when a missing choice blocks a correct "
@@ -2126,6 +2168,10 @@ def _render_plan_handoff_kind(
         ),
     }[handoff_kind]
     compact_guidance = {
+        PlanHandoffKind.EXITED_PLAN: (
+            "Planning has ended without a proposal. Continue the user's task now "
+            "within the restored permissions. No plan approval is pending."
+        ),
         PlanHandoffKind.ENTERED_PLAN: (
             "Planning is active: inspect without changing anything, then submit the "
             "complete plan with exit_plan."
@@ -2147,6 +2193,7 @@ def _render_plan_handoff_kind(
     }[handoff_kind]
     planning_update = {
         PlanHandoffKind.ENTERED_PLAN: "started",
+        PlanHandoffKind.EXITED_PLAN: "exited",
         PlanHandoffKind.REVISION_REQUESTED: "revision_requested",
         PlanHandoffKind.APPROVED_PLAN: "approved",
         PlanHandoffKind.CANCELLED_PLAN: "cancelled",
@@ -2185,7 +2232,8 @@ def _render_plan_workflow_body() -> tuple[str, str]:
                 "You are preparing a plan, not implementing it. You may inspect and "
                 "reason, but do not make changes. Resolve discoverable facts yourself; "
                 "use ask_plan_question only when a user choice materially affects the "
-                "plan. When ready, call exit_plan by itself with one complete, "
+                "plan. If the user asks to stop planning and proceed, call exit_plan without a plan. "
+                "Otherwise, when ready, call exit_plan by itself with one complete, "
                 "self-contained proposal."
             ),
             "planning_mode": "active",
@@ -2199,7 +2247,7 @@ def _render_plan_workflow_body() -> tuple[str, str]:
         {
             "guidance": (
                 "Prepare the plan without making changes. Ask only blocking questions; "
-                "submit the complete proposal with exit_plan."
+                "submit the proposal with exit_plan, or omit plan to leave planning and continue."
             ),
             "planning_mode": "active",
         },

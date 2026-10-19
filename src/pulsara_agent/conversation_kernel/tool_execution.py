@@ -393,6 +393,12 @@ class ToolBatchExecutor:
         self._deadlines = deadline_factory
         self._hooks = hook_dispatcher
         self._hook_context = hook_context_owner
+        self._active_batch: tuple[str, str, asyncio.Event] | None = None
+
+    def steer(self, turn_id: str) -> None:
+        batch = self._active_batch
+        if batch is not None and batch[0] == turn_id:
+            batch[2].set()
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -734,6 +740,7 @@ class ToolBatchExecutor:
         last_assistant_message: str | None,
         hook_scope: HookDispatchScopeRef | None = None,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (),
+        cancelled_by_steer: bool = False,
         _partition_batch: bool = True,
         _call_ordinal_offset: int = 0,
         _close_surface_borrow: bool = True,
@@ -750,8 +757,24 @@ class ToolBatchExecutor:
         unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = None
         pending_hook_context_reservations = []
         pending_completion_permit: object | None = None
+        if _close_surface_borrow:
+            self._active_batch = (turn_id, assistant_entry_id, asyncio.Event())
+            if cancelled_by_steer:
+                self._active_batch[2].set()
+        batch = self._active_batch
+        steer_event = batch[2] if batch is not None and batch[:2] == (turn_id, assistant_entry_id) else None
         try:
-            if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE":
+            if _close_surface_borrow and canonical_identity.conversation_scope_kind is ModelInputScopeKind.ROOT:
+                pending = await self._io.run(
+                    self._repository.read_pending_prompt_steer_facts,
+                    session_id=request.session_id, target_turn_id=turn_id,
+                    maximum_items=1, deadline_monotonic=self._canonical_deadline(),
+                )
+                if pending:
+                    steer_event.set()
+            if (steer_event is not None and steer_event.is_set()) or (
+                self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE"
+            ):
                 _partition_batch = False
             if _partition_batch:
                 self._validate_image_call_allowances(
@@ -861,6 +884,13 @@ class ToolBatchExecutor:
                 calls, start=_call_ordinal_offset
             ):
                 call_preauthorization = _preauthorization
+                steered = steer_event is not None and steer_event.is_set()
+                if steered:
+                    call_preauthorization = (
+                        PreparedResolvedToolInvocation(call.tool_name, call.tool_name, call.arguments),
+                        KernelToolAuthorization(KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH,
+                                                "interaction:user-steer", "被用户取消"),
+                    )
                 workspace_blocked = self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE"
                 if workspace_blocked:
                     call_preauthorization = (
@@ -878,10 +908,12 @@ class ToolBatchExecutor:
                 result_entry_id = derive_id('entry', 'tool-result', result_id)
                 if surface_borrow is None:
                     raise RuntimeError("model response lost its tool surface borrow")
-                binding = surface_borrow.execution_binding(call.tool_name)
+                # A cancelled old batch needs only canonical settlement; a
+                # prospective Plan successor may already have retired its surface.
+                binding = None if steered else surface_borrow.execution_binding(call.tool_name)
                 hook_view = (
                     self._hooks.capture_view()
-                    if not workspace_blocked and self._hooks is not None and hook_scope is not None
+                    if not workspace_blocked and not steered and self._hooks is not None and hook_scope is not None
                     else None
                 )
                 prepared_invocation = (
@@ -1031,6 +1063,7 @@ class ToolBatchExecutor:
                             authorization=authorization, turn_id=turn_id,
                             assistant_entry_id=assistant_entry_id, tool_call_id=call.tool_call_id,
                             permission_snapshot=canonical_facts.run_permission_snapshot,
+                            steer_event=steer_event,
                         )
                 if (
                     authorization.kind
@@ -1099,6 +1132,7 @@ class ToolBatchExecutor:
                             permission_snapshot=(
                                 canonical_facts.run_permission_snapshot
                             ),
+                            steer_event=steer_event,
                         )
                 attempt_id: str | None = None
                 attempt_permission_snapshot_fingerprint: str | None = (
@@ -1439,6 +1473,7 @@ class ToolBatchExecutor:
                         ),
                         surface_borrow=surface_borrow,
                         capability_call=authorization.capability_call,
+                        steer_event=steer_event,
                         memory_context=request.memory_context,
                         input_modalities=(
                             request.prepared_call.call.target.fact.input_modalities
@@ -1751,6 +1786,8 @@ class ToolBatchExecutor:
             for reservation in pending_hook_context_reservations:
                 reservation.retire()
             if _close_surface_borrow:
+                if self._active_batch is batch:
+                    self._active_batch = None
                 surface_borrow.close()
             if unsettled_process_local_effect is not None:
                 try:

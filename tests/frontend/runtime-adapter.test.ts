@@ -3380,3 +3380,58 @@ it('announces only a fresh, complete, host-owned manage_capability OAuth success
   await connection.observe(); expect(await reads[1]).toBeUndefined();
   await connection.close();
 });
+
+it.each([false, true])('sends one typed Plan revision source through the real adapter, queued=%s', async queued => {
+  const responses = [connectPayload([], {
+    active_plan_workflow:{workflow_id:'workflow-1', workflow_revision:'7'},
+    open_plan_interaction:{interaction_id:'review:exact', workflow_id:'workflow-1', kind:'DRAFT_REVIEW'},
+  }), {resolve_plan_interaction:{command_id:'command:revise', interaction_status:'REVISION_REQUESTED',
+    continuation_turn_id:'turn:revision', draft_decision:'PLAN_DRAFT_REVISE'}}];
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), {status:200}));
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const receipt = await connection.resolveInteraction(connection.current().interaction!, queued
+    ? {kind:'plan-draft', decision:'revise', sourceQueueItemId:'queue:original'}
+    : {kind:'plan-draft', decision:'revise', revisionPrompt:{parts:[
+      {type:'image', source:'local', bytes:Uint8Array.from([0, 255]), declaredMediaType:'image/png'},
+    ]}}, 'command:revise');
+  expect(receipt).toMatchObject({commandId:'command:revise', status:'succeeded', planDraftDecision:'revise', planContinuationTurnId:'turn:revision'});
+  const body = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+  expect(body).toMatchObject({command_id:'command:revise', interaction_id:'review:exact', workflow_id:'workflow-1',
+    expected_workflow_revision:7, resolution_kind:'draft', draft_decision:'PLAN_DRAFT_REVISE'});
+  expect(body).not.toHaveProperty('feedback');
+  if (queued) {
+    expect(body.source_queue_item_id).toBe('queue:original');
+    expect(body).not.toHaveProperty('revision_prompt');
+  } else {
+    expect(body.revision_prompt).toEqual({parts:[{type:'image', content_base64:'AP8=', declared_media_type:'image/png'}]});
+    expect(body).not.toHaveProperty('source_queue_item_id');
+  }
+});
+
+it.each([{}, { plan: null }, { plan: '' }, { plan: ' \n\t\u3000' }])('projects no-proposal exit without a review card or synthetic user bubble (%j)', async (args) => {
+  const resultText = JSON.stringify({status:'success', plan_control:'EXITED_PLAN', resume_permission_mode:'accept-edits'});
+  const entries = [{
+    entry_id:'exit-call', turn_id:'planning-turn', entry_sequence:'1', entry_kind:'ASSISTANT_TOOL_REQUEST', scope_kind:'ROOT',
+    blocks:[{block_id:'exit-block', block_kind:'TOOL_CALL', tool_call_id:'exit-call-id', tool_name:'exit_plan', tool_arguments_preview:inlineContent(JSON.stringify(args)).inline_content}],
+  }, {
+    entry_id:'exit-result', turn_id:'planning-turn', entry_sequence:'2', entry_kind:'TOOL_RESULT', scope_kind:'ROOT',
+    tool_result:{assistant_entry_id:'exit-call',tool_call_id:'exit-call-id',result_state:'SUCCESS'},
+    content:inlineContent(resultText),
+  }, {
+    entry_id:'exit-continuation', turn_id:'execution-turn', entry_sequence:'3', entry_kind:'PLAN_CONTINUATION', scope_kind:'ROOT',
+    content:inlineContent(JSON.stringify({transition:'EXITED_PLAN',workflow_id:'workflow-1',resume_permission_mode:'accept-edits'})),
+  }];
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries, {
+    tool_attempts:[{assistant_entry_id:'exit-call',tool_call_id:'exit-call-id',result_entry_id:'exit-result',result_state:'SUCCESS'}],
+  })))));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const projection = connection.current();
+  expect(projection.planMode).toBe(false);
+  expect(projection.interaction).toBeUndefined();
+  expect(projection.messages.some(message => message.role === 'user')).toBe(false);
+  expect(projection.messages[0]?.traces?.[0]).toMatchObject({
+    title:'退出规划',subtitle:'已完成',status:'completed',resultText,
+    resultSummary:'已退出规划，继续处理任务。',
+  });
+});

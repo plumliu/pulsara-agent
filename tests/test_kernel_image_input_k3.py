@@ -1102,7 +1102,7 @@ def test_post_response_charge_includes_assistant_arguments_and_result_uppers() -
         canonical_json_bytes(
             {
                 "transition": "ENTERED_PLAN",
-                "workflow_id": "plan-workflow:" + ("0" * 64),
+                "workflow_id": "plan:" + ("a" * 26),
             }
         )
     )

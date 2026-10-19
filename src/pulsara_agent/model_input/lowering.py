@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.identity import require_id
+from pulsara_agent.primitives.permission import PermissionMode
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -729,11 +730,11 @@ def _project_plan_continuation(text: str) -> str:
     if not isinstance(projected, dict):
         raise ValueError("Plan continuation provider payload is not an object")
     transition = str(projected.get("transition") or "")
-    if transition not in {"ENTERED_PLAN", "REVISION_REQUESTED", "APPROVED_PLAN"}:
+    if transition not in {"ENTERED_PLAN", "APPROVED_PLAN", "EXITED_PLAN"}:
         raise ValueError("Plan continuation transition is invalid")
     expected_keys = {
         "ENTERED_PLAN": {"status", "transition"},
-        "REVISION_REQUESTED": {"feedback", "status", "transition"},
+        "EXITED_PLAN": {"status", "transition", "resume_permission_mode"},
         "APPROVED_PLAN": {"status", "transition"},
     }[transition]
     if transition == "APPROVED_PLAN":
@@ -745,30 +746,20 @@ def _project_plan_continuation(text: str) -> str:
         valid_keys = (expected_keys,)
     if set(projected) not in valid_keys:
         raise ValueError("Plan continuation provider members are invalid")
-    if projected.get("status") != (
-        "APPROVED" if transition == "APPROVED_PLAN" else "ACTIVE"
+    if (
+        projected.get("status")
+        != (
+            {
+                "APPROVED_PLAN": "APPROVED",
+                "ENTERED_PLAN": "ACTIVE",
+                "EXITED_PLAN": "EXITED",
+            }[transition]
+        )
     ):
         raise ValueError("Plan continuation provider status is invalid")
-    if transition == "REVISION_REQUESTED":
-        feedback = projected["feedback"]
-        if not isinstance(feedback, dict) or set(feedback) not in (
-            {"presence"},
-            {"presence", "text"},
-        ):
-            raise ValueError("Plan revision feedback union is invalid")
-        if feedback.get("presence") == "ABSENT":
-            if set(feedback) != {"presence"}:
-                raise ValueError("absent Plan feedback has content")
-        elif feedback.get("presence") == "PRESENT":
-            if set(feedback) != {"presence", "text"} or not isinstance(
-                feedback.get("text"), str
-            ):
-                raise ValueError("present Plan feedback is invalid")
-        else:
-            raise ValueError("Plan feedback presence is invalid")
-    if "approved_plan" in projected and not isinstance(
-        projected["approved_plan"], str
-    ):
+    if transition == "EXITED_PLAN":
+        PermissionMode(projected.get("resume_permission_mode"))
+    if "approved_plan" in projected and not isinstance(projected["approved_plan"], str):
         raise ValueError("approved Plan body is invalid")
     encoded = canonical_json_bytes(value).decode("utf-8")
     if encoded != text:

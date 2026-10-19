@@ -496,14 +496,14 @@ CREATE TABLE pulsara_v3.transcript_entries (
     source_plan_workflow_id text,
     source_plan_interaction_id text,
     source_plan_handoff_kind text CHECK (source_plan_handoff_kind IN (
-        'ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
+        'ENTERED_PLAN', 'EXITED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
         'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
     )),
     imported_source_subagent_task_id text,
     imported_source_plan_workflow_id text,
     imported_source_plan_interaction_id text,
     imported_source_plan_handoff_kind text CHECK (imported_source_plan_handoff_kind IN (
-        'ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
+        'ENTERED_PLAN', 'EXITED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
         'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
     )),
     inline_content bytea,
@@ -580,13 +580,13 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND conversation_scope_kind = 'ROOT'
             AND source_plan_workflow_id IS NOT NULL
             AND source_plan_handoff_kind IN (
-                'ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN'
+                'ENTERED_PLAN', 'EXITED_PLAN', 'APPROVED_PLAN'
             )
             AND source_subagent_task_id IS NULL) OR
         (entry_kind = 'USER_MESSAGE'
             AND source_plan_workflow_id IS NOT NULL
             AND conversation_scope_kind = 'ROOT'
-            AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN')
+            AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN', 'REVISION_REQUESTED')
             AND source_subagent_task_id IS NULL) OR
         (source_plan_workflow_id IS NULL
             AND source_plan_interaction_id IS NULL
@@ -597,7 +597,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
         OR source_plan_interaction_id IS NOT NULL
     ),
     CHECK (
-        source_plan_handoff_kind <> 'ENTERED_PLAN'
+        source_plan_handoff_kind NOT IN ('ENTERED_PLAN', 'EXITED_PLAN')
         OR source_plan_interaction_id IS NULL
     ),
     CONSTRAINT ck_imported_source_exact CHECK (
@@ -606,15 +606,15 @@ CREATE TABLE pulsara_v3.transcript_entries (
                 OR (entry_kind <> 'INTER_AGENT_MESSAGE' AND imported_source_subagent_task_id IS NULL))
             AND (
                 (entry_kind = 'PLAN_CONTINUATION' AND imported_source_plan_workflow_id IS NOT NULL
-                    AND imported_source_plan_handoff_kind IN ('ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN'))
+                    AND imported_source_plan_handoff_kind IN ('ENTERED_PLAN', 'EXITED_PLAN', 'APPROVED_PLAN'))
                 OR (entry_kind = 'USER_MESSAGE' AND imported_source_plan_workflow_id IS NOT NULL
-                    AND imported_source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN'))
+                    AND imported_source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN', 'REVISION_REQUESTED'))
                 OR (entry_kind NOT IN ('PLAN_CONTINUATION') AND imported_source_plan_workflow_id IS NULL
                     AND imported_source_plan_handoff_kind IS NULL AND imported_source_plan_interaction_id IS NULL)
             )
             AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind NOT IN ('REVISION_REQUESTED', 'APPROVED_PLAN')
                 OR imported_source_plan_interaction_id IS NOT NULL)
-            AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind <> 'ENTERED_PLAN' OR imported_source_plan_interaction_id IS NULL)
+            AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind NOT IN ('ENTERED_PLAN', 'EXITED_PLAN') OR imported_source_plan_interaction_id IS NULL)
         ) IS TRUE)
     )
 );
@@ -866,9 +866,9 @@ CREATE TABLE pulsara_v3.tool_results (
             AND attempt_id IS NULL AND control_plan_workflow_id IS NULL
             AND control_plan_interaction_id IS NULL
             AND (
-                (result_origin_kind = 'PHYSICAL_ATTEMPT' AND result_state IN ('SUCCESS', 'INVALID_ARGUMENTS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'))
+                (result_origin_kind = 'PHYSICAL_ATTEMPT' AND result_state IN ('SUCCESS', 'INVALID_ARGUMENTS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED', 'CANCELLED_BEFORE_DISPATCH'))
                 OR (result_origin_kind = 'POLICY_NO_ATTEMPT' AND result_state IN ('INVALID_ARGUMENTS', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE', 'CANCELLED_BEFORE_DISPATCH'))
-                OR (result_origin_kind = 'PLAN_CONTROL' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR'))
+                OR (result_origin_kind = 'PLAN_CONTROL' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'CANCELLED_BEFORE_DISPATCH'))
             )) OR
         (result_record_kind = 'EXECUTED' AND permission_snapshot_fingerprint IS NOT NULL AND (
         (result_origin_kind = 'POLICY_NO_ATTEMPT'
@@ -883,12 +883,13 @@ CREATE TABLE pulsara_v3.tool_results (
             AND control_plan_workflow_id IS NULL
             AND control_plan_interaction_id IS NULL
             AND result_state IN (
-            'SUCCESS', 'INVALID_ARGUMENTS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'
+            -- An accepted attempt is admission; Steer can still win before physical dispatch.
+            'SUCCESS', 'INVALID_ARGUMENTS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED', 'CANCELLED_BEFORE_DISPATCH'
         )) OR
         (result_origin_kind = 'PLAN_CONTROL'
             AND attempt_id IS NULL
             AND num_nonnulls(control_plan_workflow_id, control_plan_interaction_id) = 1
-            AND result_state IN ('SUCCESS', 'APPLICATION_ERROR')
+            AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'CANCELLED_BEFORE_DISPATCH')
         )
         ))
     ),
@@ -1060,7 +1061,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND jsonb_typeof(model_call_binding->'connection_id') = 'string'
         )
     ),
-    CHECK (
+    CONSTRAINT ck_prompt_queue_permission_admission_exact CHECK (
         (delivery_mode = 'STEER_ACTIVE_TURN'
             AND permission_snapshot_id IS NULL
             AND requested_permission_mode IS NULL
@@ -1071,7 +1072,20 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND permission_contract_id IS NULL
             AND permission_contract_fingerprint IS NULL
             AND permission_snapshot_fingerprint IS NULL) OR
-        (delivery_mode = 'NEW_TURN'
+        (input_origin = 'HUMAN_MESSAGE'
+            AND requested_permission_mode IS NOT NULL
+            AND permission_snapshot_id IS NULL
+            AND effective_permission_mode IS NULL
+            AND permission_admission_source IS NULL
+            AND permission_overlay IS NULL
+            AND permission_plan_context_ordinal IS NULL
+            AND permission_plan_workflow_id IS NULL
+            AND permission_plan_revision_at_admission IS NULL
+            AND permission_inherited_from_turn_id IS NULL
+            AND permission_contract_id IS NULL
+            AND permission_contract_fingerprint IS NULL
+            AND permission_snapshot_fingerprint IS NULL) OR
+        (input_origin = 'SCHEDULED_TASK'
             AND permission_snapshot_id IS NOT NULL
             AND requested_permission_mode IS NOT NULL
             AND effective_permission_mode IS NOT NULL
@@ -1100,7 +1114,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND pending_plan_handoff_interaction_id IS NULL) OR
         (pending_plan_handoff_kind IS NOT NULL
             AND pending_plan_handoff_workflow_id IS NOT NULL
-            AND delivery_mode = 'NEW_TURN')
+            AND input_origin = 'SCHEDULED_TASK')
     )
 );
 CREATE UNIQUE INDEX uq_pulsara_v3_queue_plan_handoff_claim
@@ -1277,7 +1291,7 @@ CREATE TABLE pulsara_v3.plan_workflows (
     workspace_id text NOT NULL,
     workflow_ordinal bigint NOT NULL CHECK (workflow_ordinal >= 1),
     status text NOT NULL CHECK (status IN (
-        'ACTIVE', 'APPROVED', 'CANCELLED', 'FORCE_EXITED'
+        'ACTIVE', 'APPROVED', 'CANCELLED', 'FORCE_EXITED', 'EXITED'
     )),
     entered_by text NOT NULL CHECK (entered_by IN ('USER', 'AGENT')),
     entry_reason text NOT NULL CHECK (octet_length(entry_reason) <= 4096),
@@ -1378,7 +1392,7 @@ CREATE TABLE pulsara_v3.plan_interactions (
     FOREIGN KEY (session_id, decision_continuation_entry_id)
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (
-        (kind = 'QUESTION' AND status IN ('OPEN', 'ANSWERED', 'ABORTED')) OR
+        (kind = 'QUESTION' AND status IN ('OPEN', 'ANSWERED', 'CANCELLED', 'ABORTED')) OR
         (kind = 'DRAFT_REVIEW' AND status IN (
             'OPEN', 'APPROVED', 'REVISION_REQUESTED', 'CANCELLED', 'ABORTED'
         ))
@@ -1390,8 +1404,8 @@ CREATE TABLE pulsara_v3.plan_interactions (
             AND request_contract_fingerprint = 'sha256:d19178a8bc3eaa69f03ce3151b1803b760be6afa55f5f58f489e58e45d5420b9') OR
         (kind = 'DRAFT_REVIEW'
             AND request_contract_id = 'pulsara.workflow.exit_plan'
-            AND request_contract_version = 'v1'
-            AND request_contract_fingerprint = 'sha256:98849b9f64ec6170cb509cdc9c4ff1292f99c0b98c657d518117340466dab336')
+            AND request_contract_version = 'v2'
+            AND request_contract_fingerprint = 'sha256:9e77c16295c1ec7059729498b26c5665b494e49002113485bbebfa3d739165d1')
     ),
     CHECK (
         (status = 'OPEN' AND resolution_command_id IS NULL
@@ -1409,6 +1423,9 @@ CREATE TABLE pulsara_v3.plan_interactions (
             AND control_tool_result_id IS NOT NULL AND answer_kind IS NOT NULL
             AND ((answer_kind = 'OPTION' AND selected_option_ordinal IS NOT NULL)
                 OR (answer_kind = 'FREE_TEXT' AND selected_option_ordinal IS NULL))) OR
+        (kind = 'QUESTION' AND status = 'CANCELLED'
+            AND control_tool_result_id IS NOT NULL AND answer_kind IS NULL
+            AND selected_option_ordinal IS NULL) OR
         (kind = 'QUESTION' AND status IN ('OPEN', 'ABORTED')
             AND control_tool_result_id IS NULL AND answer_kind IS NULL
             AND selected_option_ordinal IS NULL) OR
@@ -2268,6 +2285,10 @@ BEGIN
                AND observed_status IS DISTINCT FROM 'ACTIVE' THEN
                 RAISE EXCEPTION 'Plan entry handoff requires ACTIVE workflow'
                     USING ERRCODE = '23514';
+            ELSIF NEW.source_plan_handoff_kind = 'EXITED_PLAN'
+               AND observed_status IS DISTINCT FROM 'EXITED' THEN
+                RAISE EXCEPTION 'Plan exit handoff requires EXITED workflow'
+                    USING ERRCODE = '23514';
             ELSIF NEW.source_plan_handoff_kind = 'REVISION_REQUESTED'
                AND (observed_status IS DISTINCT FROM 'ACTIVE'
                     OR observed_kind IS DISTINCT FROM 'REVISION_REQUESTED') THEN
@@ -2395,7 +2416,7 @@ BEGIN
                 AND NOT (
                     OLD.kind = 'QUESTION'
                     AND OLD.status = 'OPEN'
-                    AND NEW.status = 'ANSWERED'
+                    AND NEW.status IN ('ANSWERED', 'CANCELLED')
                     AND OLD.control_tool_result_id IS NULL
                     AND NEW.control_tool_result_id IS NOT NULL
                 )) OR
@@ -2422,7 +2443,7 @@ BEGIN
                    ELSE 'exit_plan'
                END
            )
-           OR (NEW.kind = 'QUESTION' AND NEW.status IN ('OPEN', 'ANSWERED')
+           OR (NEW.kind = 'QUESTION' AND NEW.status IN ('OPEN', 'ANSWERED', 'CANCELLED')
                AND observed_status IS DISTINCT FROM 'RUNNING')
            OR (NEW.kind = 'DRAFT_REVIEW' AND observed_status IS DISTINCT FROM 'COMPLETED') THEN
             RAISE EXCEPTION 'Plan interaction origin is not its exact ROOT tool call'
@@ -2529,10 +2550,22 @@ BEGIN
               AND b.assistant_entry_id = NEW.tool_call_entry_id
               AND b.tool_call_id = NEW.tool_call_id;
             IF (NEW.control_plan_workflow_id IS NOT NULL
-                    AND observed_tool_name IS DISTINCT FROM 'enter_plan')
+                    AND observed_tool_name NOT IN ('enter_plan', 'exit_plan'))
                OR (NEW.control_plan_interaction_id IS NOT NULL
                     AND observed_tool_name NOT IN ('ask_plan_question', 'exit_plan')) THEN
                 RAISE EXCEPTION 'Plan control result does not name a Plan tool'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF NEW.result_state = 'CANCELLED_BEFORE_DISPATCH' AND (
+                observed_tool_name IS DISTINCT FROM 'ask_plan_question'
+                OR NOT EXISTS (
+                    SELECT 1 FROM pulsara_v3.plan_interactions
+                    WHERE session_id = NEW.session_id
+                      AND id = NEW.control_plan_interaction_id
+                      AND kind = 'QUESTION' AND status = 'CANCELLED'
+                )
+            ) THEN
+                RAISE EXCEPTION 'cancelled Plan control result requires a cancelled question'
                     USING ERRCODE = '23514';
             END IF;
             IF NEW.control_plan_interaction_id IS NOT NULL THEN
@@ -2598,6 +2631,8 @@ BEGIN
               AND w.id = NEW.pending_plan_handoff_workflow_id;
             IF (NEW.pending_plan_handoff_kind = 'CANCELLED_PLAN'
                     AND observed_status IS DISTINCT FROM 'CANCELLED')
+               OR (NEW.pending_plan_handoff_kind = 'EXITED_PLAN'
+                    AND observed_status IS DISTINCT FROM 'EXITED')
                OR (NEW.pending_plan_handoff_kind = 'FORCE_EXITED_PLAN'
                     AND observed_status IS DISTINCT FROM 'FORCE_EXITED')
                OR (NEW.pending_plan_handoff_interaction_id IS NOT NULL

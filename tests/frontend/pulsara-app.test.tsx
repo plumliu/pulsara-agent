@@ -3057,7 +3057,7 @@ describe('PulsaraApp', () => {
   it.each([
     ['cancel', '取消规划', { kind: 'plan-draft', decision: 'cancel' }],
     ['revise', '提交修改意见', {
-      kind: 'plan-draft', decision: 'revise', feedback: '保留 `read_file` 与 ROOT',
+      kind: 'plan-draft', decision: 'revise', revisionPrompt: {parts: [{type: 'text', text: '保留 `read_file` 与 ROOT'}]},
     }],
   ] as const)('keeps source plan text and interaction identity when choosing %s', async (
     _name,
@@ -3079,7 +3079,7 @@ describe('PulsaraApp', () => {
     if (_name === 'revise') {
       fireEvent.click(screen.getByRole('button', { name: '提出修改' }));
       fireEvent.change(screen.getByPlaceholderText('说说你想调整的地方…'), {
-        target: { value: resolution.feedback },
+        target: { value: resolution.revisionPrompt.parts[0].text },
       });
     }
     fireEvent.click(screen.getByRole('button', { name: action }));

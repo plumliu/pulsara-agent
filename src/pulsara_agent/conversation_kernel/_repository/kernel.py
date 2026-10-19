@@ -448,20 +448,6 @@ class _RepositoryKernel:
         force_plan_workflow_id: str | None = None,
         force_plan_read_only: bool | None = None,
     ) -> FrozenRunPermissionSnapshot:
-        pending_review = connection.execute(
-            """
-            SELECT i.id
-            FROM pulsara_v3.plan_interactions AS i
-            JOIN pulsara_v3.plan_workflows AS w
-              ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
-            WHERE i.session_id = %s AND i.kind = 'DRAFT_REVIEW'
-              AND i.status = 'OPEN' AND w.status = 'ACTIVE'
-            LIMIT 1
-            """,
-            (session_id,),
-        ).fetchone()
-        if pending_review is not None:
-            raise ConversationKernelConflict("PLAN_REVIEW_PENDING")
         latest = connection.execute(
             """
             SELECT workflow_ordinal FROM pulsara_v3.plan_workflows

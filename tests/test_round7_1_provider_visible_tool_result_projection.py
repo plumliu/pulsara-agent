@@ -40,6 +40,7 @@ from pulsara_agent.model_input.lowering import (
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+    ToolObservationOrigin,
 )
 from pulsara_agent.primitives.tool_result_projection import (
     BEST_AVAILABLE_TOOL_RESULT_DELIVERY,
@@ -52,6 +53,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     classify_tool_result_delivery,
     decode_provider_tool_result_observation,
     full_required_tool_result_delivery,
+    project_tool_result_storage_body,
     render_provider_tool_result_logical_message,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
@@ -67,6 +69,28 @@ from tests.support.round3 import new_test_provider_input_continuity_owner
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_plan_question_cancellation_projects_user_visible_reason() -> None:
+    carrier = {
+        "status": "cancelled", "plan_control": "QUESTION_CANCELLED",
+        "cancelled_by": "USER_STEER", "message": "被用户取消",
+        "interaction_id": "storage-only-interaction",
+    }
+    projected = json.loads(project_tool_result_storage_body(
+        json.dumps(carrier), ToolObservationOrigin.PLAN_CONTROL,
+    ))
+    assert projected == {
+        "status": "cancelled", "plan_control": "QUESTION_CANCELLED",
+        "cancelled_by": "USER_STEER", "message": "被用户取消",
+    }
+    for field in ("status", "cancelled_by", "message"):
+        invalid = dict(carrier)
+        invalid.pop(field)
+        with pytest.raises(ValueError, match="cancellation carrier is invalid"):
+            project_tool_result_storage_body(
+                json.dumps(invalid), ToolObservationOrigin.PLAN_CONTROL,
+            )
 
 
 def _body_with_exact_logical_bytes(

@@ -114,7 +114,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 5
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:167a0cf9cfa3ab29d7ec9077d79bd0e8c929ef13914861b8a017139900801921"
+    "sha256:f36432518db108798c9be3919f5fefadcb6f77f74e4258c7c12a29613a929a04"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -783,23 +783,21 @@ class TerminalKernelProtocolServer:
                 content = _prompt_content_from_wire(request.prompt_content)
             except (TypeError, ValueError):
                 return _error(request.request_id, "PROMPT_INVALID")
+            outcome = await state.host_session.submit_prompt(
+                command_id=request.command_id, content=content,
+                requested_permission_mode=requested_permission,
+            )
+        elif request.command_kind == wire.STEER_ACTIVE_TURN:
+            if not request.target_turn_id or request.plan_reason or not request.HasField("prompt_content"):
+                return _error(request.request_id, "STEER_INVALID")
             try:
-                outcome = await state.host_session.submit_prompt(
-                    command_id=request.command_id,
-                    content=content,
-                    requested_permission_mode=requested_permission,
-                )
-            except ConversationKernelConflict as exc:
-                if str(exc) != "PLAN_REVIEW_PENDING":
-                    raise
-                # Review fences are a known non-admission, not an unknown
-                # transport outcome. Keep the attachment and original draft.
-                from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
-
-                outcome = KernelCommandOutcome(
-                    request.command_id, "REJECTED", "", "PLAN_REVIEW_PENDING",
-                    "请先批准、修改或取消当前方案，再发送新消息。",
-                )
+                content = _prompt_content_from_wire(request.prompt_content)
+            except (TypeError, ValueError):
+                return _error(request.request_id, "PROMPT_INVALID")
+            outcome = await state.host_session.steer_active_turn(
+                command_id=request.command_id, content=content,
+                target_turn_id=request.target_turn_id,
+            )
         elif request.command_kind == wire.CANCEL_QUEUED_PROMPT:
             outcome = await state.host_session.cancel_queued_prompt(
                 command_id=request.command_id,
@@ -1070,29 +1068,25 @@ class TerminalKernelProtocolServer:
                 }.get(request.draft.decision)
                 if decision is None:
                     return _error(request.request_id, "PLAN_DRAFT_DECISION_INVALID")
-                feedback = (
-                    request.draft.feedback
-                    if request.draft.HasField("feedback")
-                    else None
-                )
-                if decision in {
-                    PlanDraftDecision.APPROVE,
-                    PlanDraftDecision.CANCEL,
-                } and request.draft.HasField("feedback"):
-                    return _error(request.request_id, "PLAN_DRAFT_FEEDBACK_NOT_ALLOWED")
-                if feedback is not None and len(feedback.encode("utf-8")) > 32 * 1024:
-                    return _error(request.request_id, "PLAN_DRAFT_FEEDBACK_INVALID")
-                # Missing and present-empty REVISE feedback have one semantic
-                # candidate.  APPROVE/CANCEL presence is rejected by Host.
-                if decision is PlanDraftDecision.REVISE and feedback == "":
-                    feedback = None
+                has_prompt = request.draft.HasField("revision_prompt")
+                has_source = request.draft.HasField("source_queue_item_id")
+                if ((decision is PlanDraftDecision.REVISE and has_prompt == has_source)
+                    or (decision is not PlanDraftDecision.REVISE and (has_prompt or has_source))):
+                    return _error(request.request_id, "PLAN_REVISION_INPUT_INVALID")
+                revision_prompt = (_prompt_content_from_wire(request.draft.revision_prompt)
+                                   if request.draft.HasField("revision_prompt") else None)
+                source_queue_item_id = (request.draft.source_queue_item_id
+                                        if request.draft.HasField("source_queue_item_id") else None)
+                if source_queue_item_id is not None and not source_queue_item_id:
+                    return _error(request.request_id, "PLAN_REVISION_SOURCE_INVALID")
                 outcome = await state.host_session.resolve_plan_draft_review(
                     command_id=request.command_id,
                     workflow_id=request.workflow_id,
                     expected_workflow_revision=(request.expected_workflow_revision),
                     interaction_id=request.interaction_id,
                     decision=decision,
-                    feedback=feedback,
+                    revision_prompt=revision_prompt,
+                    source_queue_item_id=source_queue_item_id,
                     write_expected_writer_generation=(
                         request.attempt_expected_writer_generation
                     ),

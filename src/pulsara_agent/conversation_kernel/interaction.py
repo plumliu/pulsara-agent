@@ -206,6 +206,7 @@ class KernelInteractionCoordinator:
         tool_name: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         admission_hooks: InteractionAdmissionHooks | None = None,
+        steer_event: asyncio.Event | None = None,
     ) -> ToolInteractionResolution:
         return await self._request(
             turn_id=turn_id,
@@ -214,6 +215,7 @@ class KernelInteractionCoordinator:
             tool_name=tool_name,
             permission_snapshot=permission_snapshot,
             admission_hooks=admission_hooks,
+            steer_event=steer_event,
         )
 
     async def request_capability_form(
@@ -224,6 +226,7 @@ class KernelInteractionCoordinator:
         tool_call_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         form: PendingCapabilityForm,
+        steer_event: asyncio.Event | None = None,
     ) -> ToolInteractionResolution:
         return await self._request(
             turn_id=turn_id,
@@ -232,6 +235,7 @@ class KernelInteractionCoordinator:
             tool_name="manage_capability",
             permission_snapshot=permission_snapshot,
             capability_form=form,
+            steer_event=steer_event,
         )
 
     async def _request(
@@ -243,10 +247,15 @@ class KernelInteractionCoordinator:
         tool_name: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         admission_hooks: InteractionAdmissionHooks | None = None,
+        steer_event: asyncio.Event | None = None,
         capability_form: PendingCapabilityForm | None = None,
     ) -> ToolInteractionResolution:
         loop = asyncio.get_running_loop()
         async with self._lock:
+            if steer_event is not None and steer_event.is_set():
+                if admission_hooks is not None:
+                    admission_hooks.discard()
+                return ToolInteractionResolution("DENY", "interaction:user-steer", "被用户取消")
             if self._closed or (
                 capability_form is not None and not self.has_controller()
             ):
@@ -307,7 +316,20 @@ class KernelInteractionCoordinator:
             try:
                 async with asyncio.timeout_at(pending.deadline_monotonic):
                     await self._promote_next()
-                    return await asyncio.shield(pending.future)
+                    if steer_event is None:
+                        return await asyncio.shield(pending.future)
+                    redirect = asyncio.create_task(steer_event.wait())
+                    try:
+                        await asyncio.wait((pending.future, redirect), return_when=asyncio.FIRST_COMPLETED)
+                        if not pending.future.done():
+                            await self._abort_candidate(
+                                interaction_id=interaction_id,
+                                reference="interaction:user-steer", public_message="被用户取消",
+                            )
+                        return await asyncio.shield(pending.future)
+                    finally:
+                        redirect.cancel()
+                        await asyncio.gather(redirect, return_exceptions=True)
             except TimeoutError:
                 await self._abort_candidate(
                     interaction_id=interaction_id,

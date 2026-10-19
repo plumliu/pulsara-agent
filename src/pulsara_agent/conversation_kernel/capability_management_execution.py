@@ -363,7 +363,7 @@ class CapabilityManagementCall:
             else None
         )
 
-    async def execute(self):
+    async def execute(self, *, steer_event: asyncio.Event | None = None):
         state = self._state
         if state not in {"prepared", "submitted"}:
             raise RuntimeError(
@@ -424,7 +424,7 @@ class CapabilityManagementCall:
                 },
             )
         if action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}:
-            return await self._authorization(prepared)
+            return await self._authorization(prepared, steer_event=steer_event)
         observed = _plugin_observation(prepared, root)
         scope = PluginScopeKind(prepared.intent.scope.value)
         if action is Action.INSTALL_PLUGIN:
@@ -705,7 +705,7 @@ class CapabilityManagementCall:
             },
         )
 
-    async def _authorization(self, prepared):
+    async def _authorization(self, prepared, *, steer_event=None):
         service = self.service
         fields = thaw_json(prepared.intent.fields)
         if prepared.plugin is None:
@@ -737,9 +737,22 @@ class CapabilityManagementCall:
         if prepared.intent.action is Action.CLEAR_MCP_AUTHORIZATION:
             await service.mcp.oauth.logout(owner, require_current=current)
         else:
+            if steer_event is not None and steer_event.is_set():
+                return {"status": "CANCELLED", "message": "等待登录被用户取消", "adoption": "NOT_APPLICABLE"}
             flow = await service.mcp.oauth.begin(owner, current)
             assert flow.task is not None
-            await flow.task
+            if steer_event is None:
+                await asyncio.shield(flow.task)
+            else:
+                redirected = asyncio.create_task(steer_event.wait())
+                try:
+                    await asyncio.wait((flow.task, redirected), return_when=asyncio.FIRST_COMPLETED)
+                    if steer_event.is_set():
+                        return {"status": "CANCELLED", "message": "等待登录被用户取消", "adoption": "NOT_APPLICABLE"}
+                    await asyncio.shield(flow.task)
+                finally:
+                    redirected.cancel()
+                    await asyncio.gather(redirected, return_exceptions=True)
         result = self._result(
             prepared,
             "APPLIED",

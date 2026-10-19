@@ -9,6 +9,7 @@ renderer instead of copying its field list or byte formula.
 from __future__ import annotations
 
 from pulsara_agent.identity import require_id
+from pulsara_agent.primitives.permission import PermissionMode
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -158,14 +159,27 @@ def project_tool_result_storage_body(
         raise ValueError("Plan result carrier is not an object")
     status = value.get("status")
     control = value.get("plan_control")
+    if control == "QUESTION_CANCELLED":
+        if (status != "cancelled" or value.get("cancelled_by") != "USER_STEER"
+            or value.get("message") != "被用户取消"):
+            raise ValueError("Plan question cancellation carrier is invalid")
+        return canonical_json_bytes({
+            "status": "cancelled", "plan_control": "QUESTION_CANCELLED",
+            "cancelled_by": "USER_STEER", "message": "被用户取消",
+        }).decode("utf-8")
     if status != "success" or control not in {
         "ENTERED_PLAN",
+        "EXITED_PLAN",
         "PLAN_ALREADY_ACTIVE",
         "DRAFT_SUBMITTED_FOR_REVIEW",
         "QUESTION_ANSWERED",
     }:
         raise ValueError("Plan control result storage carrier is invalid")
     result: dict[str, object] = {"plan_control": control, "status": status}
+    if control == "EXITED_PLAN":
+        result["resume_permission_mode"] = PermissionMode(
+            value.get("resume_permission_mode")
+        ).value
     if control == "QUESTION_ANSWERED":
         answer_kind = value.get("answer_kind")
         if answer_kind == "OPTION":

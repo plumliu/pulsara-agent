@@ -345,7 +345,7 @@ def test_fifo_consumption_wins_over_both_queue_actions(queue_case):
     assert rows(queue_case) == before
 
 
-def test_plan_handoff_redirect_rejects_without_changing_source_or_action(
+def test_plan_handoff_is_claimed_at_delivery_and_does_not_block_redirect(
     stage2_migrated_postgres_database,
 ):
     from tests.test_round4_plan_postgres import _lease, _open_user_plan
@@ -393,16 +393,14 @@ def test_plan_handoff_redirect_rejects_without_changing_source_or_action(
     )
     case = (repository, lease.guard, turn, revision, source, "")
     before = rows(case)
-    assert before[0]["pending_plan_handoff_workflow_id"] == workflow
+    assert before[0]["pending_plan_handoff_workflow_id"] is None
     candidate = action(case)
-    with pytest.raises(QueuedPromptActionRejected, match="PROMPT_HAS_PLAN_HANDOFF"):
-        apply(case, candidate)
-    assert rows(case) == before
-    assert (
-        repository.query_command(
-            session_id=lease.guard.session_id,
-            command_id=candidate.command_id,
-            deadline_monotonic=monotonic() + 30,
-        )
-        is None
-    )
+    apply(case, candidate)
+    redirected = rows(case)
+    assert [row["status"] for row in redirected] == ["CANCELLED", "PENDING"]
+    assert redirected[1]["delivery_mode"] == "STEER_ACTIVE_TURN"
+    assert redirected[1]["target_turn_id"] == turn
+    assert redirected[1]["inline_content"] == before[0]["inline_content"]
+    assert redirected[1]["pending_plan_handoff_workflow_id"] is None
+    assert repository.query_command(session_id=lease.guard.session_id,
+        command_id=candidate.command_id, deadline_monotonic=monotonic()+30) is not None

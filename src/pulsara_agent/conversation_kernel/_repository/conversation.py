@@ -200,6 +200,7 @@ class _ConversationOperations:
         snapshot_id: str,
         requested_mode: PermissionMode,
         deadline_monotonic: float,
+        queued_user_observation: bool = False,
     ) -> FrozenRunPermissionSnapshot:
         """Read the exact Plan/permission cut required by prompt Hook admission."""
 
@@ -210,6 +211,10 @@ class _ConversationOperations:
             deadline_monotonic=deadline_monotonic,
         ) as connection:
             self._require_writer(connection, guard, lock=False)
+            if not queued_user_observation:
+                interaction = self._open_plan_interaction(connection, guard.session_id)
+                if interaction is not None and interaction['kind'] == 'DRAFT_REVIEW':
+                    raise ConversationKernelConflict('PLAN_REVIEW_PENDING')
             return self._freeze_root_permission_snapshot(
                 connection,
                 session_id=guard.session_id,
@@ -891,7 +896,7 @@ class _ConversationOperations:
         """Prove that an unpublished suffix closes the only open tool results.
 
         Most active ROOT producers require the ordinary provider safe point.
-        A Plan question answer is the one producer whose atomic publication
+        A Plan question resolution is the producer whose atomic publication
         itself closes the outstanding tool call.  This read-only check lets
         the existing safe-point owner freeze that exact future cut without
         publishing the result first.
@@ -926,6 +931,22 @@ class _ConversationOperations:
                 """,
                 (guard.session_id, cut.turn_id),
             ).fetchone()
+            # Accepted Steer closes its exact open Plan question before that
+            # input can be appended. Ordinary answers still yield to Steer.
+            question_cancellation = False
+            if len(candidate.unpublished_items) == 1:
+                item = candidate.unpublished_items[0]
+                if (item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
+                    and item.tool_result_context is not None
+                    and item.tool_result_context.result_state == "CANCELLED_BEFORE_DISPATCH"):
+                    question_cancellation = connection.execute(
+                        """SELECT 1 FROM pulsara_v3.plan_interactions
+                           WHERE session_id = %s AND origin_turn_id = %s
+                             AND assistant_entry_id = %s AND tool_call_id = %s
+                             AND kind = 'QUESTION' AND status = 'OPEN'""",
+                        (guard.session_id, cut.turn_id,
+                         item.tool_request_entry_id, item.tool_call_id),
+                    ).fetchone() is not None
             if (
                 row is None
                 or str(row["conversation_scope_kind"])
@@ -935,7 +956,7 @@ class _ConversationOperations:
                 != cut.context_binding_revision_id
                 or int(row["latest_entry_sequence"])
                 != cut.provider_input_through_sequence
-                or bool(row["has_pending_steer"])
+                or (bool(row["has_pending_steer"]) and not question_cancellation)
             ):
                 raise ConversationKernelConflict(
                     "prospective active input is not at its exact ROOT cut"

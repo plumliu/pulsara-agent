@@ -1693,7 +1693,7 @@ function InteractionCard({
           <textarea id={feedbackId} value={feedback} onChange={event => setFeedback(event.target.value)} placeholder="说说你想调整的地方…" disabled={busy} rows={3} autoFocus />
           <div className="interaction-actions">
             <button disabled={busy} onClick={() => setRevisionOpen(false)}><RotateCcw size={13} />返回方案</button>
-            <button className="is-primary" disabled={busy || !feedback.trim()} onClick={() => void resolve({ kind: 'plan-draft', decision: 'revise', feedback })}>{busy && <LoaderCircle size={13} />}提交修改意见<ArrowRight size={14} /></button>
+            <button className="is-primary" disabled={busy || !feedback.trim()} onClick={() => void resolve({ kind: 'plan-draft', decision: 'revise', revisionPrompt: { parts: [{ type: 'text', text: feedback }] } })}>{busy && <LoaderCircle size={13} />}提交修改意见<ArrowRight size={14} /></button>
           </div>
         </div> : <div className="interaction-actions interaction-actions--plan">
           <button className="interaction-quiet" disabled={busy} onClick={() => void resolve({ kind: 'plan-draft', decision: 'cancel' })}>取消规划</button>
@@ -2005,7 +2005,7 @@ export function WorkbenchView({
             ? <p>正文未能在队列终止前完成读取。</p>
             : <PromptContentView content={item.content} variant="queue" onReadImage={onReadPromptImage} />}
           {!isObserver && <div className="composer-queue__actions">
-            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || !isRunning}
+            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || (!isRunning && interaction?.kind !== 'plan-draft')}
               onClick={() => { if (queued) void queueAction(queued, 'send'); }}><CornerDownRight size={13} />发送</button>
             <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || busy || editingQueue || !canControl}
               onClick={() => { if (queued) void queueAction(queued, 'edit'); }}><Pencil size={13} />编辑</button>
@@ -2320,11 +2320,7 @@ export function WorkbenchView({
     }
     let accepted = false;
     try {
-      accepted = await onSend(
-        snapshot.content,
-        permission,
-        requestPlan && !isRunning && !activePlanMode,
-      );
+      accepted = await onSend(snapshot.content, permission, requestPlan && !isRunning && !activePlanMode);
     } finally {
       setSubmitting(false);
     }
@@ -2757,7 +2753,7 @@ export function WorkbenchView({
                     title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，任务、排队输入和后台命令不会自动取消。"
                   ><Square size={14} fill="currentColor" strokeWidth={0} aria-hidden="true" /></button>
                 ) : (
-                  <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0 || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning ? '排队发送' : '发送'}>
+                  <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0 || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning || interaction ? '排队发送' : '发送'}>
                     {isRunning ? <Play size={14} fill="currentColor" /> : <ArrowUp size={16} />}
                   </button>
                 )}

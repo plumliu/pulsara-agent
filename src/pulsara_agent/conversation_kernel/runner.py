@@ -6,6 +6,8 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.repository_errors import PlanControlSupersededBySteer
+
 from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 from pulsara_agent.identity import derive_id
 
@@ -579,32 +581,21 @@ def _plan_result_followup_upper(
     )
 
 
-def _entered_plan_continuation_followup_upper() -> tuple[
-    int, int, int, tuple[LLMMessage, ...]
-]:
-    """Quote the continuation created with a successful fresh ``enter_plan``.
+def _entered_plan_continuation_followup_upper(
+    *, exiting: bool = False, resume_permission_mode: PermissionMode | None = None
+) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
+    """Quote the closed continuation carrier for an automatic Plan turn boundary."""
 
-    The workflow id is a ``plan-workflow:`` prefix plus one SHA-256 hex digest,
-    so every real id has the same encoded length.  The provider projection is
-    the closed value produced by the canonical reader for ENTERED_PLAN.
-    """
-
-    workflow_id_shape = "plan-workflow:" + ("0" * 64)
-    canonical = canonical_json_bytes(
-        {
-            "transition": "ENTERED_PLAN",
-            "workflow_id": workflow_id_shape,
-        }
-    )
+    transition = "EXITED_PLAN" if exiting else "ENTERED_PLAN"
+    workflow_id_shape = "plan:" + ("a" * 26)
+    storage = {"transition": transition, "workflow_id": workflow_id_shape}
+    projected = {"status": "EXITED" if exiting else "ACTIVE", "transition": transition}
+    if exiting:
+        storage["resume_permission_mode"] = resume_permission_mode.value
+        projected["resume_permission_mode"] = resume_permission_mode.value
+    canonical = canonical_json_bytes(storage)
     message = LLMMessage.user(
-        canonical_json_bytes(
-            {
-                "pulsara_plan_continuation": {
-                    "status": "ACTIVE",
-                    "transition": "ENTERED_PLAN",
-                }
-            }
-        ).decode("utf-8")
+        canonical_json_bytes({"pulsara_plan_continuation": projected}).decode("utf-8")
     )
     return (
         len(canonical),
@@ -1148,6 +1139,9 @@ class ConversationKernelRunner:
             hook_dispatcher=hook_dispatcher,
             hook_context_owner=hook_context_owner,
         )
+
+    def steer_tool_batch(self, turn_id: str) -> None:
+        self._tool_batches.steer(turn_id)
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -2602,6 +2596,7 @@ class ConversationKernelRunner:
                     active_surface_borrow.close()
                     active_surface_borrow = None
                     continue
+                plan_batch_steered = False
                 plan_call_indexes = tuple(
                     index
                     for index, call in enumerate(calls)
@@ -2613,44 +2608,48 @@ class ConversationKernelRunner:
                         raise RuntimeError("Plan control escaped the ROOT tool surface")
                     if active_surface_borrow is None:
                         raise RuntimeError("Plan batch lost its tool surface borrow")
-                    tool_call_count += len(calls)
                     plan_epoch = self._continuity.current_view(planning.scope)
                     if plan_epoch is None:
                         raise RuntimeError("Plan batch lost continuity epoch")
-                    outcome = await self._plan_batches.accept_batch(
-                        calls=calls,
-                        selected_call_index=plan_call_indexes[0],
-                        assistant_entry_id=accepted.entry_id,
-                        canonical_facts=canonical_facts,
-                        surface_borrow=active_surface_borrow,
-                        deadline=self._canonical_deadline(),
-                        hook_model=request.prepared_call.call.target.fact.model_id,
-                        hook_cwd=str(self._tools.snapshot_workspace_root()),
-                        continuity_epoch_nonce=plan_epoch.epoch_nonce,
-                    )
-                    active_surface_borrow.close()
-                    active_surface_borrow = None
-                    if outcome.interaction_kind is PlanInteractionKind.QUESTION:
-                        # The canonical answer/tool result is installed by the
-                        # Host resolution command.  Human think time is not a
-                        # provider/tool operation deadline.
-                        continue
-                    if not outcome.origin_turn_completed:
-                        # Idempotent enter_plan against the already-active
-                        # workflow settles the batch but keeps this exact run.
-                        continue
-                    return KernelRunResult(
-                        turn_id=turn_id,
-                        final_entry_id=(
-                            outcome.selected_result_entry_id or accepted.entry_id
-                        ),
-                        final_text=completed.public_text,
-                        model_call_count=model_call_count,
-                        tool_call_count=tool_call_count,
-                        continuation_turn_id=outcome.continuation_turn_id,
-                        continuation_entry_id=outcome.continuation_entry_id,
-                        pending_plan_interaction_id=outcome.interaction_id,
-                    )
+                    try:
+                        outcome = await self._plan_batches.accept_batch(
+                            calls=calls,
+                            selected_call_index=plan_call_indexes[0],
+                            assistant_entry_id=accepted.entry_id,
+                            canonical_facts=canonical_facts,
+                            surface_borrow=active_surface_borrow,
+                            deadline=self._canonical_deadline(),
+                            hook_model=request.prepared_call.call.target.fact.model_id,
+                            hook_cwd=str(self._tools.snapshot_workspace_root()),
+                            continuity_epoch_nonce=plan_epoch.epoch_nonce,
+                        )
+                    except PlanControlSupersededBySteer:
+                        plan_batch_steered = True
+                    if not plan_batch_steered:
+                        tool_call_count += len(calls)
+                        active_surface_borrow.close()
+                        active_surface_borrow = None
+                        if outcome.interaction_kind is PlanInteractionKind.QUESTION:
+                            # The canonical answer/tool result is installed by the
+                            # Host resolution command.  Human think time is not a
+                            # provider/tool operation deadline.
+                            continue
+                        if not outcome.origin_turn_completed:
+                            # Idempotent enter_plan against the already-active
+                            # workflow settles the batch but keeps this exact run.
+                            continue
+                        return KernelRunResult(
+                            turn_id=turn_id,
+                            final_entry_id=(
+                                outcome.selected_result_entry_id or accepted.entry_id
+                            ),
+                            final_text=completed.public_text,
+                            model_call_count=model_call_count,
+                            tool_call_count=tool_call_count,
+                            continuation_turn_id=outcome.continuation_turn_id,
+                            continuation_entry_id=outcome.continuation_entry_id,
+                            pending_plan_interaction_id=outcome.interaction_id,
+                        )
                 if active_surface_borrow is None:
                     raise RuntimeError("Tool batch lost its execution-backed borrow")
                 batch_borrow = active_surface_borrow
@@ -2670,6 +2669,7 @@ class ConversationKernelRunner:
                     last_assistant_message=(completed.public_text or None),
                     hook_scope=self._hook_scope,
                     image_call_allowances=output_quote.image_call_allowances,
+                    cancelled_by_steer=plan_batch_steered,
                 )
                 tool_call_count += batch.tool_call_count
                 if batch.terminal is not None:
@@ -3402,8 +3402,18 @@ class ConversationKernelRunner:
             and selected_plan_call.tool_name == "enter_plan"
             and canonical_facts.plan_workflow_fact is None
         )
-        if fresh_enter_plan:
-            continuation_quote = _entered_plan_continuation_followup_upper()
+        raw_exit_plan = (thaw_json(selected_plan_call.arguments).get("plan")
+                         if selected_plan_call is not None and selected_plan_call.tool_name == "exit_plan" else None)
+        fresh_exit_plan = (selected_plan_call is not None
+                           and selected_plan_call.tool_name == "exit_plan"
+                           and canonical_facts.plan_workflow_fact is not None
+                           and (raw_exit_plan is None or (isinstance(raw_exit_plan, str) and not raw_exit_plan.strip())))
+        resume_permission_mode = (canonical_facts.plan_workflow_fact.resume_permission_mode
+                                  if fresh_exit_plan else None)
+        if fresh_enter_plan or fresh_exit_plan:
+            continuation_quote = _entered_plan_continuation_followup_upper(
+                exiting=fresh_exit_plan, resume_permission_mode=resume_permission_mode,
+            )
             canonical_followup += continuation_quote[0]
             logical_followup += continuation_quote[1]
             followup_items += continuation_quote[2]
@@ -3454,7 +3464,9 @@ class ConversationKernelRunner:
                 )
             )
         catalog_messages = tuple(source_messages)
-        if fresh_enter_plan:
+        if fresh_exit_plan:
+            source_messages.extend(self._context_source_collector.freeze_exited_plan_source_upper(resume_permission_mode))
+        elif fresh_enter_plan:
             source_messages.extend(
                 self._context_source_collector.freeze_fresh_entered_plan_source_upper(
                     canonical_facts.run_permission_snapshot

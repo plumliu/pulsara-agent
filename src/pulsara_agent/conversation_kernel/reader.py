@@ -894,7 +894,7 @@ class CanonicalProviderInputReader:
                     if _prospective_root_candidate is None
                     or _prospective_root_candidate.unpublished_plan_handoff_fact is None
                     or _prospective_root_candidate.unpublished_plan_handoff_fact.handoff_kind
-                    is not PlanHandoffKind.ENTERED_PLAN
+                    not in {PlanHandoffKind.ENTERED_PLAN, PlanHandoffKind.EXITED_PLAN}
                     else _prospective_root_candidate.permission_snapshot.inherited_from_turn_id
                 ),
             )
@@ -3251,7 +3251,9 @@ def _canonical_input_origin(
         return CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
     if row.get("scheduled_input") is not None:
         return CanonicalInputOriginKind.SCHEDULED_TASK
-    if row.get("source_plan_workflow_id") is not None:
+    # A Plan handoff is independent of the input carrier. Ordinary messages
+    # after cancellation and human revision prompts retain typed hydration.
+    if row["entry_kind"] == "PLAN_CONTINUATION":
         return CanonicalInputOriginKind.PLAN_CONTINUATION
     if row["entry_kind"] == "USER_STEER":
         return CanonicalInputOriginKind.HUMAN_STEER

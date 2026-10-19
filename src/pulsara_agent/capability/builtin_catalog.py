@@ -1723,8 +1723,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "exit_plan": _descriptor(
         name="exit_plan",
         description=(
-            "Submit the complete plan for user review and finish planning. This does "
-            "not execute the plan. The user may approve it, request a "
+            "Submit a nonblank complete plan for user review, or omit plan, pass null, "
+            "or pass blank text to leave planning without a proposal or approval card. "
+            "Use the no-proposal exit when the user asks to stop planning and proceed. "
+            "It ends the read-only turn and automatically resumes a new turn with the "
+            "permissions saved on entry to planning; the result reports that mode. "
+            "A submitted proposal does not execute the plan. The user may approve it, request a "
             "revision, or cancel it. Approval resumes work with the approved plan and "
             "the permissions available after planning; revision resumes read-only "
             "planning with the user's feedback; cancellation ends planning without "
@@ -1736,11 +1740,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=object_schema(
             properties={
                 "plan": {
-                    "type": "string",
-                    "minLength": 1,
+                    "type": ["string", "null"],
                     "maxLength": 1048576,
                     "description": (
-                        "The exact, self-contained plan the user will review and that you "
+                        "Omit, use null, or use blank text to exit planning without review. "
+                        "Otherwise, the exact, self-contained plan the user will review and that you "
                         "will follow if approved. State the intended outcome, affected "
                         "files or components, ordered changes, important behavior and "
                         "constraints, and proportionate validation. Do not submit partial "
@@ -1756,7 +1760,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     ),
                 },
             },
-            required=["plan"],
+            required=[],
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
@@ -2091,7 +2095,7 @@ def _catalog_entry(
         tool_name=name,
         origin=origin,
         contract_id=f"pulsara.{origin.value}.{name}",
-        contract_version="v1",
+        contract_version="v2" if name == "exit_plan" else "v1",
     )
     if not isinstance(binding, BuiltinToolBindingContract):
         raise TypeError("builtin catalog produced a non-builtin binding")

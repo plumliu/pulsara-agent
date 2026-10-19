@@ -468,9 +468,10 @@ class FakeConnection implements RuntimeConnection {
   resolveInteraction = vi.fn(async (
     _interaction: RuntimeInteractionSummary,
     resolution: Parameters<RuntimeConnection['resolveInteraction']>[1],
+    commandId?: string,
   ): Promise<CommandReceipt> => {
     return {
-      commandId: 'command-6', status: 'succeeded',
+      commandId: commandId ?? 'command-6', status: 'succeeded',
       ...(resolution.kind === 'plan-draft'
         ? {
           planDraftDecision: resolution.decision,

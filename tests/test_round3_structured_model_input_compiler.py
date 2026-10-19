@@ -1723,13 +1723,12 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
 ) -> None:
     snapshot = _snapshot(
         FrozenProviderInputItem(
-            FrozenProviderInputItemKind.PLAN_CONTINUATION,
+            FrozenProviderInputItemKind.USER,
             'entry:jfasfwsw2puygc3hrueckpvgba',
             1,
             'turn:klmmazz67vfgsfsvg6ceqgdsfu',
-            (LLMTextPart('{"pulsara_plan_continuation":{"feedback":{"presence":"ABSENT"},'
-            '"status":"ACTIVE","transition":"REVISION_REQUESTED"}}'),),
-            input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
+            (LLMTextPart("Revise the plan."),),
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         )
     )
     base = _canonical_facts(snapshot)

@@ -240,3 +240,64 @@ def test_model_oauth_completion_carries_exact_owner_only_after_settlement(tmp_pa
         await service.mcp.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("token_error", [False, True])
+def test_oauth_steer_detaches_only_conversation_wait_and_shared_sdk_flow_completes(tmp_path, token_error):
+    import httpx
+    from tests.test_mcp_oauth import oauth_server
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        trace = {}
+        async with oauth_server(tmp_path, auto_callback=False, token_gate=(entered, release), trace=trace, token_error=token_error) as (
+            manager, target, config, _, _, callbacks, *_,
+        ):
+            service = preparation(tmp_path)
+            unused_owner = service.mcp
+            service.mcp = trace["management"]
+            await unused_owner.aclose()
+            call = CapabilityManagementCall(service, await service.prepare({
+                "action": "AUTHORIZE_MCP", "scope": "USER", "server_id": target.server_id,
+            }))
+            form = call.form("authorize")
+            call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
+            redirected = asyncio.Event()
+            work = asyncio.create_task(call.execute(steer_event=redirected))
+            callback = None
+            try:
+                async with asyncio.timeout(10):
+                    while not callbacks:
+                        await asyncio.sleep(0.005)
+
+                async def visit():
+                    async with httpx.AsyncClient(trust_env=False) as client:
+                        return await client.get(callbacks[0])
+
+                callback = asyncio.create_task(visit())
+                await asyncio.wait_for(entered.wait(), 10)
+                shared = await manager.begin(target.owner, lambda: config)
+                assert not shared.task.done()
+                redirected.set()
+                result = await asyncio.wait_for(work, 5)
+                assert result == {"status": "CANCELLED", "message": "等待登录被用户取消", "adoption": "NOT_APPLICABLE"}
+                assert not shared.task.cancelled()
+                assert not shared.task.done()
+                assert manager.settings.read().mcp_authorization(target.owner) is None
+                release.set()
+                if token_error:
+                    with pytest.raises(ValueError, match="登录未完成"):
+                        await asyncio.wait_for(asyncio.shield(shared.task), 10)
+                    assert manager.settings.read().mcp_authorization(target.owner) is None
+                else:
+                    await asyncio.wait_for(asyncio.shield(shared.task), 10)
+                    assert manager.settings.read().mcp_authorization(target.owner) is not None
+                response = await callback
+                assert ("授权未完成" if token_error else "授权成功") in response.text
+                assert len(trace["authorizations"]) == 1
+                assert result["status"] == "CANCELLED"
+            finally:
+                release.set()
+                await asyncio.gather(*(task for task in (work, callback) if task is not None), return_exceptions=True)
+
+    asyncio.run(run())

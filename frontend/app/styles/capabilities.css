@@ -315,7 +315,7 @@
 .interaction-mcp-editor .interaction-connection-settings .capability-check { display: flex; flex-direction: row-reverse; justify-content: space-between; align-items: center; min-height: 44px; padding: 11px 13px; border: 0; border-radius: 0; background: transparent; font-size: 12px; }
 .interaction-mcp-editor .interaction-connection-settings .capability-check + .capability-check { border-top: 1px solid var(--line); }
 .interaction-mcp-editor .interaction-connection-settings input[type="checkbox"] { appearance: none; display: block; flex: none; width: 29px; height: 17px; margin: 0; padding: 0; border: 0; border-radius: 12px; background: var(--line-strong); }
-.interaction-mcp-editor .interaction-connection-settings input[type="checkbox"]::before { content: ''; display: block; width: 11px; height: 11px; margin: 3px; border: 0; border-radius: 50%; background: white; box-shadow: 0 1px 3px #0002; }
+.interaction-mcp-editor .interaction-connection-settings .capability-check input[type="checkbox"]::before { content: ''; display: block; width: 11px; height: 11px; margin: 3px; border: 0; border-radius: 50%; background: white; box-shadow: 0 1px 3px #0002; }
 .interaction-mcp-editor .interaction-connection-settings input[type="checkbox"]:checked { background: var(--blue); }
 .interaction-mcp-editor .interaction-connection-settings input[type="checkbox"]:checked::before { transform: translateX(12px); }
 .interaction-mcp-editor .mcp-advanced { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); }
@@ -331,7 +331,7 @@
   .interaction-mcp-editor .mcp-secret-row > :is(input,select) { grid-column: 1; }
   .interaction-mcp-editor .mcp-secret-row > button { grid-column: 2; grid-row: 1 / 4; }
 }
-@media(forced-colors:active) { .interaction-mcp-editor .interaction-connection-settings input[type="checkbox"] { appearance: auto; } .interaction-mcp-editor .interaction-connection-settings input[type="checkbox"]::before { display: none; } }
+@media(forced-colors:active) { .interaction-mcp-editor .interaction-connection-settings input[type="checkbox"] { appearance: auto; } .interaction-mcp-editor .interaction-connection-settings .capability-check input[type="checkbox"]::before { display: none; } }
 
 .capability-form-review .hook-review-definition { min-width: 0; }
 .capability-form-review .hook-review-definition > pre { margin: 10px 0; padding: 14px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-raised); color: var(--ink-soft); font: 11px/1.7 var(--mono); }

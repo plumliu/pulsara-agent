@@ -1092,39 +1092,39 @@ def test_pr04_cancel_queue_command_and_closed_field_matrix():
         result = asyncio.run(server._command(controller, wire.CommandRequest(**(valid | changed))))
         assert result.error.stable_code == code
     assert controller.host_session.steered == [('command:xbla77mpykdtojsv4k2diu32o4', 'queue:ny2hkezkbzwknov5sviuukewba', '')]
-    assert 'STEER_ACTIVE_TURN' not in wire.CommandKind.keys()
+    assert wire.STEER_ACTIVE_TURN == 16
 
 
-def test_plan_review_prompt_is_a_known_rejection_and_keeps_attachment_usable() -> None:
+def test_direct_steer_is_exact_targeted_and_cannot_carry_permission() -> None:
     async def scenario() -> None:
         server = _server()
         state = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
-        original = state.host_session.submit_prompt
+        received = []
 
-        async def review_pending(**_kwargs):
-            raise ConversationKernelConflict("PLAN_REVIEW_PENDING")
+        async def steer(**kwargs):
+            received.append(kwargs)
+            return KernelCommandOutcome(kwargs['command_id'], 'PENDING', '', 'PROMPT_QUEUED', 'Queued.')
 
-        state.host_session.submit_prompt = review_pending
+        state.host_session.steer_active_turn = steer
         request = wire.CommandRequest(
             request_id='request:ada6trh7kkouspbvtb5xziozey',
             command_id='command:fatsxsbdgdroqnbx53epulaaoy',
-            client_submission_id='command:fatsxsbdgdroqnbx53epulaaoy',
-            command_kind=wire.SUBMIT_PROMPT,
-            prompt_content=_wire_text_prompt("keep this input"),
-            requested_permission_mode=wire.PERMISSION_MODE_READ_ONLY,
+            command_kind=wire.STEER_ACTIVE_TURN,
+            target_turn_id='turn:qc5obgzujf23avn6iwnfufogvq',
+            prompt_content=_wire_text_prompt('keep this input'),
         )
+        result = await server._command(state, request)
+        assert result.command_outcome.status == wire.PENDING
+        assert received[0]['target_turn_id'] == request.target_turn_id
+        assert received[0]['content'].parts[0].text == 'keep this input'
+        request.requested_permission_mode = wire.PERMISSION_MODE_BYPASS_PERMISSIONS
         rejected = await server._command(state, request)
-        assert rejected.WhichOneof('response') == 'command_outcome'
-        assert rejected.command_outcome.request_id == request.request_id
-        assert rejected.command_outcome.command_id == request.command_id
-        assert rejected.command_outcome.status == wire.REJECTED
-        assert rejected.command_outcome.public_code == 'PLAN_REVIEW_PENDING'
-        assert '当前方案' in rejected.command_outcome.public_message
+        assert rejected.error.stable_code == 'PERMISSION_FIELD_NOT_ALLOWED'
+        assert len(received) == 1
+        request.requested_permission_mode = wire.PERMISSION_MODE_UNSPECIFIED
+        request.target_turn_id = ''
+        rejected = await server._command(state, request)
+        assert rejected.error.stable_code == 'STEER_INVALID'
+        assert len(received) == 1
         assert state.host_session.has_controller_attachment(state.attachment_id)
-        state.host_session.submit_prompt = original
-        queued = await server._command(state, request)
-        assert queued.command_outcome.status == wire.PENDING
-        assert queued.command_outcome.public_code == 'PROMPT_QUEUED'
-        assert state.host_session.submitted[0][1].parts[0].text == 'keep this input'
-
     asyncio.run(scenario())

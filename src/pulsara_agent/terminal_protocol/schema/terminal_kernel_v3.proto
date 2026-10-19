@@ -260,6 +260,7 @@ message PromptQueueControl {
   string accepted_at_utc = 9;
   string input_origin = 10;
   ScheduledInputProvenance scheduled_input = 11;
+  PermissionMode requested_permission_mode = 12;
 }
 
 message PlanWorkflowControl {
@@ -773,6 +774,7 @@ enum CommandKind {
   TERMINATE_BACKGROUND_PROCESS = 13;
   CANCEL_QUEUED_PROMPT = 14;
   STEER_QUEUED_PROMPT = 15;
+  STEER_ACTIVE_TURN = 16;
 }
 
 message CommandRequest {
@@ -1003,7 +1005,8 @@ enum PlanDraftDecision {
 
 message PlanDraftResolution {
   PlanDraftDecision decision = 1;
-  optional string feedback = 2;
+  PromptContent revision_prompt = 2;
+  optional string source_queue_item_id = 3;
 }
 
 message ResolvePlanInteractionRequest {

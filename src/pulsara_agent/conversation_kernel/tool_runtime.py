@@ -440,6 +440,7 @@ class KernelToolInteractionPort(Protocol):
         tool_call_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         form: PendingCapabilityForm,
+        steer_event: asyncio.Event | None = None,
     ) -> KernelToolInteractionResolution: ...
 
     async def request_tool_confirmation(
@@ -451,6 +452,7 @@ class KernelToolInteractionPort(Protocol):
         tool_name: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         admission_hooks: InteractionAdmissionHooks | None = None,
+        steer_event: asyncio.Event | None = None,
     ) -> KernelToolInteractionResolution: ...
 
     async def cancel_tool_confirmations(
@@ -2488,6 +2490,7 @@ class DirectKernelToolPort:
         assistant_entry_id,
         tool_call_id,
         permission_snapshot,
+        steer_event=None,
     ):
         call = authorization.capability_call
         if (
@@ -2510,6 +2513,7 @@ class DirectKernelToolPort:
                 tool_call_id=tool_call_id,
                 permission_snapshot=permission_snapshot,
                 form=call.form(authorization.public_message),
+                steer_event=steer_event,
             )
         except BaseException:
             call.discard()
@@ -2542,6 +2546,7 @@ class DirectKernelToolPort:
         tool_name: str,
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
+        steer_event: asyncio.Event | None = None,
     ) -> KernelToolAuthorization:
         state_key, admission, permit = self._validate_permission_request(
             prepared_request
@@ -2599,6 +2604,7 @@ class DirectKernelToolPort:
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             permission_snapshot=permission_snapshot,
+            steer_event=steer_event,
             admission_hooks=(
                 InteractionAdmissionHooks(
                     before_publish=admit_before_publish,
@@ -2639,7 +2645,9 @@ class DirectKernelToolPort:
                 if permit_entry[1].state.value == "ADMITTED":
                     permit_entry[1].release()
             return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
+                (KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH
+                 if resolution.reference == "interaction:user-steer" and resolution.result_entry_id is None
+                 else KernelToolAuthorizationKind.PERMISSION_DENIED),
                 resolution.reference,
                 resolution.public_message,
                 accepted_result_entry_id=resolution.result_entry_id,
@@ -2905,6 +2913,16 @@ class DirectKernelToolPort:
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
+        if invocation_context.steer_event is not None and invocation_context.steer_event.is_set():
+            key = (invocation_context.surface_borrow.prepared.access.surface_generation, tool_call_id)
+            self._mcp_confirmation_admissions.pop(key, None)
+            self._mcp_meta_invocations.pop(key, None)
+            permit = self._mcp_dispatch_permits.pop(key, None)
+            if permit is not None:
+                permit.release()
+            if invocation_context.capability_call is not None:
+                invocation_context.capability_call.discard()
+            return KernelToolResult(state="CANCELLED_BEFORE_DISPATCH", content="被用户取消".encode("utf-8"))
         invocation_started = monotonic()
         observation_origin = tool_observation_origin_for_binding(binding)
         from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
@@ -3058,7 +3076,7 @@ class DirectKernelToolPort:
             ):
                 raise RuntimeError("capability execution lost its exact prepared owner")
             try:
-                values = await call.execute()
+                values = await call.execute(steer_event=invocation_context.steer_event)
             except McpManagementConflict as exc:
                 values = {
                     "status": "CONFLICT",
@@ -3089,7 +3107,7 @@ class DirectKernelToolPort:
             return KernelToolResult(
                 state="SUCCESS"
                 if values["status"] in {"APPLIED", "OBSERVED"}
-                else "APPLICATION_ERROR",
+                else "CANCELLED" if values["status"] == "CANCELLED" else "APPLICATION_ERROR",
                 content=json.dumps(
                     values, ensure_ascii=False, separators=(",", ":")
                 ).encode(),
@@ -3212,7 +3230,7 @@ class DirectKernelToolPort:
                 permit.mark_attempt_accepted()
             operation_task = asyncio.create_task(
                 prepared_meta.executor.invoke(
-                    permit, thaw_json(prepared_meta.arguments)
+                    permit, thaw_json(prepared_meta.arguments), steer_event=invocation_context.steer_event,
                 ),
                 name=f"mcp-meta-operation:{tool_call_id}",
             )
@@ -3242,7 +3260,7 @@ class DirectKernelToolPort:
             if permit.state.value == "ADMITTED":
                 permit.mark_attempt_accepted()
             operation_task = asyncio.create_task(
-                executor.invoke(permit, arguments),
+                executor.invoke(permit, arguments, steer_event=invocation_context.steer_event),
                 name=f"mcp-tool-operation:{tool_call_id}",
             )
             known, caller_cancelled = await _await_mcp_operation(operation_task)
@@ -3288,6 +3306,7 @@ class DirectKernelToolPort:
                     tool_name=tool_name,
                     arguments=arguments,
                     permit=permit,
+                    steer_event=invocation_context.steer_event,
                     scope_kind=(
                         invocation_context.surface_borrow.prepared.access.conversation_scope_kind
                     ),

@@ -604,7 +604,7 @@ def test_round4_database_rejects_permission_mutation_and_wrong_initial_entry(
                 ),
             )
     assert queue_violation.value.diag.constraint_name == (
-        "ck_prompt_queue_permission_overlay_exact"
+        "ck_prompt_queue_permission_admission_exact"
     )
 
     with pytest.raises(CheckViolation, match="exact turn and scope"):
@@ -1275,7 +1275,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         expected_workflow_revision=4,
         interaction_id=str(opened_draft.interaction_id),
         decision=PlanDraftDecision.REVISE,
-        feedback="please add rollback",
+        canonical_prompt=frozen_test_prompt("please add rollback"),
         continuation_turn_id=revise_turn,
         continuation_entry_id=revise_entry,
         continuation_context_binding_revision_id=revise_revision,
@@ -1288,7 +1288,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         expected_workflow_revision=4,
         interaction_id=str(opened_draft.interaction_id),
         decision=PlanDraftDecision.REVISE,
-        feedback="please add rollback",
+        canonical_prompt=frozen_test_prompt("please add rollback"),
         continuation_turn_id=revise_turn,
         continuation_entry_id=revise_entry,
         continuation_context_binding_revision_id=revise_revision,
@@ -1301,6 +1301,26 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     assert _permission(repository, lease, revise_turn).overlay is (
         RunPermissionOverlay.PLAN_READ_ONLY
     )
+
+    revision_cut = repository.prepare_provider_input_cut(
+        lease.guard, turn_id=revise_turn, deadline_monotonic=monotonic() + 30,
+    )
+    revision_facts = CanonicalProviderInputReader(
+        repository.connection_provider
+    ).read_frozen_compile_snapshot(revision_cut, deadline_monotonic=monotonic() + 30)
+    revision_item = next(item for item in revision_facts.canonical_input.items
+                         if item.source_entry_id == revise_entry)
+    assert revision_item.item_kind is FrozenProviderInputItemKind.USER
+    assert revision_item.input_origin.value == "HUMAN_MESSAGE"
+    assert tuple(part.text for part in revision_item.content) == ("please add rollback",)
+    snapshot = CanonicalProtocolReader(repository.connection_provider).snapshot(
+        session_id=lease.guard.session_id, maximum_entries=64,
+        maximum_control_items=64, deadline_monotonic=monotonic() + 30,
+    )
+    projected_revision = next(entry for entry in snapshot.entries if entry.entry_id == revise_entry)
+    assert projected_revision.input_source.command_id == revise_command
+    assert projected_revision.input_source.queue_item_id == ""
+    assert projected_revision.input_source.delivery_mode == "NEW_TURN"
 
     second_plan = first_plan + "\n4. rollback"
     second_draft_batch = _commit_plan_batch(
@@ -1335,7 +1355,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         expected_workflow_revision=6,
         interaction_id=str(second_draft.interaction_id),
         decision=PlanDraftDecision.APPROVE,
-        feedback=None,
+        canonical_prompt=None,
         continuation_turn_id=implementation_turn,
         continuation_entry_id=implementation_entry,
         continuation_context_binding_revision_id=implementation_revision,
@@ -1353,7 +1373,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
             expected_workflow_revision=6,
             interaction_id=str(second_draft.interaction_id),
             decision=PlanDraftDecision.APPROVE,
-            feedback=None,
+            canonical_prompt=None,
             continuation_turn_id=implementation_turn,
             continuation_entry_id=implementation_entry,
             continuation_context_binding_revision_id=implementation_revision,
@@ -1390,7 +1410,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         expected_workflow_revision=6,
         interaction_id=str(second_draft.interaction_id),
         decision=PlanDraftDecision.APPROVE,
-        feedback=None,
+        canonical_prompt=None,
         continuation_turn_id=implementation_turn,
         continuation_entry_id=implementation_entry,
         continuation_context_binding_revision_id=implementation_revision,
@@ -1571,7 +1591,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         for item in materialized_facts.canonical_input.items
     )
 
-    # Present-empty and absent feedback normalize to the same stable winner.
+    # Confirm the exact approved continuation after writer replacement.
     replacement = repository.acquire_host_writer(
         intent="EXISTING",
         session_id=lease.guard.session_id,
@@ -1587,7 +1607,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         expected_workflow_revision=6,
         interaction_id=str(second_draft.interaction_id),
         decision=PlanDraftDecision.APPROVE,
-        feedback=None,
+        canonical_prompt=None,
         continuation_turn_id=implementation_turn,
         continuation_entry_id=implementation_entry,
         continuation_context_binding_revision_id=implementation_revision,
@@ -1630,7 +1650,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
 
 
 @pytest.mark.parametrize("first_disposition", ["CONSUMED", "CANCELLED"])
-def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
+def test_round4_draft_cancel_handoff_is_delivery_owned_exactly_once(
     stage2_migrated_postgres_database,
     first_disposition: str,
 ) -> None:
@@ -1664,7 +1684,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         expected_workflow_revision=2,
         interaction_id=interaction_id,
         decision=PlanDraftDecision.CANCEL,
-        feedback=None,
+        canonical_prompt=None,
         continuation_turn_id=None,
         continuation_entry_id=None,
         continuation_context_binding_revision_id=None,
@@ -1700,9 +1720,9 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
             "SELECT * FROM pulsara_v3.prompt_queue_items WHERE id = %s",
             (first_queue_id,),
         ).fetchone()
-    assert queued["pending_plan_handoff_workflow_id"] == workflow_id
-    assert queued["pending_plan_handoff_interaction_id"] == interaction_id
-    assert queued["pending_plan_handoff_kind"] == "CANCELLED_PLAN"
+    assert queued["pending_plan_handoff_workflow_id"] is None
+    assert queued["permission_snapshot_id"] is None
+    assert queued["requested_permission_mode"] == PermissionMode.READ_ONLY.value
 
     if first_disposition == "CONSUMED":
         candidate = repository.prepare_prompt_head_consumption(
@@ -1784,6 +1804,14 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
             (second_queue_id,),
         ).fetchone()
     assert second["pending_plan_handoff_workflow_id"] is None
+    next_candidate = repository.prepare_prompt_head_consumption(
+        session_id=lease.guard.session_id, occurred_at=_now(), actor_id="runtime:test",
+        deadline_monotonic=monotonic()+30,
+    )
+    assert next_candidate is not None
+    assert next_candidate.pending_plan_handoff_workflow_id == (
+        workflow_id if first_disposition == "CANCELLED" else None
+    )
 
 
 def test_round4_aborted_plan_question_lowers_without_effect_unknown(

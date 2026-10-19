@@ -132,6 +132,36 @@ class McpSnapshotStale(RuntimeError):
     pass
 
 
+class _McpDispatchCancelledBeforeStart(RuntimeError):
+    pass
+
+
+async def _acquire_dispatch_lane(lane: asyncio.Semaphore, steer_event: asyncio.Event | None) -> None:
+    if steer_event is None:
+        await lane.acquire()
+        return
+    if steer_event.is_set():
+        raise _McpDispatchCancelledBeforeStart
+    acquire = asyncio.create_task(lane.acquire())
+    redirected = asyncio.create_task(steer_event.wait())
+    transferred = False
+    try:
+        await asyncio.wait((acquire, redirected), return_when=asyncio.FIRST_COMPLETED)
+        if steer_event.is_set():
+            raise _McpDispatchCancelledBeforeStart
+        await acquire
+        transferred = True
+    finally:
+        redirected.cancel()
+        if not transferred:
+            acquire.cancel()
+        settled = await asyncio.gather(acquire, redirected, return_exceptions=True)
+        # Cancellation can race a successful semaphore grant. Return exactly
+        # that grant unless ownership transferred to the physical operation.
+        if not transferred and settled[0] is True:
+            lane.release()
+
+
 _DEFAULT_MCP_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 _SUPPORTED_MCP_SCHEMA_DIALECTS = frozenset(
     {
@@ -239,8 +269,8 @@ class McpDispatchAdmissionPermit:
     def mark_attempt_accepted(self) -> None:
         self._slot.mark_attempt_accepted(self)
 
-    async def acquire_operation(self) -> "McpPhysicalOperationPermit":
-        return await self._slot.acquire_operation(self)
+    async def acquire_operation(self, *, steer_event: asyncio.Event | None = None) -> "McpPhysicalOperationPermit":
+        return await self._slot.acquire_operation(self, steer_event=steer_event)
 
     def release(self) -> None:
         if self.state is McpDispatchPermitState.RELEASED:
@@ -530,7 +560,7 @@ class McpConnectionSlot:
             permit.state = McpDispatchPermitState.ATTEMPT_ACCEPTED
 
     async def acquire_operation(
-        self, permit: McpDispatchAdmissionPermit
+        self, permit: McpDispatchAdmissionPermit, *, steer_event: asyncio.Event | None = None
     ) -> McpPhysicalOperationPermit:
         with self._lock:
             self._require_permit(permit)
@@ -538,15 +568,17 @@ class McpConnectionSlot:
                 raise RuntimeError("MCP attempt is not accepted")
         # A request waiting on its server must not reserve capacity that an
         # unrelated ready server can use for actual physical I/O.
-        await self._lane.acquire()
+        await _acquire_dispatch_lane(self._lane, steer_event)
         try:
-            await self._host_lane.acquire()
+            await _acquire_dispatch_lane(self._host_lane, steer_event)
         except BaseException:
             self._lane.release()
             raise
         with self._lock:
             try:
                 self._require_permit(permit)
+                if steer_event is not None and steer_event.is_set():
+                    raise _McpDispatchCancelledBeforeStart
                 if permit.state is not McpDispatchPermitState.ATTEMPT_ACCEPTED:
                     raise RuntimeError("MCP operation permit raced settlement")
                 permit.state = McpDispatchPermitState.LANE_ACQUIRED
@@ -625,6 +657,7 @@ class McpBoundToolExecutor:
         self,
         permit: McpDispatchAdmissionPermit,
         arguments: Mapping[str, object],
+        *, steer_event: asyncio.Event | None = None,
     ) -> McpKnownToolResult:
         if (
             permit.runtime_generation_id != self.runtime_generation_id
@@ -634,7 +667,11 @@ class McpBoundToolExecutor:
         ):
             raise RuntimeError("MCP dispatch permit does not exact-join executor")
         try:
-            operation = await permit.acquire_operation()
+            operation = await permit.acquire_operation(steer_event=steer_event)
+        except _McpDispatchCancelledBeforeStart:
+            permit.release()
+            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "被用户取消".encode("utf-8"),
+                _mcp_remote_identity(semantic=self.semantic, connection_generation=self.lease.connection_generation))
         except BaseException:
             if permit.state is McpDispatchPermitState.ATTEMPT_ACCEPTED:
                 permit.release()
@@ -1017,6 +1054,7 @@ class McpInstalledRuntimeGeneration:
         arguments: Mapping[str, object],
         permit: McpDispatchAdmissionPermit | None,
         scope_kind: ModelInputScopeKind,
+        steer_event: asyncio.Event | None = None,
     ) -> McpKnownToolResult:
         if permit is None:
             raise RuntimeError("MCP remote read lost its dispatch permit")
@@ -1033,7 +1071,11 @@ class McpInstalledRuntimeGeneration:
             raise McpSnapshotStale("MCP standard operation generation is stale")
         permit.mark_attempt_accepted()
         try:
-            operation = await permit.acquire_operation()
+            operation = await permit.acquire_operation(steer_event=steer_event)
+        except _McpDispatchCancelledBeforeStart:
+            permit.release()
+            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "被用户取消".encode("utf-8"),
+                f"mcp:{candidate.server_id}:{permit.lease.connection_generation}:{tool_name}")
         except BaseException:
             if permit.state is McpDispatchPermitState.ATTEMPT_ACCEPTED:
                 permit.release()
