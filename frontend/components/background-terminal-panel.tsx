@@ -6,8 +6,11 @@ import {
   LoaderCircle,
   RefreshCw,
   TerminalSquare,
+  SquareArrowOutUpRight,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal, flushSync } from 'react-dom';
+import { usePromptHover } from '../lib/prompt-hover';
 import { createUserControlCommandRef } from '../lib/runtime-adapter';
 import { useDesktopWorkspace } from './desktop-workspace';
 import { AnimatedDisclosure } from './animated-disclosure';
@@ -33,6 +36,20 @@ interface ProcessView {
 }
 
 const terminal = (status: string) => status !== 'running';
+
+function ProcessIdentity({ command, status, expanded, onToggle }: { command: string; status: string; expanded?: boolean; onToggle?: () => void }) {
+  const { trigger, details, position, show, hide, keep } = usePromptHover<HTMLDivElement>(440);
+  const [placement, setPlacement] = useState(position);
+  if (position && position !== placement) setPlacement(position);
+  const id = useId();
+  const copy = <><strong>{command}</strong><small>{status}</small></>;
+  return <div ref={trigger} className="background-process__identity" onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}>
+    {onToggle ? <button type="button" className="background-process__toggle" aria-expanded={expanded} aria-describedby={position ? id : undefined} onClick={onToggle}><ChevronDown size={13} /><span>{copy}</span></button>
+      : <div className="process-detail__identity" tabIndex={0} aria-describedby={position ? id : undefined}><TerminalSquare size={16} /><span>{copy}</span></div>}
+    {placement && createPortal(<span ref={details} id={id} role="tooltip" className="process-command-tooltip" data-open={Boolean(position)} aria-hidden={!position} inert={!position}
+      style={{ left: placement.left, top: placement.top, translate: placement.above ? '0 calc(-100% - 6px)' : '0 6px' }} onMouseEnter={keep} onMouseLeave={hide}>{command}</span>, document.body)}
+  </div>;
+}
 
 const processStatusText = (process: BackgroundProcess): string => {
   if (process.status === 'running') return '运行中';
@@ -63,6 +80,7 @@ const controlQueryMessage = (status: UserControlQueryResult['status']): string =
 
 export function BackgroundTerminalPanel({
   processId: selectedProcessId,
+  command,
   onOpenProcess,
   ownerKey,
   sessionId,
@@ -75,6 +93,7 @@ export function BackgroundTerminalPanel({
   queryControl,
 }: {
   processId?: string;
+  command?: string;
   onOpenProcess?: (process: BackgroundProcess) => void;
   ownerKey: string;
   sessionId: string;
@@ -308,14 +327,32 @@ export function BackgroundTerminalPanel({
     }
   };
 
+  const openDetail = (process: BackgroundProcess, source: HTMLButtonElement) => {
+    if (!onOpenProcess) return;
+    if (!document.startViewTransition) { onOpenProcess(process); return; }
+    const card = source.closest<HTMLElement>('.background-process')!;
+    const identity = card.querySelector<HTMLElement>('.background-process__identity')!;
+    const overview = card.parentElement!;
+    card.style.viewTransitionName = 'process-card';
+    identity.style.viewTransitionName = 'process-identity';
+    overview.style.viewTransitionName = 'process-overview';
+    const transition = document.startViewTransition({ types: ['process-detail'], update: () => flushSync(() => onOpenProcess(process)) });
+    void transition.ready.catch(() => undefined);
+    void transition.finished.finally(() => {
+      for (const element of [card, identity, overview]) element.style.removeProperty('view-transition-name');
+    }).catch(() => undefined);
+  };
+
+  if (selectedProcessId && loading && !items.size && command) return <div className="process-detail-panel"><article className="background-process process-detail"><header><ProcessIdentity command={command} status="正在读取…" /></header><div className="process-detail__body"><LoaderCircle className="is-spinning" size={16} /></div></article></div>;
+
   if (loading && items.size === 0) return <div className="task-inventory-notice"><LoaderCircle className="is-spinning" size={15} /><span><strong>正在读取后台终端</strong><small>仅显示当前 Host 保留范围。</small></span></div>;
   if (error && items.size === 0) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>后台终端不可用</strong><small>{error}</small></span><button onClick={() => void refresh()}><RefreshCw size={11} /> 重试</button></div>;
   if (!items.size) return <div className="inspector-empty"><TerminalSquare size={18} /><span>{selectedProcessId ? '原进程记录已不在当前保留范围。' : '当前没有已交付的后台命令'}</span></div>;
 
-  return <div className="background-terminal-panel">
-    {[...items.values()].map((item) => <article className={`background-process${item.expanded ? ' is-expanded' : ''}`} key={item.process.processId}>
+  return <div className={selectedProcessId ? 'process-detail-panel' : 'background-terminal-panel'}>
+    {[...items.values()].map((item) => <article className={`background-process${selectedProcessId ? ' process-detail' : ''}${item.expanded ? ' is-expanded' : ''}`} key={item.process.processId}>
       <header>
-        <button type="button" className="background-process__toggle" aria-expanded={item.expanded} onClick={() => {
+        <ProcessIdentity command={item.process.command} status={item.control?.status === 'pending' ? '正在终止' : processStatusText(item.process)} expanded={item.expanded} onToggle={selectedProcessId ? undefined : () => {
           if (item.expanded) {
             readRevisions.current.set(
               item.process.processId,
@@ -328,19 +365,20 @@ export function BackgroundTerminalPanel({
             reading: item.expanded ? false : value.reading,
           }));
           if (!item.expanded && !item.output) void read(item.process.processId);
-        }}><ChevronDown size={13} /><span><strong>{item.process.command}</strong><small>{item.control?.status === 'pending' ? '正在终止' : processStatusText(item.process)}</small></span></button>
-        {!selectedProcessId && onOpenProcess && <button type="button" className="secondary-ghost" onClick={() => onOpenProcess(item.process)}>打开</button>}
-        <button type="button" className="background-process__info" aria-label="查看命令详情" aria-pressed={item.details} onClick={() => update(item.process.processId, (value) => ({ ...value, details: !value.details }))}><Info size={13} /></button>
+        }} />
+        {!selectedProcessId && onOpenProcess && <button type="button" className="background-process__open" aria-label="打开到新标签页" title="打开到新标签页" onClick={event => openDetail(item.process, event.currentTarget)}><SquareArrowOutUpRight size={13} /><span>打开到新标签页</span></button>}
+        {!selectedProcessId && <button type="button" className="background-process__info" aria-label="查看命令详情" aria-pressed={item.details} onClick={() => update(item.process.processId, (value) => ({ ...value, details: !value.details }))}><Info size={13} /></button>}
         {controlReady && !terminal(item.process.status) && <button type="button" className="background-process__stop" aria-label={`终止 ${item.process.command}`} disabled={Boolean(item.reference && (!item.control || controlNeedsPolling(item.control)))} onClick={() => void stop(item.process)}>{item.control?.status === 'pending' ? <LoaderCircle className="is-spinning" size={13} /> : <CircleStop size={13} />}</button>}
       </header>
-      <AnimatedDisclosure open={item.details} className="background-process__details">
+      <div className={selectedProcessId ? 'process-detail__body' : undefined}>
+      <AnimatedDisclosure open={Boolean(selectedProcessId) || item.details} className="background-process__details">
         <dl><div><dt>来源</dt><dd>{item.process.originSubagentTaskId ? `任务 ${item.process.originSubagentTaskId}` : `主 Agent ${item.process.originTurnId}`}</dd></div><div><dt>目录</dt><dd>{item.process.cwd}</dd></div><div><dt>物理状态</dt><dd>{item.process.physicalState}</dd></div></dl>
       </AnimatedDisclosure>
       {(item.error || item.control?.status === 'failed' || item.control?.status === 'rejected') && <p className="background-process__attention"><AlertTriangle size={12} /> {item.error || item.control?.publicMessage || '终止操作只完成了一部分。'}</p>}
       {item.control?.userControl?.feedback && <p className="background-process__feedback">反馈：{item.control.userControl.feedback.canonicalStatus === 'ACCEPTED' ? '已记录' : item.control.userControl.feedback.canonicalStatus === 'NOT_REQUIRED' ? '本次无需记录' : '记录状态待确认'} · {item.control.userControl.feedback.inclusionStatus === 'INCLUDED' ? '已编入原轮次模型请求' : item.control.userControl.feedback.inclusionStatus === 'TARGET_ENDED_BEFORE_INCLUSION' ? '原轮次在纳入前结束' : item.control.userControl.feedback.inclusionStatus === 'NOT_APPLICABLE' ? '不适用模型请求' : '请求纳入状态待确认'}{item.control.userControl.feedback.transportInvocationAttempted ? ` · 本地请求${item.control.userControl.feedback.transportInvocationSucceeded === false ? '发起失败' : '已发起'}` : ''}</p>}
       <AnimatedDisclosure open={item.expanded} className="background-process__output-disclosure">
         <div className="background-process__output" aria-label="后台命令输出">
-          <div className="background-process__command" role="region" aria-label="命令原文"><span aria-hidden="true">$</span> {item.process.command}</div>
+          {!selectedProcessId && <div className="background-process__command" role="region" aria-label="命令原文"><span aria-hidden="true">$</span> {item.process.command}</div>}
           <section className="background-process__result" aria-label="命令输出">
             <strong>输出</strong>
             <pre>{item.output || (item.reading ? '正在读取…' : '暂无输出')}</pre>
@@ -348,6 +386,7 @@ export function BackgroundTerminalPanel({
           </section>
         </div>
       </AnimatedDisclosure>
+      </div>
     </article>)}
   </div>;
 }

@@ -86,7 +86,7 @@ it('drills into directories with the arrow and inserts an original path with Tab
   expect((await store.capture('restored')).content.parts).toEqual([{ type: 'text', text: raw }]);
 });
 
-it('selects a directory reference by name and loads additional pages without a total cap', async () => {
+it('browses a paginated directory selection and commits its reference with Space', async () => {
   const lookup = vi.fn<CompleteWorkspacePaths>().mockResolvedValueOnce(page([document], 'draft.pdf')).mockResolvedValueOnce(page([directory]));
   const { type, key, store } = setup(lookup);
   type('@');
@@ -96,6 +96,8 @@ it('selects a directory reference by name and loads additional pages without a t
   await screen.findByRole('option', { name: /文档 folder/ });
   expect(lookup).toHaveBeenLastCalledWith('', 'draft.pdf', expect.any(AbortSignal));
   key('Enter');
+  expect(store.summary('one').text).toBe('@文档 folder/');
+  key(' ');
   expect(store.summary('one').text).toBe(`${formatWorkspaceReference(directory)} `);
 });
 
@@ -184,4 +186,66 @@ it('aborts pagination when the query changes and ignores a late page', async () 
   expect(lookup.mock.calls[1][2].aborted).toBe(true);
   await act(async () => more.resolve(page([directory])));
   expect(screen.queryByRole('option')).toBeNull();
+});
+
+
+it.each(['Tab', 'Enter', 'click'])('enters a directory with %s and continues selecting its child file', async choice => {
+  const lookup = vi.fn<CompleteWorkspacePaths>().mockResolvedValueOnce(page([directory])).mockResolvedValue(page([document]));
+  const { type, key, store, onSubmit } = setup(lookup);
+  type('@文');
+  await screen.findByRole('option', { name: /文档 folder/ });
+  if (choice === 'click') fireEvent.click(screen.getByRole('button', { name: '文档 folder' }));
+  else key(choice);
+  expect(store.summary('one').text).toBe('@文档 folder/');
+  expect(screen.queryByRole('button', { name: '目录：文档 folder' })).toBeNull();
+  await screen.findByRole('option', { name: 'draft.pdf' });
+  expect(lookup).toHaveBeenLastCalledWith('文档 folder/', null, expect.any(AbortSignal));
+  key('Enter');
+  expect(store.summary('one').text).toBe(`${formatWorkspaceReference(document)} `);
+  expect(onSubmit).not.toHaveBeenCalled();
+});
+
+it('commits the chosen directory before child lookup finishes and ignores late candidates', async () => {
+  const children = deferred<WorkspacePathPage>();
+  const lookup = vi.fn<CompleteWorkspacePaths>().mockResolvedValueOnce(page([directory])).mockImplementationOnce(() => children.promise);
+  const { type, key, store, editor } = setup(lookup);
+  type('前文 @文');
+  await screen.findByRole('option', { name: /文档 folder/ });
+  key('Tab');
+  await waitFor(() => expect(lookup).toHaveBeenCalledTimes(2));
+  act(() => editor.view.dispatch(closeHistory(editor.state.tr)));
+  expect(key(' ')).toBe(false);
+  expect(store.summary('one').text).toBe(`前文 ${formatWorkspaceReference(directory)} `);
+  await act(async () => children.resolve(page([document])));
+  expect(screen.queryByRole('listbox')).toBeNull();
+  expect(lookup.mock.calls[1][2].aborted).toBe(true);
+  act(() => editor.commands.undo());
+  expect(store.summary('one').text).toBe('前文 @文档 folder/');
+});
+
+it('does not consume spaces in an edited child query or IME', async () => {
+  const lookup = vi.fn<CompleteWorkspacePaths>().mockImplementation(async query => page(query === '' ? [directory] : []));
+  const { type, key, store } = setup(lookup);
+  type('@');
+  await screen.findByRole('option', { name: /文档 folder/ });
+  key('Enter');
+  await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+  expect(key(' ', { isComposing: true, keyCode: 229 })).toBe(true);
+  expect(store.summary('one').text).toBe('@文档 folder/');
+  type('child');
+  expect(key(' ')).toBe(true);
+  expect(store.summary('one').text).toBe('@文档 folder/child');
+});
+
+
+it('commits an empty directory with Space after its candidate popup has disappeared', async () => {
+  const lookup = vi.fn<CompleteWorkspacePaths>().mockResolvedValueOnce(page([directory])).mockResolvedValue(page([]));
+  const { type, key, store } = setup(lookup);
+  type('@');
+  await screen.findByRole('option', { name: /文档 folder/ });
+  key('Tab');
+  await waitFor(() => expect(lookup).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+  key(' ');
+  expect(store.summary('one').text).toBe(`${formatWorkspaceReference(directory)} `);
 });

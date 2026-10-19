@@ -16,7 +16,7 @@ export function AnnotationQuote({ quote }: { quote: string }) {
   }, [quote, expanded]);
   return <>
     <blockquote ref={ref} className={expanded ? 'is-expanded' : undefined}>{quote}</blockquote>
-    {(overflowing || expanded) && <button type="button" className="prompt-annotation__expand" aria-expanded={expanded}
+    {(overflowing || expanded) && <button type="button" className="prompt-annotation__expand" data-thread-disclosure="" aria-expanded={expanded}
       onClick={() => setExpanded(value => !value)}>{expanded ? '收起' : '更多'}</button>}
   </>;
 }

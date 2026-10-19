@@ -3,12 +3,12 @@ import { stat } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
-import { pathToFileURL } from 'node:url';
 import { BundledPostgres } from './postgres';
 import { PythonRuntime } from './runtime';
 import { UiPreferences } from './ui-preferences';
 import { cliLauncherScript, cliStatus, registerCli, type CliRegistration } from './cli-install';
 import { BrowserOwner } from './browser-owner';
+import { StartupCover } from './startup-cover';
 
 const resources = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', 'resources');
 function resolveHome(): string {
@@ -17,7 +17,6 @@ function resolveHome(): string {
 }
 const home = resolveHome();
 const startupFile = path.resolve(__dirname, '..', 'assets', 'startup.html');
-const startupURL = pathToFileURL(startupFile).href;
 app.setName('Pulsara');
 app.setPath('userData', path.join(home, 'desktop', 'electron'));
 const uiPreferences = new UiPreferences(path.join(app.getPath('userData'), 'ui-preferences.json'));
@@ -25,6 +24,7 @@ let window: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let origin: string | undefined;
 let browser: BrowserOwner | undefined;
+let startupCover: StartupCover | undefined;
 let starting: Promise<void> | undefined;
 let quitting = false;
 let quittingRequest = false;
@@ -44,7 +44,7 @@ async function showStartup(error = '', phase = error ? 'failed' : 'starting') {
   const retiring = browser?.retireHost();
   origin = undefined;
   await retiring;
-  await window?.loadFile(startupFile, {query: {error, phase}});
+  await startupCover?.show(error, phase);
   focusWindow();
 }
 async function boot(fromReset = false) {
@@ -74,10 +74,11 @@ async function boot(fromReset = false) {
 }
 
 function trusted(event: IpcMainInvokeEvent, startupAllowed = false) {
+  if (startupAllowed && startupCover?.accepts(event)) return;
   if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效的桌面请求来源。');
   const url = event.senderFrame.url;
   const isWorkbench = origin && new URL(url).origin === origin && new URL(url).pathname === '/';
-  if (!isWorkbench && !(startupAllowed && url.split('?')[0] === startupURL)) throw new Error('此页面不能调用桌面接口。');
+  if (!isWorkbench) throw new Error('此页面不能调用桌面接口。');
 }
 function handle(name: string, action: (value?: any) => unknown, startupAllowed = false) {
   ipcMain.handle(`desktop:${name}`, (event, value) => { trusted(event, startupAllowed); return action(value); });
@@ -148,6 +149,7 @@ else {
       trafficLightPosition: {x: 16, y: 16},
       webPreferences: {preload:path.join(__dirname,'preload.js'), sandbox:true, contextIsolation:true, nodeIntegration:false, webviewTag:false, navigateOnDragDrop:false}});
     browser = new BrowserOwner(window, () => origin);
+    startupCover = new StartupCover(window, startupFile, path.join(__dirname, 'preload.js'));
     window.webContents.setWindowOpenHandler(({url}) => {
       if (/^https?:\/\//i.test(url)) void dialog.showMessageBox(window!, {message:'在默认浏览器中打开链接？', detail:url, buttons:['取消','打开'], defaultId:0,cancelId:0}).then(choice => {if(choice.response===1) void shell.openExternal(url);});
       return {action:'deny'};
@@ -178,6 +180,7 @@ else {
     handle('retry',()=>boot(),true); handle('logs',()=>shell.openPath(path.join(home,'desktop')),true);
     handle('reset-database',()=>resetDatabase(),true);
     handle('read-ui-preferences', () => uiPreferences.read());
+    handle('startup-settled', () => startupCover!.finish());
     handle('browser-create', value => browser!.create(value));
     handle('browser-command', value => browser!.command(value));
     handle('browser-close', value => browser!.close(value));

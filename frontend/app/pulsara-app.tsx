@@ -1,3 +1,4 @@
+import { PresentationProvider } from '../components/presentation-provider';
 import { flushSync } from 'react-dom';
 import { uiPreferences } from '../lib/ui-preferences';
 import { randomIdentity, isCanonicalIdentity } from '../lib/identity';
@@ -186,6 +187,7 @@ function promptWasAccepted(receipt: CommandReceipt): boolean {
 
 interface PulsaraAppProps {
   adapter?: RuntimeAdapter;
+  onStartupSettled?: () => void;
 }
 
 type ToolDecisionIntent = {
@@ -194,7 +196,11 @@ type ToolDecisionIntent = {
   status: 'submitting' | 'unknown' | 'accepted' | 'rejected' | 'retired';
 };
 
-export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps) {
+export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled }: PulsaraAppProps) {
+  const [startupSettled, setStartupSettled] = useState(false);
+  useEffect(() => {
+    if (startupSettled) onStartupSettled?.();
+  }, [startupSettled, onStartupSettled]);
   const workspaceControl = useRef<WorkspaceControl | null>(null);
   const taskCancelReferences = useRef(new Map<string, UserControlCommandRef>());
   const [promptDraftStore] = useState(() => new PromptDraftStore());
@@ -323,6 +329,15 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return saved === null ? Boolean(window.matchMedia?.('(min-width: 1151px)').matches) : saved === 'true';
   });
   useEffect(() => { uiPreferences.setItem('pulsara-sidebar-open', String(sidebarOpen)); }, [sidebarOpen]);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const desktop = window.matchMedia('(min-width: 1151px)');
+    const onResize = (event: MediaQueryListEvent) => {
+      if (!event.matches) setSidebarOpen(false);
+    };
+    desktop.addEventListener('change', onResize);
+    return () => desktop.removeEventListener('change', onResize);
+  }, []);
   const [searchOpen, setSearchOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   useEffect(() => () => promptDraftStore.destroy(), [promptDraftStore]);
@@ -1150,6 +1165,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         if (disposed) return;
         setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
         setRuntimeError(productMessage(error instanceof Error ? error.message : undefined, 'Pulsara 启动失败。'));
+      } finally {
+        // Release the initial cover only after initialization (or its error UI) commits.
+        if (!disposed) setStartupSettled(true);
       }
     })();
     return () => {
@@ -2712,6 +2730,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     <UserAvatarProvider adapter={adapter}>
     <DesktopWorkspaceProvider visible={activeView === 'workbench' && !databaseBlocked && !loadingSession} onBrowserShortcut={command => flushSync(() => { if (command === 'search') setSearchOpen(value => !value); else if (canCreateSession) setNewSessionOpen(true); })} controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
     <FilePreviewProvider sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
+    <PresentationProvider connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>
       <DesktopTitlebar workbench={activeView === "workbench"} title={activeView === "workbench" ? activeSession.title : "Pulsara"} onToggleSidebar={() => setSidebarOpen(value => !value)} onToggleWorkspace={() => setInspectorOpen(value => !value)} />
@@ -3057,6 +3076,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
     </main>
     </ToolResultDisplayContext.Provider>
+    </PresentationProvider>
     </FilePreviewProvider>
     </DesktopWorkspaceProvider>
     </UserAvatarProvider>

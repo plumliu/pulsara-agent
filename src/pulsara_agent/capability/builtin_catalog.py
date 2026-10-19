@@ -472,7 +472,40 @@ def _wait_agent_schema() -> dict[str, Any]:
     }
 
 
+OPEN_IN_PULSARA_DESCRIPTION = (
+    "Show files, HTTP(S) webpages, existing background processes, MCP connections, or overview panels "
+    "in this conversation's right-side tabs when the user asks to open them or active presentation helps. "
+    "Use ordinary reply links for sources and optional reading; do not open every cited page or repeat "
+    "a URL solely because you opened it. Group related targets in one call; the last accepted target is selected. "
+    "Invalid targets are skipped and reported in errors with zero-based input indices; correct and retry only those. "
+    "Accepted targets are display requests, not confirmation of opening. Display starts after the tool result "
+    "without waiting for your final answer; later display failures are not returned to you. "
+    "Webpages load normally but you receive no page contents or rendering verification. "
+    "This does not start servers, run commands, reconnect MCP, or publish inline visualizations. ROOT only."
+)
+OPEN_IN_PULSARA_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["targets"],
+    "properties": {"targets": {
+        "type": "array", "minItems": 1, "items": {},
+        "description": (
+            'Ordered targets, each exactly one of: {"type":"file","path":"..."}, '
+            '{"type":"browser","url":"https://..."}, {"type":"terminal","process_id":"..."}, '
+            '{"type":"mcp","runtime_server_id":"..."}, or {"type":"panel","name":"capabilities|tasks|background|browser"}. '
+            'Panel browser creates a blank webpage with no URL; duplicates within a batch share one blank tab, later calls create a new one. '
+            'No extra fields. File paths are relative to this conversation workspace; absolute paths, ~ and '
+            '${PULSARA_HOME} are supported. Browser URLs must include HTTP(S), without credentials. '
+            'Copy process_id from terminal results/listings and runtime_server_id from capability inspection. '
+            'Do not provide host, session or tab IDs.'
+        ),
+    }},
+}
+
+
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
+    "open_in_pulsara": _descriptor(
+        name="open_in_pulsara", description=OPEN_IN_PULSARA_DESCRIPTION,
+        input_schema=OPEN_IN_PULSARA_SCHEMA, is_read_only=True, permission_category="filesystem_read",
+    ),
     "list_capabilities": _descriptor(
         name="list_capabilities",
         description=(
@@ -2139,6 +2172,9 @@ def _catalog_shape(name: str):
             both,
             "mcp",
         )
+    if name == "open_in_pulsara":
+        return (BuiltinToolBindingKind.FILESYSTEM, BuiltinToolAvailabilityKind.ALWAYS,
+                (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "filesystem")
     if name in _FILESYSTEM:
         return (
             BuiltinToolBindingKind.FILESYSTEM,
@@ -2274,6 +2310,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         severity = "bounded_write"
     elif name in SESSION_QUERY_TOOL_NAMES or name in {
         "artifact_read",
+        "open_in_pulsara",
         "list_capabilities",
         "inspect_capability",
         "get_mcp_prompt",

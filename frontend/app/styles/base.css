@@ -145,6 +145,11 @@ svg { flex: 0 0 auto; }
 }
 .section-label button { display: inline-flex; align-items: center; padding: 2px; background: transparent; color: var(--muted); font-family: var(--sans); font-size: var(--type-small); letter-spacing: 0; text-transform: none; }
 
+.sliding-tabs { position: relative; isolation: isolate; display: grid; grid-template-columns: repeat(var(--sliding-count, 2), 1fr); gap: 3px; padding: 3px; border-radius: 9px; background: var(--paper-deep); }
+.sliding-tabs::before { content: ''; position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc((100% - 6px - (var(--sliding-count, 2) - 1) * 3px) / var(--sliding-count, 2)); border-radius: 6px; background: var(--paper-solid); box-shadow: var(--shadow-sm); pointer-events: none; transform: translateX(calc(var(--sliding-index, 0) * (100% + 3px))); transition: transform .26s cubic-bezier(.22, 1, .36, 1); }
+.sliding-tabs > button { position: relative; z-index: 1; background: transparent; color: var(--muted); font-weight: 600; white-space: nowrap; transition: color .2s ease; }
+.sliding-tabs > button:hover, .sliding-tabs > button[aria-selected=true], .sliding-tabs > button[aria-pressed=true] { color: var(--ink); }
+
 .primary-action,
 .secondary-action,
 .ghost-button,

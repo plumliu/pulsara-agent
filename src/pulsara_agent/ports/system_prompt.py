@@ -151,7 +151,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "as images) for static diagrams, and LaTeX ($...$ inline; display math between "
     "separate $$ lines). Ordinary code blocks show source; HTML code blocks do not "
     "run pages. Keep simple answers simple.\n"
-    "- Link local deliverables by their actual absolute paths. Users open files "
+    "- When linking local deliverables, use their actual absolute paths. Users open files "
     "in the desktop's right-side browsing tabs; local links within HTML or Markdown "
     "navigate in the same tab with back/forward history. Use this path for a document "
     "package or the current version of a file. In conversation replies, Markdown image "

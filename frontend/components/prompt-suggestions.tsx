@@ -1,4 +1,4 @@
-import type { Editor } from '@tiptap/core';
+import type { Editor, Range } from '@tiptap/core';
 import { shift } from '@floating-ui/dom';
 import { PluginKey } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
@@ -10,7 +10,7 @@ import { formatWorkspaceReference, type CompleteWorkspacePaths, type WorkspacePa
 import type { SkillCapability } from '../lib/pulsara-types';
 
 type Candidate = { kind: 'skill'; name: string } | WorkspacePathCandidate;
-type Selection = { item: Candidate; browse?: boolean };
+type Selection = { item: Candidate };
 interface Page { rows: Candidate[]; cursor: string | null; error?: string }
 interface PopupProps extends SuggestionProps<Page, Selection> {
   kind: 'skill' | 'path';
@@ -82,7 +82,7 @@ const CandidatePopup = forwardRef<PopupHandle, PopupProps>(function CandidatePop
     if (event.key === 'Enter' || event.key === 'Tab') { choose(); return true; }
     const item = page.rows[active];
     if (event.key === 'ArrowRight' && item?.kind === 'directory') {
-      command({ item, browse: true });
+      command({ item });
       return true;
     }
     return false;
@@ -99,7 +99,7 @@ const CandidatePopup = forwardRef<PopupHandle, PopupProps>(function CandidatePop
             <Icon size={14} aria-hidden="true" /><span>{item.name}</span>
           </button>
           {item.kind === 'directory' && <button type="button" tabIndex={-1} className="prompt-candidates__browse"
-            aria-label={`进入 ${item.name}`} title="进入目录 →" onClick={() => command({ item, browse: true })}><ChevronRight size={14} /></button>}
+            aria-label={`进入 ${item.name}`} title="进入目录 →" onClick={() => command({ item })}><ChevronRight size={14} /></button>}
         </div>;
       })}
       {hasAction && <div id={`${id}-${page.rows.length}`} role="option" aria-selected={active === page.rows.length}
@@ -121,6 +121,17 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
   useEffect(() => { current.current = options; }, [options]);
   useEffect(() => {
     if (disabled) return;
+    // Only a directory explicitly chosen from the inventory can be committed by
+    // Space. Keep its exact path while Suggestion owns child lookup/cancellation.
+    let directory: { item: WorkspacePathCandidate; range: Range; text: string } | undefined;
+    const insertReference = (item: Candidate, range: Range) => {
+      directory = undefined;
+      const node = item.kind === 'skill'
+        ? { type: 'skillReference', attrs: { raw: `/${item.name}` } }
+        : { type: 'fileReference', attrs: { raw: formatWorkspaceReference(item), name: item.name, kind: item.kind, state: 'ready' } };
+      const suffix = editor.state.doc.textBetween(range.to, Math.min(range.to + 1, editor.state.doc.content.size), '\n', '\ufffc');
+      editor.chain().focus().insertContentAt(range, [node, ...(/^\s/.test(suffix) ? [] : [{ type: 'text', text: ' ' }])]).run();
+    };
     const plugins = (['skill', 'path'] as const).map(kind => {
       const key = new PluginKey(`prompt-${kind}-candidates`);
       const load = async (query: string, cursor: string | null, signal: AbortSignal): Promise<Page> => {
@@ -150,17 +161,15 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
           return kind === 'skill' ? /^[a-z0-9-]*$/i.test(query) : !/[\u0000-\u001f\u007f]/.test(query);
         },
         items: async ({ query, signal }) => [await load(query, null, signal)],
-        command: ({ editor, range, props: { item, browse } }) => {
+        command: ({ editor, range, props: { item } }) => {
           if (!editor.isEditable) return;
-          if (browse && item.kind === 'directory') {
-            editor.chain().focus().insertContentAt(range, { type: 'text', text: `@${item.relative_path}/` }).run();
+          if (item.kind === 'directory') {
+            const text = `@${item.relative_path.replace(/\/$/, '')}/`;
+            directory = { item, range: { from: range.from, to: range.from + text.length }, text };
+            editor.chain().focus().insertContentAt(range, { type: 'text', text }).run();
             return;
           }
-          const node = item.kind === 'skill'
-            ? { type: 'skillReference', attrs: { raw: `/${item.name}` } }
-            : { type: 'fileReference', attrs: { raw: formatWorkspaceReference(item), name: item.name, kind: item.kind, state: 'ready' } };
-          const suffix = editor.state.doc.textBetween(range.to, Math.min(range.to + 1, editor.state.doc.content.size), '\n', '\ufffc');
-          editor.chain().focus().insertContentAt(range, [node, ...(/^\s/.test(suffix) ? [] : [{ type: 'text', text: ' ' }])]).run();
+          insertReference(item, range);
         },
         render: () => {
           let component: ReactRenderer<PopupHandle> | undefined;
@@ -182,7 +191,20 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
       return { plugin, key };
     });
     // Direct editor props run before plugin props: let suggestions consume Enter first.
-    keydown.current = (view, event) => plugins.some(({ plugin }) => Boolean(plugin.props.handleKeyDown?.call(plugin, view, event)));
+    keydown.current = (view, event) => {
+      if (directory && event.key === ' ' && !view.composing && !event.isComposing && event.keyCode !== 229
+        && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const { range, text, item } = directory;
+        const { selection, doc } = view.state;
+        if (selection.empty && selection.from === range.to && range.to <= doc.content.size
+          && doc.textBetween(range.from, range.to, '\n', '\ufffc') === text) {
+          event.preventDefault();
+          insertReference(item, range);
+          return true;
+        }
+      }
+      return plugins.some(({ plugin }) => Boolean(plugin.props.handleKeyDown?.call(plugin, view, event)));
+    };
     return () => {
       keydown.current = () => false;
       for (const { key } of plugins) {

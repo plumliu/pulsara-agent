@@ -1,13 +1,17 @@
 import { writeClipboardText } from '../lib/desktop-host';
 
 import { Check, Copy, File, FileText, Folder, Presentation, Sheet, TriangleAlert } from 'lucide-react';
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { fileAppearance, type FileReference } from '../lib/file-reference';
+import { FileLinkContext } from './file-link-context';
+import { fileUrl } from '../lib/file-preview';
 import { usePromptHover } from '../lib/prompt-hover';
 
 export function FileReferenceChip({ reference }: { reference: FileReference }) {
-  const { trigger, details, position, show, hide, keep } = usePromptHover(340);
+  const files = useContext(FileLinkContext);
+  const canPreview = reference.kind === 'file' && Boolean(files) && reference.path.startsWith('/');
+  const { trigger, details, position, show, hide, keep, dismiss } = usePromptHover(340);
   const [copyState, setCopyState] = useState<'copied' | 'failed'>();
   const appearance = fileAppearance(reference.name, reference.kind === 'directory');
   const Icon = { directory: Folder, pdf: FileText, word: FileText,
@@ -19,7 +23,11 @@ export function FileReferenceChip({ reference }: { reference: FileReference }) {
   return <span className={`file-reference file-reference--${appearance.type}`} data-file-reference={reference.raw}>
     <button ref={trigger} type="button" className="file-reference__label" aria-expanded={Boolean(position)}
       aria-label={`${appearance.label}：${reference.name}`}
-      onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide} onClick={show}>
+      onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide} onClick={event => {
+        if (!canPreview) { show(); return; }
+        dismiss();
+        files!.open(fileUrl(reference.path), event.currentTarget);
+      }}>
       <Icon size={14} aria-hidden="true" />
       <span className="file-reference__filename">
         <span className="file-reference__name">{hasExtension ? reference.name.slice(0, dot) : reference.name}</span>

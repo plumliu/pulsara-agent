@@ -147,6 +147,7 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
 )
 from pulsara_agent.tools.builtins.workspace import WritePathScope
+from pulsara_agent.tools.builtins.presentation import OpenInPulsaraTool
 from pulsara_agent.tools.builtins.todo import (
     TodoTool,
     TodoValidationError,
@@ -746,6 +747,7 @@ class DirectKernelToolPort:
                 pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
+            OpenInPulsaraTool(root, pulsara_home_resolution=frozen_pulsara_home, user_home_resolution=frozen_user_home, host_session_id=host_owner_id),
             TodoTool(),
             _DirectTerminalTool(self._terminal, host_owner_id),
             _DirectTerminalProcessTool(self._terminal, host_owner_id),
@@ -945,6 +947,7 @@ class DirectKernelToolPort:
                     for item in bindings
                     if item.tool_name
                     not in {
+                        "open_in_pulsara",
                         "search_sessions",
                         "search_session_content",
                         "read_session_content",
@@ -1856,6 +1859,8 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
+        if tool_name == "open_in_pulsara" and surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
+            return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED, "open_in_pulsara_root_only", "open_in_pulsara requires ROOT scope")
         if tool_name in {"view_image", "terminal_monitor"}:
             try:
                 if tool_name == "view_image":
@@ -3326,6 +3331,8 @@ class DirectKernelToolPort:
         tool = self._tools[tool_name]
         if isinstance(tool, _DirectPlanControlTool):
             raise RuntimeError("Plan control escaped the runner batch barrier")
+        if isinstance(tool, OpenInPulsaraTool) and invocation_context.conversation_scope_kind != "ROOT":
+            raise RuntimeError("open_in_pulsara requires ROOT scope")
         if isinstance(tool, TodoTool):
             candidate = parse_todo_replacement(arguments)
             counts = {

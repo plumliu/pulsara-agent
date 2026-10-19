@@ -23,10 +23,11 @@
 .capability-page-controls { display: flex; align-items: center; gap: 8px; }
 .capability-page-controls > button { flex: none; white-space: nowrap; }
 .capability-page-controls .capability-reload { min-height: 38px; border: 1px solid var(--line); background: var(--paper-solid); }
-.capability-tabs { display: flex; align-items: center; gap: 4px; }
-.capability-tabs button { display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 12px; border-radius: 9px; color: var(--muted); font-size: var(--type-control); }
-.capability-tabs button:hover, .capability-tabs button.is-active { background: var(--paper-deep); color: var(--ink); }
-.capability-tabs button.is-active { font-weight: 600; }
+.capability-tabs { --sliding-count: 4; justify-self: start; max-width: 100%; }
+.capability-tabs[data-active='mcp'] { --sliding-index: 1; }
+.capability-tabs[data-active='skills'] { --sliding-index: 2; }
+.capability-tabs[data-active='hooks'] { --sliding-index: 3; }
+.capability-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 0 10px; border-radius: 6px; font-size: var(--type-control); }
 .capability-tabs span { color: var(--faint); font-family: var(--mono); font-size: var(--type-label); font-weight: 400; }
 .capability-search { display: flex; align-items: center; gap: 7px; height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-solid); color: var(--faint); }
 .capability-search input { min-width: 0; width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: var(--type-control); }

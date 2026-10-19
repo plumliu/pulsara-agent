@@ -10,11 +10,11 @@
 .memory-view :is(button, input, select):focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
 .memory-view :is(.memory-search input, .memory-project select, .memory-state-select select):focus-visible { outline: none; }
 
-.memory-scope-header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; margin-bottom: 18px; }
-.memory-tabs { display: inline-flex; flex: none; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--paper-deep) 65%, transparent); }
-.memory-tabs button { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 0 18px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); }
-.memory-tabs button[aria-selected=true] { border-color: var(--line); background: var(--paper-raised); color: var(--ink); box-shadow: var(--shadow-sm); font-weight: 600; }
-.memory-scope-note { font-size: 12px; color: var(--muted); line-height: 1.6; }
+.memory-scope-header { display: grid; grid-template-columns: max-content minmax(0, 320px); justify-content: space-between; align-items: center; gap: 12px 18px; margin-bottom: 18px; }
+.memory-project-slot { min-width: 0; height: 40px; }
+.memory-tabs { flex: none; justify-self: start; }
+.memory-tabs[data-active='project'] { --sliding-index: 1; }
+.memory-tabs button { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 0 18px; border-radius: 6px; }
 .memory-collection, .memory-detail { border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--paper-raised) 90%, transparent); box-shadow: var(--shadow-sm); }
 .memory-toolbar { padding: 18px 20px 14px; border-bottom: 1px solid var(--line); }
 .memory-controls { display: flex; align-items: center; gap: 12px; }
@@ -28,12 +28,14 @@
 .memory-state-select > svg, .memory-project > svg { flex: none; pointer-events: none; }
 .memory-state-select > svg:last-child, .memory-project > svg:last-child { position: absolute; right: 10px; }
 .memory-state-select { flex: none; }
-.memory-project { margin-bottom: 12px; }
-.memory-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 14px; color: var(--faint); }
-.memory-filters > svg { margin-right: 6px; }
-.memory-filters button { min-height: 30px; padding: 4px 10px; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; }
-.memory-filters button:hover { background: var(--paper-deep); color: var(--ink); }
-.memory-filters button[aria-pressed=true] { background: var(--paper-deep); color: var(--ink); font-weight: 600; }
+.memory-project { height: 40px; min-height: 0; }
+.memory-project select { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-filters { --sliding-count: 5; width: max-content; max-width: 100%; margin-top: 14px; }
+.memory-filters[data-kind='FACT'] { --sliding-index: 1; }
+.memory-filters[data-kind='USER_PROFILE'] { --sliding-index: 2; }
+.memory-filters[data-kind='RESPONSE_PREFERENCE'] { --sliding-index: 3; }
+.memory-filters[data-kind='DECISION'] { --sliding-index: 4; }
+.memory-filters button { min-height: 30px; padding: 4px 10px; border-radius: 6px; }
 
 .memory-list { padding: 5px 10px; }
 .memory-row { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr) 16px; align-items: start; gap: 12px; width: 100%; padding: 19px 12px; text-align: left; color: var(--ink); background: transparent; border-bottom: 1px solid var(--line); }
@@ -178,13 +180,13 @@
 }
 @media (max-width: 600px) {
   .memory-layout { padding: 0 16px; margin-top: 18px; }
+  .memory-scope-header { grid-template-columns: minmax(0, 1fr); }
   .memory-toolbar { padding: 14px; }
   .memory-controls { flex-wrap: wrap; gap: 9px; }
   .memory-search { flex-basis: 100%; }
   .memory-state-select { margin-left: auto; }
-  .memory-filters { gap: 3px; }
-  .memory-filters > svg { display: none; }
-  .memory-filters button { padding: 5px 8px; }
+  .memory-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .memory-filters button { padding: 5px 4px; font-size: 12px; }
   .memory-row { grid-template-columns: 30px minmax(0, 1fr); padding: 16px 6px; gap: 10px; }
   .memory-row-icon { width: 28px; height: 30px; }
   .memory-row-chevron { display: none; }

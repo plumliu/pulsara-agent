@@ -8,6 +8,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import {
+  createContext,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -21,11 +22,13 @@ import type {
   FilePreviewApi,
   FilePreviewPage,
 } from "../lib/file-preview";
-import { classifyFileLink } from "../lib/file-preview";
+import { classifyFileLink, fileUrl } from "../lib/file-preview";
 import { desktopHost, writeClipboardText } from "../lib/desktop-host";
-import { useDesktopWorkspace } from "./desktop-workspace";
+import { type PreparedWorkspaceTab, type WorkspaceTab, useDesktopWorkspace } from "./desktop-workspace";
 import { FileLinkContext } from "./file-link-context";
-import { MarkdownBody, type MarkdownNotify } from "./markdown-body";
+import { type MarkdownNotify } from "./markdown-body";
+import { FileMarkdown } from "./file-markdown";
+import { FileCode } from "./file-code";
 import { SandboxedHtmlPreview } from "./sandboxed-html-preview";
 
 const detail = (error: unknown) =>
@@ -59,7 +62,6 @@ type BrowserTab = {
   loading: boolean;
   request?: object;
   touched: number;
-  preferredId?: string;
 };
 type OpenFile = (
   path: string,
@@ -67,8 +69,6 @@ type OpenFile = (
   base?: string,
   newTab?: boolean,
 ) => void;
-const fileUrl = (path: string) =>
-  `file://${path.split("/").map(encodeURIComponent).join("/")}`;
 const pageAddress = (path: string) =>
   path.startsWith("/") ? fileUrl(path) : path;
 const visit = (path: string): Visit => ({
@@ -77,6 +77,8 @@ const visit = (path: string): Visit => ({
   cursor: 0,
   source: false,
 });
+
+export const FilePresentationContext = createContext<((path: string, valid: () => boolean) => Promise<PreparedWorkspaceTab>) | undefined>(undefined);
 
 export function FilePreviewProvider({
   api,
@@ -126,7 +128,6 @@ export function FilePreviewProvider({
   const load = async (
     tab: BrowserTab,
     request: Request,
-    deduplicate = false,
   ) => {
     const currentConnection = connection.current;
     const owner = currentConnection.api;
@@ -159,37 +160,7 @@ export function FilePreviewProvider({
         void owner.close(file.read_token).catch(() => undefined);
         return;
       }
-      if (deduplicate) {
-        const matches = [...tabs.current.values()]
-          .filter(
-            (other) =>
-              other !== tab &&
-              other.sessionId === tab.sessionId &&
-              other.file?.path === file.path &&
-              other.root === file.reading_root,
-          )
-          .sort((a, b) =>
-            a.id === tab.preferredId
-              ? -1
-              : b.id === tab.preferredId
-                ? 1
-                : b.touched - a.touched,
-          );
-        if (matches[0]) {
-          const match = matches[0];
-          match.history[match.index].anchor = new URL(
-            request.path,
-            fileUrl(file.path),
-          ).hash.slice(1);
-          match.touched = Date.now();
-          void owner.close(file.read_token).catch(() => undefined);
-          close(tab);
-          workspaceRef.current?.close(tab.id);
-          workspaceRef.current?.activate(match.id);
-          changed();
-          return;
-        }
-      }
+      if (file.kind === 'directory') { void owner.close(file.read_token).catch(() => undefined); throw new Error('目录不能作为文件预览打开。'); }
       release(tab);
       tab.file = file;
       tab.api = owner;
@@ -223,31 +194,54 @@ export function FilePreviewProvider({
       changed();
     }
   };
+  const prepare = async (path: string, valid: () => boolean, root?: string, deduplicate = true): Promise<PreparedWorkspaceTab> => {
+    const expected = connection.current;
+    const tab: BrowserTab = { id: crypto.randomUUID(), sessionId: expected.sessionId, root,
+      history: [visit(path)], index: 0, loading: false, touched: Date.now() };
+    let adopted = false;
+    const alive = () => valid() && connection.current === expected && workspaceRef.current?.sessionId === expected.sessionId;
+    try {
+      if (!expected.api) throw new Error('会话尚未连接，请连接后重试。');
+      tab.file = await expected.api.open(pageAddress(path), undefined, root);
+      tab.api = expected.api;
+      tab.root = tab.file.reading_root;
+      if (tab.file.kind === 'directory') { release(tab); throw new Error('目录不能作为文件预览打开。'); }
+      tab.history = [visit(tab.file.path)];
+      tab.history[0].anchor = new URL(pageAddress(path), fileUrl(tab.file.path)).hash.slice(1);
+    } catch (error) {
+      tab.error = detail(error); tab.failed = { path: pageAddress(path), mode: 'refresh' };
+    }
+    if (!alive()) release(tab);
+    return {
+      release: () => { if (!adopted) release(tab); },
+      adopt: () => {
+        if (!alive()) { release(tab); return; }
+        const candidates = deduplicate && tab.file ? [...tabs.current.values()].filter(other =>
+          other.sessionId === tab.sessionId && !other.loading && !other.error && other.file?.path === tab.file!.path && other.root === tab.root) : [];
+        const match = candidates.find(other => other.id === workspaceRef.current?.activeId) ?? candidates[0];
+        if (match) {
+          if (tab.history[0].anchor) match.history[match.index].anchor = tab.history[0].anchor;
+          release(tab); changed(); return describe(match);
+        }
+        adopted = true; tabs.current.set(tab.id, tab); changed();
+        return describe(tab);
+      },
+    };
+  };
   const create = (path: string, root?: string, deduplicate = false) => {
     if (!workspaceRef.current) {
       onNotify("无法打开文件", "文件工作区当前不可用。", "warning");
       return;
     }
-    const tab: BrowserTab = {
-      id: crypto.randomUUID(),
-      sessionId: connection.current.sessionId,
-      root,
-      history: [visit(path)],
-      index: 0,
-      loading: true,
-      touched: Date.now(),
-      preferredId: workspaceRef.current.activeId,
-    };
-    tabs.current.set(tab.id, tab);
-    workspaceRef.current?.open({
-      id: tab.id,
-      sessionId: tab.sessionId,
-      kind: "file",
-      title: path.split("/").pop() || "文件",
-      render: () => null,
-      onClose: () => close(tab),
+    const expected = connection.current;
+    const workspaceOwner = workspaceRef.current;
+    workspaceOwner.interact();
+    const interaction = workspaceOwner.interactionVersion();
+    const valid = () => connection.current === expected && workspaceRef.current?.visible === true;
+    void prepare(path, valid, root, deduplicate).then(prepared => {
+      try { const tab = prepared.adopt(); if (tab) workspaceRef.current?.publish([tab], workspaceOwner.interactionVersion() === interaction); }
+      finally { prepared.release(); }
     });
-    void load(tab, { path, mode: "refresh" }, deduplicate);
   };
   const navigate = (tab: BrowserTab, path: string, newTab = false) => {
     const page = tab.history[tab.index];
@@ -293,10 +287,11 @@ export function FilePreviewProvider({
     if (source) navigate(source, path, newTab);
     else create(path, undefined, !newTab);
   };
-  const actions = useRef({ load, navigate, open, close });
+  const actions = useRef({ load, navigate, open, close, prepare });
   useLayoutEffect(() => {
-    actions.current = { load, navigate, open, close };
+    actions.current = { load, navigate, open, close, prepare };
   });
+  const stablePrepare = useCallback((path: string, valid: () => boolean) => actions.current.prepare(path, valid), []);
   const stableOpen = useCallback<OpenFile>(
     (...args) => actions.current.open(...args),
     [],
@@ -325,10 +320,9 @@ export function FilePreviewProvider({
       if (selected) selected.touched = Date.now();
     }
   }, [workspace?.activeId]);
-  useEffect(() => {
-    for (const tab of tabs.current.values()) {
-      const page = tab.history[tab.index];
-      workspaceRef.current?.update(tab.id, {
+  const describe = useCallback((tab: BrowserTab): WorkspaceTab => {
+    const page = tab.history[tab.index];
+    return { id: tab.id, sessionId: tab.sessionId, kind: 'file', onClose: () => actions.current.close(tab),
         title:
           page?.title ||
           tab.file?.name ||
@@ -372,15 +366,19 @@ export function FilePreviewProvider({
             }
           />
         ),
-      });
-    }
-  }, [revision, onNotify, changed, ownerKey]);
+    };
+  }, [onNotify, changed]);
+  useEffect(() => {
+    for (const tab of tabs.current.values()) workspaceRef.current?.update(tab.id, describe(tab));
+  }, [revision, describe, ownerKey]);
   return (
+    <FilePresentationContext.Provider value={stablePrepare}>
     <FileLinkContext.Provider
       value={{ open: stableOpen, readImageReference, imageOwnerKey }}
     >
       {children}
     </FileLinkContext.Provider>
+    </FilePresentationContext.Provider>
   );
 }
 
@@ -423,6 +421,7 @@ function FileBrowserView({
         <nav aria-label="文件操作">
           <button
             aria-label="后退"
+            title="后退"
             disabled={tab.index <= 0}
             onClick={() => onHistory(tab.index - 1)}
           >
@@ -430,12 +429,13 @@ function FileBrowserView({
           </button>
           <button
             aria-label="前进"
+            title="前进"
             disabled={tab.index >= tab.history.length - 1}
             onClick={() => onHistory(tab.index + 1)}
           >
             <ArrowRight size={16} />
           </button>
-          <button aria-label="刷新文件" onClick={onRefresh} disabled={!page}>
+          <button aria-label="刷新文件" title="刷新文件" onClick={onRefresh} disabled={!page}>
             <RotateCcw size={16} />
           </button>
           {file && (
@@ -444,6 +444,7 @@ function FileBrowserView({
                 ["markdown", "table", "html", "svg"].includes(file.kind) && (
                   <button
                     aria-label={page.source ? "显示预览" : "查看源码"}
+                    title={page.source ? "显示预览" : "查看源码"}
                     aria-pressed={page.source}
                     onClick={() => {
                       onVisitChange({
@@ -457,7 +458,7 @@ function FileBrowserView({
                 )}
               <button
                 aria-label="复制路径"
-                title={file.path}
+                title="复制路径"
                 onClick={() =>
                   void writeClipboardText(file.path)
                     .catch(() => onNotify("无法复制路径", undefined, "warning"))
@@ -467,6 +468,7 @@ function FileBrowserView({
               </button>
               <button
                 aria-label="打开所在文件夹"
+                title="打开所在文件夹"
                 onClick={() => void reveal()}
               >
                 <FolderOpen size={16} />
@@ -827,19 +829,9 @@ function FileReader({
           {!page.text ? (
             <p className="file-preview-empty">空文件</p>
           ) : fullMarkdown ? (
-            <MarkdownBody body={page.text} onNotify={onNotify} />
+            <FileMarkdown body={page.text} onNotify={onNotify} />
           ) : (
-            <div className="file-preview-code">
-              <pre className="file-preview-line-numbers" aria-hidden="true">
-                {page.text
-                  .split("\n")
-                  .map((_, index) => index + 1)
-                  .join("\n")}
-              </pre>
-              <pre>
-                <code>{page.text}</code>
-              </pre>
-            </div>
+            <FileCode source={page.text} filename={file.name} />
           )}
         </div>
       )}

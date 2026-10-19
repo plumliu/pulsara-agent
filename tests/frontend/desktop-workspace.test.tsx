@@ -12,6 +12,32 @@ afterEach(() => { cleanup(); delete window.pulsaraDesktop; vi.restoreAllMocks();
 let workspace: NonNullable<ReturnType<typeof useDesktopWorkspace>>;
 function Content({ onClose = () => {} }: { onClose?: () => void }) { workspace = useDesktopWorkspace()!; return <DesktopWorkspace isOpen onClose={onClose} toolbar={null} renderTab={tab => <p>{tab.sessionId}:{tab.entityId}</p>} />; }
 function Host({ sessionId, onClose }: { sessionId: string; onClose?: () => void }) { return <DesktopWorkspaceProvider sessionId={sessionId} onShow={() => {}}><Content onClose={onClose} /></DesktopWorkspaceProvider>; }
+it('updates overflow arrows on scroll and resize without changing the selected tab', () => {
+  let resize = () => {};
+  vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { resize = callback; } observe() {} disconnect() {} });
+  render(<Host sessionId="a" />);
+  act(() => workspace.open({ id: 'file', sessionId: 'a', title: 'guide.md', kind: 'file' }));
+  const list = screen.getByRole('tablist');
+  Object.defineProperties(list, { clientWidth: { configurable: true, value: 300 }, scrollWidth: { configurable: true, value: 900 } });
+  list.scrollBy = vi.fn();
+  act(() => resize());
+  const left = screen.getByRole('button', { name: '向左滚动标签页' }) as HTMLButtonElement;
+  const right = screen.getByRole('button', { name: '向右滚动标签页' }) as HTMLButtonElement;
+  expect(left.disabled).toBe(true);
+  expect(right.disabled).toBe(false);
+  fireEvent.click(right);
+  expect(list.scrollBy).toHaveBeenCalledWith({ left: 210, behavior: 'smooth' });
+  list.scrollLeft = 600;
+  fireEvent.scroll(list);
+  expect(left.disabled).toBe(false);
+  expect(right.disabled).toBe(true);
+  expect(workspace.activeId).toBe('file');
+  Object.defineProperty(list, 'clientWidth', { value: 900 });
+  list.scrollLeft = 0;
+  act(() => resize());
+  expect(left.disabled).toBe(true);
+  expect(right.disabled).toBe(true);
+});
 it('hides after a deliberate rightward drag and reopens the same tab at a usable width', () => {
   vi.stubGlobal('PointerEvent', MouseEvent);
   const closed = vi.fn();
@@ -117,7 +143,7 @@ it('keeps category controls in the top header and instance tabs below it', () =>
   act(() => workspace.open({id:'a-task',sessionId:'a',kind:'task',title:'Review',entityId:'task-1'}));
   const topbar = view.container.querySelector('.workspace-topbar')!;
   expect(topbar.querySelector('[role="tablist"]')).toBeNull();
-  expect(topbar.nextElementSibling?.getAttribute('role')).toBe('tablist');
+  expect(topbar.nextElementSibling?.querySelector('[role="tablist"]')).toBe(screen.getByRole('tablist'));
   expect(topbar.querySelector('.workspace-toolbar')).toBeTruthy();
   expect(view.container.querySelectorAll('header')).toHaveLength(1);
   expect(screen.getByRole('button',{name:'收起工作区'})).toBeTruthy();

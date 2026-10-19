@@ -3,6 +3,7 @@ import type { BrowserState, DesktopBrowser } from './desktop-host';
 export interface BrowserTabRecord {
   id: string;
   focusAddressOnOpen?: boolean;
+  requestedUrl?: string;
   sessionId: string;
   state?: BrowserState;
   opening?: object;
@@ -59,12 +60,31 @@ export class BrowserTabs {
     });
     return () => { this.unsubscribe?.(); this.unsubscribe = undefined; };
   }
+  find(sessionId: string, url: string) {
+    const candidates = [...this.records.values()].filter(item => item.sessionId === sessionId && item.state?.url === url && !item.opening && !item.pendingNavigation && !item.state.loading && !item.state.pendingUrl && !item.state.crashed);
+    return candidates.find(item => item.id === this.sink.activeId(sessionId)) ?? candidates[0];
+  }
+  /** Adopt only at batch publication; native resources are started afterwards. */
+  prepare(sessionId: string, input: string | undefined, batch: Map<string, BrowserTabRecord>) {
+    let url: string | undefined, error: string | undefined;
+    if (input !== undefined) { try { url = browserUrl(input); } catch { error = '请输入有效的 HTTP(S) 网页地址。'; } }
+    let created: BrowserTabRecord | undefined;
+    return {
+      adopt: () => {
+        const match = input === undefined ? batch.get('') : url ? batch.get(url) ?? this.find(sessionId, url) : undefined;
+        if (match) return match;
+        created = { id: crypto.randomUUID(), sessionId, focusAddressOnOpen: input === undefined, requestedUrl: input, error };
+        this.records.set(created.id, created); if (!error) batch.set(url ?? '', created);
+        return created;
+      },
+      start: () => { if (created && !error) void this.create(created, url); },
+    };
+  }
   open(sessionId: string, input?: string, options: { newTab?: boolean; background?: boolean } = {}) {
     if (!sessionId) return;
     const url = input ? browserUrl(input) : undefined;
     if (url && !options.newTab) {
-      const candidates = [...this.records.values()].filter(item => item.sessionId === sessionId && item.state?.url === url && !item.state.loading && !item.state.pendingUrl && !item.state.crashed);
-      const match = candidates.find(item => item.id === this.sink.activeId(sessionId)) ?? candidates[0];
+      const match = this.find(sessionId, url);
       if (match) { if (!options.background) this.sink.activate(match.id); return match; }
     }
     const record: BrowserTabRecord = { id: crypto.randomUUID(), sessionId, focusAddressOnOpen: !url };

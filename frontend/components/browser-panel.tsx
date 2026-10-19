@@ -6,15 +6,15 @@ import { presentBrowser } from '../lib/browser-presentation';
 
 export function BrowserPanel({ record, tabs, isOpen }: { record: BrowserTabRecord; tabs: BrowserTabs; isOpen: boolean }) {
   const state = record.state;
-  const [draft, setDraft] = useState(state?.pendingUrl || state?.url || '');
+  const [draft, setDraft] = useState(state?.pendingUrl || state?.url || record.requestedUrl || '');
   const [editing, setEditing] = useState(false);
   const [message, setMessage] = useState('');
   const slot = useRef<HTMLDivElement>(null);
   const address = useRef<HTMLInputElement>(null);
   const focusBlank = useRef(record.focusAddressOnOpen === true);
   const host = desktopHost();
-  const actualUrl = state?.pendingUrl || state?.url || '';
-  const hasDocument = Boolean(actualUrl);
+  const actualUrl = state?.pendingUrl || state?.url || record.requestedUrl || '';
+  const hasDocument = Boolean(state?.url || state?.pendingUrl);
   useEffect(() => { if (!editing) setDraft(actualUrl); }, [actualUrl, editing]);
   useEffect(() => { if (!actualUrl && isOpen && focusBlank.current) address.current?.focus(); if (actualUrl) focusBlank.current = false; }, [record.id, isOpen, actualUrl]);
   const failed = state?.error?.message || (!state ? record.error : undefined);

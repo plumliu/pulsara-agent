@@ -211,11 +211,11 @@ export function CapabilityView({
 
       <div className="capability-page__inner">
         <div className="capability-page-toolbar">
-          <div className="capability-tabs" role="tablist">
-            <button className={tab === 'plugins' ? 'is-active' : ''} onClick={() => setTab('plugins')} role="tab">插件 <span>{snapshot?.plugins.items.length ?? 0}</span></button>
-            <button className={tab === 'mcp' ? 'is-active' : ''} onClick={() => setTab('mcp')} role="tab">MCP <span>{(snapshot?.mcp.servers.length ?? 0) + (snapshot?.plugins.items ?? []).reduce((total, plugin) => total + (plugin.mcpConnections?.length ?? 0), 0)}</span></button>
-            <button className={tab === 'skills' ? 'is-active' : ''} onClick={() => setTab('skills')} role="tab">技能 <span>{snapshot?.skills.items.length ?? 0}</span></button>
-            <button className={tab === 'hooks' ? 'is-active' : ''} onClick={() => setTab('hooks')} role="tab" title="当前已启用且受信任的可执行钩子">钩子 <span>{hookCount ?? '—'}</span></button>
+          <div className="capability-tabs sliding-tabs" data-active={tab} role="tablist" aria-label="能力分类">
+            <button aria-selected={tab === 'plugins'} className={tab === 'plugins' ? 'is-active' : ''} onClick={() => setTab('plugins')} role="tab">插件 <span>{snapshot?.plugins.items.length ?? 0}</span></button>
+            <button aria-selected={tab === 'mcp'} className={tab === 'mcp' ? 'is-active' : ''} onClick={() => setTab('mcp')} role="tab">MCP <span>{(snapshot?.mcp.servers.length ?? 0) + (snapshot?.plugins.items ?? []).reduce((total, plugin) => total + (plugin.mcpConnections?.length ?? 0), 0)}</span></button>
+            <button aria-selected={tab === 'skills'} className={tab === 'skills' ? 'is-active' : ''} onClick={() => setTab('skills')} role="tab">技能 <span>{snapshot?.skills.items.length ?? 0}</span></button>
+            <button aria-selected={tab === 'hooks'} className={tab === 'hooks' ? 'is-active' : ''} onClick={() => setTab('hooks')} role="tab" title="当前已启用且受信任的可执行钩子">钩子 <span>{hookCount ?? '—'}</span></button>
           </div>
           <div className="capability-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${tab === 'plugins' ? '插件' : tab === 'mcp' ? ' MCP' : tab === 'hooks' ? '钩子' : '技能'}`} /></div>
           <div className="capability-page-controls">

@@ -25,8 +25,17 @@ if (!root) {
   throw new Error('Pulsara root element is missing');
 }
 
+function finishStartup() {
+  void desktopHost()!.startupSettled().catch(error => {
+    console.error('Could not dismiss startup cover', error);
+  }).finally(() => {
+    root!.inert = false;
+  });
+}
+
 if (!desktopHost()) {
   root.innerHTML = '<main style="font:16px system-ui;padding:48px;color:#625a49;background:#faf8f1;height:100vh"><h1>Pulsara</h1><p>请从 Pulsara 桌面应用打开工作台。</p></main>';
+  root.inert = false;
 } else void desktopHost()!.readUiPreferences().catch(error => {
   console.warn('Could not load UI preferences', error);
   return {};
@@ -34,7 +43,7 @@ if (!desktopHost()) {
   initializeUiPreferences(saved);
   createRoot(root).render(
   <StrictMode>
-    <PulsaraApp />
+    <PulsaraApp onStartupSettled={finishStartup} />
   </StrictMode>,
   );
 });

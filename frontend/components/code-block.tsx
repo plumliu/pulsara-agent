@@ -1,11 +1,10 @@
 import { writeClipboardText } from '../lib/desktop-host';
 
 import { ChevronDown, Code2, Copy, TextWrap } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import type { ShjLanguage, ShjToken } from '@speed-highlight/core';
+import { useMemo, useState } from 'react';
+import { useCodeHighlight, type CodePiece as Piece } from '../lib/code-highlight';
 import type { MarkdownNotify } from './markdown-body';
 
-type Piece = { text: string; type?: ShjToken };
 type LinePiece = Piece & { start: number; end: number };
 
 function splitCodeLines(source: string, pieces?: Piece[]): LinePiece[][] {
@@ -22,22 +21,6 @@ function splitCodeLines(source: string, pieces?: Piece[]): LinePiece[][] {
   return lines;
 }
 
-const supported = new Set<ShjLanguage>([
-  'asm', 'bash', 'bf', 'c', 'css', 'csv', 'diff', 'docker', 'git', 'go',
-  'html', 'http', 'ini', 'java', 'js', 'jsdoc', 'json', 'log', 'lua',
-  'make', 'md', 'pl', 'py', 'regex', 'rs', 'sql', 'toml', 'ts', 'xml', 'yaml',
-]);
-const aliases: Record<string, ShjLanguage> = {
-  python: 'py', javascript: 'js', jsx: 'js', typescript: 'ts', tsx: 'ts',
-  shell: 'bash', sh: 'bash', zsh: 'bash', yml: 'yaml', markdown: 'md',
-  rust: 'rs', dockerfile: 'docker', plaintext: 'plain', text: 'plain', txt: 'plain',
-};
-
-function highlightLanguage(label: string): ShjLanguage | undefined {
-  const name = label.toLowerCase();
-  return aliases[name] ?? (supported.has(name as ShjLanguage) ? name as ShjLanguage : undefined);
-}
-
 export function CodeBlock({ source, language, sourceMap, invalidSource, onNotify, streaming = false }: {
   source: string;
   language?: string;
@@ -50,8 +33,7 @@ export function CodeBlock({ source, language, sourceMap, invalidSource, onNotify
   // mapping out of the visual rows; actual newlines stay between logical rows.
   const displaySource = source.replace(/\n$/, '');
   const label = language || 'TEXT';
-  const syntax = highlightLanguage(label);
-  const [highlighted, setHighlighted] = useState<{ source: string; language: ShjLanguage; pieces: Piece[] }>();
+  const pieces = useCodeHighlight(displaySource, label, !streaming);
   const [expanded, setExpanded] = useState(false);
   const [wrapped, setWrapped] = useState(false);
   const mapping = useMemo(() => {
@@ -59,21 +41,6 @@ export function CodeBlock({ source, language, sourceMap, invalidSource, onNotify
     const entries = JSON.parse(sourceMap) as number[][];
     return entries.length >= displaySource.length ? entries.slice(0, displaySource.length) : undefined;
   }, [sourceMap, displaySource]);
-  useEffect(() => {
-    if (!syntax || syntax === 'plain' || streaming || !displaySource) return;
-    let live = true;
-    const pieces: Piece[] = [];
-    // The library only classifies text. React still owns every character and
-    // each token retains its original source offsets for copy and annotations.
-    void import('@speed-highlight/core').then(({ tokenize }) => tokenize(displaySource, syntax, (text, type) => {
-      if (text) pieces.push({ text, type });
-    })).then(() => {
-      if (live && pieces.map(piece => piece.text).join('') === displaySource) setHighlighted({ source: displaySource, language: syntax, pieces });
-    }).catch(() => undefined);
-    return () => { live = false; };
-  }, [displaySource, syntax, streaming]);
-
-  const pieces = !streaming && highlighted?.source === displaySource && highlighted.language === syntax ? highlighted.pieces : undefined;
   const lines = useMemo(() => splitCodeLines(displaySource, pieces), [displaySource, pieces]);
   const canExpand = lines.length > 10;
   const mapped = sourceMap !== undefined;
@@ -93,11 +60,11 @@ export function CodeBlock({ source, language, sourceMap, invalidSource, onNotify
       <span><Code2 size={13} aria-hidden="true" />{label.toUpperCase()}</span>
       <div>
         <button type="button" aria-label={wrapped ? '关闭自动换行' : '按宽度换行'}
-          aria-pressed={wrapped} title={wrapped ? '关闭自动换行' : '按宽度换行'}
+          data-thread-disclosure="" aria-pressed={wrapped} title={wrapped ? '关闭自动换行' : '按宽度换行'}
           onClick={() => setWrapped(value => !value)}><TextWrap size={14} /></button>
         <button type="button" aria-label="复制代码" title="复制代码" onClick={() => void copy()}><Copy size={14} /></button>
         {canExpand && <button type="button" aria-label={expanded ? '收起代码' : '展开代码'}
-          aria-expanded={expanded} title={expanded ? '收起代码' : '展开代码'} onClick={() => setExpanded(value => !value)}>
+          data-thread-disclosure="" aria-expanded={expanded} title={expanded ? '收起代码' : '展开代码'} onClick={() => setExpanded(value => !value)}>
           <ChevronDown size={14} className={expanded ? 'is-expanded' : ''} />
         </button>}
       </div>

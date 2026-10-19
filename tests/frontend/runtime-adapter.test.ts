@@ -3279,3 +3279,40 @@ it('refreshes TODOs once per live batch without jumping interaction state or its
   expect(fetch.mock.calls.filter(call => String(call[0]).endsWith('/live-control-snapshot'))).toHaveLength(1);
   expect(fetch).toHaveBeenCalledTimes(4);
 });
+
+it('presents only fresh authenticated complete root results, without history replay or blocking observe', async () => {
+  const assistant = {entry_id:'open-call',turn_id:'turn-open',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'open-1',tool_name:'open_in_pulsara'}]};
+  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{type:'panel',name:'tasks'}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
+  let committed: unknown[] = [];
+  let cut = '9007199254740993';
+  let releaseWindow!: () => void;
+  const windowWait = new Promise<void>(resolve => {releaseWindow=resolve;});
+  const windows: unknown[] = [];
+  stubRuntimeFetch(vi.fn(async (input, init) => {
+    const url=String(input);
+    if(url.endsWith('/connections')) {const payload=connectPayload(); payload.snapshot.snapshot.event_sequence_cut=cut; return new Response(JSON.stringify(payload));}
+    if(url.endsWith('/observe')) return new Response(JSON.stringify({observation:{committed,through_event_sequence:cut}}));
+    if(url.endsWith('/history/window')) {windows.push(JSON.parse(String(init?.body))); await windowWait;return new Response(JSON.stringify({session_id:'session-1',entries:[assistant]}));}
+    if(url.endsWith('/history-snapshot')) return new Response(JSON.stringify({snapshot:{snapshot:{entries:[assistant,result],event_sequence_cut:cut,control:{}}}}));
+    return new Response('{}');
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  if(connection instanceof CanonicalHistoryView) throw new Error('expected controller');
+  const seen: import('../../frontend/lib/presentation-targets').PresentationRequest[]=[];
+  const reads: Promise<unknown>[]=[];
+  connection.subscribePresentation!(request=>{seen.push(request);reads.push(request.read());});
+  expect(seen).toHaveLength(0);
+  cut='9007199254740994'; committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:result}];
+  await connection.observe(); // The association read is still pending.
+  expect(seen).toHaveLength(1); expect(windows).toEqual([expect.objectContaining({anchor_entry_id:'open-call',maximum_entries:1})]);
+  await connection.observe(); expect(seen).toHaveLength(1);
+  releaseWindow(); expect(await reads[0]).toEqual({targets:[{type:'panel',name:'tasks'}],errors:[{index:1,message:'invalid'}]});
+  cut='9007199254740996'; await connection.snapshot(); expect(seen[0].signal.aborted).toBe(true);
+  committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740995',entry:result},{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740997',entry:{...result,entry_id:'imported',entry_owner_kind:'IMPORTED_HISTORY'}}];cut='9007199254740997';
+  await connection.observe(); expect(seen).toHaveLength(1);
+  cut='9007199254740998';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'truncated',tool_result:{...result.tool_result,display_kind:'HEAD_TAIL'}}}];
+  await connection.observe();expect(seen).toHaveLength(1);
+  cut='9007199254740999';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'new'}}];
+  await connection.observe();expect(seen).toHaveLength(2); await reads[1];
+  await connection.close();expect(seen[1].signal.aborted).toBe(true);
+});

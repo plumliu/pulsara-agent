@@ -261,13 +261,14 @@ it("shares a restricted HTML shell without letting content break into its truste
 
 it("switches Markdown source without losing the loaded page", async () => {
   const reader = api();
+  const text = '---\nname: skill-example\ndescription: Read this document\n---\n# Heading';
   vi.mocked(reader.open).mockResolvedValue({
     ...file("report.md"),
     kind: "markdown",
   });
   vi.mocked(reader.page).mockResolvedValue({
     mode: "text",
-    text: "# Heading",
+    text,
     cursor: 0,
     next_cursor: null,
   });
@@ -278,11 +279,35 @@ it("switches Markdown source without losing the loaded page", async () => {
   );
   fireEvent.click(screen.getByRole("link", { name: "报告" }));
   await screen.findByRole("heading", { name: "Heading" });
+  expect(screen.getByRole('region', { name: '文档属性' }).textContent).toContain('skill-example');
   fireEvent.click(screen.getByRole("button", { name: "查看源码" }));
-  await screen.findByText("# Heading");
+  await waitFor(() => expect(document.querySelector('.file-preview-code code')?.textContent).toBe(text));
+  expect(screen.queryByRole('region', { name: '文档属性' })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "显示预览" }));
   await screen.findByRole("heading", { name: "Heading" });
   expect(reader.page).toHaveBeenCalledTimes(1);
+});
+
+it('highlights code one preview page at a time without fetching the whole file', async () => {
+  const reader = api();
+  vi.mocked(reader.open).mockResolvedValue(file('main.py'));
+  const first = 'def greet():\n    return "hello';
+  const second = ' world"\n\nprint(42)\n';
+  vi.mocked(reader.page).mockImplementation(async (_token, cursor) => ({
+    mode: 'text', text: cursor === 0 ? first : second,
+    cursor, next_cursor: cursor === 0 ? 30 : null,
+  }));
+  const view = render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}>
+    <MarkdownBody body="[代码](main.py)" onNotify={notify} />
+  </FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('link', { name: '代码' }));
+  await waitFor(() => expect(view.container.querySelector('.file-preview-code code')?.textContent).toBe(first));
+  await waitFor(() => expect(view.container.querySelector('.file-preview-code [class*="code-card__token--"]')).toBeTruthy());
+  expect(reader.page).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: '下一页 →' }));
+  await waitFor(() => expect(view.container.querySelector('.file-preview-code code')?.textContent).toBe(second));
+  expect(reader.page).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(reader.page).mock.calls.map(call => call[1])).toEqual([0, 30]);
 });
 
 it("shows HTML source as text while preserving the preview frame", async () => {
@@ -674,4 +699,23 @@ it("reopens the current child using the original root after a session round trip
     ),
   );
   expect(screen.getAllByRole("tab")).toHaveLength(1);
+});
+
+it('preserves file URL fragments on a new view and a deduplicated view', async () => {
+  // jsdom lacks CSS.escape; these fixture anchors contain only ASCII letters.
+  vi.stubGlobal('CSS', { ...CSS, escape: (value: string) => value });
+  const reader=api();
+  vi.mocked(reader.open).mockResolvedValue({...file('anchor.md'),kind:'markdown'});
+  vi.mocked(reader.page).mockResolvedValue({mode:'text',text:'# First\n\n# Second',cursor:0,next_cursor:null});
+  const scrolled:string[]=[];
+  const original=HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView=function(){scrolled.push(this.id);};
+  try {
+    render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}><MarkdownBody body={'[first](file:///project/anchor.md#first) [second](file:///project/anchor.md#second)'} onNotify={notify}/></FilePreviewProvider>);
+    fireEvent.click(screen.getByRole('link',{name:'first'}));
+    await waitFor(()=>expect(scrolled).toContain('first'));
+    fireEvent.click(screen.getByRole('link',{name:'second'}));
+    await waitFor(()=>expect(scrolled).toContain('second'));
+    expect(screen.getAllByRole('tab')).toHaveLength(1);expect(reader.close).toHaveBeenCalledOnce();
+  } finally {HTMLElement.prototype.scrollIntoView=original;}
 });

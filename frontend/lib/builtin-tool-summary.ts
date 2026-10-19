@@ -3,6 +3,7 @@ import type { ToolTrace } from './pulsara-types';
 // Presentation only. Names and result fields follow builtin_catalog and each
 // production tool owner; MCP direct and meta tools keep their existing views.
 const labels: Record<string, [title: string, pending: string, completed: string]> = {
+  open_in_pulsara: ['展示内容', '正在准备展示请求', '已请求展示'],
   read_file: ['读取文件', '正在读取文件', '已读取文件'],
   view_image: ['查看图片', '正在读取图片', '已读取图片'],
   search_content: ['搜索内容', '正在搜索内容', '搜索已结束'],
@@ -129,6 +130,12 @@ function failure(trace: ToolTrace, result: Record<string, unknown>): string {
 }
 
 export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle: string } | undefined {
+  if (trace.toolName === 'open_in_pulsara' && trace.status === 'completed') {
+    const result = parse(trace.resultText);
+    const accepted = count(result.targets) ?? 0, rejected = count(result.errors) ?? 0;
+    return { title: accepted ? '请求展示' : '目标未通过检查', subtitle: accepted ? `${accepted} 个目标${rejected ? `，${rejected} 项未通过检查` : ''}` : `${rejected} 项未通过检查` };
+  }
+
   const name = trace.toolName ?? '';
   const label = labels[name];
   if (!label) return undefined;

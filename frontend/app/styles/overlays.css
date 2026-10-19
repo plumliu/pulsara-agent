@@ -30,10 +30,17 @@
 .file-preview-pagebar input { width: 6em; border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; color: var(--ink); background: var(--paper); }
 .file-preview-page-position { margin-left: auto; }
 .file-preview-pagination { border-bottom: 0; border-top: 1px solid var(--line); }
-.file-preview-text { flex: 1; min-height: 0; overflow: auto; padding: 20px; }
+.file-preview-text { flex: 1; min-height: 0; overflow: auto; padding: 20px 10px; }
 .file-preview-text.is-markdown { padding: 24px max(24px, calc((100% - 780px) / 2)); }
 .file-preview-text.is-markdown img { max-width: 100%; height: auto; }
-.file-preview-code { display: flex; gap: 18px; min-width: max-content; }
+.file-frontmatter { margin-bottom: 22px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-deep); font: 13px/1.6 var(--sans); color: var(--ink); }
+.file-frontmatter-label { margin-bottom: 8px; color: var(--muted); font-size: 11px; }
+.file-frontmatter dl { margin: 0; }
+.file-frontmatter-field + .file-frontmatter-field { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--line); }
+.file-frontmatter dt { margin-bottom: 2px; color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+.file-frontmatter dd,.file-frontmatter pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-markdown .file-frontmatter pre { margin: 0; padding: 0; border-radius: 0; background: transparent; color: inherit; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); }
+.file-preview-code { display: flex; gap: 12px; min-width: max-content; }
 .file-preview-code pre { font: 12px/1.7 var(--mono); margin: 0; white-space: pre; }
 .file-preview-line-numbers { color: var(--muted); text-align: right; user-select: none; opacity: .65; }
 .file-preview-html iframe,.file-preview-pdf { width: 100%; height: 100%; border: 0; flex: 1; min-height: 0; background: white; }

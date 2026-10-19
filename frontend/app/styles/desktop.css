@@ -19,8 +19,19 @@
 .workspace-toolbar nav { display: flex; gap: 3px; }
 .workspace-toolbar button { display: flex; align-items: center; gap: 5px; padding: 7px; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px; }
 .workspace-toolbar button:hover { background: var(--paper-deep); color: var(--ink); }
-.workspace-tabs { display: flex; flex: none; align-items: center; gap: 5px; overflow: auto; scrollbar-width: thin; min-height: 40px; padding: 4px 6px; border-bottom: 1px solid var(--line); background: var(--paper); }
-.workspace-tabs:empty { display: none; }
+@property --workspace-scroll-thumb { syntax: '<color>'; inherits: true; initial-value: transparent; }
+.workspace-tab-strip { --workspace-scroll-thumb: transparent; position: relative; z-index: 1; flex: none; min-width: 0; height: 39px; border-bottom: 1px solid var(--line); background: var(--paper); transition: --workspace-scroll-thumb .2s ease; }
+.workspace-tab-strip:hover, .workspace-tab-strip:has(:focus-visible), .workspace-tab-strip[data-scrolling] { --workspace-scroll-thumb: color-mix(in srgb, var(--ink) 24%, transparent); }
+.workspace-tabs { display: flex; align-items: center; gap: 5px; overflow-x: auto; overflow-y: hidden; scrollbar-width: auto; height: 38px; padding: 3px 6px 1px; }
+/* Extend native hit testing into the toolbar's top padding, without growing the row. */
+.workspace-tab-strip[data-overflow] .workspace-tabs { height: 44px; padding: 4px 6px 0; }
+.workspace-tabs::-webkit-scrollbar { height: 10px; }
+.workspace-tabs::-webkit-scrollbar-thumb, .workspace-tabs::-webkit-scrollbar-thumb:hover { border: solid transparent; border-width: 2px 0 6px; border-radius: 999px; background: var(--workspace-scroll-thumb); background-clip: padding-box; }
+.workspace-tab-edge { position: absolute; top: 2px; bottom: 3px; z-index: 2; display: grid; place-items: center; width: 22px; padding: 0; color: var(--muted); background: var(--paper); opacity: 1; transition: opacity .18s ease, color .18s ease; }
+.workspace-tab-edge.is-left { left: 0; box-shadow: 5px 0 7px var(--paper); }
+.workspace-tab-edge.is-right { right: 0; box-shadow: -5px 0 7px var(--paper); }
+.workspace-tab-edge:hover { color: var(--ink); }
+.workspace-tab-edge:disabled { opacity: 0; pointer-events: none; }
 .workspace-tab { position: relative; display: flex; flex: 0 1 180px; align-items: center; min-width: 112px; max-width: 220px; height: 30px; border-radius: 7px; transition: background .16s ease, box-shadow .16s ease; }
 .workspace-tab::after { content: ''; position: absolute; right: -3px; top: 8px; height: 14px; width: 1px; background: var(--line); pointer-events: none; transition: opacity .16s ease; }
 .workspace-tab:last-child::after, .workspace-tab:is(.is-active, :hover, :focus-within)::after, .workspace-tab:has(+ .workspace-tab:is(.is-active, :hover, :focus-within))::after { opacity: 0; }
@@ -42,7 +53,21 @@
 .workspace-empty svg { color: var(--amber); opacity: .7; }.workspace-empty strong { color: var(--ink-soft); font-size: 14px; }.workspace-empty p { font-size: 12px; line-height: 1.8; margin: 0; }.workspace-empty small { font-size: 10px; color: var(--faint); }
 .workspace-resizer { position: absolute; top: 0; bottom: 0; left: 0; width: 7px; z-index: 6; cursor: col-resize; touch-action: none; }.workspace-resizer:hover, .workspace-resizer:focus-visible { background: color-mix(in srgb, var(--amber) 22%, transparent); }
 .task-graph-embedded { height: 100%; min-height: 0; }.skill-read-button { text-align: left; background: transparent; }
-.desktop-shell .conversation { padding-inline: clamp(20px, 4vw, 64px); }
+/* Center the reading area itself; avatars hang in symmetric outer gutters. */
+.desktop-shell .workbench { --conversation-width: 720px; --conversation-gutter: 48px; --conversation-scrollbar-width: 10px; }
+.desktop-shell .workbench .thread-scroll { scrollbar-gutter: stable; }
+.desktop-shell .workbench .thread-scroll::-webkit-scrollbar { width: var(--conversation-scrollbar-width); }
+.desktop-shell .workbench .thread-column { width: min(var(--conversation-width), calc(100% - 2 * var(--conversation-gutter))); }
+/* Match the scroll viewport's reserved right gutter, including before it overflows. */
+.desktop-shell .workbench .composer-wrap { padding-left: var(--conversation-gutter); padding-right: calc(var(--conversation-gutter) + var(--conversation-scrollbar-width)); }
+.desktop-shell .workbench :is(.composer-frame, .composer-queue, .observer-dock) { max-width: var(--conversation-width); }
+.desktop-shell .thread-column .assistant-heading { position: relative; grid-template-columns: minmax(0, 1fr) auto; min-height: 31px; }
+.desktop-shell .thread-column .assistant-heading > .assistant-avatar { position: absolute; left: -40px; top: 0; }
+.desktop-shell .thread-column .user-heading { position: relative; min-height: 31px; margin-right: 0; }
+.desktop-shell .thread-column .user-heading > .person-avatar { position: absolute; right: -40px; top: 50%; transform: translateY(-50%); }
+.desktop-shell .thread-column :is(.assistant-copy, .reasoning-disclosure, .conversation-run__toggle, .assistant-progress, .conversation-interruption, .user-steer, .subagent-completion-event) { margin-left: 0; }
+.desktop-shell .thread-column .subagent-completion-event { width: min(520px, 100%); }
+.desktop-shell .thread-column .execution-rail { margin-left: 14px; }
 
 
 .file-browser-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -64,6 +89,8 @@
 @media (max-width: 1150px) {
   .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { --desktop-navigation-width: 62px; grid-template-columns: 62px minmax(360px, 1fr) auto; }
   .desktop-navigation { grid-template-columns: 62px; }
+  /* The sliding drawer passes behind the permanent rail, including its shadow. */
+  .desktop-navigation > .activity-rail { z-index: 81; }
   .desktop-navigation > .session-sidebar { position: fixed; left: 62px; top: 44px; bottom: 0; width: 252px; z-index: 80; display: flex; visibility: hidden; pointer-events: none; transform: translateX(-100%); box-shadow: var(--shadow-lg); transition: transform .22s cubic-bezier(.2,.7,.2,1), visibility 0s .22s; }
   .desktop-shell.sidebar-visible .session-sidebar { visibility: visible; pointer-events: auto; transform: none; transition-delay: 0s; }
   .desktop-shell .mobile-scrim { position: fixed; inset: 44px 0 0 62px; z-index: 70; display: block; background: rgba(13,14,18,.24); opacity: 0; pointer-events: none; }
@@ -87,8 +114,7 @@
 .desktop-shell.is-workbench .topbar .session-title p { display: none; }
 .desktop-shell.is-workbench .topbar .session-title h2 { font-size: 13px; font-weight: 600; }
 .desktop-shell.is-workbench .topbar-actions { flex: none; gap: 4px; }
-.desktop-shell.is-workbench .topbar .context-compact-button { width: 28px; padding: 0; justify-content: center; }
-.desktop-shell.is-workbench .topbar .context-compact-button > span { display: none; }
+.desktop-shell.is-workbench .topbar .context-compact-button { width: auto; padding: 0 9px; gap: 6px; justify-content: center; }
 .desktop-shell.is-workbench .desktop-workspace { grid-row: 1 / -1; }
 .workspace-topbar { display: flex; flex: none; align-items: stretch; min-width: 0; height: 44px; border-bottom: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; }
 .workspace-topbar .workspace-toolbar { flex: 1; min-width: 0; gap: 4px; min-height: 0; padding: 0 9px; border-bottom: 0; }
@@ -122,7 +148,7 @@
 }
 .desktop-shell .thread-column > .conversation-run:last-child { margin-bottom: 0; }
 .desktop-shell .thread-column .assistant-copy {
-  --type-body: 15.5px;
+  --type-body: 16px;
   --type-title-small: 17px;
   --type-title: 18px;
   --type-title-large: 19px;
@@ -135,12 +161,12 @@
 .desktop-shell .thread-column .user-message :is(.prompt-content-body, p) { line-height: 1.7; }
 .desktop-shell .thread-column .user-message p + p { margin-top: 10px; }
 .desktop-shell .thread-column .trace-node { margin-bottom: 6px; }
-.desktop-shell .thread-column .trace-node__dot { top: 15px; }
+.desktop-shell .thread-column .trace-node__dot { top: 16px; }
 .desktop-shell .thread-column .trace-card { border-radius: 8px; }
-.desktop-shell .thread-column .trace-card__summary { grid-template-columns: 22px minmax(0, 1fr) auto auto; min-height: 34px; gap: 7px; padding: 5px 8px; }
+.desktop-shell .thread-column .trace-card__summary { grid-template-columns: 22px minmax(0, 1fr) auto auto; min-height: 34px; gap: 7px; padding: 6px 8px; }
 .desktop-shell .thread-column .trace-icon { width: 22px; height: 22px; border-radius: 5px; }
 .desktop-shell .thread-column .trace-icon svg { width: 12px; height: 12px; }
-.desktop-shell .thread-column .trace-summary-copy strong { font-size: 11.5px; line-height: 1.35; }
+.desktop-shell .thread-column .trace-summary-copy strong { color: var(--ink-soft); font-size: 11.5px; font-weight: 600; line-height: 1.35; }
 .desktop-shell .thread-column .trace-summary-copy small { margin-top: 1px; font-size: 10.5px; line-height: 1.35; }
 .desktop-shell .thread-column .trace-purpose { font-size: 10.5px; }
 
@@ -154,6 +180,7 @@
 .browser-toolbar button { display: grid; place-items: center; width: 25px; height: 28px; flex: none; background: transparent; color: var(--muted); border-radius: 5px; }
 .browser-toolbar button:hover { background: var(--paper-deep); }.browser-toolbar button:disabled { opacity: .35; }
 .browser-toolbar input { width: 0; flex: 1; min-width: 40px; height: 28px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); font: 12px var(--sans); color: var(--ink); }
+.browser-toolbar input:focus { outline: none; border-color: var(--line-strong); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 10%, transparent); }
 .browser-viewport { flex: 1; min-height: 0; margin-left: 6px; overflow: hidden; }
 .browser-empty { display: flex; height: 100%; padding: 28px; gap: 12px; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); text-align: center; font-size: 12px; }
 .browser-empty strong { color: var(--ink); font-size: 14px; }.browser-empty small { overflow-wrap: anywhere; }.browser-empty button { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); }

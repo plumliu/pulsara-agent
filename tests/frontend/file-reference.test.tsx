@@ -1,8 +1,9 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { closeHistory } from '@tiptap/pm/history';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { fileReference, formatFileReference, formatWorkspaceReference, splitFileReferences, type ImportedPath } from '../../frontend/lib/file-reference';
+import { FileLinkContext } from '../../frontend/components/file-link-context';
 import { PromptComposer } from '../../frontend/components/prompt-composer';
 import { PromptContentView } from '../../frontend/components/prompt-content-view';
 
@@ -170,4 +171,39 @@ it('renders original path references across history and queue with their exact p
     ]);
     view.unmount();
   }
+});
+
+
+it('opens composer and sent file references through the same sidebar owner without changing the draft', async () => {
+  const value = store();
+  const path = '/tmp/资料 #?%/report.pdf';
+  value.insertPaths('s', [path], false);
+  const before = (await value.capture('s')).content;
+  const open = vi.fn(); const submit = vi.fn();
+  const view = render(<FileLinkContext.Provider value={{ open }}>
+    <PromptComposer store={value} sessionId="s" disabled={false} placeholder="input" onSubmit={submit} onNotify={() => {}} />
+    <PromptContentView content={before} variant="message" onReadImage={vi.fn()} />
+  </FileLinkContext.Provider>);
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'PDF：report.pdf' })).toHaveLength(2));
+  const buttons = screen.getAllByRole('button', { name: 'PDF：report.pdf' });
+  for (const button of buttons) {
+    fireEvent.click(button);
+    expect(open).toHaveBeenLastCalledWith('file:///tmp/%E8%B5%84%E6%96%99%20%23%3F%25/report.pdf', button);
+  }
+  expect(open).toHaveBeenCalledTimes(2);
+  expect(submit).not.toHaveBeenCalled();
+  expect((await value.capture('s')).content).toEqual(before);
+  expect(screen.queryByRole('group', { name: '文件引用详情' })).toBeNull();
+  fireEvent.mouseEnter(buttons[0]);
+  expect(screen.getByText(path)).toBeTruthy();
+  expect(screen.getByRole('button', { name: '复制路径' })).toBeTruthy();
+  view.unmount();
+});
+
+it('keeps directory references as path details rather than requesting a file preview', () => {
+  const open = vi.fn();
+  render(<FileLinkContext.Provider value={{ open }}><PromptContentView content={{ parts: [{ type: 'text', text: formatWorkspaceReference({ path: '/tmp/docs', kind: 'directory' }) }] }} variant="message" onReadImage={vi.fn()} /></FileLinkContext.Provider>);
+  fireEvent.click(screen.getByRole('button', { name: '目录：docs' }));
+  expect(open).not.toHaveBeenCalled();
+  expect(screen.getByText('/tmp/docs')).toBeTruthy();
 });

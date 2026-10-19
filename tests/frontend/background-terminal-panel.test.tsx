@@ -18,6 +18,35 @@ const process: BackgroundProcess = {
   originTurnId: 'turn-a',
 };
 
+it('shows a standalone process with output, without list expand or open controls', async () => {
+  const readLog = vi.fn(async (): Promise<BackgroundProcessLog> => ({ process, output: 'detail output', outputCursor: '9', retainedFromCursor: '0', gapBeforeOutput: false, truncatedByResponseBound: false, sourceCoverage: 'COMPLETE' }));
+  const view = render(<BackgroundTerminalPanel processId={process.processId} command={process.command} ownerKey="one" sessionId="one" hostSessionId="host" canControl={false}
+    loadProcesses={async () => ({ processes: [process] })} readLog={readLog} terminateProcess={vi.fn()} queryControl={vi.fn()} onOpenProcess={vi.fn()} />);
+  expect(await screen.findByText('detail output', {}, { timeout: 2500 })).toBeTruthy();
+  expect(view.container.querySelector('.process-detail')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '打开到新标签页' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '查看命令详情' })).toBeNull();
+  expect(view.container.querySelector('.background-process__toggle')).toBeNull();
+  expect(screen.getAllByText(process.command)).toHaveLength(1);
+});
+
+it('shows only the complete command on hover and opens the source card with a transition', async () => {
+  const onOpen = vi.fn();
+  const transition = vi.fn(({ update }: { update: () => void }) => { update(); return { ready: Promise.resolve(), finished: Promise.resolve() }; });
+  const original = document.startViewTransition;
+  Object.defineProperty(document, 'startViewTransition', { configurable: true, value: transition });
+  try {
+    render(<BackgroundTerminalPanel ownerKey="one" sessionId="one" hostSessionId="host" canControl={false} loadProcesses={async () => ({ processes: [process] })} readLog={vi.fn()} terminateProcess={vi.fn()} queryControl={vi.fn()} onOpenProcess={onOpen} />);
+    const command = await screen.findByText(process.command);
+    fireEvent.mouseEnter(command.closest('.background-process__identity')!);
+    expect(screen.getByRole('tooltip').textContent).toBe(process.command);
+    fireEvent.click(screen.getByRole('button', { name: '打开到新标签页' }));
+    expect(onOpen).toHaveBeenCalledWith(process);
+    expect(transition).toHaveBeenCalledWith(expect.objectContaining({ types: ['process-detail'] }));
+    await waitFor(() => expect(command.closest<HTMLElement>('.background-process')!.style.viewTransitionName).toBe(''));
+  } finally { Object.defineProperty(document, 'startViewTransition', { configurable: true, value: original }); }
+});
+
 describe('BackgroundTerminalPanel PR03 controls', () => {
   it('does not infer retention expiry from an unavailable control result or resend termination', async () => {
     const terminate = vi.fn(async (_reference: UserControlCommandRef): Promise<CommandReceipt> => {

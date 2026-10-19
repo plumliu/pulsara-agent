@@ -40,7 +40,7 @@ import type {
 } from '../lib/pulsara-types';
 import type { MarkdownNotify } from './markdown-body';
 import { TaskWorkspace, TaskGraphDetail } from './task-workspace';
-import { DesktopWorkspace, useDesktopWorkspace, type WorkspaceTab } from './desktop-workspace';
+import { inspectorTab, DesktopWorkspace, useDesktopWorkspace, type WorkspaceTab } from './desktop-workspace';
 import { FileLinkContext } from './file-link-context';
 import { BackgroundTerminalPanel } from './background-terminal-panel';
 import { AnimatedDisclosure } from './animated-disclosure';
@@ -425,7 +425,7 @@ function ProjectCapabilityPanel({
           </div>
         )}
         <div className="project-capability-toolbar">
-          <div className="project-capability-tabs" role="tablist" aria-label="能力类型">
+          <div className="project-capability-tabs sliding-tabs" data-active={kind} role="tablist" aria-label="能力类型">
             <button role="tab" aria-selected={kind === 'skills'} className={kind === 'skills' ? 'is-active' : ''} onClick={() => { setKind('skills'); setInheritedExpanded(false); }}>技能 <span>{skills.length}</span></button>
             <button role="tab" aria-selected={kind === 'mcp'} className={kind === 'mcp' ? 'is-active' : ''} onClick={() => { setKind('mcp'); setInheritedExpanded(false); }}>MCP <span>{servers.length}</span></button>
           </div>
@@ -543,7 +543,7 @@ export function InspectorPanel({
   const [capabilityKind, setCapabilityKind] = useState<ProjectCapabilityKind>('skills');
 
   const open = (kind: WorkspaceTab['kind'], title: string, entityId?: string, hostSessionId?: string) => workspace?.open({
-    id: JSON.stringify([session.id, kind, entityId ?? '', hostSessionId ?? '']), sessionId: session.id, kind, title, entityId, hostSessionId,
+    ...inspectorTab(session.id, kind, title, entityId, hostSessionId),
     onClose: kind === 'group' && entityId ? () => onUnloadTaskGroup?.(entityId) : undefined,
   });
   const renderTab = (tab: WorkspaceTab) => {
@@ -560,7 +560,7 @@ export function InspectorPanel({
       skills={(capabilities?.skills.items ?? []).filter(skill => skill.enabled && skill.effective)} artifactOwnerKey={taskArtifactOwnerKey}
       onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
       onOpenTask={task => open('task', task.label, task.id)} />;
-    if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
+    if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} command={tab.title !== tab.entityId ? tab.title : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
             ownerKey={backgroundOwnerKey}
             sessionId={session.id}
             hostSessionId={backgroundHostSessionId}

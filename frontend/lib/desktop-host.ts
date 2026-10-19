@@ -13,6 +13,7 @@ export interface CliStatus {
 export interface PulsaraDesktop {
   browser: DesktopBrowser;
   platform: 'darwin' | 'linux';
+  startupSettled(): Promise<void>;
   readUiPreferences(): Promise<Record<string, string>>;
   writeUiPreference(input: { key: string; value: string | null }): Promise<void>;
   writeClipboardText(text: string): Promise<void>;

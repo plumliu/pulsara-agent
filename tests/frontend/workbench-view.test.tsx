@@ -411,7 +411,7 @@ describe('current-session runtime actions', () => {
     render(<WorkbenchView {...props({ onRenameSession })} />);
     const trigger = screen.getByRole('button', { name: '更多会话操作' });
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole('button', { name: '重命名给你的会话起个名字吧' }));
+    fireEvent.click(screen.getByRole('button', { name: '重命名给你的会话起个名字' }));
     expect(onRenameSession).toHaveBeenCalledOnce();
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });
@@ -421,11 +421,11 @@ describe('current-session runtime actions', () => {
     render(<WorkbenchView {...props({ onReopenRuntime })} />);
     const trigger = screen.getByRole('button', { name: '更多会话操作' });
     expect(screen.getByRole('button', { name: '压缩上下文' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '重新载入当前会话运行时' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '重新加载会话' })).toBeNull();
 
     fireEvent.click(trigger);
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: /重新载入当前会话运行时/ }));
+    fireEvent.click(screen.getByRole('button', { name: /重新加载会话/ }));
     expect(onReopenRuntime).toHaveBeenCalledOnce();
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });
@@ -1056,6 +1056,21 @@ describe('completed reply process disclosure', () => {
 });
 
 describe('composer + menu', () => {
+  it('opens skills inside the same menu and can return or insert a skill', () => {
+    render(<WorkbenchView {...props({ skills: [{ name: 'review', description: 'Review a project', location: '/tmp/review/SKILL.md', scope: 'user', configured: false }] })} />);
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
+    const menu = screen.getByRole('dialog', { name: '添加内容与模式' });
+    fireEvent.click(screen.getByRole('button', { name: '选择技能' }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(within(menu).getByText('/review')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '添加文件' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '返回添加菜单' }));
+    expect(within(menu).getByRole('button', { name: '添加文件' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '选择技能' }));
+    fireEvent.click(within(menu).getByText('/review').closest('button')!);
+    expect(screen.queryByRole('dialog', { name: '添加内容与模式' })).toBeNull();
+    expect(promptDraftStore.summary('session-one').text).toContain('review');
+  });
   it.each([false, true])('reserves queued edit against an open menu and late picker, directory=%s', async directory => {
     const upload = vi.fn(async () => ({ path: '/tmp/imports/id/report.pdf', name: 'report.pdf', bytes: 1 }));
     promptDraftStore.setImporter(upload);
@@ -1371,7 +1386,13 @@ describe('ROOT context compaction progress', () => {
     expect(status.getAttribute('aria-busy')).toBe('true');
     expect(status.querySelector('.context-compaction-divider__spinner')).toBeTruthy();
     expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
-    if (!isObserver) expect((screen.getByRole('button', { name: '正在整理上下文' }) as HTMLButtonElement).disabled).toBe(true);
+    if (!isObserver) {
+      const button = screen.getByRole('button', { name: '压缩中…' }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute('aria-busy')).toBe('true');
+      expect(button.classList.contains('is-compacting')).toBe(true);
+      expect(button.textContent).toBe('压缩中…');
+    }
   });
 
   it('replaces live progress with only the adopted canonical boundary', () => {
@@ -1854,4 +1875,47 @@ it('retains the same process content through exit without starting hidden hydrat
   await act(async()=>settle());
   expect(host.isConnected).toBe(false);
   expect(screen.getByText('最终正文')).toBeTruthy();
+});
+
+it('keeps tail following when clicking a file reference popover', () => {
+  let resizeColumn: () => void = () => {};
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: () => void) {}
+    observe(node: Element) { if (node.classList.contains('thread-column')) resizeColumn = this.callback; }
+    disconnect() {} unobserve() {}
+  });
+  const view = render(<WorkbenchView {...props({ isRunning: false, messages: [
+    { id: 'file-user', role: 'user', time: '', body: '【本地文件："/project/notes.md"】看看这个文件', promptContent: { parts: [{ type: 'text', text: '【本地文件："/project/notes.md"】看看这个文件' }] } },
+    { id: 'file-answer', role: 'assistant', assistantKind: 'terminal', rootFinal: true, time: '', body: '已找到。' },
+  ] })} />);
+  const thread = view.container.querySelector('.thread-scroll')! as HTMLElement;
+  let height = 1000, top = 600;
+  Object.defineProperties(thread, {
+    scrollHeight: { get: () => height }, clientHeight: { get: () => 400 },
+    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(height - 400, value)); } },
+  });
+  fireEvent.click(screen.getByRole('button', { name: '文件：notes.md' }));
+  expect(screen.getByRole('group', { name: '文件引用详情' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
+  height = 1200; act(() => resizeColumn());
+  expect(top).toBe(800);
+});
+
+it('resumes tail following on a downward gesture at the bottom even without a scroll event', async () => {
+  const view = render(<WorkbenchView {...props({ isRunning: false, messages: [
+    { id: 'process-edge', role: 'assistant', assistantKind: 'progress', turnId: 'turn-edge', time: '', body: '处理中' },
+    { id: 'answer-edge', role: 'assistant', assistantKind: 'terminal', turnId: 'turn-edge', rootFinal: true, time: '', body: '正文' },
+  ] })} />);
+  const thread = view.container.querySelector('.thread-scroll')! as HTMLElement;
+  let top = 600;
+  Object.defineProperties(thread, {
+    scrollHeight: { get: () => 1000 }, clientHeight: { get: () => 400 },
+    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(600, value)); } },
+  });
+  // A real in-flow disclosure pauses following even if it adds no height.
+  fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+  expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+  fireEvent.wheel(thread, { deltaY: 100 });
+  await waitFor(() => expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull());
+  expect(top).toBe(600);
 });

@@ -86,3 +86,7 @@ export function markdownImageUrl(
     return undefined;
   }
 }
+
+/** Encode a native absolute path without interpreting filename #, ? or %. */
+export const fileUrl = (path: string) =>
+  `file://${path.split("/").map(encodeURIComponent).join("/")}`;

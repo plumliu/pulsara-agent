@@ -1063,9 +1063,11 @@ describe('PulsaraApp', () => {
 
   it('keeps startup failures on overview', async () => {
     const adapter = new FakeAdapter();
+    const onStartupSettled = vi.fn();
     vi.spyOn(adapter, 'bootstrap').mockRejectedValue(new RuntimeApiError('START_FAILED', '本地服务启动失败', false));
-    render(<PulsaraApp adapter={adapter} />);
+    render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
     await screen.findByText('连接失败');
+    expect(onStartupSettled).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current')).toBe('page');
     expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
     expect(adapter.connectCalls).toHaveLength(0);
@@ -2907,20 +2909,52 @@ describe('PulsaraApp', () => {
 
   it('keeps creation disabled until bootstrap and the initial session list are ready', async () => {
     const adapter = new FakeAdapter();
+    const onStartupSettled = vi.fn();
     let finishBootstrap!: (value: RuntimeBootstrap) => void;
     let finishList!: (value: SessionSummary[]) => void;
     vi.spyOn(adapter, 'bootstrap').mockImplementation(() => new Promise(resolve => { finishBootstrap = resolve; }));
     vi.spyOn(adapter, 'listSessions').mockImplementation(() => new Promise(resolve => { finishList = resolve; }));
-    render(<PulsaraApp adapter={adapter} />);
+    render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
+    expect(onStartupSettled).not.toHaveBeenCalled();
     expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => finishBootstrap(bootstrap));
+    expect(onStartupSettled).not.toHaveBeenCalled();
     expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
     await act(async () => finishList([]));
+    expect(onStartupSettled).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
     expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.keyDown(window, { key: 'n', metaKey: true });
     expect(screen.getByRole('dialog', { name: '新建会话' })).toBeTruthy();
+  });
+
+  it('holds the startup cover until the saved session connection is restored', async () => {
+    const adapter = new FakeAdapter();
+    const onStartupSettled = vi.fn();
+    const pending = deferred<void>();
+    const connect = adapter.connect.bind(adapter);
+    vi.spyOn(adapter, 'connect').mockImplementation(async (...args) => {
+      await pending.promise;
+      return connect(...args);
+    });
+    render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
+    await waitFor(() => expect(adapter.connect).toHaveBeenCalled());
+    expect(onStartupSettled).not.toHaveBeenCalled();
+    await act(async () => pending.resolve());
+    await waitFor(() => expect(onStartupSettled).toHaveBeenCalledTimes(1));
+    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('releases the startup cover for database setup instead of waiting for readiness forever', async () => {
+    const adapter = new FakeAdapter();
+    const onStartupSettled = vi.fn();
+    vi.spyOn(adapter, 'bootstrap').mockResolvedValue({ ...bootstrap, database_state: 'database_not_configured' });
+    render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
+    await waitFor(() => expect(onStartupSettled).toHaveBeenCalledTimes(1));
+    expect(adapter.connectCalls).toHaveLength(0);
+    expect(screen.getByRole('heading', { name: '正在准备内置数据服务' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /前往通用设置/ })).toBeTruthy();
   });
 
   it('blocks an already open creation dialog while reconnecting, then enables it after recovery', async () => {
@@ -5197,7 +5231,7 @@ describe('explicit runtime reopen owner', () => {
     await screen.findByRole('heading', {name:'准备发布'});
     const original = adapter.lastConnection!;
     fireEvent.click(screen.getByRole('button', {name:'更多会话操作'}));
-    fireEvent.click(screen.getByRole('button', {name:/重新载入当前会话运行时/}));
+    fireEvent.click(screen.getByRole('button', {name:/重新加载会话/}));
     await waitFor(() => expect(reopen).toHaveBeenCalledOnce());
     await act(async () => {
       disconnect(new RuntimeApiError('DETACHED', 'connection detached', true));
@@ -5531,4 +5565,25 @@ it('remembers the left sidebar globally across sessions and remounts', async () 
   expect(view.container.querySelector('.sidebar-visible')).toBeTruthy();
   expect(uiPreferences.getItem('pulsara-sidebar-open')).toBe('true');
   view.unmount();
+});
+
+it('collapses the left sidebar at the drawer breakpoint but still allows manual reopening', async () => {
+  const sidebarMedia = Object.assign(new EventTarget(), { matches: true });
+  const remove = vi.spyOn(sidebarMedia, 'removeEventListener');
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => query === '(min-width: 1151px)' ? sidebarMedia : { matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  const view = renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
+  await screen.findByRole('heading', { name: '准备发布' });
+  expect(view.container.querySelector('.sidebar-visible')).toBeTruthy();
+  sidebarMedia.matches = false;
+  act(() => sidebarMedia.dispatchEvent(Object.assign(new Event('change'), { matches: false })));
+  expect(view.container.querySelector('.sidebar-visible')).toBeNull();
+  expect(uiPreferences.getItem('pulsara-sidebar-open')).toBe('false');
+  fireEvent.click(screen.getByRole('button', { name: '切换会话侧栏' }));
+  expect(view.container.querySelector('.sidebar-visible')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '切换会话侧栏' }));
+  sidebarMedia.matches = true;
+  act(() => sidebarMedia.dispatchEvent(Object.assign(new Event('change'), { matches: true })));
+  expect(view.container.querySelector('.sidebar-visible')).toBeNull();
+  view.unmount();
+  expect(remove).toHaveBeenCalledWith('change', expect.any(Function));
 });

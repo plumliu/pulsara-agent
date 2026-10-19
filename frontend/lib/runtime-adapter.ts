@@ -1,3 +1,4 @@
+import { parsePresentationResult, type PresentationRequest } from './presentation-targets';
 import { desktopHost } from './desktop-host';
 import { randomIdentity, isCanonicalIdentity } from './identity';
 import type { FilePreviewApi } from './file-preview';
@@ -913,6 +914,7 @@ function taskAssistantBody(entryKind: string, body: string): string {
 }
 
 export interface RuntimeConnection {
+  subscribePresentation?: (listener: (request: PresentationRequest) => void) => () => void;
   readHistory?: (windowId?: string, direction?: 'older' | 'newer', signal?: AbortSignal) => Promise<RuntimeProjection>;
   hydrateEntries?: (ids: string[], signal?: AbortSignal, includeReasoning?: boolean) => Promise<RuntimeProjection>;
   locateEntry?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
@@ -1281,7 +1283,7 @@ function decimal(value: string | number | undefined): string {
   if (result > BigInt('18446744073709551615')) throw new RuntimeApiError('HISTORY_SEQUENCE_INVALID', '会话游标超出协议范围。', false);
   return result.toString();
 }
-function compareSequence(a: string | number | undefined, b: string | number | undefined): number {
+export function compareSequence(a: string | number | undefined, b: string | number | undefined): number {
   const left = BigInt(decimal(a)), right = BigInt(decimal(b)); return left < right ? -1 : left > right ? 1 : 0;
 }
 
@@ -2886,6 +2888,38 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   private liveControlRevision = 0;
   private presentationNotices: string[] = [];
   private closed = false;
+  private presentationWatermark = '0';
+  private presentationEpoch = new AbortController();
+  private presentationListeners = new Set<(request: PresentationRequest) => void>();
+  subscribePresentation(listener: (request: PresentationRequest) => void) {
+    this.presentationListeners.add(listener);
+    return () => { this.presentationListeners.delete(listener); };
+  }
+  private observePresentation(entry: ProtocolEntry, sequence: string) {
+    if (compareSequence(sequence, this.presentationWatermark) <= 0) return;
+    this.presentationWatermark = sequence;
+    const result = entry.tool_result;
+    if (this.role !== 'controller' || entry.entry_kind !== 'TOOL_RESULT' || entry.scope_kind !== 'ROOT'
+      || entry.entry_owner_kind === 'IMPORTED_HISTORY' || result?.result_state !== 'SUCCESS'
+      || result.source_coverage !== 'COMPLETE' || result.display_kind !== 'COMPLETE'
+      || !result.assistant_entry_id || !result.tool_call_id) return;
+    const signal = this.presentationEpoch.signal;
+    const request: PresentationRequest = { sequence, signal, read: async () => {
+      let assistant = this.entries.get(result.assistant_entry_id!);
+      if (!assistant) {
+        const window = await this.historyPost<BrowserWindow>('window', { anchor_entry_id: result.assistant_entry_id, maximum_entries: 1, maximum_serialized_bytes: 2 << 20 }, signal);
+        if (window.session_id !== this.sessionId) return;
+        assistant = window.entries.find(item => item.entry_id === result.assistant_entry_id);
+      }
+      if (signal.aborted || this.closed || assistant?.scope_kind !== 'ROOT' || assistant.turn_id !== entry.turn_id
+        || assistant.entry_owner_kind === 'IMPORTED_HISTORY'
+        || !assistant.blocks?.some(block => block.block_kind === 'TOOL_CALL' && block.tool_call_id === result.tool_call_id && block.tool_name === 'open_in_pulsara')) return;
+      await this.hydrateContentReference(entry.content, { entry_id: entry.entry_id }, '展示请求暂时无法读取。', signal);
+      if (signal.aborted || this.closed || entry.content?.inline_content === undefined) return;
+      return parsePresentationResult(decodeBase64(entry.content.inline_content));
+    } };
+    for (const listener of this.presentationListeners) listener(request);
+  }
 
   async readSubagentCapacity(): Promise<{ target: number; occupied: number }> {
     return this.subagentCapacity(true, 0);
@@ -3040,6 +3074,10 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         this.control = committed.current_control;
         this.controlReadSequence = decimal(committed.control_read_event_sequence ?? observation.through_event_sequence ?? 0);
       }
+    }
+    for (const committed of observation.committed ?? []) {
+      if (committed.projection_kind === 'IMMUTABLE_ENTRY' && committed.entry && committed.event_sequence !== undefined)
+        this.observePresentation(committed.entry, decimal(committed.event_sequence));
     }
     this.applyLive(observation.live ?? [], observation.settlements ?? []);
     for (const event of observation.live_control ?? []) {
@@ -3508,6 +3546,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.presentationEpoch.abort();
+    this.presentationListeners.clear();
     this.disposeReader();
     try {
       await apiRequest(`/api/connections/${encodeURIComponent(this.connectionId)}`, {
@@ -3591,6 +3631,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
 
   private replaceSnapshot(snapshot: ProtocolCanonicalSnapshot) {
     if (compareSequence(snapshot.event_sequence_cut ?? 0, this.eventSequenceCursor) < 0) return;
+    this.presentationEpoch.abort();
+    this.presentationEpoch = new AbortController();
+    this.presentationWatermark = decimal(snapshot.event_sequence_cut ?? 0);
     this.rememberQueueContent(this.control);
     this.installTail(snapshot);
     if (compareSequence(snapshot.event_sequence_cut ?? 0, this.controlReadSequence) >= 0) {

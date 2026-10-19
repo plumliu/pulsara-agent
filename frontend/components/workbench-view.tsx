@@ -1,3 +1,6 @@
+import { PresentationContext } from './presentation-provider';
+import { parsePresentationResult } from '../lib/presentation-targets';
+import { PresentationResult } from './presentation-result';
 import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 
 import { captureHistoryAnchor, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
@@ -12,6 +15,7 @@ import { CapabilityInteractionEditor } from './capability-interaction-editor';
 
 import {
   ArrowDown,
+  ArrowLeft,
   AlarmClock,
   Plus,
   FolderPlus,
@@ -35,6 +39,7 @@ import {
   ListTodo,
   LoaderCircle,
   MessageSquarePlus,
+  Minimize2,
   MoreHorizontal,
   PanelRight,
   Play,
@@ -435,6 +440,9 @@ function TraceCard({
   const purpose = skill ? `使用 ${skill.name} 技能` : builtinSummary?.title ?? trace.title;
   const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
   const parsedResult = parseJsonObject(trace.resultText);
+  const showTargets = useContext(PresentationContext);
+  const presentation = trace.toolName === 'open_in_pulsara' && trace.status === 'completed' && trace.artifact?.sourceCoverage === 'COMPLETE' && trace.artifact?.displayKind === 'COMPLETE'
+    ? parsePresentationResult(trace.resultText ?? '') : undefined;
   const terminalOutput = trace.toolName === 'terminal'
     ? terminalOutputText(trace.resultText, trace.status === 'running')
     : undefined;
@@ -462,7 +470,7 @@ function TraceCard({
     && (trace.artifact?.disposition === 'AVAILABLE' || trace.artifact?.disposition === 'INCOMPLETE'),
   );
   const expandable = Boolean(
-    trace.command || diffText || hasTerminalOutput || hasRawResult
+    presentation || trace.command || diffText || hasTerminalOutput || hasRawResult
     || trace.resultContent || mcpDetail || canReadArtifact
   );
   const artifactAtEnd = Boolean(artifactPage && !artifactPage.hasMore);
@@ -533,7 +541,7 @@ function TraceCard({
       <article data-result-entry={trace.resultEntryId} className={`trace-card${expanded ? ' is-expanded' : ''}`}>
         {expandable ? (
           <button
-            className="trace-card__summary"
+            data-thread-disclosure="" className="trace-card__summary"
             onClick={() => {
               if (expanded) closeArtifactPage();
               else terminalFollowTailRef.current = true;
@@ -542,8 +550,9 @@ function TraceCard({
             aria-expanded={expanded}
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
-        ) : <div className="trace-card__summary">{summary}</div>}
+        ) : <div data-thread-disclosure="" className="trace-card__summary">{summary}</div>}
         {expandable && <AnimatedDisclosure unmountOnClose open={expanded} className="trace-card__disclosure">
+          {presentation && <PresentationResult result={presentation} onOpen={showTargets} />}
           {trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
               <PromptContentView
@@ -553,7 +562,7 @@ function TraceCard({
               />
             </section>
           ) : (
-            <div className="terminal-output">
+            (!presentation || hasRawResult || canReadArtifact) && <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
             {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
             {hasTerminalOutput && (
@@ -672,7 +681,7 @@ function TraceCard({
                 )}
               </section>
             )}
-            {trace.meta && <footer><span>{trace.meta}</span></footer>}
+            {trace.meta && !presentation && <footer><span>{trace.meta}</span></footer>}
             </div>
           )}
         </AnimatedDisclosure>}
@@ -805,7 +814,7 @@ function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: Ma
   return (
     <section className={`reasoning-row${expanded ? ' is-expanded' : ''}`}>
       <button
-        className="reasoning-row__summary"
+        data-thread-disclosure="" className="reasoning-row__summary"
         onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded}
         aria-label={`${expanded ? '收起' : '展开'}${title}`}
@@ -816,7 +825,7 @@ function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: Ma
           {!expanded && <small><MarkdownInline body={reasoningPreview(block.body, running)} onNotify={onNotify} /></small>}
         </span>
         {running && <span className="reasoning-row__live"><i />思考中</span>}
-        <ChevronRight className="reasoning-row__chevron" size={12} />
+        <ChevronRight className="reasoning-row__chevron" size={13} />
       </button>
       <AnimatedDisclosure unmountOnClose open={expanded}>
         <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} streaming={running} /></div>
@@ -888,7 +897,7 @@ function SubagentRunCard({
       className={`subagent-run subagent-run--${run.status}${expanded ? ' is-expanded' : ''}${focused ? ' is-focused' : ''}`}
       data-task-id={run.id}
     >
-      <button className="subagent-run__header" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+      <button data-thread-disclosure="" className="subagent-run__header" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
         <span className={`agent-mini-icon color-${run.color}`}><Bot size={13} /></span>
         <span className="subagent-run__identity"><strong>{run.label}</strong><small>{run.role}</small></span>
         <span className={`subagent-run__status subagent-run__status--${run.status}`}>
@@ -1293,7 +1302,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     {!historyLoading && messages.some(message => message.historyEarlierUnloaded) && <div role="status" className="history-boundary">本轮较早过程尚未加载</div>}
     <AssistantHeading message={messages[0]} response={Boolean(messages[0].body.trim())} label={assistantLabel} />
     <button type="button" className="conversation-run__toggle"
-      aria-expanded={disclosure.expanded}
+      data-thread-disclosure="" aria-expanded={disclosure.expanded}
       aria-label={disclosure.expanded ? '收起中间过程' : '展开中间过程'}
       onClick={() => setDisclosure({ ...disclosure, expanded: !disclosure.expanded })}>
       <span>{complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
@@ -2052,22 +2061,7 @@ export function WorkbenchView({
   }, [welcome, session.id]);
 
   useLayoutEffect(() => {
-    if (!addOpen || !skillOpen) return;
-    const menu = addMenu.current;
-    const submenu = menu?.querySelector<HTMLElement>('.skill-menu--composer');
-    if (!menu || !submenu) return;
-    const position = () => {
-      const anchor = menu.getBoundingClientRect();
-      const fitsRight = anchor.right + 8 + submenu.offsetWidth <= window.innerWidth - 12;
-      const left = fitsRight ? anchor.right + 8 : Math.max(12, Math.min(anchor.left, window.innerWidth - submenu.offsetWidth - 12));
-      const top = Math.max(12, fitsRight ? anchor.bottom - submenu.offsetHeight : anchor.top - submenu.offsetHeight - 8);
-      submenu.style.left = `${left - anchor.left}px`;
-      submenu.style.top = `${top - anchor.top}px`;
-      submenu.style.bottom = 'auto';
-    };
-    position();
-    window.addEventListener('resize', position);
-    return () => window.removeEventListener('resize', position);
+    if (addOpen) addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
   }, [addOpen, skillOpen]);
   useEffect(() => {
     if (!addOpen && !modelOpen && !reasoningOpen && !skillOpen && !permissionOpen) return;
@@ -2109,7 +2103,7 @@ export function WorkbenchView({
     setAtBottom(false);
     readingAnchor.current = threadRef.current ? captureHistoryAnchor(threadRef.current) : undefined;
   }, []);
-  const beginUserScroll = useCallback(() => {
+  const beginUserScroll = useCallback((towardLatest = false) => {
     disclosureAnchor.current = undefined;
     userScrollPending.current = true;
     if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
@@ -2118,7 +2112,13 @@ export function WorkbenchView({
     userScrollFrame.current = requestAnimationFrame(() => {
       userScrollFrame.current = undefined;
       userScrollPending.current = false;
-      if (!followLatestRef.current && threadRef.current) readingAnchor.current = captureHistoryAnchor(threadRef.current);
+      const thread = threadRef.current;
+      if (towardLatest && thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight < 1) {
+        followLatestRef.current = true;
+        setAtBottom(true);
+        readingAnchor.current = undefined;
+        programmaticTop.current = undefined;
+      } else if (!followLatestRef.current && thread) readingAnchor.current = captureHistoryAnchor(thread);
     });
   }, []);
   useLayoutEffect(() => {
@@ -2438,18 +2438,19 @@ export function WorkbenchView({
             {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
               <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onRenameSession(); }}>
                 <Pencil size={15} />
-                <span><strong>重命名</strong><small>给你的会话起个名字吧</small></span>
+                <span><strong>重命名</strong><small>给你的会话起个名字</small></span>
               </button>
               <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onReopenRuntime(); }}>
                 <RotateCcw size={15} />
-                <span><strong>重新载入当前会话运行时</strong><small>仅作用于当前会话；空闲时从已保存记录重建</small></span>
+                <span><strong>重新加载会话</strong><small>从数据库重新组装上下文</small></span>
               </button>
             </div>}
           </div>
           {canControl && (
             <button
               className={`ghost-button context-compact-button${compactionBusy ? ' is-compacting' : ''}`}
-              aria-label={compactionBusy ? '正在整理上下文' : '压缩上下文'}
+              aria-label={compactionBusy ? '压缩中…' : '压缩上下文'}
+              aria-busy={compactionBusy}
               disabled={compactionBusy || !hasCompactionContext || runtimeStatus !== 'online'}
               title={!hasCompactionContext ? '开始对话后即可压缩上下文' : undefined}
               onClick={() => {
@@ -2457,8 +2458,8 @@ export function WorkbenchView({
                 void onCompact().finally(() => setCompacting(false));
               }}
             >
-              {compactionBusy ? <LoaderCircle size={12} /> : <RotateCcw size={12} />}
-              <span>{compactionBusy ? '正在整理上下文' : '压缩上下文'}</span>
+              {compactionBusy ? <LoaderCircle size={13} aria-hidden="true" /> : <Minimize2 size={13} aria-hidden="true" />}
+              <span>{compactionBusy ? '压缩中…' : '压缩上下文'}</span>
             </button>
           )}
           <button className={`icon-button${inspectorOpen ? ' is-active' : ''}`} onClick={onToggleInspector} aria-label="切换检查器"><PanelRight size={15} /></button>
@@ -2470,7 +2471,9 @@ export function WorkbenchView({
         ref={threadRef}
         style={{ overflowAnchor: 'none', scrollBehavior: 'auto' }}
         onClickCapture={event => {
-          const button = (event.target as HTMLElement).closest<HTMLElement>('button[aria-expanded], .code-card__toolbar button[aria-pressed]');
+          // Only in-flow disclosures move the reading anchor. ARIA expanded
+          // also describes floating file/annotation popovers that add no height.
+          const button = (event.target as HTMLElement).closest<HTMLElement>('button[data-thread-disclosure]');
           if (!button || !event.currentTarget.contains(button)) return;
           resetReading();
           userScrollPending.current = false;
@@ -2478,15 +2481,15 @@ export function WorkbenchView({
         }}
         onWheel={event => {
           if (event.deltaY < 0) resetReading();
-          beginUserScroll();
+          beginUserScroll(event.deltaY > 0);
         }}
-        onTouchStart={beginUserScroll}
+        onTouchStart={() => beginUserScroll()}
         onPointerDown={event => { if (event.target === event.currentTarget) beginUserScroll(); }}
         onPointerUp={() => { userScrollPending.current = false; }}
         onTouchEnd={() => { userScrollPending.current = false; }}
         onKeyDown={event => {
           if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) resetReading();
-          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll();
+          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll(['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey));
         }}
         onScroll={(event) => {
           const element = event.currentTarget;
@@ -2638,17 +2641,26 @@ export function WorkbenchView({
                   disabled={fileEntryBlocked}
                   onClick={() => { setAddOpen(value => !value); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); }}
                   onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); setAddOpen(true); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); requestAnimationFrame(() => addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()); } }}><Plus size={18} /></button>
-                {addOpen && <div ref={addMenu} className="menu-popover composer-add-menu" role="dialog" aria-label="添加内容与模式" onKeyDown={event => {
+                {addOpen && <div ref={addMenu} className={`menu-popover composer-add-menu${skillOpen ? ' is-skills' : ''}`} role="dialog" aria-label="添加内容与模式" onKeyDown={event => {
                   if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
                   const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
                   const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
                   const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
                   event.preventDefault(); buttons[next]?.focus();
                 }}>
+                  {skillOpen ? <>
+                    <button type="button" className="mode-chip composer-skills-back" aria-label="返回添加菜单" onClick={() => setSkillOpen(false)}><ArrowLeft size={12} /><span>技能</span></button>
+                    <div className="skill-menu__list">
+                      {skills.map(skill => {
+                        const selected = skill.configured || splitSkillReferences(draft.text).some(reference => typeof reference !== 'string' && reference.name === skill.name);
+                        return <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured || editingQueue}>
+                          <span><strong>/{skill.name}</strong><small>{skill.description}</small></span>{selected && <Check size={13} />}
+                        </button>;
+                      })}
+                    </div>
+                  </> : <>
                   <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(false)}><FileText size={12} /> 添加文件</button>
                   <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(true)}><FolderPlus size={12} /> 添加文件夹</button>
-                {(
-                  <div className="popover-anchor">
                     <button
                       className={`mode-chip${skillOpen ? ' is-active' : ''}`}
                       onClick={() => {
@@ -2661,24 +2673,6 @@ export function WorkbenchView({
                       aria-label="选择技能"
                       disabled={submitting || editingQueue || skills.length === 0}
                     ><BookOpenText size={12} /> 技能 <ChevronRight className="composer-skill-chevron" size={10} /></button>
-                    {skillOpen && (
-                      <div className="menu-popover skill-menu skill-menu--composer">
-                        <span className="menu-label">用于本轮</span>
-                        <div className="skill-menu__list">
-                          {skills.map((skill) => {
-                            const selected = skill.configured || splitSkillReferences(draft.text).some(reference => typeof reference !== 'string' && reference.name === skill.name);
-                            return (
-                              <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured || editingQueue}>
-                                <span><strong>/{skill.name}</strong><small>{skill.description}</small></span>
-                                {selected && <Check size={13} />}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
                 <button
                   className={`mode-chip${(requestPlan && !isRunning) || activePlanMode ? ' is-active' : ''}`}
                   onClick={() => { setRequestPlan((value) => !value); setAddOpen(false); draftStore.focus(session.id); }}
@@ -2686,6 +2680,7 @@ export function WorkbenchView({
                   aria-pressed={requestPlan && !isRunning}
                   title={isRunning ? '当前运行结束后可为下一轮启用规划' : undefined}
                 ><WandSparkles size={12} /> {activePlanMode ? '规划进行中' : requestPlan && !isRunning ? '本轮先规划' : '先规划'}</button>
+                </>}
                 </div>}
               </div>
               <div className="popover-anchor">
@@ -2710,8 +2705,8 @@ export function WorkbenchView({
                 sessionId={session.id} binding={modelCallBinding!} revision={contextUsageRevision}
                 isRunning={isRunning} readUsage={onReadContextUsage} />}
               <div className="popover-anchor model-picker">
-                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && !modelOpen ? ' needs-selection' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
-                  <span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型'}</span><ChevronDown size={10} />
+                <button aria-label={modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型'} className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && !modelOpen ? ' needs-selection' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
+                  <Bot className="model-chip__icon" size={15} aria-hidden="true" /><span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型'}</span><ChevronDown className="model-chip__chevron" size={10} />
                 </button>
                 {modelOpen && <div className="menu-popover model-menu">
                   <div className="model-menu__header">
@@ -2727,8 +2722,8 @@ export function WorkbenchView({
                 </div>}
               </div>
               <div className="popover-anchor">
-                <button title={reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)} className={`mode-chip reasoning-chip${reasoningOpen ? ' is-active' : ''}`} onClick={() => { setReasoningOpen((value) => !value); setAddOpen(false); setModelOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={reasoningOpen} disabled={!selectedModel || selectedModel.reasoning.kind !== 'selectable' || modelBindingBusy}>
-                  <BrainCircuit size={12} /><span className="reasoning-chip__label">{reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)}</span> {selectedModel?.reasoning.kind === 'selectable' && <ChevronDown size={10} />}
+                <button aria-label={reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)} title={reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)} className={`mode-chip reasoning-chip${reasoningOpen ? ' is-active' : ''}`} onClick={() => { setReasoningOpen((value) => !value); setAddOpen(false); setModelOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={reasoningOpen} disabled={!selectedModel || selectedModel.reasoning.kind !== 'selectable' || modelBindingBusy}>
+                  <BrainCircuit size={15} aria-hidden="true" /><span className="reasoning-chip__label">{reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)}</span> {selectedModel?.reasoning.kind === 'selectable' && <ChevronDown className="reasoning-chip__chevron" size={10} />}
                 </button>
                 {reasoningOpen && selectedModel?.reasoning.kind === 'selectable' && modelCallBinding && <div className="menu-popover reasoning-menu">
                   {selectedModel.reasoning.effort && <><span className="menu-label">推理档位</span>{selectedModel.reasoning.effort.values.map((effort) => {
