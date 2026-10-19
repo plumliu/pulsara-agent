@@ -1,3 +1,4 @@
+import { flushSync } from 'react-dom';
 import { uiPreferences } from '../lib/ui-preferences';
 import { randomIdentity, isCanonicalIdentity } from '../lib/identity';
 
@@ -2709,7 +2710,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   return (
     <UserAvatarProvider adapter={adapter}>
-    <DesktopWorkspaceProvider controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
+    <DesktopWorkspaceProvider visible={activeView === 'workbench' && !databaseBlocked && !loadingSession} onBrowserShortcut={command => flushSync(() => { if (command === 'search') setSearchOpen(value => !value); else if (canCreateSession) setNewSessionOpen(true); })} controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
     <FilePreviewProvider sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Archive, Check, ChevronDown, LoaderCircle, Search, X } from 'lucide-react';
 import type { RuntimeAdapter, SessionSearchItem, SessionSearchPage } from '../lib/runtime-adapter';
@@ -107,7 +107,7 @@ export function SessionSearchDialog({ adapter, available, onClose, onOpen }: {
   const items = recent ? (current?.items ?? []).slice(0, 5) : current?.items ?? [];
   const loading = available && !current;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mounted.current = true;
     const previous = document.activeElement as HTMLElement | null;
     const app = document.querySelector<HTMLElement>('main.pulsara-shell');

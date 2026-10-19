@@ -19,12 +19,20 @@
 .workspace-toolbar nav { display: flex; gap: 3px; }
 .workspace-toolbar button { display: flex; align-items: center; gap: 5px; padding: 7px; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px; }
 .workspace-toolbar button:hover { background: var(--paper-deep); color: var(--ink); }
-.workspace-tabs { display: flex; flex: none; overflow: auto; scrollbar-width: thin; min-height: 36px; border-bottom: 1px solid var(--line); }
+.workspace-tabs { display: flex; flex: none; align-items: center; gap: 5px; overflow: auto; scrollbar-width: thin; min-height: 40px; padding: 4px 6px; border-bottom: 1px solid var(--line); background: var(--paper); }
 .workspace-tabs:empty { display: none; }
-.workspace-tab { display: flex; flex: none; align-items: center; max-width: 220px; border-right: 1px solid var(--line); border-bottom: 2px solid transparent; }
-.workspace-tab.is-active { border-bottom-color: var(--amber); background: var(--paper-solid); }
-.workspace-tab button { display: flex; gap: 6px; align-items: center; min-width: 0; padding: 9px 7px; background: transparent; color: var(--muted); font-size: 11px; }
-.workspace-tab button[role=tab] { padding-left: 11px; }
+.workspace-tab { position: relative; display: flex; flex: 0 1 180px; align-items: center; min-width: 112px; max-width: 220px; height: 30px; border-radius: 7px; transition: background .16s ease, box-shadow .16s ease; }
+.workspace-tab::after { content: ''; position: absolute; right: -3px; top: 8px; height: 14px; width: 1px; background: var(--line); pointer-events: none; transition: opacity .16s ease; }
+.workspace-tab:last-child::after, .workspace-tab:is(.is-active, :hover, :focus-within)::after, .workspace-tab:has(+ .workspace-tab:is(.is-active, :hover, :focus-within))::after { opacity: 0; }
+.workspace-tab:hover, .workspace-tab:focus-within { background: var(--paper-deep); }
+.workspace-tab.is-active { background: var(--paper-solid); box-shadow: 0 1px 3px var(--line); }
+.workspace-tab button { display: flex; gap: 6px; align-items: center; min-width: 0; background: transparent; color: var(--muted); font-size: 11px; transition: background .16s ease, color .16s ease, opacity .16s ease; }
+.workspace-tab button[role=tab] { flex: 1; align-self: stretch; padding: 0 8px 0 10px; border-radius: 7px; text-align: left; }
+.workspace-tab button:not([role=tab]) { flex: none; justify-content: center; width: 22px; height: 22px; margin-right: 4px; padding: 0; border-radius: 5px; opacity: 0; }
+.workspace-tab:is(.is-active, :hover, :focus-within) button:not([role=tab]) { opacity: 1; }
+.workspace-tab button:not([role=tab]):hover { background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink); }
+.workspace-tab button:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
+@media (hover: none) { .workspace-tab button:not([role=tab]) { opacity: 1; } }
 .workspace-tab button span { text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
 .workspace-tab button svg { flex: none; }
 .workspace-tab.is-active button { color: var(--ink); }
@@ -139,3 +147,16 @@
 @media (prefers-reduced-motion: reduce) {
   .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector, .desktop-shell .desktop-workspace, .desktop-navigation > .session-sidebar { transition: none; }
 }
+
+/* The native viewport starts below these host-owned controls. */
+.browser-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.browser-toolbar { display: flex; gap: 2px; align-items: center; flex: none; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.browser-toolbar button { display: grid; place-items: center; width: 25px; height: 28px; flex: none; background: transparent; color: var(--muted); border-radius: 5px; }
+.browser-toolbar button:hover { background: var(--paper-deep); }.browser-toolbar button:disabled { opacity: .35; }
+.browser-toolbar input { width: 0; flex: 1; min-width: 40px; height: 28px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); font: 12px var(--sans); color: var(--ink); }
+.browser-viewport { flex: 1; min-height: 0; margin-left: 6px; overflow: hidden; }
+.browser-empty { display: flex; height: 100%; padding: 28px; gap: 12px; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); text-align: center; font-size: 12px; }
+.browser-empty strong { color: var(--ink); font-size: 14px; }.browser-empty small { overflow-wrap: anywhere; }.browser-empty button { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); }
+.browser-notice { padding: 7px 12px; font-size: 11px; color: var(--red); border-bottom: 1px solid var(--line); }.browser-notice button { background: transparent; color: var(--amber); }
+.toast-stack { right: var(--browser-toast-right, 18px); width: min(310px, calc(100vw - var(--browser-toast-right, 18px) - 18px)); }
+[role=tooltip] { max-width: min(360px, calc(100vw - var(--browser-toast-right, 18px) - 18px)); }

@@ -20,7 +20,6 @@ export interface CliStatus {
   existingTarget?: string;
   message?: string;
   managedBy: 'application' | 'package';
-  directoryOnPath: boolean;
   shadowedBy?: string;
 }
 export interface CliRegistration {
@@ -32,10 +31,12 @@ export interface CliRegistration {
 const launcherMarker = '#!/bin/sh\n# Pulsara desktop command-line launcher\n';
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 
-/** Inspect only; never source shell profiles or execute a discovered command. */
+/** Inspect only the app environment, not the user's terminal shell. Absence
+ * from this PATH cannot establish a terminal configuration problem. Never
+ * source shell profiles or execute a discovered command. */
 export async function cliStatus(config: CliRegistration): Promise<CliStatus> {
   const directories = config.searchPath.split(path.delimiter).filter(p => path.isAbsolute(p));
-  const result: CliStatus = { state: 'missing', path: config.destination, managedBy: config.packageTarget ? 'package' : 'application', directoryOnPath: directories.includes(path.dirname(config.destination)) };
+  const result: CliStatus = { state: 'missing', path: config.destination, managedBy: config.packageTarget ? 'package' : 'application' };
   try {
     const info = await lstat(config.destination);
     if (info.isSymbolicLink()) {

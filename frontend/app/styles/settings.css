@@ -275,7 +275,7 @@
 .settings-service-actions button.subtle-danger { color: var(--red); }
 
 .settings-cli-path { grid-column: 1 / -1; width: 100%; }
-.settings-cli-notice { grid-column: 2 / -1; overflow-wrap: anywhere; color: var(--muted); font-size: var(--type-caption); }
+.settings-cli-notice { grid-column: 1 / -1; overflow-wrap: anywhere; color: var(--muted); font-size: var(--type-caption); }
 
 .settings-local-service > .settings-home { border-bottom: 1px solid var(--line); }
 

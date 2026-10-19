@@ -254,6 +254,10 @@ export function FilePreviewProvider({
     let target: string;
     try {
       if (classifyFileLink(path) === "external") {
+        if (/^https?:/i.test(path) && workspaceRef.current && tab.sessionId) {
+          workspaceRef.current.browserTabs.open(tab.sessionId, path, { newTab });
+          return;
+        }
         const native = desktopHost();
         if (!native) throw new Error("当前环境无法安全打开外部链接。");
         void native

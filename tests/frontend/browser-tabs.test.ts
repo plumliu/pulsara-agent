@@ -1,0 +1,83 @@
+import { describe, expect, it, vi } from 'vitest';
+import { BrowserTabs, browserUrl, browserAddressUrl, type BrowserTabRecord, type BrowserTabSink } from '../../frontend/lib/browser-tabs';
+import type { BrowserEvent, BrowserState, DesktopBrowser } from '../../frontend/lib/desktop-host';
+const state = (tab: BrowserTabRecord, instanceId = crypto.randomUUID()): BrowserState => ({ instanceId, tabId: tab.id, sessionId: tab.sessionId, title: '', url: '', pendingUrl: null, loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false });
+function setup() {
+  let event!: (event: BrowserEvent) => void;
+  const sink: BrowserTabSink = { visibleSession: () => 'a', activeId: () => undefined, insert: vi.fn(), changed: vi.fn(), activate: vi.fn(), shortcut: vi.fn() };
+  const host: DesktopBrowser = { create: vi.fn(), command: vi.fn(async () => {}), close: vi.fn(async () => {}), forgetSession: vi.fn(async () => {}), clear: vi.fn(async () => {}), activate: vi.fn(async () => {}), layout: vi.fn(async () => {}), hide: vi.fn(async () => {}), onEvent: listener => { event = listener; return () => {}; } };
+  vi.mocked(host.create).mockImplementation(async ({sessionId, tabId}) => state({sessionId, id: tabId}));
+  const tabs = new BrowserTabs(host, sink); tabs.connect();
+  return {tabs, host, sink, event: (value: BrowserEvent) => event(value)};
+}
+const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+it.each([
+  [' example.com/path?q=one#two ', 'https://example.com/path?q=one#two'],
+  ['example.com:8080', 'https://example.com:8080/'],
+  ['localhost:3000/path', 'http://localhost:3000/path'],
+  ['localhost:443', 'http://localhost:443/'],
+  ['demo.localhost:3000', 'http://demo.localhost:3000/'],
+  ['127.0.0.1:8080', 'http://127.0.0.1:8080/'],
+  ['[::1]:8080', 'http://[::1]:8080/'],
+  ['http://example.com', 'http://example.com/'],
+  ['https://localhost:3000', 'https://localhost:3000/'],
+])('normalizes address input %s without changing explicit protocols or ports', (input, expected) => {
+  expect(browserAddressUrl(input)).toBe(expected);
+});
+it.each(['', '/Users/me/index.html', 'file:///tmp/a', 'javascript:alert(1)', 'javascript:123', 'tel:123', 'data:text/html,hello', 'https://me:secret@example.com', 'not a hostname'])('rejects invalid or privileged address input %s', input => {
+  expect(() => browserAddressUrl(input)).toThrow();
+});
+describe('browser resource ownership', () => {
+  it('matches only committed URLs in the same session, preferring the active exact match', async () => {
+    const {tabs, host, sink, event} = setup();
+    const first = tabs.open('a', 'https://example.com')!; await settle();
+    event({kind: 'state', state: {...first.state!, url:'https://example.com/'}});
+    expect(tabs.open('a', ' https://example.com/ ')).toBe(first);
+    const second = tabs.open('a', 'https://example.com/', {newTab:true})!; await settle();
+    event({kind:'state',state:{...second.state!,url:'https://example.com/'}});
+    sink.activeId = () => second.id;
+    expect(tabs.open('a', 'https://example.com')).toBe(second);
+    const other = tabs.open('b', 'https://example.com')!; expect(other.sessionId).toBe('b');
+    event({kind:'state',state:{...second.state!,pendingUrl:'https://other.test/',loading:true}});
+    expect(tabs.open('a','https://example.com')).toBe(first);
+    expect(host.create).toHaveBeenCalledTimes(3);
+  });
+  it('closes an exact late allocation after close, without navigating or recreating the tab', async () => {
+    const {tabs, host, sink} = setup();
+    let resolve!: (state: BrowserState) => void;
+    vi.mocked(host.create).mockImplementation(() => new Promise(done => {resolve=done;}));
+    const record = tabs.open('a','https://example.com')!;
+    tabs.close(record.id); resolve(state(record,'late')); await settle();
+    expect(host.close).toHaveBeenCalledWith('late'); expect(host.command).not.toHaveBeenCalled();
+    expect(tabs.records.size).toBe(0); expect(sink.insert).toHaveBeenCalledTimes(1);
+  });
+  it('uses the latest address during allocation, and ignores an older rejected navigation', async () => {
+    const {tabs,host} = setup(); let resolve!: (state:BrowserState)=>void;
+    vi.mocked(host.create).mockImplementation(() => new Promise(done=>{resolve=done;}));
+    const record=tabs.open('a','https://first.test')!;
+    await tabs.navigate(record,'https://second.test'); resolve(state(record)); await settle();
+    expect(host.create).toHaveBeenCalledTimes(1);
+    expect(host.command).toHaveBeenLastCalledWith(expect.objectContaining({url:'https://second.test/'}));
+    let reject!: (error:Error)=>void;
+    vi.mocked(host.command).mockImplementationOnce(()=>new Promise((_done,fail)=>{reject=fail;}));
+    const previous=tabs.navigate(record,'https://previous.test'); await tabs.navigate(record,'https://current.test');
+    reject(new Error('stale')); await previous; expect(record.error).toBeUndefined();
+  });
+  it('keeps hidden popup requests on their source and background requests do not activate', async () => {
+    const {tabs,host,sink,event}=setup(); const record=tabs.open('a','https://source.test')!; await settle();
+    sink.visibleSession=()=>'b'; event({kind:'popup',instanceId:record.state!.instanceId,sessionId:'a',url:'https://child.test/',disposition:'foreground-tab'});
+    expect(record.popup).toBe('https://child.test/'); expect(host.create).toHaveBeenCalledTimes(1);
+    sink.visibleSession=()=>'a'; event({kind:'popup',instanceId:record.state!.instanceId,sessionId:'a',url:'https://child.test/',disposition:'background-tab'});
+    expect(sink.insert).toHaveBeenLastCalledWith(expect.objectContaining({sessionId:'a'}),false);
+    tabs.close(record.id); event({kind:'popup',instanceId:record.state!.instanceId,sessionId:'a',url:'https://stale.test/',disposition:'foreground-tab'});
+    expect(host.create).toHaveBeenCalledTimes(2);
+  });
+  it('retires partitions even after every visible tab was already closed', async () => {
+    const {tabs,host}=setup(); const record=tabs.open('a')!; await settle(); tabs.close(record.id);
+    tabs.forgetSession('a'); tabs.clear(); expect(host.forgetSession).toHaveBeenCalledWith('a'); expect(host.clear).toHaveBeenCalledOnce();
+  });
+  it('does not infer schemes, credentials, or local-file navigation', () => {
+    for (const url of ['example.com','file:///tmp/test','javascript:alert(1)','https://user:password@example.com']) expect(()=>browserUrl(url)).toThrow();
+    expect(browserUrl('http://localhost:3000/path#part')).toBe('http://localhost:3000/path#part');
+  });
+});

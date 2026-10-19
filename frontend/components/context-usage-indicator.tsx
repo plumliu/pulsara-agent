@@ -66,7 +66,7 @@ export function ContextUsageIndicator({ sessionId, binding, revision, isRunning,
         placement: 'top-end', strategy: 'fixed',
         middleware: [offset(10), flip({ padding: 8 }), shift({ padding: 8, crossAxis: true })],
       }).then(({ x, y }) => {
-        if (!disposed) Object.assign(floating.style, { left: `${x}px`, top: `${y}px`, visibility: 'visible' });
+        if (!disposed) Object.assign(floating.style, { left: `${Math.max(8, Math.min(x, window.innerWidth - (parseFloat(document.documentElement.style.getPropertyValue('--browser-toast-right')) || 0) - floating.getBoundingClientRect().width - 8))}px`, top: `${y}px`, visibility: 'visible' });
       });
     };
     const cleanup = autoUpdate(reference, floating, update);

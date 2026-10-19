@@ -1,3 +1,4 @@
+import { useDesktopWorkspace } from './desktop-workspace';
 import { writeClipboardText } from '../lib/desktop-host';
 
 import { InlineVisualization, type InlineVisualizationContext } from './inline-visualization';
@@ -264,10 +265,19 @@ function ImageReference({ reference, title, children }: { reference: string; tit
 function MarkdownLink({ href = '', children, onNotify }: { href?: string; children?: ReactNode; onNotify: MarkdownNotify }) {
   const context = useContext(FileLinkContext);
   const assistantChat = useContext(AssistantChatContext);
+  const workspace = useDesktopWorkspace();
   const kind = classifyFileLink(href);
   const content = <MarkdownAnchorContext.Provider value={true}>{children}</MarkdownAnchorContext.Provider>;
   if (assistantChat && isCanonicalIdentity(href, 'image')) return <ImageReference reference={href} title={typeof children === 'string' ? children : '图片'}>{content}</ImageReference>;
-  if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer">{content}</a>;
+  if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer" onClick={event => {
+    if (!/^https?:/i.test(href)) return;
+    if (context?.basePreview) { event.preventDefault(); context.open(href, event.currentTarget, context.basePreview, event.metaKey || event.ctrlKey); }
+    else if (workspace?.visible && workspace.sessionId) {
+      event.preventDefault();
+      try { workspace.browserTabs.open(workspace.sessionId, href, { newTab: event.metaKey || event.ctrlKey }); }
+      catch (error) { onNotify('无法打开网页', String(error instanceof Error ? error.message : error), 'warning'); }
+    }
+  }}>{content}</a>;
   if (kind === 'anchor') return <a href={href} onClick={event=>{if(context?.basePreview){event.preventDefault();context.open(href,event.currentTarget,context.basePreview);}}}>{content}</a>;
   return <a href={kind === 'local' ? href : undefined} role="link" tabIndex={0}
     onClick={event => {

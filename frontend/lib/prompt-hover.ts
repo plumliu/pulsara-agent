@@ -15,7 +15,7 @@ export function usePromptHover<T extends HTMLElement = HTMLButtonElement, D exte
     keep();
     const rect = trigger.current?.getBoundingClientRect();
     if (!rect) return;
-    setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - maxWidth - 8)),
+    setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - (parseFloat(document.documentElement.style.getPropertyValue('--browser-toast-right')) || 0) - maxWidth - 8)),
       top: rect.top > 180 ? rect.top : rect.bottom, above: rect.top > 180 });
     onShow?.();
   };

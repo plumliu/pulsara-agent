@@ -8,6 +8,7 @@ import { BundledPostgres } from './postgres';
 import { PythonRuntime } from './runtime';
 import { UiPreferences } from './ui-preferences';
 import { cliLauncherScript, cliStatus, registerCli, type CliRegistration } from './cli-install';
+import { BrowserOwner } from './browser-owner';
 
 const resources = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', 'resources');
 function resolveHome(): string {
@@ -23,6 +24,7 @@ const uiPreferences = new UiPreferences(path.join(app.getPath('userData'), 'ui-p
 let window: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let origin: string | undefined;
+let browser: BrowserOwner | undefined;
 let starting: Promise<void> | undefined;
 let quitting = false;
 let quittingRequest = false;
@@ -39,7 +41,9 @@ const runtime = new PythonRuntime(resources, home, event => {
 
 function focusWindow() { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } }
 async function showStartup(error = '', phase = error ? 'failed' : 'starting') {
+  const retiring = browser?.retireHost();
   origin = undefined;
+  await retiring;
   await window?.loadFile(startupFile, {query: {error, phase}});
   focusWindow();
 }
@@ -120,7 +124,7 @@ async function requestQuit() {
       if (choice.response !== 1) return;
     }
     quitting = true;
-    await showStartup('正在停止并结算当前工作，请等待内核退出…', 'stopping');
+    await showStartup('正在停止并结算当前工作，等待内核退出…', 'stopping');
     await runtime.stop();
     if (starting) await starting;
     // If startup never owned a ready kernel and reused a database, don't stop another owner's instance.
@@ -143,6 +147,7 @@ else {
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
       trafficLightPosition: {x: 16, y: 16},
       webPreferences: {preload:path.join(__dirname,'preload.js'), sandbox:true, contextIsolation:true, nodeIntegration:false, webviewTag:false, navigateOnDragDrop:false}});
+    browser = new BrowserOwner(window, () => origin);
     window.webContents.setWindowOpenHandler(({url}) => {
       if (/^https?:\/\//i.test(url)) void dialog.showMessageBox(window!, {message:'在默认浏览器中打开链接？', detail:url, buttons:['取消','打开'], defaultId:0,cancelId:0}).then(choice => {if(choice.response===1) void shell.openExternal(url);});
       return {action:'deny'};
@@ -173,6 +178,14 @@ else {
     handle('retry',()=>boot(),true); handle('logs',()=>shell.openPath(path.join(home,'desktop')),true);
     handle('reset-database',()=>resetDatabase(),true);
     handle('read-ui-preferences', () => uiPreferences.read());
+    handle('browser-create', value => browser!.create(value));
+    handle('browser-command', value => browser!.command(value));
+    handle('browser-close', value => browser!.close(value));
+    handle('browser-forget-session', value => browser!.forgetSession(value));
+    handle('browser-clear', () => browser!.clear());
+    handle('browser-activate', value => browser!.activate(value));
+    handle('browser-layout', value => browser!.layout(value));
+    handle('browser-hide', value => browser!.hide(value));
     handle('write-ui-preference', value => uiPreferences.write(value));
     handle('cli-status',async()=>{ await cliRegistrationPending; return cliStatus(cliRegistration()); });
     handle('repair-cli',value=>{ if (typeof value !== 'boolean') throw new Error('无效的命令行入口操作。'); return ensureCli(value); });

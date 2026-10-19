@@ -1,7 +1,25 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import type { BrowserCommand, BrowserEvent, BrowserHide, BrowserLayout, BrowserPresentation, DesktopBrowser } from './browser-contract';
+
+const browser: DesktopBrowser = {
+  create: (input: { sessionId: string; tabId: string }) => ipcRenderer.invoke('desktop:browser-create', input),
+  command: (input: BrowserCommand) => ipcRenderer.invoke('desktop:browser-command', input),
+  close: (instanceId: string) => ipcRenderer.invoke('desktop:browser-close', instanceId),
+  forgetSession: (sessionId: string) => ipcRenderer.invoke('desktop:browser-forget-session', sessionId),
+  clear: () => ipcRenderer.invoke('desktop:browser-clear'),
+  activate: (input: BrowserPresentation) => ipcRenderer.invoke('desktop:browser-activate', input),
+  layout: (input: BrowserLayout) => ipcRenderer.invoke('desktop:browser-layout', input),
+  hide: (input: BrowserHide) => ipcRenderer.invoke('desktop:browser-hide', input),
+  onEvent: (listener: (event: BrowserEvent) => void) => {
+    const receive = (_event: Electron.IpcRendererEvent, value: BrowserEvent) => listener(value);
+    ipcRenderer.on('desktop:browser-event', receive);
+    return () => { ipcRenderer.removeListener('desktop:browser-event', receive); };
+  },
+};
 
 // No Node primitives or generic IPC channel are exposed. Main validates frame and origin too.
 if (process.isMainFrame) contextBridge.exposeInMainWorld('pulsaraDesktop', {
+  browser,
   platform: process.platform,
   readUiPreferences: () => ipcRenderer.invoke('desktop:read-ui-preferences'),
   writeUiPreference: (value: {key: string; value: string | null}) => ipcRenderer.invoke('desktop:write-ui-preference', value),

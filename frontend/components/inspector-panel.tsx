@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ExternalLink,
   FolderCog,
+  Globe,
   Info,
   ListChecks,
   LoaderCircle,
@@ -16,7 +17,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { useContext, useEffect, useId, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import { McpEditor } from './mcp-editor';
 import { McpImporter } from './mcp-importer';
 import { SkillImporter } from './skill-importer';
@@ -276,7 +277,7 @@ function ProjectCapabilityPanel({
   onOpenHomeSettings,
 }: {
   onNotify: MarkdownNotify;
-  onOpenMcp?: (server: McpServerCapability) => void;
+  onOpenMcp: (server: McpServerCapability) => void;
   selectedMcpId?: string;
   canControl: boolean;
   mcpForms: ProjectMcpForms;
@@ -300,11 +301,10 @@ function ProjectCapabilityPanel({
   onRemoveSkill: (skill: SkillCapability) => Promise<void>;
 }) {
   const fileLink = useContext(FileLinkContext);
-  const [expandedMcp, setExpandedMcp] = useState<string>();
   const [editingMcp, setEditingMcp] = useState<McpServerCapability>();
   const [importingMcp, setImportingMcp] = useState(false);
   const [removingSkill, setRemovingSkill] = useState<string>();
-  const [inheritedExpanded, setInheritedExpanded] = useState(Boolean(selectedMcpId));
+  const [inheritedExpanded, setInheritedExpanded] = useState(false);
   const [dialogKind, setDialogKind] = useState<ProjectCapabilityKind>();
   const [dialogOpener, setDialogOpener] = useState<HTMLButtonElement | null>(null);
   const [previousCanControl, setPreviousCanControl] = useState(canControl);
@@ -332,6 +332,30 @@ function ProjectCapabilityPanel({
       ...servers.filter((server) => server.hasFailure).map((server) => `${server.name}：${mcpFailureReason(server.failureCategory)}`),
     ];
 
+  const openMcpDetail = (server: McpServerCapability, source: HTMLButtonElement) => {
+    if (!document.startViewTransition) {
+      onOpenMcp(server);
+      return;
+    }
+    const summary = source.closest<HTMLElement>('.project-capability-row__summary')!;
+    const card = source.closest<HTMLElement>('.project-capability-row')!;
+    const overview = source.closest<HTMLElement>('.project-capability-panel')!;
+    // Only a user click has a source card. Direct tab opens need no shared-element transition.
+    summary.style.viewTransitionName = 'mcp-connection';
+    card.style.viewTransitionName = 'mcp-card';
+    overview.style.viewTransitionName = 'mcp-overview';
+    const transition = document.startViewTransition({
+      types: ['mcp-detail'],
+      update: () => flushSync(() => onOpenMcp(server)),
+    });
+    void transition.ready.catch(() => undefined);
+    void transition.finished.finally(() => {
+      summary.style.removeProperty('view-transition-name');
+      card.style.removeProperty('view-transition-name');
+      overview.style.removeProperty('view-transition-name');
+    }).catch(() => undefined);
+  };
+
   const renderSkill = (skill: SkillCapability) => (
     <article className={`project-capability-row${skill.enabled ? '' : ' is-disabled'}`} key={`${skill.source}:${skill.id}:${skill.path}`}>
       <span className="project-capability-row__icon"><Wrench size={13} /></span>
@@ -349,25 +373,25 @@ function ProjectCapabilityPanel({
   );
 
   const renderMcp = (server: McpServerCapability) => {
-    const expanded = Boolean(selectedMcpId) || expandedMcp === `${server.source}:${server.id}`;
     const rowKey = `${server.source}:${server.id}`;
     const status = server.needsApproval ? '需要确认' : mcpStatusLabels[server.status];
     return (
-      <article className={`project-capability-row project-capability-row--mcp${server.enabled ? '' : ' is-disabled'}${expanded ? ' is-expanded' : ''}`} key={rowKey}>
+      <article className={`project-capability-row project-capability-row--mcp${server.enabled ? '' : ' is-disabled'}${selectedMcpId ? ' project-mcp-detail' : ''}`} key={rowKey}>
         <div className="project-capability-row__summary">
-          <button className="project-capability-row__identity" type="button" onClick={() => onOpenMcp && !selectedMcpId ? onOpenMcp(server) : setExpandedMcp(expanded ? undefined : rowKey)}>
+          {selectedMcpId ? <div className="project-capability-row__identity">
             <span className="project-capability-row__icon"><Server size={13} /></span>
             <span className="project-capability-row__copy"><strong>{server.name}</strong><small>{status}{server.toolCount ? ` · ${server.toolCount} 个工具` : ''}</small></span>
-          </button>
+          </div> : <button className="project-capability-row__identity" type="button" onClick={event => openMcpDetail(server, event.currentTarget)}>
+            <span className="project-capability-row__icon"><Server size={13} /></span>
+            <span className="project-capability-row__copy"><strong>{server.name}</strong><small>{status}{server.toolCount ? ` · ${server.toolCount} 个工具` : ''}</small></span>
+          </button>}
           {server.editable ? (
             <CapabilitySwitch checked={server.enabled} disabled={!canControl || Boolean(busy)} label={`${server.enabled ? '关闭' : '开启'} ${server.name}`} onChange={(enabled) => void onToggleMcp(server, enabled)} />
           ) : (
             <span className="project-capability-row__source">{capabilitySourceLabels[server.source]}</span>
           )}
-          <button className="project-capability-row__expand" type="button" aria-label={expanded ? '收起详情' : '展开详情'} onClick={() => setExpandedMcp(expanded ? undefined : rowKey)}><ChevronDown size={12} /></button>
         </div>
-        <AnimatedDisclosure open={expanded} className="project-capability-row__detail-disclosure">
-          <div className="project-capability-row__detail">
+        {selectedMcpId && <div className="project-capability-row__detail">
             {server.transport && <p><code>{server.transport.kind === 'stdio' ? '本地命令' : 'HTTP'}</code><span className="project-capability-row__transport">{server.transport.detail}</span></p>}
             {server.availableToSubagents && <small><Bot size={11} /> 子代理也可使用</small>}
             {server.hasFailure && <small><AlertTriangle size={11} /> {mcpFailureReason(server.failureCategory)}</small>}
@@ -380,15 +404,14 @@ function ProjectCapabilityPanel({
               {server.effective && server.status !== 'disabled' && <button type="button" disabled={!canControl || Boolean(busy)} onClick={() => void onReconnectMcp(server)}><RefreshCw size={11} /> 重新连接</button>}
               {server.editable && <button className="is-danger" type="button" disabled={!canControl || Boolean(busy)} onClick={() => void onRemoveMcp(server)}><Trash2 size={11} /> 移除</button>}
             </footer>
-          </div>
-        </AnimatedDisclosure>
+        </div>}
       </article>
     );
   };
 
   return (
     <div className="project-capability-panel" aria-busy={loading}>
-      <section className="inspector-section project-capability-overview">
+      {!selectedMcpId && <section className="inspector-section project-capability-overview">
         <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{kind === 'skills' && <SkillPrecedenceInfo onOpenHomeSettings={onOpenHomeSettings} />}{loading && !snapshot && <small><LoaderCircle size={10} /> 正在同步</small>}</div>
         <p>这里的修改会应用到同一目录的所有会话。</p>
         {snapshot?.adoption.attention && !snapshot.adoption.pending && (
@@ -419,20 +442,21 @@ function ProjectCapabilityPanel({
             ><Plus size={12} /> 添加</button>
           </div>
         </div>
-      </section>
+      </section>}
 
       {error && <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>没有读完整</strong><small>{error}</small></span><button onClick={onRetry}><RefreshCw size={11} /> 重试</button></div>}
-      {!error && capabilityAttention.length > 0 && (
+      {!selectedMcpId && !error && capabilityAttention.length > 0 && (
         <div className="task-inventory-notice task-inventory-notice--error">
           <AlertTriangle size={15} />
           <span><strong>有 {capabilityAttention.length} 项需要留意</strong><small>{capabilityAttention.join('；')}</small></span>
         </div>
       )}
-      {!error && loading && !snapshot && <div className="task-inventory-notice"><LoaderCircle size={15} /><span><strong>正在读取项目能力</strong><small>整理这个目录中的技能和连接…</small></span></div>}
+      {!error && loading && !snapshot && <div className="task-inventory-notice"><LoaderCircle size={15} /><span><strong>{selectedMcpId ? '正在读取 MCP 连接' : '正在读取项目能力'}</strong>{!selectedMcpId && <small>整理这个目录中的技能和连接…</small>}</span></div>}
       {!loading && !error && selectedMcpId && !servers.length && <div className="inspector-empty" role="status">此 MCP 连接已不可用。标签保留原连接身份。</div>}
       {!selectedMcpId && (!loading || snapshot) && !error && rows === 0 && (kind !== 'skills' || snapshot?.skills.status !== 'attention') && <div className="inspector-empty"><Blocks size={18} /><span>这个目录还没有{kind === 'skills' ? '技能' : ' MCP'}</span></div>}
 
-      {snapshot && rows > 0 && (
+      {selectedMcpId && servers.length > 0 && <section className="inspector-section project-mcp-detail-panel">{servers.map(renderMcp)}</section>}
+      {!selectedMcpId && snapshot && rows > 0 && (
         <section className="inspector-section project-capability-list">
           {(kind === 'skills' ? projectSkills : projectMcp).length > 0 && (
             <div className="project-capability-group"><header><FolderCog size={11} /><span>从目录中加载</span></header>{kind === 'skills' ? projectSkills.map(renderSkill) : projectMcp.map(renderMcp)}</div>
@@ -576,6 +600,7 @@ export function InspectorPanel({
     <button type="button" aria-label="项目能力" title="项目能力" onClick={() => open('capabilities', '会话能力')}><Blocks size={13} />能力</button>
     <button type="button" title="任务" className={workspace?.tabs.find(tab => tab.id === workspace.activeId)?.kind === "tasks" ? "is-active" : undefined} onClick={() => open('tasks', '任务')}><ListChecks size={13} />任务</button>
     <button type="button" title="后台进程" onClick={() => open('background', '后台进程')}><TerminalSquare size={13} />后台进程</button>
+    <button type="button" title="新建网页" aria-label="新建网页" disabled={!session.id} onClick={() => workspace?.browserTabs.open(session.id)}><Globe size={13} />新建网页</button>
   </nav>} />;
 }
 

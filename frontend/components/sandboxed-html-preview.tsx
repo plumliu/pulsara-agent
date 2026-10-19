@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -81,7 +82,7 @@ addEventListener('message',event=>{
   }
   if(event.source!==frame.contentWindow || !event.data || typeof event.data!=='object')return;
   const d=event.data;
-  if(${JSON.stringify(local)} && d.token===${JSON.stringify(token)} && ['pulsara-preview-navigation','pulsara-preview-title','pulsara-preview-position'].includes(d.type)){parent.postMessage(d,'*');return;}
+  if(${JSON.stringify(local)} && d.token===${JSON.stringify(token)} && ['pulsara-preview-navigation','pulsara-preview-title','pulsara-preview-position'].includes(d.type)){parent.postMessage({...d,pulsaraUserActivated:navigator.userActivation?.isActive===true},'*');return;}
   if(d.type==='pulsara-snapshot-target-unavailable')report(d.type);
   if(d.type==='pulsara-visualization-environment-ready')sendEnvironment();
   if(d.type==='pulsara-preview-error')report(d.type);
@@ -127,6 +128,7 @@ export function SandboxedHtmlPreview({
   position?: { top: number; left: number };
   anchor?: string;
 }) {
+  const [pendingWebpage, setPendingWebpage] = useState<{ href: string; newTab: boolean }>();
   const [blockedSnapshot, setBlockedSnapshot] = useState(false);
   const ownRef = useRef<HTMLIFrameElement>(null);
   const ref = frameRef ?? ownRef;
@@ -162,7 +164,7 @@ export function SandboxedHtmlPreview({
       ),
     [html, url, measure, allowTextSelection, initialEnvironment],
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== ref.current?.contentWindow) return;
       if (
@@ -173,8 +175,17 @@ export function SandboxedHtmlPreview({
         if (
           event.data.type === "pulsara-preview-navigation" &&
           typeof event.data.href === "string"
-        )
-          onNavigation?.(event.data.href, event.data.newTab === true);
+        ) {
+          let target: URL;
+          try { target = new URL(event.data.href, new URL(url, window.location.origin)); } catch { return; }
+          if (['http:', 'https:'].includes(target.protocol) && target.origin !== window.location.origin) {
+            const box = ref.current?.getBoundingClientRect();
+            const visible = box && box.width > 0 && box.height > 0 && box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth && !ref.current?.closest('[inert]') && getComputedStyle(ref.current!).visibility !== 'hidden';
+            // Source+token authenticate the document, never its claimed userGesture.
+            if (visible && event.data.pulsaraUserActivated === true) onNavigation?.(target.href, event.data.newTab === true);
+            else setPendingWebpage({ href: target.href, newTab: event.data.newTab === true });
+          } else onNavigation?.(event.data.href, event.data.newTab === true);
+        }
         if (
           event.data.type === "pulsara-preview-title" &&
           typeof event.data.title === "string"
@@ -216,8 +227,10 @@ export function SandboxedHtmlPreview({
         "*",
       );
   }, [anchor, ref]);
+  useEffect(() => { setPendingWebpage(undefined); }, [url]);
   return (
     <>
+      {pendingWebpage && <div className="file-preview-html-status"><span>{pendingWebpage.href}</span> <button type="button" onClick={() => { onNavigation?.(pendingWebpage.href, pendingWebpage.newTab); setPendingWebpage(undefined); }}>打开网页</button></div>}
       {blockedSnapshot && (
         <div role="status" className="file-preview-html-status">
           此快照未包含目标文档

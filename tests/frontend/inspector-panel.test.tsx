@@ -268,8 +268,8 @@ describe('InspectorPanel PR03 production navigation', () => {
     render(<Panel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
 
     const navigation = screen.getByRole('navigation', { name: '工作区入口' });
-    expect(within(navigation).getAllByRole('button').map((button) => button.textContent?.trim())).toEqual([
-      '能力', '任务', '后台进程',
+    expect(within(navigation).getAllByRole('button').map((button) => button.textContent?.trim() || button.getAttribute('aria-label'))).toEqual([
+      '能力', '任务', '后台进程', '新建网页',
     ]);
     expect(screen.queryAllByRole('tab')).toHaveLength(0);
     fireEvent.click(within(navigation).getByRole('button', { name: '项目能力' }));
@@ -307,7 +307,7 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(within(actions).getAllByRole('button')[0].className).toBe(within(actions).getAllByRole('button')[1].className);
   });
 
-  it('animates inherited capabilities and nested MCP details without unmounting on collapse', () => {
+  it('animates the inherited list and opens MCP details in a separate flat tab', () => {
     const view = render(<Panel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
     fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
     fireEvent.click(screen.getByRole('tab', { name: 'MCP 2' }));
@@ -320,20 +320,19 @@ describe('InspectorPanel PR03 production navigation', () => {
     fireEvent.click(inheritedToggle);
     expect(inheritedDisclosure.classList.contains('is-open')).toBe(true);
     const mcpRow = screen.getByText('用户 MCP').closest('.project-capability-row')!;
-    const detailDisclosure = mcpRow.querySelector('.project-capability-row__detail-disclosure')!;
-    expect(detailDisclosure.classList.contains('is-open')).toBe(false);
-
-    fireEvent.click(within(mcpRow as HTMLElement).getByRole('button', { name: '展开详情' }));
-    expect(detailDisclosure.classList.contains('is-open')).toBe(true);
-    expect(mcpRow.querySelector('.project-capability-row__detail')).toBeTruthy();
-
-    fireEvent.click(within(mcpRow as HTMLElement).getByRole('button', { name: '收起详情' }));
-    expect(detailDisclosure.classList.contains('is-open')).toBe(false);
-    expect(mcpRow.querySelector('.project-capability-row__detail')).toBeTruthy();
+    expect(mcpRow.querySelector('.project-capability-row__detail')).toBeNull();
+    expect(within(mcpRow as HTMLElement).queryByRole('button', { name: '展开详情' })).toBeNull();
 
     fireEvent.click(inheritedToggle);
     expect(inheritedDisclosure.classList.contains('is-open')).toBe(false);
-    expect(view.container.querySelector('.project-capability-row__detail')).toBeTruthy();
+    expect(view.container.querySelector('.project-capability-group__items')).toBeTruthy();
+    fireEvent.click(inheritedToggle);
+    fireEvent.click(within(mcpRow as HTMLElement).getByRole('button', { name: /用户 MCP/ }));
+    expect(screen.getByRole('tab', { name: '用户 MCP' })).toBeTruthy();
+    expect(screen.queryByRole('tablist', { name: '能力类型' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /继承的能力/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: '收起详情' })).toBeNull();
+    expect(view.container.querySelector('.project-mcp-detail .project-capability-row__detail')).toBeTruthy();
   });
 });
 
@@ -342,8 +341,18 @@ it('keeps the original MCP identity unavailable after removal or Host replacemen
   const view = render(<Panel {...base} />);
   fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
   fireEvent.click(screen.getByRole('tab', { name: 'MCP 2' }));
-  fireEvent.click(screen.getByRole('button', { name: /工作区 MCP/ }));
+  fireEvent.click(screen.getByRole('button', { name: /^工作区 MCP/ }));
   expect(screen.getByRole('tab', { name: '工作区 MCP' })).toBeTruthy();
+  expect(base.onReconnectProjectMcp).not.toHaveBeenCalled();
+  expect(screen.queryByRole('tablist', { name: '能力类型' })).toBeNull();
+  expect(screen.queryByRole('group', { name: '能力操作' })).toBeNull();
+  expect(screen.queryByText('从目录中加载')).toBeNull();
+  expect(screen.queryByRole('button', { name: '收起详情' })).toBeNull();
+  expect(screen.getByRole('button', { name: '重新连接' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '移除' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('tab', { name: '会话能力' }));
+  fireEvent.click(screen.getByRole('button', { name: /^工作区 MCP/ }));
+  expect(screen.getAllByRole('tab', { name: '工作区 MCP' })).toHaveLength(1);
   expect(base.onReconnectProjectMcp).not.toHaveBeenCalled();
   view.rerender(<Panel {...base} capabilities={{...capabilitySnapshot, mcp: {...capabilitySnapshot.mcp, servers: []}}} />);
   expect(screen.getByText('此 MCP 连接已不可用。标签保留原连接身份。')).toBeTruthy();

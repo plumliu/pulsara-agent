@@ -178,7 +178,7 @@
 .inline-visualization { --visualization-height: min(120dvh, 1200px); margin: 18px 0; font-family: var(--sans); user-select: none; }
 .inline-visualization__layout { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "chart"; position: relative; inset: auto; margin: 0; padding: 0; width: 100%; max-width: none; max-height: none; border: 0; overflow: visible; background: transparent; color: var(--ink); }
 /* The invisible reference probe must not extend the conversation scroll range. */
-.inline-visualization__page { position: relative; min-width: 0; overflow: clip; }
+.inline-visualization__page { position: relative; min-width: 0; overflow: clip; border-radius: 12px; }
 .inline-visualization__controls { grid-area: controls; display: flex; align-items: flex-start; gap: 12px; min-width: 0; margin-top: 8px; }
 .inline-visualization__layout.has-thumbnails { grid-template-areas: "chart" "controls"; }
 .inline-visualization__zoom-anchor { position: absolute; top: 0; left: 0; width: 100%; height: 0; }
@@ -195,7 +195,7 @@
 .inline-visualization__stage { position: relative; min-height: 46px; overflow: clip; display: grid; place-items: start; }
 .inline-visualization__stage[data-visualization-compact="true"] { min-height: 0; }
 /* Crop windows must not scroll on focus/scrollIntoView; the inner document owns scrolling. */
-.inline-visualization__crop { position: relative; width: 100%; height: 100%; overflow: clip; }
+.inline-visualization__crop { position: relative; width: 100%; height: 100%; overflow: clip; border-radius: 12px; }
 .inline-visualization__crop iframe { position: absolute; inset: 0 auto auto 0; display: block; max-width: none; border: 0; }
 .inline-visualization__status { box-sizing: border-box; width: 100%; min-height: 104px; padding: 20px; display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-deep); color: var(--muted); text-align: left; }
 .inline-visualization__status-icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 8px; background: var(--paper-solid); }
@@ -912,6 +912,7 @@
 .saved-image { display: block; width: 100%; }
 .saved-image__open { display: block; width: 100%; border: 0; padding: 0; cursor: zoom-in; background: transparent; }
 .saved-image__open img { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; }
+.inline-visualization__page .saved-image__open img { border-radius: 12px; }
 .saved-image-reference { display: inline; }
 
 /* Code expansion shares the disclosure cadence; existing viewport bounds stay unchanged. */

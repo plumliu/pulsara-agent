@@ -12,7 +12,8 @@
     "test": "npm run build && node --test dist/*.test.js",
     "prepare:resources": "../.venv/bin/python scripts/prepare_resources.py",
     "package:dir": "node scripts/linux-hooks.cjs && npm run build && electron-builder --dir",
-    "package": "node scripts/linux-hooks.cjs && npm run build && electron-builder"
+    "package": "node scripts/linux-hooks.cjs && npm run build && electron-builder",
+    "test:browser": "npm run build && electron scripts/browser-owner-smoke.cjs"
   },
   "devDependencies": {
     "@types/node": "22.19.19",

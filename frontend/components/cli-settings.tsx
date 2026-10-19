@@ -41,7 +41,7 @@ export function CliSettings() {
     </div>
     {status && <input className="settings-readonly-path settings-cli-path" aria-label="命令行路径" disabled value={status.existingTarget ?? status.path} title={status.existingTarget ?? status.path} />}
     {status?.managedBy === 'package' && status.state !== 'ready' && status.state !== 'conflict' && <small className="settings-cli-notice">入口由 deb 管理，请处理同名冲突后重新安装 Pulsara。</small>}
-    {status?.state === 'ready' && (status.shadowedBy || !status.directoryOnPath) && <small className="settings-cli-notice">{status.shadowedBy ? `当前 PATH 优先使用 ${status.shadowedBy}。` : `请将 ${status.path.slice(0, status.path.lastIndexOf('/'))} 加入终端 PATH。`}用 <code>command -v pulsara</code> 核对。</small>}
+    {status?.state === 'ready' && status.shadowedBy && <small className="settings-cli-notice">应用环境中的同名命令：<code>{status.shadowedBy}</code>。终端环境可能不同，可运行 <code>command -v pulsara</code> 查看实际入口。</small>}
     {(error || status?.message) && <small role="alert" className="settings-cli-notice">{error || status?.message}</small>}
     </div>
     {status?.state === 'conflict' && <div id={detailsId}>

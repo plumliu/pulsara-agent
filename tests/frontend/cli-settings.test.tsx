@@ -4,7 +4,7 @@ import { CliSettings } from '../../frontend/components/cli-settings';
 import type { CliStatus, PulsaraDesktop } from '../../frontend/lib/desktop-host';
 
 afterEach(() => { cleanup(); delete window.pulsaraDesktop; });
-const conflict: CliStatus = { state:'conflict', path:'/home/me/.local/bin/pulsara', existingTarget:'/uv/pulsara', managedBy:'application', directoryOnPath:false };
+const conflict: CliStatus = { state:'conflict', path:'/home/me/.local/bin/pulsara', existingTarget:'/uv/pulsara', managedBy:'application' };
 it('inspects on opening and replaces only after the explicit action', async () => {
   const cliStatus=vi.fn().mockResolvedValue(conflict), repairCli=vi.fn().mockResolvedValue({...conflict,state:'ready'});
   window.pulsaraDesktop={cliStatus,repairCli} as unknown as PulsaraDesktop;
@@ -32,4 +32,18 @@ it('keeps system package repair with the package manager', async () => {
   fireEvent.click(await screen.findByRole('button', {name:'已有同名命令'}));
   expect(screen.getByText('处理同名冲突后，通过 deb 重新安装 Pulsara。')).toBeTruthy();
   expect(screen.queryByRole('button',{name:'重置入口'})).toBeNull();
+});
+
+it('does not infer a terminal PATH problem from a registered app entry', async () => {
+  window.pulsaraDesktop={cliStatus:vi.fn().mockResolvedValue({state:'ready',path:conflict.path,managedBy:'application'})} as unknown as PulsaraDesktop;
+  const {container}=render(<CliSettings/>);
+  await screen.findByText('使用 pulsara 命令打开或管理应用。');
+  expect(container.querySelector('.settings-cli-notice')).toBeNull();
+});
+
+it('scopes a different PATH command to the app environment', async () => {
+  window.pulsaraDesktop={cliStatus:vi.fn().mockResolvedValue({state:'ready',path:conflict.path,managedBy:'application',shadowedBy:'/other/pulsara'})} as unknown as PulsaraDesktop;
+  const {container}=render(<CliSettings/>);
+  await screen.findByText('使用 pulsara 命令打开或管理应用。');
+  expect(container.querySelector('.settings-cli-notice')?.textContent).toBe('应用环境中的同名命令：/other/pulsara。终端环境可能不同，可运行 command -v pulsara 查看实际入口。');
 });
