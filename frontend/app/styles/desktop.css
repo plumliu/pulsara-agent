@@ -65,7 +65,7 @@
 .desktop-shell .thread-column .assistant-heading > .assistant-avatar { position: absolute; left: -40px; top: 0; }
 .desktop-shell .thread-column .user-heading { position: relative; min-height: 31px; margin-right: 0; }
 .desktop-shell .thread-column .user-heading > .person-avatar { position: absolute; right: -40px; top: 50%; transform: translateY(-50%); }
-.desktop-shell .thread-column :is(.assistant-copy, .reasoning-disclosure, .conversation-run__toggle, .assistant-progress, .conversation-interruption, .user-steer, .subagent-completion-event) { margin-left: 0; }
+.desktop-shell .thread-column :is(.assistant-copy, .reasoning-disclosure, .conversation-run__toggle, .assistant-progress, .conversation-interruption, .subagent-completion-event) { margin-left: 0; }
 .desktop-shell .thread-column .subagent-completion-event { width: min(520px, 100%); }
 .desktop-shell .thread-column .execution-rail { margin-left: 14px; }
 

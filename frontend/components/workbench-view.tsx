@@ -37,6 +37,7 @@ import {
   Clock3,
   Copy,
   CornerDownRight,
+  CornerDownLeft,
   FileDiff,
   FileText,
   FileSearch,
@@ -1058,18 +1059,13 @@ function UserMessage({
   }
 
   if (message.userKind === 'steer') {
-    const renderSteer = (body: ReactNode) => (
-      <article className="user-steer" aria-label="引导">
-        <span className="user-steer__icon"><CornerDownRight size={13} /></span>
-        <div className="user-steer__content">
-          <header><strong>引导</strong><time>{message.time}</time></header>
-          {body}
-        </div>
-      </article>
-    );
-    return content ? <div className="user-steer-turn"><PromptContentView content={content} variant="message"
-      onReadImage={onReadPromptImage} renderMessageBody={renderSteer} /></div>
-      : renderSteer(<p style={sourceTextStyle}>{message.body}</p>);
+    const renderSteerBubble = (body: ReactNode) => body ? <div className="user-message">{body}</div> : null;
+    return <article className="user-turn user-steer" aria-label="引导">
+      <header className="user-steer__heading"><strong>引导</strong><CornerDownLeft size={13} aria-hidden="true" /></header>
+      {content ? <PromptContentView content={content} variant="message"
+        onReadImage={onReadPromptImage} renderMessageBody={renderSteerBubble} />
+        : renderSteerBubble(<p style={sourceTextStyle}>{message.body}</p>)}
+    </article>;
   }
 
   const renderBubble = (body: ReactNode) => body ? <div className="user-message">{body}</div> : null;
