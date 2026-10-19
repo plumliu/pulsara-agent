@@ -24,7 +24,7 @@ describe('Plugin connection editor', () => {
     fireEvent.click(screen.getByText('插件默认连接（只读）'));
     fireEvent.click(screen.getByRole('button', {name: '恢复插件默认连接'}));
     expect(save).not.toHaveBeenCalled();
-    expect(screen.getByText(/恢复上方默认目的地和认证设置/)).toBeTruthy();
+    expect(screen.getByText(/恢复默认连接后，不再使用的本机凭据和授权也会清除/)).toBeTruthy();
     expect(document.body.textContent).toContain('https://default.example/mcp');
     fireEvent.click(screen.getByRole('button', {name: '确认恢复默认连接'}));
     await waitFor(() => expect(save).toHaveBeenCalledWith({overlay: null, secretChanges: []}));

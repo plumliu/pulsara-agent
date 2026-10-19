@@ -18,7 +18,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from aiohttp import web
 import httpx2
+import mcp_types as types
 from mcp.client.auth.oauth2 import OAuthClientProvider, OAuthContext
+from mcp_types.version import LATEST_MODERN_VERSION
 from pydantic import PrivateAttr
 from mcp.shared.auth import (
     AuthorizationCodeResult,
@@ -30,9 +32,11 @@ from mcp.shared.auth import (
 )
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 
+from pulsara_agent import __version__
 from pulsara_agent.capability.mcp_management import auth_to_entry
 from pulsara_agent.mcp_config import (
     McpServerConfig,
+    McpTransportKind,
     OAuthAuthorization,
     StdioTransportConfig,
     StreamableHttpTransportConfig,
@@ -83,9 +87,12 @@ class McpOAuthLogin:
     config: McpServerConfig
     current_target: Callable[[], McpServerConfig | None] = field(repr=False)
     task: asyncio.Task[LocalMcpOAuthRecord] | None = field(default=None, repr=False)
+    retiring: asyncio.Task | None = field(default=None, repr=False)
     authorization_url: str | None = field(default=None, repr=False)
     state: str = "connecting"
     error: str | None = None
+    settled: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    listener: web.AppRunner | None = field(default=None, repr=False)
 
 
 class _DraftTokenStorage:
@@ -147,6 +154,24 @@ class _ConfiguredOAuthProvider(OAuthClientProvider):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundAuthorization:
+    manager: McpOAuthManager
+    owner: McpCredentialOwner
+    config: McpServerConfig
+    current_target: Callable[[], McpServerConfig | None] = field(repr=False)
+
+    async def __call__(self):
+        return await self.manager.authorization(
+            self.owner, self.config, self.current_target
+        )
+
+    def rejection_observer(self, authorization):
+        return self.manager._rejection_observer(
+            self.owner, self.config, self.current_target, authorization
+        )
+
+
 class McpOAuthManager:
     def __init__(
         self,
@@ -161,6 +186,9 @@ class McpOAuthManager:
         self.credential_boundary = credential_boundary
         self.open_browser = open_browser
         self._logins: dict[McpCredentialOwner, McpOAuthLogin] = {}
+        # A live HTTP rejection is advisory execution knowledge, not saved state.
+        # Keep the complete existing grant so late responses cannot reject a replacement.
+        self._rejected: dict[McpCredentialOwner, LocalMcpOAuthRecord] = {}
         self._refreshes: dict[
             McpCredentialOwner, asyncio.Task[LocalMcpOAuthRecord]
         ] = {}
@@ -169,22 +197,68 @@ class McpOAuthManager:
         self, owner: McpCredentialOwner, config=None
     ) -> dict[str, str | None]:
         flow = self._logins.get(owner)
-        if flow is None:
-            record = self.settings.read().mcp_authorization(owner)
-            if record is not None and (config is None or self._matches(record, config)):
-                token = OAuthToken.model_validate_json(record.token_json)
-                expired = record.expires_at is not None and record.expires_at <= time()
-                return {
-                    "state": "needs_login"
-                    if expired and not token.refresh_token
-                    else "authorized",
-                    "error": None,
-                }
+        if flow is not None:
+            try:
+                current = flow.current_target()
+            except Exception:
+                current = None
+            if config is None:
+                config = current
+                if config is None:
+                    return {"state": "idle", "error": None}
+            if current != flow.config or config != flow.config:
+                flow = None
+        if flow is not None and flow.state in {"connecting", "awaiting_user"}:
+            return {"state": flow.state, "error": flow.error}
+        record = self.settings.read().mcp_authorization(owner)
+        if record is not None and (config is None or self._matches(record, config)):
+            token = OAuthToken.model_validate_json(record.token_json)
+            expired = record.expires_at is not None and record.expires_at <= time()
+            if self._rejected.get(owner) == record or (expired and not token.refresh_token):
+                return {"state": "needs_login", "error": flow.error if flow else None}
+            if flow is None or flow.state == "authorized":
+                return {"state": "authorized", "error": None}
         return (
             {"state": flow.state, "error": flow.error}
-            if flow
+            if flow is not None and flow.state != "authorized"
             else {"state": "idle", "error": None}
         )
+
+    def bind(self, owner, config, current_target):
+        return _BoundAuthorization(self, owner, config, current_target)
+
+    def _rejection_observer(self, owner, config, current_target, authorization):
+        record = self.settings.read().mcp_authorization(owner)
+        matches = self._matches(record, config) and authorization == (
+            f"Bearer {OAuthToken.model_validate_json(record.token_json).access_token}"
+        )
+
+        def observe():
+            if not matches:
+                return
+            if self.settings.read().mcp_authorization(owner) != record:
+                return
+            try:
+                if current_target() != config:
+                    return
+            except Exception:
+                return
+            self._rejected[owner] = record
+
+        return observe
+
+    def completed_login_state(self, owner: McpCredentialOwner, config_identity: str):
+        """Read current login state while the completed connection still matches."""
+        flow = self._logins.get(owner)
+        if flow is None or flow.config.resolved_config_identity != config_identity:
+            return {"state": "idle", "error": None}
+        try:
+            current = flow.current_target()
+            if current is None or current != flow.config:
+                return {"state": "idle", "error": None}
+        except Exception:
+            return {"state": "idle", "error": None}
+        return self.login_state(owner, flow.config)
 
     async def begin(
         self,
@@ -199,9 +273,22 @@ class McpOAuthManager:
         if current is None or not isinstance(current.auth, OAuthAuthorization):
             raise ValueError("save an OAuth connection before logging in")
         prior = self._logins.get(owner)
+        retiring = None
         if prior is not None and prior.task is not None and not prior.task.done():
-            return prior
-        flow = McpOAuthLogin(owner, current, current_target)
+            try:
+                same_target = prior.config == current and prior.current_target() == current
+            except Exception:
+                same_target = False
+            if same_target and prior.state in {"connecting", "awaiting_user"} and not prior.task.cancelling():
+                return prior
+            retiring = prior.task
+            # A settled flow may still be draining its HTTP callback. Do not
+            # interrupt that cleanup; its exact listener must close before reuse.
+            if prior.retiring is not None:
+                prior.state = "cancelled"
+            elif not prior.settled.is_set() and not retiring.cancelling():
+                retiring.cancel()
+        flow = McpOAuthLogin(owner, current, current_target, retiring=retiring)
         self._logins[owner] = flow
         flow.task = asyncio.create_task(self._login(flow), name="mcp-oauth-login")
         # UI may observe state without awaiting user interaction; retrieve errors
@@ -213,6 +300,23 @@ class McpOAuthManager:
 
     async def _login(self, flow: McpOAuthLogin) -> LocalMcpOAuthRecord:
         try:
+            if flow.retiring is not None:
+                # Never join under the canonical lane: the old SDK exchange may
+                # be waiting to publish there. This task owns its predecessor
+                # through cleanup even if this replacement is itself cancelled.
+                joined = asyncio.gather(flow.retiring, return_exceptions=True)
+                cancelled = False
+                while not joined.done():
+                    try:
+                        await asyncio.shield(joined)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                joined.result()
+                flow.retiring = None
+                if cancelled or flow.state == "cancelled":
+                    raise asyncio.CancelledError()
+            if self._logins.get(flow.owner) is not flow or flow.current_target() != flow.config:
+                raise McpOAuthStale()
             record = await self._exchange(
                 flow.owner, flow.config, current_target=flow.current_target, flow=flow
             )
@@ -227,10 +331,30 @@ class McpOAuthManager:
             raise ValueError(flow.error) from None
         finally:
             flow.authorization_url = None
+            # Publish the final result before draining callback handlers: a handler
+            # waits for settlement, never for this task (which also owns cleanup).
+            flow.settled.set()
+            if flow.listener is not None:
+                await flow.listener.cleanup()
+                flow.listener = None
 
-    def invalidate(self, owner: McpCredentialOwner) -> tuple[asyncio.Task, ...]:
+    def invalidate(
+        self, owner: McpCredentialOwner, *, clear_rejection=True
+    ) -> tuple[asyncio.Task, ...]:
         """Call under canonical lane before changing/removing/logout of the owner."""
-        flow = self._logins.pop(owner, None)
+        if clear_rejection:
+            self._rejected.pop(owner, None)
+        flow = self._logins.get(owner)
+        if flow is not None and flow.task is not None and not flow.task.done():
+            # Keep the existing owner slot until callback cleanup has joined.
+            # A concurrent begin can then wait for this same physical listener.
+            def discard(done):
+                if self._logins.get(owner) is flow:
+                    self._logins.pop(owner)
+
+            flow.task.add_done_callback(discard)
+        else:
+            self._logins.pop(owner, None)
         refresh = self._refreshes.pop(owner, None)
         tasks = tuple(
             task
@@ -238,14 +362,23 @@ class McpOAuthManager:
             if task is not None and not task.done()
         )
         for task in tasks:
-            task.cancel()
+            if flow is not None and task is flow.task:
+                if flow.retiring is not None:
+                    # This coroutine may not have started yet. Let it join the
+                    # predecessor before observing this existing cancel state.
+                    flow.state = "cancelled"
+                    continue
+                if flow.settled.is_set():
+                    continue
+            if not task.cancelling():
+                task.cancel()
         return tasks
 
     async def cancel(self, owner: McpCredentialOwner, *, require_current=None) -> None:
         async with self.lane:
             if require_current is not None:
                 require_current()
-            tasks = self.invalidate(owner)
+            tasks = self.invalidate(owner, clear_rejection=False)
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def logout(self, owner: McpCredentialOwner, *, require_current=None) -> None:
@@ -265,7 +398,7 @@ class McpOAuthManager:
         current_target: Callable[[], McpServerConfig | None],
     ) -> tuple[str, tuple[str, ...]]:
         record = self.settings.read().mcp_authorization(owner)
-        if not self._matches(record, config):
+        if not self._matches(record, config) or self._rejected.get(owner) == record:
             raise McpOAuthNeedsLogin()
         assert record is not None
         if record.expires_at is not None and record.expires_at <= time():
@@ -309,6 +442,14 @@ class McpOAuthManager:
         if flow is None and record is None:
             raise McpOAuthNeedsLogin()
         storage = _DraftTokenStorage(record)
+        prior_tokens = storage.tokens
+        if record is not None and self._rejected.get(owner) == record:
+            if flow is None:
+                raise McpOAuthNeedsLogin()
+            # SDK TokenStorage is the supported auth boundary: remove rejected
+            # tokens only from this exchange's private draft, keeping the saved
+            # grant and client registration until a new grant is accepted.
+            storage.tokens = None
         metadata = _UserScopedClientMetadata(
             client_name="Pulsara",
             redirect_uris=[auth.redirect_uri],
@@ -328,7 +469,6 @@ class McpOAuthManager:
             )
         callback_result = asyncio.get_running_loop().create_future()
         expected_state: str | None = None
-        listener: web.AppRunner | None = None
 
         async def callback(request):
             if (
@@ -345,10 +485,6 @@ class McpOAuthManager:
                 )
             if "error" in request.query:
                 callback_result.set_exception(McpOAuthNeedsLogin())
-                return oauth_callback_response(
-                    "本次授权未完成",
-                    "服务商没有返回授权许可。你可以回到 Pulsara，准备好后再次登录。",
-                )
             elif request.query.get("code"):
                 callback_result.set_result(
                     AuthorizationCodeResult(
@@ -363,13 +499,20 @@ class McpOAuthManager:
                     "回调中缺少授权码。请回到 Pulsara 重新发起登录授权。",
                     status=400,
                 )
+            assert flow is not None
+            await flow.settled.wait()
+            if flow.state == "authorized":
+                return oauth_callback_response("授权成功", "", outcome="success")
             return oauth_callback_response(
-                "已收到授权回调",
-                "Pulsara 将继续核验授权信息，最终结果会显示在能力页中。",
+                "授权已取消" if flow.state == "cancelled" else "授权未完成",
+                ""
+                if flow.state == "cancelled"
+                else "请检查权限或客户端配置，然后重试。",
+                outcome="cancelled" if flow.state == "cancelled" else "error",
             )
 
         async def redirect(url):
-            nonlocal listener, expected_state
+            nonlocal expected_state
             if flow is None:
                 raise McpOAuthNeedsLogin()
             await self._validate_url(config, url)
@@ -381,9 +524,9 @@ class McpOAuthManager:
                 client_max_size=DEFAULT_MCP_WIRE_BOUNDS.maximum_http_json_body_bytes
             )
             app.router.add_get(uri.path, callback)
-            listener = web.AppRunner(app, access_log=None)
-            await listener.setup()
-            await web.TCPSite(listener, uri.hostname, uri.port).start()
+            flow.listener = web.AppRunner(app, access_log=None)
+            await flow.listener.setup()
+            await web.TCPSite(flow.listener, uri.hostname, uri.port).start()
             flow.authorization_url = url
             flow.state = "awaiting_user"
             await self.open_browser(url)
@@ -441,6 +584,41 @@ class McpOAuthManager:
                 if request is probe and flow is None:
                     raise McpOAuthNeedsLogin()
                 response = await self._request(config, request)
+                if (
+                    request is probe
+                    and response.status_code == 405
+                    and config.transport.kind is McpTransportKind.STREAMABLE_HTTP
+                ):
+                    # The SDK begins discovery only after an auth challenge, but
+                    # Streamable HTTP need not serve GET. This read-only SDK
+                    # request obtains the real POST challenge for the same auth
+                    # generator; no tools/call is sent or replayed.
+                    discovery = types.JSONRPCRequest(
+                        jsonrpc="2.0",
+                        id="pulsara-oauth-discovery",
+                        **types.DiscoverRequest(params=types.RequestParams(_meta={
+                            types.PROTOCOL_VERSION_META_KEY: LATEST_MODERN_VERSION,
+                            types.CLIENT_INFO_META_KEY: types.Implementation(
+                                name="Pulsara", version=__version__
+                            ).model_dump(mode="json", by_alias=True),
+                            types.CLIENT_CAPABILITIES_META_KEY: {},
+                        })).model_dump(
+                            mode="json", by_alias=True, exclude_none=True
+                        ),
+                    )
+                    response = await self._request(
+                        config,
+                        httpx2.Request(
+                            "POST", config.transport.endpoint,
+                            headers={
+                                "Accept": "application/json, text/event-stream",
+                                "Mcp-Protocol-Version": LATEST_MODERN_VERSION,
+                            },
+                            json=discovery.model_dump(
+                                mode="json", by_alias=True, exclude_none=True
+                            ),
+                        ),
+                    )
                 try:
                     request = await generator.asend(response)
                 except StopAsyncIteration:
@@ -490,9 +668,20 @@ class McpOAuthManager:
                         raise McpOAuthStale()
                 elif self._refreshes.get(owner) is not asyncio.current_task():
                     raise McpOAuthStale()
+                if record is not None and storage.tokens is prior_tokens:
+                    # A cached-token login cannot clear an in-flight rejection.
+                    # Do not await a redundant write: a 401 may arrive while that
+                    # write yields, and this path has no new grant to accept.
+                    if self._rejected.get(owner) == record:
+                        raise McpOAuthNeedsLogin()
+                    if self.settings.read().mcp_authorization(owner) != prior:
+                        raise McpOAuthStale()
+                    return record
                 await self.settings.replace_mcp_authorization(
                     owner, accepted, expected=prior
                 )
+                if self._rejected.get(owner) == prior:
+                    self._rejected.pop(owner, None)
             return accepted
         except asyncio.CancelledError:
             raise
@@ -505,8 +694,6 @@ class McpOAuthManager:
         finally:
             await generator.aclose()
             _private_auth_flow.reset(private_context)
-            if listener is not None:
-                await listener.cleanup()
             if not callback_result.done():
                 callback_result.cancel()
             elif not callback_result.cancelled():
@@ -518,7 +705,8 @@ class McpOAuthManager:
                 endpoint=url,
                 allow_http_localhost=config.transport.allow_http_localhost,
                 network_policy=config.transport.network_policy,
-            )
+            ),
+            credential_boundary=self.credential_boundary,
         )
 
     async def _request(self, config, request):
@@ -536,7 +724,7 @@ class McpOAuthManager:
         async with self.lane:
             tasks = tuple(
                 task
-                for owner in set(self._logins) | set(self._refreshes)
+                for owner in set(self._logins) | set(self._refreshes) | set(self._rejected)
                 for task in self.invalidate(owner)
             )
         await asyncio.gather(*tasks, return_exceptions=True)

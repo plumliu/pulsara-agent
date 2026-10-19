@@ -198,3 +198,45 @@ def test_plugin_install_returns_published_identity_for_followup_management(tmp_p
             await service.mcp.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", ["USER", "WORKSPACE"])
+def test_model_oauth_completion_carries_exact_owner_only_after_settlement(tmp_path, monkeypatch, scope):
+    from dataclasses import asdict
+    from pulsara_agent.capability.mcp_management import config_guard
+
+    async def run():
+        service = preparation(tmp_path)
+        target = LocalMcpTarget("docs", service.workspace_root if scope == "WORKSPACE" else None)
+        created = await service.mcp.create(target, {
+            "transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"},
+            "auth": {"type": "oauth"},
+        })
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def exchange(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return None
+
+        monkeypatch.setattr(service.mcp.oauth, "_exchange", exchange)
+        call = CapabilityManagementCall(service, await service.prepare({
+            "action": "AUTHORIZE_MCP", "scope": scope, "server_id": "docs",
+        }))
+        form = call.form("authorize")
+        call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
+        work = asyncio.create_task(call.execute())
+        await entered.wait()
+        assert not work.done()
+        release.set()
+        result = await work
+        assert result["current"] == {"authorized": True}
+        assert result["authorization"] == {
+            "owner": asdict(target.owner),
+            "config_identity": created.config.resolved_config_identity,
+            "display_identity": config_guard(created.config),
+            "package_install_id": None,
+        }
+        await service.mcp.aclose()
+
+    asyncio.run(run())

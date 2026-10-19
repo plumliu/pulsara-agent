@@ -263,6 +263,7 @@ from .mcp.supervisor import (
     McpSnapshotStale,
 )
 from .mcp.contracts import McpDiscoveryCatalogInspection
+from .mcp.schema import McpSchemaEvaluationFailure, validate_mcp_arguments
 from .capability_query import CapabilitySourceQuery
 from pulsara_agent.capability.source_query import (
     parse_query,
@@ -1106,7 +1107,7 @@ class DirectKernelToolPort:
         supervisor = self._mcp_supervisor
         if supervisor is None:
             raise RuntimeError("MCP supervisor is not bound")
-        return supervisor.inspect_discovery_catalog()
+        return supervisor.inspect_discovery_catalog(live=True)
 
     def freeze_mcp_capability_projection_input(self, owner):
         supervisor = self._mcp_supervisor
@@ -1270,7 +1271,7 @@ class DirectKernelToolPort:
             return reject(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 f"mcp-direct:{binding.unavailable_reason_code}",
-                "MCP tool generation is unavailable",
+                _mcp_unavailable_direct_message(binding.unavailable_reason_code),
             )
         entry = (
             builtin_tool_catalog_entry(tool_name) if tool_name in self._tools else None
@@ -1321,9 +1322,15 @@ class DirectKernelToolPort:
             if not isinstance(schema, dict):
                 raise RuntimeError("MCP meta schema did not thaw to an object")
             try:
-                validator = validators.validator_for(schema)
-                validator.check_schema(schema)
-                validator(schema).validate(dict(inner))
+                validate_mcp_arguments(schema, dict(inner))
+            except McpSchemaEvaluationFailure as exc:
+                return reject(
+                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                    f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
+                    str(exc),
+                    post_name=resolved_name,
+                    post_arguments=frozen_inner,
+                )
             except ValidationError:
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -1347,9 +1354,13 @@ class DirectKernelToolPort:
             if not isinstance(schema, dict):
                 raise RuntimeError("MCP schema did not thaw to an object")
             try:
-                validator = validators.validator_for(schema)
-                validator.check_schema(schema)
-                validator(schema).validate(dict(arguments))
+                validate_mcp_arguments(schema, dict(arguments))
+            except McpSchemaEvaluationFailure as exc:
+                return reject(
+                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                    f"mcp-descriptor:{binding.descriptor_fingerprint}",
+                    str(exc),
+                )
             except ValidationError:
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -1799,13 +1810,7 @@ class DirectKernelToolPort:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 f"mcp-direct:{binding.unavailable_reason_code}",
-                (
-                    "This MCP tool was available when the current context began, "
-                    "but its server connection is currently unavailable. The native "
-                    "tool definition remains frozen to preserve context continuity. "
-                    "Do not route it through use_new_mcp_tool. Check list_capabilities "
-                    "or wait for a same-schema reconnect."
-                ),
+                _mcp_unavailable_direct_message(binding.unavailable_reason_code),
             )
         if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
             return self._authorize_mcp(
@@ -2183,9 +2188,13 @@ class DirectKernelToolPort:
         if not isinstance(schema, dict):
             raise RuntimeError("MCP meta schema did not thaw to an object")
         try:
-            validator = validators.validator_for(schema)
-            validator.check_schema(schema)
-            validator(schema).validate(dict(inner))
+            validate_mcp_arguments(schema, dict(inner))
+        except McpSchemaEvaluationFailure as exc:
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
+                str(exc),
+            )
         except ValidationError:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -2283,9 +2292,13 @@ class DirectKernelToolPort:
         if not isinstance(schema, dict):
             raise RuntimeError("MCP schema did not thaw to an object")
         try:
-            validator = validators.validator_for(schema)
-            validator.check_schema(schema)
-            validator(schema).validate(dict(arguments))
+            validate_mcp_arguments(schema, dict(arguments))
+        except McpSchemaEvaluationFailure as exc:
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                f"mcp-descriptor:{binding.descriptor_fingerprint}",
+                str(exc),
+            )
         except ValidationError:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -2753,7 +2766,9 @@ class DirectKernelToolPort:
                             "diagnostics": [
                                 {
                                     "code": direct_binding.unavailable_reason_code,
-                                    "message": "The frozen direct tool cannot currently be dispatched.",
+                                    "message": _mcp_unavailable_direct_message(
+                                        direct_binding.unavailable_reason_code
+                                    ),
                                 }
                             ],
                         }
@@ -4524,6 +4539,25 @@ def _mcp_inspection_values(
         input_schema=semantic.input_schema,
         output_schema=semantic.output_schema,
         effect_kind=executor.policy.effect_kind.value,
+    )
+
+
+def _mcp_unavailable_direct_message(reason: str) -> str:
+    if reason == "SCHEMA_REPLACED_PENDING_COLD_ADOPTION":
+        return (
+            "The MCP server now advertises a different schema for this tool. "
+            "The current context keeps its original native tool definition. "
+            "Reconnecting or reloading capabilities cannot adopt the new schema "
+            "in this context. Adoption requires a new cold context or an explicitly "
+            "adopted compaction successor. Do not route this tool through "
+            "use_new_mcp_tool or rebuild the current provider input. "
+            "Continue independent work meanwhile."
+        )
+    return (
+        "The current MCP connection or configuration does not provide this frozen "
+        "tool. Check list_capabilities; direct use can resume when a same-schema "
+        "connection is available. The native tool definition remains frozen to "
+        "preserve context continuity. Do not route it through use_new_mcp_tool."
     )
 
 

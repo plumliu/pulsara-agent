@@ -17,6 +17,8 @@ from pulsara_agent.capability.mcp_management import (
     LocalMcpManagementService,
     LocalMcpTarget,
     McpManagementConflict,
+    McpSecretMutation,
+    config_guard,
 )
 from pulsara_agent.plugins.management import PluginManagementService
 from pulsara_agent.plugins.contracts import InstallLocalPluginRequest, PluginScopeKind
@@ -30,6 +32,7 @@ from pulsara_agent.mcp_config import BearerSecret
 from pulsara_agent.mcp_credentials import (
     ManagedLocalCredentialReference,
     McpCredentialBinding,
+    binding_to_dict,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.settings import LocalSettingsStore
@@ -141,6 +144,66 @@ def test_missing_local_configuration_is_a_form_draft_not_a_fake_endpoint(tmp_pat
         assert thaw_json(result.public_prefill)["config"] == {}
         assert not owner.mcp.user_config_path.exists()
         await owner.mcp.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("destination_changed", [True, False])
+def test_model_secret_template_update_requires_confirmation_only_for_new_destination(
+    tmp_path, destination_changed
+):
+    from pulsara_agent.conversation_kernel.capability_management_execution import (
+        CapabilityManagementCall,
+    )
+
+    async def run():
+        owner = preparation(tmp_path)
+        target = LocalMcpTarget("example")
+        binding = McpCredentialBinding(target.owner, "bearer")
+        reference = {"source": "managed", "binding": binding_to_dict(binding)}
+        original = {
+            "transport": {
+                "type": "streamable_http",
+                "endpoint": "https://old.example/mcp",
+            },
+            "auth": {"type": "bearer", "reference": reference},
+        }
+        try:
+            created = await owner.mcp.create(
+                target, original, (McpSecretMutation(binding, "retained-test-credential"),)
+            )
+            arguments = json.loads(json.dumps({
+                "action": "UPDATE_LOCAL_MCP",
+                "scope": "USER",
+                "server_id": "example",
+                "expected_identity": config_guard(created.config),
+                "config": {
+                    "transport": {
+                        **original["transport"],
+                        "endpoint": "https://new.example/mcp" if destination_changed
+                        else "https://old.example/mcp",
+                    },
+                    "auth": {
+                        "type": "bearer",
+                        "reference": {"parts": [reference, "x"]},
+                    },
+                },
+            }))
+            prepared = await owner.prepare(arguments)
+            call = CapabilityManagementCall(owner, prepared)
+            if destination_changed:
+                assert prepared.user_inputs == ("credential_destination_confirmation",)
+                with pytest.raises(ValueError, match="requires user input"):
+                    await call.execute()
+                assert config_guard(owner.mcp.inspect(target)) == config_guard(created.config)
+            else:
+                assert prepared.user_inputs == ()
+                assert (await call.execute())["status"] == "APPLIED"
+                assert owner.mcp.inspect(target).resolved_headers() == {
+                    "Authorization": "Bearer retained-test-credentialx"
+                }
+        finally:
+            await owner.mcp.aclose()
 
     asyncio.run(run())
 

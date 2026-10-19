@@ -207,10 +207,10 @@ def bind_plugin_authorization(
     def current_target():
         return config if current_state(identity) == state else None
 
-    async def authorization():
-        return await oauth_manager.authorization(owner, config, current_target)
-
-    return replace(config, authorization_provider=authorization)
+    return replace(
+        config,
+        authorization_provider=oauth_manager.bind(owner, config, current_target),
+    )
 
 
 def _selected_servers(

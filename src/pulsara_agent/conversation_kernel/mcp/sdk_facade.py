@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import date
@@ -17,12 +17,18 @@ from typing import Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import anyio
+import dns.asyncquery
+import dns.asyncresolver
+import dns.exception
+import dns.nameserver
 import httpx2
 from mcp import ClientSession
+from mcp.client.subscriptions import SubscriptionLost, listen
 import mcp_types as types
 from mcp_types.version import (
     HANDSHAKE_PROTOCOL_VERSIONS,
     LATEST_MODERN_VERSION,
+    MODERN_PROTOCOL_VERSIONS,
 )
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
@@ -41,6 +47,13 @@ from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundHttpx2Client,
 )
 
+from jsonschema import ValidationError
+
+from .schema import (
+    LOCAL_MCP_SCHEMA_REGISTRY,
+    McpOutputSchemaMismatch,
+    require_local_mcp_schema_references,
+)
 from .wire import (
     DEFAULT_MCP_WIRE_BOUNDS,
     McpWireBoundExceeded,
@@ -53,6 +66,12 @@ from .wire import (
 NotificationCallback = Callable[[str], Awaitable[None]]
 
 _private_sdk_wire = ContextVar("pulsara_mcp_private_sdk_wire", default=False)
+_mcp_proxy_target = ContextVar("pulsara_mcp_proxy_target", default=None)
+
+# Product-owned public DNS recovery authority, never a Fake-IP allowlist.
+_MCP_DOH_URL = "https://cloudflare-dns.com/dns-query"
+_MCP_DOH_BOOTSTRAP = "1.1.1.1"
+_DNS_WIRE_MAXIMUM = 65535  # RFC 8484 §6: maximum DNS message size.
 
 
 class _SdkWireLogFilter(logging.Filter):
@@ -83,9 +102,9 @@ class McpAdvertisedCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class _PinnedHttpEndpoint:
-    """One DNS-validated physical target with the logical authority preserved."""
+    """One validated DNS answer set with the logical authority preserved."""
 
-    url: str
+    urls: tuple[str, ...]
     host_header: str
     sni_hostname: str | None
 
@@ -479,8 +498,9 @@ class _BoundedStdioTransport(_BoundedTransport):
         if process is not None:
             if process.stdin is not None:
                 process.stdin.close()
-                with suppress(BrokenPipeError, ConnectionResetError):
-                    await process.stdin.wait_closed()
+            # A peer may have stopped reading with a full stdin pipe. Terminate
+            # it before joining the buffered writer; flushing cannot precede
+            # the very signal that releases its blocked pipe.
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -489,6 +509,9 @@ class _BoundedStdioTransport(_BoundedTransport):
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
+            if process.stdin is not None:
+                with suppress(BrokenPipeError, ConnectionResetError):
+                    await process.stdin.wait_closed()
         # Give stdout/stderr readers the process EOF before cancellation.  An
         # immediate cancel after wait can leave asyncio pipe transports pending
         # until the event loop is already closed.
@@ -506,6 +529,8 @@ class _BoundedStdioTransport(_BoundedTransport):
 class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
     """HTTP policy/credentials only; SDK owns MCP and SSE protocol behavior."""
 
+    _allows_event_stream = True
+
     def __init__(
         self,
         transport_config,
@@ -518,9 +543,15 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
         **kwargs,
     ):
         follow_redirects = kwargs.pop("follow_redirects", False)
+        self._runtime_proxy_transports = []
+        # HTTPX owns system/environment proxy discovery and NO_PROXY matching.
+        # Keep the existing system certificate trust instead of also adopting
+        # SSL_CERT_FILE/SSL_CERT_DIR as a side effect of enabling proxy discovery.
+        if "verify" not in kwargs:
+            kwargs["verify"] = httpx2.create_ssl_context(trust_env=False)
         super().__init__(
             credential_boundary=credential_boundary,
-            trust_env=False,
+            trust_env=True,
             follow_redirects=follow_redirects,
             **kwargs,
         )
@@ -531,6 +562,16 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
         self.observe_session_id = observe_session_id
         self.sessionful = False
         self.static_headers = {}
+        if observe_secrets is not None:
+            observe_secrets(tuple(
+                value
+                for _, proxy in self._runtime_proxy_transports
+                for value in (
+                    *(proxy.auth or ()),
+                    *proxy.headers.get_list("proxy-authorization"),
+                )
+                if value
+            ))
         if config is not None:
             from pulsara_agent.mcp_config import OAuthAuthorization
 
@@ -541,10 +582,60 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
                 if observe_secrets is not None:
                     observe_secrets(secrets)
 
+    def _init_proxy_transport(self, proxy, **kwargs):
+        transport = super()._init_proxy_transport(proxy, **kwargs)
+        # HTTPX sends proxy authentication inside its transport, outside the
+        # origin request headers. Keep those values inside the existing gate,
+        # including after the protected process credential rotates.
+        self._runtime_proxy_transports.append((transport, proxy))
+        return transport
+
+    def _validate_transport_credentials(self, request, guard):
+        selected = self._transport_for_url(request.url)
+        for transport, proxy in self._runtime_proxy_transports:
+            if transport is not selected:
+                continue
+            values = (str(proxy.url), *(proxy.raw_auth or ()), *(
+                value for pair in proxy.headers.raw for value in pair
+            ))
+            if any(guard.contains(value) for value in values):
+                raise ValueError("MCP proxy contains the protected credential")
+
+    def _transport_for_url(self, url):
+        # HTTPX has no public routing hook before our DNS-pinned URL is used.
+        # Adapt only its selector: retain dependency-owned proxy rules, pools
+        # and lifecycle, matching NO_PROXY against each hop's logical URL.
+        try:
+            if ipaddress.ip_address(url.host).is_loopback:
+                return self._transport
+        except ValueError:
+            pass
+        target = _mcp_proxy_target.get()
+        logical = target[1] if target is not None and target[0] is self else url
+        return super()._transport_for_url(logical)
+
+    async def send(self, request, **kwargs):
+        if request.method == "DELETE":
+            # SDK session termination is a best-effort control operation. Reuse
+            # the finite HTTP write budget for its complete exchange, including
+            # credentials, DNS and response body; long-lived SSE/tool reads keep
+            # their existing independent lifetimes.
+            async with asyncio.timeout(self.timeout.write):
+                return await super().send(request, **kwargs)
+        return await super().send(request, **kwargs)
+
+    async def _pin_endpoint(self, url):
+        return await _enforce_http_network_policy(
+            replace(self.transport_config, endpoint=str(url)),
+            credential_boundary=self._credential_boundary,
+            observe_secrets=self.observe_secrets,
+        )
+
     async def _send_single_request(self, request):
         from pulsara_agent.mcp_config import OAuthAuthorization
         from pulsara_agent.mcp_credentials import McpCredentialMissing
 
+        observe_rejection = None
         if self.config is not None:
             if _http_origin(str(request.url)) != _http_origin(
                 self.transport_config.endpoint
@@ -557,28 +648,46 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
                 authorization, secrets = await self.config.authorization_provider()
                 self.observe_secrets(secrets)
                 request.headers["Authorization"] = authorization
+                observe_rejection = self.config.authorization_provider.rejection_observer(
+                    request.headers["Authorization"]
+                )
         content = await request.aread()
         if len(content) > self.bounds.maximum_http_json_body_bytes:
             raise McpTransportOperationError(may_have_reached_server=False)
-        pinned = await _enforce_http_network_policy(
-            replace(self.transport_config, endpoint=str(request.url))
-        )
+        pinned = await self._pin_endpoint(request.url)
         headers = dict(request.headers)
         headers["host"] = pinned.host_header
-        physical = httpx2.Request(
-            request.method,
-            pinned.url,
-            headers=headers,
-            content=content,
-            extensions={**request.extensions, **_http_request_extensions(pinned)},
-        )
-        response = await super()._send_single_request(physical)
+        # HTTPX owns TCP/TLS and identifies failures before HTTP transmission.
+        # Pinning replaces its hostname resolution, so retain every validated DNS
+        # candidate here. Never replay after a read/write failure or HTTP response.
+        for index, url in enumerate(pinned.urls):
+            physical = httpx2.Request(
+                request.method,
+                url,
+                headers=headers,
+                content=content,
+                extensions={**request.extensions, **_http_request_extensions(pinned)},
+            )
+            target = _mcp_proxy_target.set((self, request.url))
+            try:
+                response = await super()._send_single_request(physical)
+                break
+            except (httpx2.ConnectError, httpx2.ConnectTimeout):
+                if index == len(pinned.urls) - 1:
+                    raise
+            finally:
+                _mcp_proxy_target.reset(target)
         response.request = request  # Logical origin for SDK URLs and HTTP redirects.
+        # Observe the real response before SSE/body processing can suspend/fail.
+        # This owner reports rejection only; OAuth is never installed here and no
+        # application request is replayed to obtain a replacement grant.
+        if response.status_code == 401 and observe_rejection is not None:
+            observe_rejection()
         if response.headers.get("mcp-session-id"):
             self.sessionful = True
             if self.observe_session_id is not None:
                 await self.observe_session_id()
-        if "text/event-stream" in response.headers.get("content-type", "").lower():
+        if self._allows_event_stream and "text/event-stream" in response.headers.get("content-type", "").lower():
             return response
         # HTTPX2 owns decompression; bound the decoded body before SDK materializes
         # its RPC carrier. This is not a claim about decoder-internal allocations.
@@ -606,7 +715,7 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
             result_headers = dict(response.headers)
             result_headers.pop("content-encoding", None)
             result_headers.pop("content-length", None)
-            return httpx2.Response(
+            result = httpx2.Response(
                 response.status_code,
                 headers=result_headers,
                 content=bytes(body),
@@ -615,6 +724,11 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
             )
         finally:
             await response.aclose()
+        # Preserve SDK timing when supplied (dnspython reads it). HTTPX permits
+        # preclosed custom-transport responses with no timing; retain absence.
+        with suppress(RuntimeError):
+            result.elapsed = response.elapsed
+        return result
 
     def _build_redirect_request(self, request, response):
         redirected = super()._build_redirect_request(request, response)
@@ -721,6 +835,17 @@ class _SdkHttpTransport(_BoundedTransport):
 
         async for message in read:
             if isinstance(message, Exception):
+                if isinstance(message, (
+                    httpx2.TransportError, OSError, anyio.EndOfStream,
+                    anyio.BrokenResourceError, anyio.ClosedResourceError,
+                )):
+                    await self._offer_failure(
+                        McpTransportOperationError(may_have_reached_server=True),
+                        "MCP SDK receive transport failed",
+                    )
+                    await self.read_writer.aclose()
+                    self._stop.set()
+                    return
                 await self._offer_failure(
                     McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
                     "MCP SDK carrier invalid",
@@ -741,6 +866,16 @@ class _SdkHttpTransport(_BoundedTransport):
                     McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
                     "MCP SDK carrier invalid",
                 )
+        if not self._closed:
+            # In particular, legacy SSE can end cleanly while its POST writer
+            # remains alive. Propagate that lost receive channel to the public
+            # session so pending requests settle and the exact slot reconnects.
+            await self._offer_failure(
+                McpTransportOperationError(may_have_reached_server=True),
+                "MCP SDK receive stream ended",
+            )
+            await self.read_writer.aclose()
+            self._stop.set()
 
     async def _forward_requests(self, write):
         async with self.write_reader:
@@ -782,8 +917,68 @@ def _http_request_extensions(endpoint: _PinnedHttpEndpoint) -> dict[str, object]
     )
 
 
+class _McpDohHttpClient(_McpHttpClient):
+    _allows_event_stream = False
+
+    async def _pin_endpoint(self, url):
+        # An injected dnspython client owns bootstrap itself. Using its
+        # bootstrap_address argument together with client= would be ineffective.
+        # No recursive DNS recovery, redirects or arbitrary bootstrap targets.
+        if str(url) != _MCP_DOH_URL:
+            raise ValueError("MCP_DOH_DESTINATION_CHANGED")
+        return _pin_http_endpoint(str(url), frozenset({ipaddress.ip_address(_MCP_DOH_BOOTSTRAP)}))
+
+
+class _McpDohNameserver(dns.nameserver.DoHNameserver):
+    def __init__(self, client):
+        super().__init__(_MCP_DOH_URL)
+        self.client = client
+
+    async def async_query(
+        self, request, timeout, source, source_port, max_size, backend,
+        one_rr_per_rrset=False, ignore_trailing=False,
+    ):
+        # The SDK resolver retains answer/CNAME/error handling. Its standard
+        # DoHNameserver has no client injection; adapt only this HTTP seam.
+        return await dns.asyncquery.https(
+            request, self.url, timeout=timeout, client=self.client,
+            one_rr_per_rrset=one_rr_per_rrset, ignore_trailing=ignore_trailing,
+        )
+
+
+async def _resolve_public_http_addresses(host, *, credential_boundary, observe_secrets):
+    async with _McpDohHttpClient(
+        StreamableHttpTransportConfig(endpoint=_MCP_DOH_URL),
+        credential_boundary=credential_boundary,
+        bounds=replace(DEFAULT_MCP_WIRE_BOUNDS, maximum_http_json_body_bytes=_DNS_WIRE_MAXIMUM),
+        timeout=httpx2.Timeout(10),
+        observe_secrets=observe_secrets,
+    ) as client:
+        resolver = dns.asyncresolver.Resolver(configure=False)
+        resolver.nameservers = [_McpDohNameserver(client)]
+        resolver.timeout = resolver.lifetime = 10
+        try:
+            answers = await resolver.resolve_name(host.rstrip(".") + ".", search=False)
+        except dns.exception.DNSException as exc:
+            raise RuntimeError("MCP_HTTP_PUBLIC_DNS_UNAVAILABLE") from exc
+        return frozenset(ipaddress.ip_address(value) for value in answers.addresses())
+
+
+def _public_dns_recovery_name(host):
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        name = host.rstrip(".").lower()
+        local = ("localhost", "local", "lan", "internal", "home.arpa", "test", "invalid", "onion")
+        return "." in name and not any(name == item or name.endswith("." + item) for item in local)
+    return False
+
+
 async def _enforce_http_network_policy(
     transport: StreamableHttpTransportConfig,
+    *,
+    credential_boundary: ProcessCredentialBoundary,
+    observe_secrets=None,
 ) -> _PinnedHttpEndpoint:
     """Resolve, validate, and pin the exact address used by HTTPX."""
 
@@ -793,47 +988,103 @@ async def _enforce_http_network_policy(
         raise ValueError("MCP HTTP endpoint has no host")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        addresses = await asyncio.wait_for(
-            asyncio.get_running_loop().getaddrinfo(
+        # Reuse the existing per-resolution budget for both system DNS and
+        # public recovery; this is not a connection or application lifetime cap.
+        async with asyncio.timeout(10):
+            addresses = await asyncio.get_running_loop().getaddrinfo(
                 host,
                 port,
                 family=socket.AF_UNSPEC,
                 type=socket.SOCK_STREAM,
-            ),
-            timeout=10,
-        )
+            )
+            if not addresses:
+                raise RuntimeError("MCP_HTTP_DNS_EMPTY")
+            resolved = frozenset(
+                ipaddress.ip_address(item[4][0].split("%", 1)[0]) for item in addresses
+            )
+            localhost = all(address.is_loopback for address in resolved)
+            allowed = (
+                (localhost and transport.allow_http_localhost)
+                or transport.network_policy is McpHttpNetworkPolicy.ALLOW_PRIVATE
+                or all(address.is_global for address in resolved)
+            )
+            if not allowed and parsed.scheme == "https" and _public_dns_recovery_name(host):
+                # Never trust the suspicious address or ask a proxy to resolve
+                # the domain. Independently obtain and pin public addresses.
+                resolved = await _resolve_public_http_addresses(
+                    host, credential_boundary=credential_boundary, observe_secrets=observe_secrets,
+                )
+                allowed = bool(resolved) and all(address.is_global for address in resolved)
+            if not allowed:
+                raise ValueError("MCP_HTTP_PRIVATE_NETWORK_DENIED")
     except TimeoutError as exc:
         raise RuntimeError("MCP_HTTP_DNS_TIMEOUT") from exc
-    if not addresses:
-        raise RuntimeError("MCP_HTTP_DNS_EMPTY")
-    resolved = frozenset(
-        ipaddress.ip_address(item[4][0].split("%", 1)[0]) for item in addresses
-    )
-    localhost = all(address.is_loopback for address in resolved)
-    allowed = (
-        (localhost and transport.allow_http_localhost)
-        or transport.network_policy is McpHttpNetworkPolicy.ALLOW_PRIVATE
-        or all(address.is_global for address in resolved)
-    )
-    if not allowed:
-        raise ValueError("MCP_HTTP_PRIVATE_NETWORK_DENIED")
-    selected = sorted(resolved, key=lambda item: (item.version, item.packed))[0]
-    pinned_host = f"[{selected}]" if selected.version == 6 else str(selected)
+    return _pin_http_endpoint(transport.endpoint, resolved)
+
+
+def _pin_http_endpoint(endpoint, resolved):
+    parsed = urlsplit(endpoint)
+    host = parsed.hostname
     explicit_port = parsed.port
-    pinned_netloc = (
-        f"{pinned_host}:{explicit_port}" if explicit_port is not None else pinned_host
-    )
+    urls = []
+    for address in sorted(resolved, key=lambda item: (item.version, item.packed)):
+        pinned_host = f"[{address}]" if address.version == 6 else str(address)
+        pinned_netloc = (
+            f"{pinned_host}:{explicit_port}" if explicit_port is not None else pinned_host
+        )
+        urls.append(urlunsplit(
+            (parsed.scheme, pinned_netloc, parsed.path, parsed.query, parsed.fragment)
+        ))
     logical_host = f"[{host}]" if ":" in host else host
     host_header = (
         f"{logical_host}:{explicit_port}" if explicit_port is not None else logical_host
     )
     return _PinnedHttpEndpoint(
-        url=urlunsplit(
-            (parsed.scheme, pinned_netloc, parsed.path, parsed.query, parsed.fragment)
-        ),
+        urls=tuple(urls),
         host_header=host_header,
         sni_hostname=host if parsed.scheme == "https" else None,
     )
+
+
+class SchemaBoundMcpClientSession(ClientSession):
+    """Keep SDK validation and classify failures after a response was received.
+
+    SDK 2.1.0 has no registry injection or typed validation exception. These
+    two small overrides retain its output-validation flow and cache while
+    supplying Pulsara's local-only policy and known-response classification.
+    """
+
+    def _output_schema_validator(self, name, output_schema):
+        require_local_mcp_schema_references(output_schema)
+        validator = super()._output_schema_validator(name, output_schema)
+        # evolve is the dependency's registry injection point. Reset its derived
+        # resolver as well, so it cannot retain the SDK's default retrieval path.
+        return validator.evolve(registry=LOCAL_MCP_SCHEMA_REGISTRY, _resolver=None)
+
+    async def validate_tool_result(self, name: str, result: types.CallToolResult) -> None:
+        try:
+            # SDK 2.1.0 conflates an absent field with explicit JSON null.
+            # Modern structuredContent permits null; use the SDK's same cache
+            # and validator for that one present-value case.
+            if (
+                self.protocol_version in MODERN_PROTOCOL_VERSIONS
+                and "structured_content" in result.model_fields_set
+                and result.structured_content is None
+            ):
+                if name not in self._tool_output_schemas:
+                    await self.list_tools()
+                output_schema = self._tool_output_schemas.get(name)
+                if output_schema is not None:
+                    self._output_schema_validator(name, output_schema).validate(None)
+                return
+            await super().validate_tool_result(name, result)
+        except MemoryError:
+            raise
+        except Exception as exc:
+            error = exc if isinstance(exc, ValidationError) else exc.__cause__
+            if isinstance(error, ValidationError):
+                raise McpOutputSchemaMismatch(f"{error.json_path}: {error.message}") from exc
+            raise McpOutputSchemaMismatch(str(exc)) from exc
 
 
 class BoundedMcpSdkClient:
@@ -934,13 +1185,56 @@ class BoundedMcpSdkClient:
     async def _run_session(self):
         try:
             await self._open_session()
-            self._session_ready.set_result(None)
-            await self._session_stop.wait()
+            async with AsyncExitStack() as stack:
+                subscription = None
+                if self.protocol_version in MODERN_PROTOCOL_VERSIONS:
+                    capabilities = self.session.server_capabilities
+                    requested = {
+                        f"{kind}_list_changed": (
+                            (capability := getattr(capabilities, kind)) is not None
+                            and capability.list_changed is True
+                        )
+                        for kind in ("tools", "resources", "prompts")
+                    }
+                    if any(requested.values()):
+                        subscription = await stack.enter_async_context(
+                            listen(self.session, **requested)
+                        )
+                        if any(
+                            wanted and getattr(subscription.honored, kind) is not True
+                            for kind, wanted in requested.items()
+                        ):
+                            # Honoring a subset is legal, but leaves Pulsara's
+                            # advertised dynamic catalog unobserved. Retry the
+                            # observation instead of publishing it as ready.
+                            raise McpTransportOperationError(
+                                may_have_reached_server=True
+                            )
+                self._session_ready.set_result(None)
+                if subscription is None:
+                    await self._session_stop.wait()
+                else:
+                    async with anyio.create_task_group() as group:
+                        group.start_soon(self._observe_catalog_subscription, subscription)
+                        await self._session_stop.wait()
+                        group.cancel_scope.cancel()
         except BaseException as exc:
             if not self._session_ready.done():
                 self._session_ready.set_exception(exc)
         finally:
             await self._close_resources()
+
+    async def _observe_catalog_subscription(self, subscription) -> None:
+        try:
+            # ClientSession already tees these events to _handle_notification;
+            # consuming here owns SDK stream lifetime without dirtying twice.
+            async for _event in subscription:
+                pass
+        except (MCPError, SubscriptionLost):
+            pass  # Lost delivery requires the same refetch as a graceful end.
+        if not self._session_stop.is_set():
+            await self._notification_callback("pulsara/transport_failure")
+            self._session_stop.set()
 
     async def _open_session(self) -> None:
         if self._session is not None:
@@ -965,7 +1259,7 @@ class BoundedMcpSdkClient:
         self._transport = transport
         try:
             await transport.start()
-            self._session = ClientSession(
+            self._session = SchemaBoundMcpClientSession(
                 transport.read_stream,
                 transport.write_stream,
                 read_timeout_seconds=None,

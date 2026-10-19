@@ -154,26 +154,24 @@ def _require_destination_confirmation(current, candidate, secrets, confirmed):
     ):
         return
     changed = {item.binding for item in secrets}
-    old = config_secret_inputs(current)
-    for ref in config_secret_inputs(candidate):
-        if ref not in old:
-            continue
-        references = tuple(
-            part
-            for part in (ref.parts if isinstance(ref, BoundSecretValue) else (ref,))
-            if not isinstance(part, str)
-        )
-        if references and all(
-            isinstance(part, ManagedLocalCredentialReference)
-            and part.binding in changed
-            for part in references
-        ):
-            continue
-        try:
-            resolve_secret(ref, current.secret_resolver)
-        except McpCredentialMissing:
-            continue
-        raise ValueError("请确认将保留的凭据用于新的连接目标。")
+    # Literal edits and template regrouping do not change which secrets move.
+    old_references = {
+        part
+        for value in config_secret_inputs(current)
+        for part in (value.parts if isinstance(value, BoundSecretValue) else (value,))
+        if not isinstance(part, str)
+    }
+    for value in config_secret_inputs(candidate):
+        for ref in value.parts if isinstance(value, BoundSecretValue) else (value,):
+            if isinstance(ref, str) or ref not in old_references:
+                continue
+            if isinstance(ref, ManagedLocalCredentialReference) and ref.binding in changed:
+                continue
+            try:
+                resolve_secret(ref, current.secret_resolver)
+            except McpCredentialMissing:
+                continue
+            raise ValueError("请确认将保留的凭据用于新的连接目标。")
 
 
 def auth_to_entry(auth) -> dict[str, object]:
@@ -580,12 +578,12 @@ class LocalMcpManagementService:
             raise ValueError("MCP credential reference crosses its owner")
         if isinstance(config.auth, OAuthAuthorization):
 
-            async def authorization():
-                return await self.oauth.authorization(
+            config = replace(
+                config,
+                authorization_provider=self.oauth.bind(
                     owner, config, lambda: self.inspect(target)
-                )
-
-            config = replace(config, authorization_provider=authorization)
+                ),
+            )
         return config
 
     async def test(

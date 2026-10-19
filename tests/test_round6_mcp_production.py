@@ -572,19 +572,19 @@ def test_round6_http_network_policy_is_typed_and_private_default_denied() -> Non
         endpoint="https://127.0.0.1:9443/mcp",
     )
     with pytest.raises(ValueError, match="PRIVATE_NETWORK_DENIED"):
-        asyncio.run(_enforce_http_network_policy(denied))
+        asyncio.run(_enforce_http_network_policy(denied, credential_boundary=ProcessCredentialBoundary()))
 
     explicit_local = StreamableHttpTransportConfig(
         endpoint="http://127.0.0.1:9443/mcp",
         allow_http_localhost=True,
     )
-    asyncio.run(_enforce_http_network_policy(explicit_local))
+    asyncio.run(_enforce_http_network_policy(explicit_local, credential_boundary=ProcessCredentialBoundary()))
 
     explicit_private = StreamableHttpTransportConfig(
         endpoint="https://127.0.0.1:9443/mcp",
         network_policy=McpHttpNetworkPolicy.ALLOW_PRIVATE,
     )
-    asyncio.run(_enforce_http_network_policy(explicit_private))
+    asyncio.run(_enforce_http_network_policy(explicit_private, credential_boundary=ProcessCredentialBoundary()))
 
 
 def test_round6_public_http_resolution_is_pinned_with_logical_host_and_sni(
@@ -611,10 +611,11 @@ def test_round6_public_http_resolution_is_pinned_with_logical_host_and_sni(
         pinned = await _enforce_http_network_policy(
             StreamableHttpTransportConfig(
                 endpoint="https://mcp.example.test:9443/v1/mcp?mode=bounded"
-            )
+            ),
+            credential_boundary=ProcessCredentialBoundary(),
         )
         assert calls == 1
-        assert pinned.url == "https://93.184.216.34:9443/v1/mcp?mode=bounded"
+        assert pinned.urls == ("https://93.184.216.34:9443/v1/mcp?mode=bounded",)
         assert pinned.host_header == "mcp.example.test:9443"
         assert pinned.sni_hostname == "mcp.example.test"
 
@@ -1458,7 +1459,37 @@ class _OutputSchemaMismatchFakeMcpSession(_FakeMcpSession):
 class _OutputSchemaMismatchFakeMcpClient(_FakeMcpClient):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.session = _OutputSchemaMismatchFakeMcpSession()
+        import anyio
+        from pulsara_agent.conversation_kernel.mcp.sdk_facade import SchemaBoundMcpClientSession
+
+        self._streams = (
+            *anyio.create_memory_object_stream(1),
+            *anyio.create_memory_object_stream(1),
+        )
+        self.session = SchemaBoundMcpClientSession(self._streams[1], self._streams[2])
+        self.session._negotiated_version = "2026-07-28"
+        self.protocol_version = "2026-07-28"
+        fixture = _OutputSchemaMismatchFakeMcpSession()
+
+        async def send_request(request, _result_type, **_kwargs):
+            if request.method == "tools/list":
+                return await fixture.list_tools()
+            if request.method == "tools/call":
+                return await fixture.call_tool()
+            return await getattr(fixture, {
+                "resources/list": "list_resources",
+                "resources/templates/list": "list_resource_templates",
+                "prompts/list": "list_prompts",
+            }[request.method])()
+
+        self.session.send_request = send_request
+
+    complete_tool_catalog = BoundedMcpSdkClient.complete_tool_catalog
+
+    async def aclose(self):
+        for stream in self._streams:
+            await stream.aclose()
+        await super().aclose()
 
 
 class _LargeSurfaceFakeMcpSession(_FakeMcpSession):

@@ -1,21 +1,43 @@
 """Self-contained callback presentation; OAuth settlement stays with its owner."""
 
+from base64 import b64encode
+from functools import cache
+from importlib.resources import files
 from html import escape
 from string import Template
+from typing import Literal
 
 from aiohttp import web
 
 
 def oauth_callback_response(
-    title: str, description: str, *, status: int = 200
+    title: str,
+    description: str,
+    *,
+    status: int = 200,
+    outcome: Literal["success", "error", "cancelled"] = "error",
 ) -> web.Response:
     # No query values, remote assets or scripts belong on the callback page.
     return web.Response(
         status=status,
-        text=_PAGE.substitute(title=escape(title), description=escape(description)),
+        text=_PAGE.substitute(
+            title=escape(title),
+            description=escape(description),
+            logo=_logo(),
+            outcome=escape(outcome, quote=True),
+        ),
         content_type="text/html",
         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
     )
+
+
+@cache
+def _logo() -> str:
+    # Reuse the desktop brand asset, embedded so the one-shot listener can close.
+    asset = files("pulsara_agent.desktop_app").joinpath(
+        "static/assets/pulsara-icon.png"
+    )
+    return b64encode(asset.read_bytes()).decode("ascii")
 
 
 _PAGE = Template("""<!doctype html>
@@ -27,71 +49,88 @@ _PAGE = Template("""<!doctype html>
   <style>
     :root {
       color-scheme: light dark;
-      --paper: #f3f0e8; --card: #fdfbf6; --ink: #17191f;
-      --muted: #7d7b74; --line: rgba(29,31,38,.12);
-      --accent: #bd8739; --soft: #f5e6ca;
+      --card: #fcfaf5; --line: #e6e0d3; --status-gap: 20px;
+      --paper: #f3f0e8; --ink: #24262b; --muted: #77786f; --accent: #bd8739;
+      --button: #292c29; --button-hover: #3c403a; --button-ink: #faf8f1;
+      --success: #478269; --success-bg: #e3ece3;
+      --error: #ab6155; --error-bg: #f1e4dc;
+      --neutral: #7b7b70; --neutral-bg: #e8e5dc;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; min-height: 100vh; min-height: 100dvh;
-      display: grid; place-items: center; padding: 28px;
-      background: radial-gradient(ellipse at 50% 32%, var(--soft), transparent 65%), var(--paper);
-      color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: grid; place-items: center; padding: 40px 24px calc(40px + 8vh);
+      background: var(--paper); color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    main { width: min(100%, 500px); }
-    .brand { display: flex; align-items: center; gap: 12px; margin: 0 0 26px 4px; }
-    .brand-mark {
-      display: grid; place-items: center; width: 42px; height: 42px;
-      border-radius: 13px; background: #17191f; color: #d79a42;
+    main {
+      width: min(100%, 440px); padding: 44px 36px; text-align: center;
+      background: var(--card); border: 1px solid var(--line); border-radius: 22px;
+      box-shadow: 0 20px 52px -24px rgba(64,48,23,.22), 0 2px 8px rgba(64,48,23,.03);
+      animation: appear .35s ease-out both;
     }
-    .brand-name { font: 600 22px Georgia, "Songti SC", serif; letter-spacing: -.4px; }
-    .brand small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
-    .card {
-      padding: 38px; border: 1px solid var(--line); border-radius: 22px;
-      background: var(--card); box-shadow: 0 16px 52px rgba(33,31,25,.06);
+    .brand { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: var(--status-gap); }
+    .brand-mark { display: block; width: 36px; height: 36px; object-fit: contain; }
+    .brand-name { font: 600 23px Georgia, "Songti SC", serif; letter-spacing: -.5px; }
+    .status-icon {
+      position: relative; display: grid; place-items: center; margin: 0 auto var(--status-gap);
+      width: 52px; height: 52px; border-radius: 50%;
+      color: var(--error); background: var(--error-bg);
     }
-    .eyebrow { display: flex; align-items: center; gap: 8px; color: var(--accent); font-size: 12px; }
-    .eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-    h1 { margin: 20px 0 14px; font: 500 clamp(24px,5vw,30px)/1.4 Georgia, "Songti SC", "Noto Serif CJK SC", serif; }
-    p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.9; }
-    .return-note {
-      display: flex; align-items: flex-start; gap: 10px; margin-top: 30px;
-      padding-top: 22px; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.8;
+    .status-icon::before, .status-icon::after { content: ""; position: absolute; border-radius: 1px; }
+    .status-icon.error::before { width: 2px; height: 14px; background: currentColor; top: 15px; }
+    .status-icon.error::after { width: 3px; height: 3px; background: currentColor; top: 33px; }
+    .status-icon.success { color: var(--success); background: var(--success-bg); }
+    .status-icon.success::before {
+      width: 19px; height: 10px; border-left: 2px solid; border-bottom: 2px solid;
+      transform: translateY(-3px) rotate(-45deg);
     }
-    .return-note svg { flex: none; margin-top: 3px; color: var(--accent); }
-    footer { margin-top: 22px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.8; }
-    @media (max-width: 480px) { body { padding: 22px; } .card { padding: 28px 24px; } }
+    .status-icon.cancelled { color: var(--neutral); background: var(--neutral-bg); }
+    .status-icon.cancelled::before { width: 18px; height: 2px; background: currentColor; }
+    h1 { margin: 0; font: 600 clamp(26px,6vw,30px)/1.4 Georgia, "Songti SC", "Noto Serif CJK SC", serif; letter-spacing: .02em; }
+    p { margin: 14px 0 0; color: var(--muted); font-size: 15px; line-height: 1.8; overflow-wrap: anywhere; }
+    p:empty { display: none; }
+    .return-button {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 44px; min-width: 176px; max-width: 100%; margin-top: 30px;
+      padding: 11px 24px; border-radius: 9px; background: var(--button);
+      color: var(--button-ink); font-size: 14px; font-weight: 500; text-decoration: none;
+      transition: background .15s;
+    }
+    .return-button:hover { background: var(--button-hover); }
+    .return-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    @keyframes appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    @media (max-width: 480px) {
+      body { padding-left: 18px; padding-right: 18px; }
+      main { padding: 36px 24px; border-radius: 20px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      main { animation: none; }
+      .return-button { transition: none; }
+    }
     @media (prefers-color-scheme: dark) {
-      :root { --paper: #1c1c1b; --card: #242421; --ink: #ede9df; --muted: #aaa69b;
-        --line: rgba(237,233,223,.12); --accent: #d8ac65; --soft: #302a20; }
+      :root {
+        --card: #242621; --line: #393c32;
+        --paper: #1c1e1b; --ink: #eeeadd; --muted: #b4b1a5; --accent: #d7a34f;
+        --button: #e7e3d8; --button-hover: #f7f3e9; --button-ink: #252820;
+        --success: #95c4a6; --success-bg: #2a3a30;
+        --error: #dca194; --error-bg: #3d2d28;
+        --neutral: #b8b8a9; --neutral-bg: #32352d;
+      }
     }
   </style>
 </head>
 <body>
   <main aria-labelledby="callback-title">
     <header class="brand">
-      <span class="brand-mark" aria-hidden="true">
-        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-          <circle cx="16" cy="16" r="10" stroke="currentColor" stroke-width=".8"/>
-          <ellipse cx="16" cy="16" rx="15" ry="5.5" transform="rotate(-24 16 16)" stroke="currentColor"/>
-          <path d="M16 10.5 17.3 14.7 21.5 16 17.3 17.3 16 21.5 14.7 17.3 10.5 16 14.7 14.7Z" fill="currentColor"/>
-        </svg>
-      </span>
-      <div><span class="brand-name">Pulsara</span><small>本机连接 · 浏览器授权</small></div>
+      <img class="brand-mark" src="data:image/png;base64,$logo" alt="" width="36" height="36">
+      <span class="brand-name">Pulsara</span>
     </header>
-    <section class="card">
-      <div class="eyebrow">授权回调</div>
-      <h1 id="callback-title">$title</h1>
-      <p>$description</p>
-      <div class="return-note">
-        <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="m9 10-4 4 4 4M5 14h9a5 5 0 0 0 5-5V5"/>
-        </svg>
-        <span>回到 Pulsara，在能力页查看授权状态。</span>
-      </div>
-    </section>
-    <footer>可以关闭此标签页，继续你的工作。</footer>
+    <div class="status-icon $outcome" aria-hidden="true"></div>
+    <h1 id="callback-title">$title</h1>
+    <p>$description</p>
+    <a class="return-button" href="pulsara://oauth/return">返回 Pulsara</a>
   </main>
 </body>
 </html>

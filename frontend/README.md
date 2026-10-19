@@ -17,3 +17,11 @@ npm run build:desktop
 
 三栏工作台、实例标签、文件浏览历史与冻结可视化的现行契约见
 [`PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md`](../PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md)。
+
+## 会话内阻塞交互
+
+能力配置、操作权限确认和规划交互统一使用会话内嵌卡片。会话内的添加 MCP、编辑 MCP 与插件连接配置复用共享 MCP 编辑器及原有凭据、默认值和提交逻辑；能力页继续使用其用户级编辑入口。
+
+规划卡片不显示额外的 Plan Mode 标签。自然语言回答与修改意见使用通用 placeholder，沿用现有接口；授权使用通用服务图标，不依赖品牌信息或服务商专属说明。卡片小字限于作用范围、截止时间、凭据状态等决策所需的信息。
+
+回归通过 PulsaraApp 的真实会话组件链路覆盖内嵌表单、秘密值分离、目的地确认、插件连接、权限结算与规划选择，不以预览页替代生产行为验证。

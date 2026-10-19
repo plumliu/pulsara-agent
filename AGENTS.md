@@ -63,6 +63,10 @@ This file applies to the entire repository. Human instructions and the active im
 - Reuse does not authorize silently dropping product semantics, credential boundaries, resource protections, cancellation, or side-effect settlement. Verify those behaviors at the integration boundary. If they conflict with the dependency, identify the exact conflict and revise the boundary explicitly rather than hiding it behind fallback or generic hardening.
 - When adopting a dependency-owned path, remove the superseded implementation in the same hard cut. Do not wrap a copied implementation and call it SDK reuse. Keep tests focused on Pulsara's observable contract and real integration gaps, rather than duplicating the dependency's entire conformance suite.
 
+## 8. Keep user-level pages independent of the active session
+
+Outside the conversation page and its session-scoped controls, pages must use user-level data and service owners. Do not derive their reads, refreshes, availability, or authorization tracking from the active session; explicit actions on a chosen session retain that target.
+
 ## Execution discipline
 
 - Read the active specification and current production code before changing behavior. Do not treat historical implementation details as current authority.

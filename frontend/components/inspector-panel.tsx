@@ -1,3 +1,4 @@
+import { McpAuthorizationStatus } from './mcp-authorization';
 import {
   AlertTriangle,
   Blocks,
@@ -109,6 +110,7 @@ interface InspectorPanelProps {
 }
 
 interface ProjectMcpForms {
+  authorizationKey?: (server: McpServerCapability) => string;
   preview: (input: McpImportSource) => Promise<McpImportPreview[]>;
   import: (input: McpImportSelection) => Promise<boolean>;
   test: (input: McpEditInput) => Promise<McpConnectionTestResult>;
@@ -400,6 +402,7 @@ function ProjectCapabilityPanel({
               <ul>{server.tools.map((tool) => <li key={tool.name}><code>{tool.name}</code><span>{tool.description || 'MCP 工具'}</span></li>)}</ul>
             )}
             <footer>
+              <McpAuthorizationStatus owner={mcpForms.authorizationKey?.(server)} />
               {server.editable && server.config && <button type="button" disabled={!canControl || Boolean(busy)} onClick={() => setEditingMcp(server)}>编辑连接</button>}
               {server.effective && server.status !== 'disabled' && <button type="button" disabled={!canControl || Boolean(busy)} onClick={() => void onReconnectMcp(server)}><RefreshCw size={11} /> 重新连接</button>}
               {server.editable && <button className="is-danger" type="button" disabled={!canControl || Boolean(busy)} onClick={() => void onRemoveMcp(server)}><Trash2 size={11} /> 移除</button>}
@@ -482,7 +485,7 @@ function ProjectCapabilityPanel({
       )}
       {busy && <div className="project-capability-busy"><LoaderCircle size={12} /> {busy}</div>}
       {canControl && dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
-      {canControl && editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
+      {canControl && editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor authorizationKey={mcpForms.authorizationKey?.(editingMcp)} credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
       {canControl && importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
     </div>
   );

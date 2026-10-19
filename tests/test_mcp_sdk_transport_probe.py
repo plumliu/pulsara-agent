@@ -10,6 +10,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import gzip
+import ipaddress
 import json
 import socket
 from urllib.parse import parse_qs, urlsplit
@@ -86,13 +87,14 @@ class PolicyTransport(httpx2.AsyncBaseTransport):
     async def handle_async_request(self, request):
         self.checked.append(str(request.url))
         pinned = await _enforce_http_network_policy(
-            replace(self.config, endpoint=str(request.url))
+            replace(self.config, endpoint=str(request.url)),
+            credential_boundary=ProcessCredentialBoundary(),
         )
         headers = dict(request.headers)
         headers["host"] = pinned.host_header
         physical = httpx2.Request(
             request.method,
-            pinned.url,
+            pinned.urls[0],
             headers=headers,
             content=await request.aread(),
             extensions={
@@ -133,6 +135,10 @@ def anyio_backend():
 
 @pytest.fixture
 def dns(monkeypatch):
+    async def denied_public_recovery(*args, **kwargs):
+        return frozenset({ipaddress.ip_address("127.0.0.1")})
+
+    monkeypatch.setattr("pulsara_agent.conversation_kernel.mcp.sdk_facade._resolve_public_http_addresses", denied_public_recovery)
     async def addresses(self, host, port, **kwargs):
         address = (
             "127.0.0.1" if host in {"private.example", "127.0.0.1"} else "93.184.216.34"

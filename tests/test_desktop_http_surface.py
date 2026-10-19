@@ -289,10 +289,8 @@ class _Sessions:
             "capabilities": _capabilities(session_id),
         }
 
-    async def inspect_user_capabilities(
-        self, *, active_session_id: str | None
-    ) -> dict[str, object]:
-        return _user_capabilities(active_session_id)
+    async def inspect_user_capabilities(self) -> dict[str, object]:
+        return _user_capabilities()
 
     async def update_user_mcp_server(
         self,
@@ -301,17 +299,16 @@ class _Sessions:
         config: dict[str, object],
         expected: str,
         secret_changes: tuple,
-        active_session_id: str | None,
         retain_credentials_confirmed: bool = False,
     ) -> dict[str, object]:
         assert expected == "current-docs"
         assert secret_changes == ()
         self.user_mcp_toggle_calls.append(
-            (server_id, config["enabled"], active_session_id)
+            (server_id, config["enabled"])
         )
         return {
             "operation": {"status": "DISABLED", "success": True},
-            "capabilities": _user_capabilities(active_session_id),
+            "capabilities": _user_capabilities(),
         }
 
     async def set_user_skill_enabled(
@@ -319,12 +316,11 @@ class _Sessions:
         *,
         skill_path: str,
         enabled: bool,
-        active_session_id: str | None,
     ) -> dict[str, object]:
-        self.user_skill_toggle_calls.append((skill_path, enabled, active_session_id))
+        self.user_skill_toggle_calls.append((skill_path, enabled))
         return {
             "operation": {"status": "DISABLED", "success": True},
-            "capabilities": _user_capabilities(active_session_id),
+            "capabilities": _user_capabilities(),
         }
 
 
@@ -346,9 +342,8 @@ def _capabilities(session_id: str) -> dict[str, object]:
     }
 
 
-def _user_capabilities(active_session_id: str | None) -> dict[str, object]:
+def _user_capabilities() -> dict[str, object]:
     return {
-        "active_session_id": active_session_id,
         "roots": [
             {"kind": "agents", "path": "/Users/test/.agents"},
             {"kind": "pulsara", "path": "/Users/test/.pulsara"},
@@ -1261,7 +1256,6 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
 
             async with client.get(
                 f"{server.origin}/api/capabilities",
-                params={"active_session_id": "session:bwpogagzox7onyn52iumyctnkq"},
             ) as response:
                 assert response.status == 200
                 payload = await response.json()
@@ -1275,7 +1269,6 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 json={
                     "path": "/Users/test/.agents/skills/review/SKILL.md",
                     "enabled": False,
-                    "active_session_id": "session:bwpogagzox7onyn52iumyctnkq",
                 },
                 headers={
                     "Origin": server.origin,
@@ -1287,7 +1280,6 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     (
                         "/Users/test/.agents/skills/review/SKILL.md",
                         False,
-                        "session:bwpogagzox7onyn52iumyctnkq",
                     )
                 ]
 
@@ -1296,7 +1288,6 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 json={
                     "config": {"enabled": False},
                     "expected_identity": "current-docs",
-                    "active_session_id": "session:bwpogagzox7onyn52iumyctnkq",
                 },
                 headers={
                     "Origin": server.origin,
@@ -1304,7 +1295,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 },
             ) as response:
                 assert response.status == 200
-                assert sessions.user_mcp_toggle_calls == [("docs", False, "session:bwpogagzox7onyn52iumyctnkq")]
+                assert sessions.user_mcp_toggle_calls == [("docs", False)]
 
             async with client.post(
                 f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities/mcp/docs/reconnect",
@@ -1690,11 +1681,11 @@ def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
             mcp_configs=(user_config,),
             plugins=object(),
             secret_resolver=lambda _binding: None,
-            live_inspection=SimpleNamespace(
+            live_inspections=(SimpleNamespace(
                 mcp_catalog=SimpleNamespace(servers=(live_server,)),
                 mcp_configured_servers=(live_config,),
                 mcp_tools=(live_tool,),
-            ),
+            ),),
         )
 
     workspace_payload = project(

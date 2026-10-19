@@ -11,10 +11,16 @@ import { usePromptHover } from '../lib/prompt-hover';
 import { AgentInputAvatar, UserAvatar } from './user-avatar';
 
 
+import { InteractionCardHeader } from './interaction-card-header';
 import { CapabilityInteractionEditor } from './capability-interaction-editor';
 
 import {
   ArrowDown,
+  ArrowRight,
+  ArrowUpRight,
+  FileQuestion,
+  ListChecks,
+  CircleAlert,
   ArrowLeft,
   AlarmClock,
   Plus,
@@ -65,6 +71,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useId,
   useSyncExternalStore,
 } from 'react';
 import { TurnInterruptionHistoryNotice } from './turn-interruption-notice';
@@ -1087,7 +1094,7 @@ function UserMessage({
   );
 }
 
-function AssistantHeading({ message, response, label = 'Pulsara' }: { message: Message; response: boolean; label?: string }) {
+function AssistantHeading({ message, response, label = 'Pulsara', running = message.status === 'running' }: { message: Message; response: boolean; label?: string; running?: boolean }) {
   return (
     <header className={`assistant-heading${response ? ' assistant-heading--response' : ' assistant-heading--run-start'}`}>
       <div className="assistant-avatar" aria-hidden="true">
@@ -1096,7 +1103,7 @@ function AssistantHeading({ message, response, label = 'Pulsara' }: { message: M
       </div>
       <div className="assistant-identity">
         <strong>{label}</strong>
-        {message.status === 'running' && (
+        {running && (
           <span className="thinking-label"><i /> {response ? '正在回复' : '正在执行'}</span>
         )}
       </div>
@@ -1300,7 +1307,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   if (!hasProcess) return renderMessage(answer!, true);
   return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
     {!historyLoading && messages.some(message => message.historyEarlierUnloaded) && <div role="status" className="history-boundary">本轮较早过程尚未加载</div>}
-    <AssistantHeading message={messages[0]} response={Boolean(messages[0].body.trim())} label={assistantLabel} />
+    <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
     <button type="button" className="conversation-run__toggle"
       data-thread-disclosure="" aria-expanded={disclosure.expanded}
       aria-label={disclosure.expanded ? '收起中间过程' : '展开中间过程'}
@@ -1506,7 +1513,15 @@ export function ConversationMessages({
       } else {
         const newInput = message.role === 'user'
           && message.userKind !== 'steer' && message.userKind !== 'subagent-completion';
-        if (newInput || (run.length && (run[0].historyGroupId !== message.historyGroupId || run[0].historyWindowId !== message.historyWindowId || run[0].turnId !== message.turnId))) flush();
+        // A live root draft has no canonical history segment/window yet. It
+        // continues only the immediately preceding process of the active turn;
+        // gaps, compactions and interruption notices already flush that run.
+        // Keep this a presentation join, without inventing historical metadata.
+        const continuesLiveRun = isRunning && message.role === 'assistant' && message.assistantKind === 'live'
+          && message.turnId === activeTurnId && Boolean(activeTurnId)
+          && !message.historyGroupId && !message.historyWindowId
+          && run[0]?.turnId === message.turnId && run[0]?.entryOwnerKind !== 'IMPORTED_HISTORY';
+        if (newInput || (run.length && !continuesLiveRun && (run[0].historyGroupId !== message.historyGroupId || run[0].historyWindowId !== message.historyWindowId || run[0].turnId !== message.turnId))) flush();
         if (message.role === 'user' && message.userKind !== 'subagent-completion' && !run.length) content.push(renderMessage(message, false));
         else run.push(message);
         if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
@@ -1528,21 +1543,33 @@ export function ConversationMessages({
   return content;
 }
 
-function permissionPrompt(prompt: string): string {
+function nestedScrollConsumes(target: EventTarget | null, thread: HTMLElement, deltaY: number): boolean {
+  for (let node = target instanceof Element ? target : null; node && node !== thread; node = node.parentElement) {
+    if (!(node instanceof HTMLElement)) continue;
+    const style = getComputedStyle(node);
+    if (!/^(auto|scroll)$/.test(style.overflowY) || node.scrollHeight <= node.clientHeight) continue;
+    if (deltaY === 0 || (deltaY < 0 && node.scrollTop > 0)
+      || (deltaY > 0 && node.scrollTop + node.clientHeight < node.scrollHeight)
+      || ['contain', 'none'].includes(style.overscrollBehaviorY)) return true;
+  }
+  return false;
+}
+
+function permissionCopy(prompt: string): {title: string; body: string} {
   const toolName = prompt.match(/^Allow\s+(.+?)\??$/i)?.[1]?.toLowerCase() ?? '';
   if (toolName.includes('write') || toolName.includes('edit') || toolName.includes('patch')) {
-    return 'Pulsara 想修改工作目录中的文件。是否允许本次操作？';
+    return {title: '允许修改文件？', body: 'Pulsara 想修改工作目录中的文件。'};
   }
   if (toolName.includes('read') || toolName.includes('search')) {
-    return 'Pulsara 想读取或搜索工作目录中的内容。是否允许本次操作？';
+    return {title: '允许读取内容？', body: 'Pulsara 想读取或搜索工作目录中的内容。'};
   }
   if (toolName.includes('browser')) {
-    return 'Pulsara 想操作本地浏览器。是否允许本次操作？';
+    return {title: '允许操作浏览器？', body: 'Pulsara 想操作本地浏览器。'};
   }
   if (toolName.includes('terminal') || toolName.includes('shell') || toolName.includes('exec')) {
-    return 'Pulsara 想在工作目录中运行一条命令。是否允许本次操作？';
+    return {title: '允许运行命令？', body: 'Pulsara 想在工作目录中运行一条命令。'};
   }
-  return 'Pulsara 需要执行一项可能产生改动的操作。是否允许本次操作？';
+  return {title: '允许本次操作？', body: 'Pulsara 需要执行一项可能产生改动的操作。'};
 }
 
 function InteractionCard({
@@ -1564,6 +1591,8 @@ function InteractionCard({
   const [freeText, setFreeText] = useState('');
   const [revisionOpen, setRevisionOpen] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const answerId = useId();
+  const feedbackId = useId();
   const interactionId = interaction.id;
   const interactionKind = interaction.kind;
   const [now, setNow] = useState(Date.now);
@@ -1613,89 +1642,65 @@ function InteractionCard({
     if (!accepted) setBusy(false);
   };
 
+  const permission = permissionCopy(content?.kind === 'tool-confirmation' ? content.prompt : prompt);
+  const capabilityLoaded = content?.kind === 'capability-form';
   return (
-    <section className={`interaction-card interaction-card--${interaction.kind}`} aria-live="polite">
-      <header className="interaction-card__header">
-        <span className="interaction-card__icon" aria-hidden="true">
-          {interaction.kind === 'tool-confirmation' ? <ShieldCheck size={15} /> : <FileText size={15} />}
-        </span>
-        <div>
-          <span>{interaction.kind === 'capability-form' ? '需要你的配置' : interaction.kind === 'tool-confirmation' ? '需要你的确认' : interaction.kind === 'plan-question' ? '规划需要你的选择' : '方案已准备好'}</span>
-          <small>{interaction.kind === 'tool-confirmation' ? '只决定这一次操作' : '确认后 Pulsara 会继续这次工作'}</small>
-        </div>
-      </header>
-
-      {!content && !loadError && <div className="interaction-loading"><LoaderCircle size={14} /> 正在准备内容…</div>}
-      {loadError && <p className="interaction-error">{loadError}</p>}
+    <section className={`interaction-card interaction-card--${interaction.kind}`} aria-live="polite" aria-busy={!content && !loadError || busy || Boolean(decisionInProgress || toolDecisionPending)}>
+      {!capabilityLoaded && <InteractionCardHeader
+        icon={interactionKind === 'tool-confirmation' ? ShieldCheck : interactionKind === 'plan-question' ? FileQuestion : ListChecks}
+        title={interactionKind === 'tool-confirmation' ? permission.title : interactionKind === 'plan-question' ? '先确认一个选择' : interactionKind === 'capability-form' ? '需要你的配置' : '方案已准备好'}
+        tone={interactionKind === 'tool-confirmation' ? 'amber' : interactionKind === 'plan-question' ? 'violet' : 'blue'}
+        subtitle={interactionKind === 'tool-confirmation' ? '仅本次操作' : undefined}
+      />}
+      {!content && !loadError && <div className="interaction-loading" role="status"><LoaderCircle size={18} /> <div>正在准备内容…<span className="interaction-skeleton" /><span className="interaction-skeleton is-short" /></div></div>}
+      {loadError && <div className="interaction-error" role="alert"><CircleAlert size={18} /><span>{loadError}</span></div>}
       {content?.kind === 'capability-form' && <CapabilityInteractionEditor form={content.form} onResolve={resolution => onResolve(interaction, resolution)} />}
-
-      {content?.kind === 'tool-confirmation' && (
-        <>
-          <p className="interaction-question">{permissionPrompt(content.prompt)}</p>
-          <div className="tool-confirmation-footer">
-            <div className="tool-confirmation-status">
-              {toolBusy ? <LoaderCircle size={15} className="is-spinning" /> : <Clock3 size={15} />}
-              <div>
-                <span>{toolBusy ? '正在处理确认' : expired ? '已到截止时间' : <span aria-live="off">剩余 {Math.floor(secondsLeft / 60)} 分 {secondsLeft % 60} 秒</span>}</span>
-                <small>{toolBusy ? '决定结果确认后将继续更新' : expired ? '正在等待后台确认状态' : <time dateTime={expiresAtUtc} aria-live="off">截至 {new Date(expiresAtUtc).toLocaleTimeString('zh-CN')}</time>}</small>
-              </div>
-            </div>
-            <div className="interaction-actions">
-              <button disabled={toolDisabled} onClick={() => void resolve({ kind: 'tool', decision: 'deny' })}>拒绝</button>
-              <button className="is-primary" disabled={toolDisabled} onClick={() => void resolve({ kind: 'tool', decision: 'allow' })}>
-                {toolBusy ? <LoaderCircle size={13} /> : <Check size={13} />} 允许本次操作
-              </button>
+      {content?.kind === 'tool-confirmation' && <>
+        <p className="interaction-question">{permission.body}</p>
+        <div className="tool-confirmation-footer">
+          <div className="tool-confirmation-status">
+            {toolBusy ? <LoaderCircle size={16} className="is-spinning" /> : <Clock3 size={16} />}
+            <div>
+              <span>{toolBusy ? '正在处理确认' : expired ? '已到截止时间' : <span aria-live="off">剩余 {Math.floor(secondsLeft / 60)} 分 {secondsLeft % 60} 秒</span>}</span>
+              <small>{toolBusy ? '确认后会继续更新' : expired ? '正在等待确认状态更新' : <time dateTime={expiresAtUtc} aria-live="off">截至 {new Date(expiresAtUtc).toLocaleTimeString('zh-CN')}</time>}</small>
             </div>
           </div>
-        </>
-      )}
-
-      {content?.kind === 'plan-question' && (
-        <>
-          <p className="interaction-question">{content.question}</p>
-          <div className="plan-options">
-            {content.options.map((option) => (
-              <button
-                key={option.ordinal}
-                disabled={busy}
-                onClick={() => void resolve({ kind: 'plan-question-option', optionOrdinal: option.ordinal })}
-              >
-                <span><strong>{option.label}</strong>{option.recommended && <em>建议</em>}</span>
-                {option.description && <small>{option.description}</small>}
-              </button>
-            ))}
+          <div className="interaction-actions">
+            <button disabled={toolDisabled} onClick={() => void resolve({ kind: 'tool', decision: 'deny' })}>拒绝</button>
+            <button className="is-primary" disabled={toolDisabled} onClick={() => void resolve({ kind: 'tool', decision: 'allow' })}>{toolBusy ? <LoaderCircle size={13} /> : <Check size={13} />} 允许本次操作</button>
           </div>
-          {content.allowFreeText && (
-            <div className="interaction-text-answer">
-              <textarea value={freeText} onChange={(event) => setFreeText(event.target.value)} placeholder="或者写下你的选择…" rows={2} />
-              <button className="is-primary" disabled={busy || !freeText.trim()} onClick={() => void resolve({ kind: 'plan-question-text', text: freeText.trim() })}>提交回答</button>
-            </div>
-          )}
-        </>
-      )}
-
-      {content?.kind === 'plan-draft' && (
-        <>
-          <div className="plan-draft-body"><MarkdownBody body={content.body} onNotify={onNotify} /></div>
-          {revisionOpen ? (
-            <div className="interaction-text-answer interaction-text-answer--revision">
-              <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="告诉 Pulsara 需要怎样修改方案…" rows={3} autoFocus />
-              <div className="interaction-actions">
-                <button disabled={busy} onClick={() => setRevisionOpen(false)}>返回</button>
-                <button className="is-primary" disabled={busy || !feedback.trim()} onClick={() => void resolve({ kind: 'plan-draft', decision: 'revise', feedback })}>提交修改意见</button>
-              </div>
-            </div>
-          ) : (
-            <div className="interaction-actions interaction-actions--plan">
-              <button disabled={busy} onClick={() => void resolve({ kind: 'plan-draft', decision: 'cancel' })}>取消规划</button>
-              <button disabled={busy} onClick={() => setRevisionOpen(true)}>提出修改</button>
-              <button className="is-primary" disabled={busy} onClick={() => void resolve({ kind: 'plan-draft', decision: 'approve' })}>
-                {busy ? <LoaderCircle size={13} /> : <Check size={13} />} 批准并继续
-              </button>
-            </div>
-          )}
-        </>
-      )}
+        </div>
+      </>}
+      {content?.kind === 'plan-question' && <>
+        <p className="interaction-question">{content.question}</p>
+        <div className="plan-options">
+          {content.options.map((option, index) => <button key={option.ordinal} className={option.recommended ? 'is-recommended' : undefined} disabled={busy} onClick={() => void resolve({ kind: 'plan-question-option', optionOrdinal: option.ordinal })}>
+            <span className="plan-option-number" aria-hidden="true">{index + 1}</span>
+            <span className="plan-option-content"><span><strong>{option.label}</strong>{option.recommended && <em>建议</em>}</span>{option.description && <small>{option.description}</small>}</span>
+            <ArrowUpRight size={15} aria-hidden="true" />
+          </button>)}
+        </div>
+        {content.allowFreeText && <div className="interaction-text-answer">
+          <label htmlFor={answerId}>也可以写下你的想法</label>
+          <textarea id={answerId} value={freeText} onChange={event => setFreeText(event.target.value)} placeholder="写下你的想法…" disabled={busy} rows={2} />
+          <button className="is-primary" disabled={busy || !freeText.trim()} onClick={() => void resolve({ kind: 'plan-question-text', text: freeText.trim() })}>{busy && <LoaderCircle size={13} />}提交回答<ArrowRight size={14} /></button>
+        </div>}
+      </>}
+      {content?.kind === 'plan-draft' && <>
+        <div className="plan-draft-body"><MarkdownBody body={content.body} onNotify={onNotify} /></div>
+        {revisionOpen ? <div className="interaction-text-answer interaction-text-answer--revision">
+          <label htmlFor={feedbackId}><Pencil size={15} />你想调整哪里？</label>
+          <textarea id={feedbackId} value={feedback} onChange={event => setFeedback(event.target.value)} placeholder="说说你想调整的地方…" disabled={busy} rows={3} autoFocus />
+          <div className="interaction-actions">
+            <button disabled={busy} onClick={() => setRevisionOpen(false)}><RotateCcw size={13} />返回方案</button>
+            <button className="is-primary" disabled={busy || !feedback.trim()} onClick={() => void resolve({ kind: 'plan-draft', decision: 'revise', feedback })}>{busy && <LoaderCircle size={13} />}提交修改意见<ArrowRight size={14} /></button>
+          </div>
+        </div> : <div className="interaction-actions interaction-actions--plan">
+          <button className="interaction-quiet" disabled={busy} onClick={() => void resolve({ kind: 'plan-draft', decision: 'cancel' })}>取消规划</button>
+          <button disabled={busy} onClick={() => setRevisionOpen(true)}><Pencil size={13} />提出修改</button>
+          <button className="is-primary" disabled={busy} onClick={() => void resolve({ kind: 'plan-draft', decision: 'approve' })}>{busy ? <LoaderCircle size={13} /> : <Check size={13} />} 批准并继续</button>
+        </div>}
+      </>}
     </section>
   );
 }
@@ -2480,18 +2485,24 @@ export function WorkbenchView({
           disclosureAnchor.current = { element: button, top: button.getBoundingClientRect().top - event.currentTarget.getBoundingClientRect().top };
         }}
         onWheel={event => {
+          if (nestedScrollConsumes(event.target, event.currentTarget, event.deltaY)) return;
           if (event.deltaY < 0) resetReading();
           beginUserScroll(event.deltaY > 0);
         }}
-        onTouchStart={() => beginUserScroll()}
+        onTouchStart={event => { if (!nestedScrollConsumes(event.target, event.currentTarget, 0)) beginUserScroll(); }}
         onPointerDown={event => { if (event.target === event.currentTarget) beginUserScroll(); }}
         onPointerUp={() => { userScrollPending.current = false; }}
         onTouchEnd={() => { userScrollPending.current = false; }}
         onKeyDown={event => {
+          const target = event.target;
+          if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+          const upward = ['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey);
+          if (nestedScrollConsumes(target, event.currentTarget, upward ? -1 : 1)) return;
           if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) resetReading();
           if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll(['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey));
         }}
         onScroll={(event) => {
+          if (event.target !== event.currentTarget) return;
           const element = event.currentTarget;
           if (!userScrollPending.current && programmaticTop.current !== undefined
             && Math.abs(element.scrollTop - programmaticTop.current) < 1) { programmaticTop.current = undefined; return; }

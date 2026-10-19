@@ -380,6 +380,34 @@ it('requests Plugin discovery using only the source directory', async () => {
   }));
 });
 
+it('reads the device capability overview without a selected conversation', async () => {
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({
+    skills: {}, mcp: {}, plugins: {},
+  }), { status: 200 }));
+  stubRuntimeFetch(fetcher);
+  const adapter = new LocalHttpRuntimeAdapter();
+  await adapter.inspectUserCapabilities();
+  expect(fetcher).toHaveBeenLastCalledWith('/api/capabilities', expect.anything());
+  await adapter.refreshUserCapabilities();
+  expect(fetcher).toHaveBeenLastCalledWith('/api/capabilities/refresh', expect.objectContaining({
+    method: 'POST', body: '{}',
+  }));
+});
+
+it('passes user overview cancellation to fetch without a session connection header', async () => {
+  const controller = new AbortController();
+  const fetcher = vi.fn<typeof fetch>((_input, init) => new Promise((_resolve, reject) => {
+    init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), {once: true});
+  }));
+  stubRuntimeFetch(fetcher);
+  const read = new LocalHttpRuntimeAdapter().inspectUserCapabilities(controller.signal);
+  expect(fetcher).toHaveBeenCalledWith('/api/capabilities', expect.objectContaining({signal: controller.signal}));
+  expect(fetcher.mock.calls[0][1]?.headers).toBeUndefined();
+  const aborted = expect(read).rejects.toThrow('cancel user overview');
+  controller.abort(new DOMException('cancel user overview', 'AbortError'));
+  await aborted;
+});
+
 it('preserves pending safe-point adoption from a user capability mutation', async () => {
   stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
     operation: { status: 'CREATED', success: true },
@@ -2240,7 +2268,6 @@ describe('capability catalog adapter', () => {
     const result = await new LocalHttpRuntimeAdapter().setUserSkillEnabled(
       '/Users/test/.agents/skills/review/SKILL.md',
       false,
-      'session-1',
     );
 
     expect(result.capabilities.skills).toMatchObject({
@@ -2251,7 +2278,6 @@ describe('capability catalog adapter', () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       path: '/Users/test/.agents/skills/review/SKILL.md',
       enabled: false,
-      active_session_id: 'session-1',
     });
   });
 });
@@ -3315,4 +3341,42 @@ it('presents only fresh authenticated complete root results, without history rep
   cut='9007199254740999';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'new'}}];
   await connection.observe();expect(seen).toHaveLength(2); await reads[1];
   await connection.close();expect(seen[1].signal.aborted).toBe(true);
+});
+
+it('announces only a fresh, complete, host-owned manage_capability OAuth success', async () => {
+  const authorization = {owner:{kind:'local',scope_key:'user',server_id:'notion',plugin_id:null},config_identity:'config',display_identity:'config',package_install_id:null};
+  const value = {action:'AUTHORIZE_MCP',status:'APPLIED',scope:'USER',identity:{server_id:'notion'},current:{authorized:true},authorization};
+  const assistant = {entry_id:'auth-call',turn_id:'turn-auth',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'auth-1',tool_name:'manage_capability'}]};
+  const result = {entry_id:'auth-result',turn_id:'turn-auth',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify(value)),tool_result:{assistant_entry_id:'auth-call',tool_call_id:'auth-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
+  let committed: unknown[] = [];
+  let cut = '10';
+  stubRuntimeFetch(vi.fn(async input => {
+    const url = String(input);
+    if (url.endsWith('/connections')) { const payload = connectPayload(); payload.snapshot.snapshot.event_sequence_cut = cut; return new Response(JSON.stringify(payload)); }
+    if (url.endsWith('/observe')) return new Response(JSON.stringify({observation:{committed,through_event_sequence:cut}}));
+    if (url.endsWith('/history/window')) return new Response(JSON.stringify({session_id:'session-1',entries:[assistant]}));
+    return new Response('{}');
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  if (connection instanceof CanonicalHistoryView) throw new Error('expected controller');
+  const reads: Promise<unknown>[] = [];
+  connection.subscribeMcpAuthorization!(request => reads.push(request.read()));
+  committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:result}];
+  await connection.observe(); expect(reads).toHaveLength(0); // bootstrap/history boundary
+  cut = '11'; committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:result}];
+  await connection.observe(); expect(await reads[0]).toEqual({scope:'USER',authorization});
+  await connection.observe(); expect(reads).toHaveLength(1); // no duplicate focus
+  for (const changed of [
+    {...result,entry_owner_kind:'IMPORTED_HISTORY'},
+    {...result,scope_kind:'SUBAGENT'},
+    {...result,tool_result:{...result.tool_result,display_kind:'HEAD_TAIL'}},
+    {...result,tool_result:{...result.tool_result,result_state:'ERROR'}},
+  ]) {
+    cut = String(Number(cut) + 1); committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:changed}];
+    await connection.observe();
+  }
+  expect(reads).toHaveLength(1);
+  cut = '20'; committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'rejected-result',content:inlineContent(JSON.stringify({...value,status:'REJECTED'}))}}];
+  await connection.observe(); expect(await reads[1]).toBeUndefined();
+  await connection.close();
 });

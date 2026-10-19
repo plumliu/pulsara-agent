@@ -22,6 +22,7 @@ if (process.isMainFrame) contextBridge.exposeInMainWorld('pulsaraDesktop', {
   browser,
   platform: process.platform,
   startupSettled: () => ipcRenderer.invoke('desktop:startup-settled'),
+  focus: () => ipcRenderer.invoke('desktop:focus'),
   readUiPreferences: () => ipcRenderer.invoke('desktop:read-ui-preferences'),
   writeUiPreference: (value: {key: string; value: string | null}) => ipcRenderer.invoke('desktop:write-ui-preference', value),
   writeClipboardText: (text: string) => ipcRenderer.invoke('desktop:write-clipboard-text', text),

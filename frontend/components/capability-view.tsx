@@ -1,3 +1,4 @@
+import { McpAuthorizationStatus, mcpAuthorizationKey } from './mcp-authorization';
 import {
   BookOpenText,
   Box,
@@ -283,6 +284,7 @@ export function CapabilityView({
                   <div className="capability-detail-actions capability-drawer-actions">
                   <button className="secondary-ghost" onClick={() => setEditingMcp(server)}>编辑连接与凭据</button>
                   {(server.config.auth as { type?: string } | undefined)?.type === 'oauth' && <>
+                    <McpAuthorizationStatus owner={mcpAuthorizationKey('device', server.id, server.currentIdentity)} />
                     <button className="secondary-ghost" onClick={() => void onMcpAuthorization(server, 'login')}>登录授权</button>
                     <button className="secondary-ghost" onClick={() => void onMcpAuthorization(server, 'status')}>查看登录状态</button>
                     <button className="secondary-ghost" onClick={() => void onMcpAuthorization(server, 'cancel')}>取消登录</button>
@@ -359,7 +361,7 @@ export function CapabilityView({
       {addKind === 'skill' && <SkillImporter onClose={() => setAddKind(undefined)} onInstall={onInstallSkill} onPreview={onPreviewSkills} />}
       {addKind === 'mcp' && <McpEditor onClose={() => setAddKind(undefined)} onSave={onCreateMcp} onTest={onTestMcp} onNotify={onNotify} />}
       {addKind === 'mcp-import' && <McpImporter onClose={() => setAddKind(undefined)} onPreview={onPreviewMcpImport} onImport={onImportMcp} />}
-      {editingMcp && <McpEditor server={editingMcp} onClose={() => setEditingMcp(undefined)} onSave={(input) => onEditMcp(editingMcp, input)} onTest={onTestMcp} onNotify={onNotify} />}
+      {editingMcp && <McpEditor server={editingMcp} authorizationKey={mcpAuthorizationKey('device', editingMcp.id, editingMcp.currentIdentity)} onAuthorization={action => onMcpAuthorization(editingMcp, action)} onClose={() => setEditingMcp(undefined)} onSave={(input) => onEditMcp(editingMcp, input)} onTest={onTestMcp} onNotify={onNotify} />}
     </section>
   );
 }

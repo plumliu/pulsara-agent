@@ -35,15 +35,22 @@ async def oauth_server(
     client_id=None,
     trace=None,
     metadata_redirect=False,
+    token_error=False,
+    token_gate=None,
+    get_probe_status=401,
+    post_probe_status=401,
 ):
     requests = []
     authorizations = []
     token_forms = []
+    mcp_messages = []
     if trace is not None:
         trace.update(
-            authorizations=authorizations, token_forms=token_forms, requests=requests
+            authorizations=authorizations, token_forms=token_forms, requests=requests,
+            mcp_messages=mcp_messages,
         )
     callbacks = []
+    browser_tasks = []
     refresh_started = asyncio.Event()
     refresh_release = asyncio.Event()
     refresh_release.set()
@@ -58,6 +65,12 @@ async def oauth_server(
             (request.method, request.path, request.headers.get("Authorization"))
         )
         if request.path == "/mcp":
+            if request.method == "GET" and get_probe_status != 401:
+                return web.Response(status=get_probe_status, headers={"Allow": "POST"})
+            if request.method == "POST":
+                mcp_messages.append(await request.json())
+                if post_probe_status != 401:
+                    return web.Response(status=post_probe_status)
             return web.Response(
                 status=401,
                 headers={
@@ -117,6 +130,11 @@ async def oauth_server(
                 assert challenge == authorizations[-1]["code_challenge"][0]
                 assert form["redirect_uri"] == redirect_uri
                 assert form["code"] == "single-use-code"
+                if token_gate is not None:
+                    token_gate[0].set()
+                    await token_gate[1].wait()
+                if token_error:
+                    return web.json_response({"error": "invalid_grant"}, status=400)
                 access = "initial-private-token"
             else:
                 assert form["grant_type"] == "refresh_token"
@@ -147,7 +165,8 @@ async def oauth_server(
             )
         )
         callbacks.append(callback)
-        if auto_callback:
+
+        async def visit_callback():
             async with httpx.AsyncClient(trust_env=False) as client:
                 wrong = await client.get(
                     query["redirect_uri"][0],
@@ -168,10 +187,14 @@ async def oauth_server(
                 assert response.headers["content-type"].startswith("text/html")
                 assert response.headers["cache-control"] == "no-store"
                 assert response.headers["referrer-policy"] == "no-referrer"
-                assert "已收到授权回调" in response.text
-                assert "最终结果会显示在能力页中" in response.text
+                assert "授权成功" in response.text
+                assert 'class="status-icon success"' in response.text
+                assert "返回 Pulsara" in response.text
                 assert "single-use-code" not in response.text
                 assert query["state"][0] not in response.text
+
+        if auto_callback:
+            browser_tasks.append(asyncio.create_task(visit_callback()))
 
     app = web.Application()
     app.router.add_route("*", "/{path:.*}", serve)
@@ -182,7 +205,7 @@ async def oauth_server(
     base = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
     settings = LocalSettingsStore(tmp_path / "local-settings.yaml")
     service = LocalMcpManagementService(
-        settings, user_config_path=tmp_path / "mcp.yaml"
+        settings, user_config_path=tmp_path / "mcp.yaml", open_browser=browser
     )
     target = LocalMcpTarget("oauth-test")
     result = await service.create(
@@ -208,12 +231,9 @@ async def oauth_server(
             },
         },
     )
-    manager = McpOAuthManager(
-        settings,
-        lane=service.lane,
-        credential_boundary=ProcessCredentialBoundary(),
-        open_browser=browser,
-    )
+    manager = service.oauth
+    if trace is not None:
+        trace["management"] = service
     try:
         yield (
             manager,
@@ -228,6 +248,7 @@ async def oauth_server(
     finally:
         refresh_release.set()
         await manager.aclose()
+        await asyncio.gather(*browser_tasks)
         await runner.cleanup()
 
 
@@ -259,6 +280,37 @@ def test_oauth_redirect_and_status_after_manager_restart(tmp_path):
                 "error": None,
             }
             await restarted.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("post_probe_status", [401, 503])
+def test_oauth_get_405_uses_one_read_only_post_challenge_then_sdk_authorization(
+    tmp_path, post_probe_status
+):
+    async def scenario():
+        trace = {}
+        async with oauth_server(
+            tmp_path, get_probe_status=405, post_probe_status=post_probe_status, trace=trace
+        ) as (manager, target, config, requests, forms, *_):
+            flow = await trace["management"].authorize(target)
+            if post_probe_status == 401:
+                record = await flow.task
+                assert manager.settings.read().mcp_authorization(target.owner) == record
+                assert flow.state == "authorized"
+                assert len(trace["authorizations"]) == 1
+                assert [form["grant_type"] for form in forms] == ["authorization_code"]
+            else:
+                with pytest.raises(ValueError, match="登录未完成"):
+                    await flow.task
+                assert flow.state == "failed"
+                assert manager.settings.read().mcp_authorization(target.owner) is None
+                assert trace["authorizations"] == [] and forms == []
+            assert requests[:2] == [("GET", "/mcp", None), ("POST", "/mcp", None)]
+            assert sum(path == "/mcp" for _, path, _ in requests) == 2
+            assert all(authorization is None for _, _, authorization in requests)
+            assert len(trace["mcp_messages"]) == 1
+            assert trace["mcp_messages"][0]["method"] == "server/discover"
 
     asyncio.run(scenario())
 
@@ -355,7 +407,8 @@ def test_oauth_denied_callback_shows_unfinished_page_without_grant(tmp_path):
                     },
                 )
             assert response.status_code == 200
-            assert "本次授权未完成" in response.text
+            assert "授权未完成" in response.text
+            assert 'class="status-icon error"' in response.text
             assert "已收到授权回调" not in response.text
             assert "untrusted" not in response.text
             assert state not in response.text
@@ -391,6 +444,96 @@ def test_oauth_cancel_closes_listener_and_preserves_no_grant(tmp_path):
             async with httpx.AsyncClient(trust_env=False) as client:
                 with pytest.raises(httpx.ConnectError):
                     await client.get(callbacks[0])
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("token_error", [False, True])
+def test_callback_waits_for_final_exchange_and_persistence(tmp_path, token_error):
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        async with oauth_server(
+            tmp_path,
+            auto_callback=False,
+            token_error=token_error,
+            token_gate=(started, release),
+        ) as (manager, target, config, _, _, callbacks, _, _):
+            flow = await manager.begin(target.owner, lambda: config)
+            async with asyncio.timeout(5):
+                while not callbacks:
+                    await asyncio.sleep(0.01)
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    response_task = asyncio.create_task(client.get(callbacks[0]))
+                    await started.wait()
+                    assert not response_task.done()
+                    assert (
+                        manager.settings.read().mcp_authorization(target.owner) is None
+                    )
+                    release.set()
+                    response = await response_task
+                if token_error:
+                    with pytest.raises(ValueError, match="登录未完成"):
+                        await flow.task
+                    assert "授权未完成" in response.text
+                    assert 'class="status-icon error"' in response.text
+                    assert "授权成功" not in response.text
+                    assert (
+                        manager.settings.read().mcp_authorization(target.owner) is None
+                    )
+                else:
+                    await flow.task
+                    assert "授权成功" in response.text
+                    assert 'class="status-icon success"' in response.text
+                    assert (
+                        manager.settings.read().mcp_authorization(target.owner)
+                        is not None
+                    )
+                assert 'href="pulsara://oauth/return"' in response.text
+                assert "single-use-code" not in response.text
+                assert "initial-private-token" not in response.text
+                assert (
+                    parse_qs(urlsplit(callbacks[0]).query)["state"][0]
+                    not in response.text
+                )
+
+    asyncio.run(scenario())
+
+
+def test_cancel_during_callback_returns_cancelled_without_cleanup_deadlock(tmp_path):
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        async with oauth_server(
+            tmp_path, auto_callback=False, token_gate=(started, release)
+        ) as (
+            manager,
+            target,
+            config,
+            _,
+            _,
+            callbacks,
+            _,
+            _,
+        ):
+            flow = await manager.begin(target.owner, lambda: config)
+            async with asyncio.timeout(5):
+                while not callbacks:
+                    await asyncio.sleep(0.01)
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    response_task = asyncio.create_task(client.get(callbacks[0]))
+                    await started.wait()
+                    try:
+                        await manager.cancel(target.owner)
+                        response = await response_task
+                        assert "授权已取消" in response.text
+                        assert 'class="status-icon cancelled"' in response.text
+                        assert "授权成功" not in response.text
+                        assert flow.task.cancelled()
+                        assert (
+                            manager.settings.read().mcp_authorization(target.owner)
+                            is None
+                        )
+                    finally:
+                        release.set()
 
     asyncio.run(scenario())
 
@@ -461,5 +604,22 @@ def test_explicit_scope_pre_registered_client_and_resource_survive_refresh(tmp_p
                 manager.settings.read().mcp_authorization(target.owner).scope
                 == "limited"
             )
+
+    asyncio.run(scenario())
+
+
+def test_model_completion_status_rechecks_current_owner_and_logout(tmp_path):
+    async def scenario():
+        async with oauth_server(tmp_path) as (manager, target, config, *_):
+            current = config
+            flow = await manager.begin(target.owner, lambda: current)
+            await flow.task
+            assert manager.completed_login_state(target.owner, config.resolved_config_identity)["state"] == "authorized"
+            assert manager.completed_login_state(target.owner, "replaced-config")["state"] == "idle"
+            current = None
+            assert manager.completed_login_state(target.owner, config.resolved_config_identity)["state"] == "idle"
+            current = config
+            await manager.logout(target.owner)
+            assert manager.completed_login_state(target.owner, config.resolved_config_identity)["state"] == "idle"
 
     asyncio.run(scenario())

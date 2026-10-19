@@ -1,5 +1,7 @@
+import { InteractionCardHeader } from './interaction-card-header';
+import { McpAuthorizationStatus } from './mcp-authorization';
 import { useEffect, useState } from 'react';
-import { ChevronDown, LoaderCircle, Plus, Save, Trash2, X, PlugZap } from 'lucide-react';
+import { ChevronDown, LoaderCircle, Plus, Save, Trash2, X, PlugZap, Globe2, KeyRound, Eye, EyeOff, Link2, ArrowRight } from 'lucide-react';
 import type { McpEditInput, McpCredentialOwner, McpConnectionTestResult, UserMcpServerCapability, PluginMcpConnection } from '../lib/pulsara-types';
 import type { MarkdownNotify } from './markdown-body';
 
@@ -22,10 +24,15 @@ type ConnectionTestProps = {
   onNotify: MarkdownNotify;
 } | { onTest?: never; onNotify?: never };
 
-export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthorization, onRestoreDefaults, credentialOwner, credentialScopeKey, packageDefinition, connectionInputs = [] }: {
+export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthorization, authorizationKey, onRestoreDefaults, credentialOwner, credentialScopeKey, packageDefinition, connectionInputs = [], presentation = 'dialog', title, sourceName, scopeLabel }: {
   server?: UserMcpServerCapability;
+  presentation?: 'dialog' | 'inline';
+  title?: string;
+  sourceName?: string;
+  scopeLabel?: string;
   onClose: () => void;
   onSave: (input: McpEditInput) => Promise<boolean>;
+  authorizationKey?: string;
   onAuthorization?: (action: 'login' | 'status' | 'cancel' | 'logout') => Promise<void>;
   onRestoreDefaults?: () => Promise<boolean>;
   credentialOwner?: McpCredentialOwner;
@@ -33,6 +40,8 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
   packageDefinition?: Record<string, unknown>;
   connectionInputs?: PluginMcpConnection['connectionInputs'];
 } & ConnectionTestProps) {
+  const inline = presentation === 'inline';
+  const [showBearer, setShowBearer] = useState(false);
   const [inputValues, setInputValues] = useState<Record<string, string>>({});
   const [clearInputs, setClearInputs] = useState<Record<string, boolean>>({});
   const original = server?.config ?? {};
@@ -81,10 +90,11 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
+    if (inline) return;
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onClose(); };
     window.addEventListener('keydown', close);
     return () => window.removeEventListener('keydown', close);
-  }, [busy, onClose]);
+  }, [busy, onClose, inline]);
   const destinationChanged = Boolean(server && (kind !== previousTransport.type || (kind === 'stdio'
     ? command !== previousTransport.command || args !== JSON.stringify(previousTransport.args ?? []) || cwd !== String(previousTransport.cwd ?? '.')
     : endpoint !== previousTransport.endpoint)));
@@ -173,16 +183,17 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
       <button className="secondary-ghost" type="button" onClick={() => setRows([...rows, { name: '', value: '', clear: false }])}><Plus size={13} />添加一项</button>
     </div>
   );
-  return <div className="capability-add-panel mcp-editor" role="dialog" aria-modal="true" aria-label={server ? '编辑 MCP 服务' : '添加 MCP 服务'}>
-    <div className="capability-add-panel__backdrop" onClick={busy ? undefined : onClose} />
-    <section><header><div><span>本机连接 · 凭据不会交给模型</span><h2>{server ? '编辑 MCP 服务' : '添加 MCP 服务'}</h2></div><button disabled={busy} onClick={onClose} aria-label="关闭"><X size={16} /></button></header>
+  return <div className={inline ? 'interaction-mcp-editor mcp-editor' : 'capability-add-panel mcp-editor'} role={inline ? 'region' : 'dialog'} aria-modal={inline ? undefined : true} aria-label={title ?? (server ? '编辑 MCP 服务' : '添加 MCP 服务')} aria-busy={busy}>
+    {!inline && <div className="capability-add-panel__backdrop" onClick={busy ? undefined : onClose} />}
+    <section>{inline ? <InteractionCardHeader icon={packageDefinition ? Link2 : PlugZap} title={title ?? (server ? `编辑 ${server.name} 连接` : '添加 MCP 连接')} subtitle={sourceName} scope={scopeLabel} /> : <header><div><span>本机连接</span><h2>{server ? '编辑 MCP 服务' : '添加 MCP 服务'}</h2></div><button disabled={busy} onClick={onClose} aria-label="关闭"><X size={16} /></button></header>}
       <div className="capability-form-grid capability-dialog-body">
-        <label className="capability-field"><span>服务 ID</span><input autoFocus disabled={Boolean(server)} value={id} onChange={(event) => setId(event.target.value)} /></label>
+        {inline && <div className="interaction-form-section capability-field--wide"><Globe2 size={14} />连接信息</div>}
+        {!inline && <label className="capability-field"><span>服务 ID</span><input autoFocus disabled={Boolean(server)} value={id} onChange={(event) => setId(event.target.value)} /></label>}
         <label className="capability-field"><span>显示名称</span><input disabled={Boolean(packageDefinition)} value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label className="capability-field capability-field--wide"><span>连接方式</span><select disabled={Boolean(packageDefinition)} value={kind} onChange={(event) => setKind(event.target.value)}><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">本地命令</option></select></label>
-        {packageDefinition && <details className="capability-field capability-field--wide" open={confirmRestore || undefined}><summary>插件默认连接（只读）</summary><pre>{pretty(packageDefinition)}</pre><small>保存仅覆盖本机实例；同名 Header / 环境变量会覆盖这里的默认值，不修改插件文件。</small>
+        <label className={`capability-field${inline ? '' : ' capability-field--wide'}`}><span>连接方式</span><select disabled={Boolean(packageDefinition)} value={kind} onChange={(event) => setKind(event.target.value)}><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">本地命令</option></select></label>
+        {packageDefinition && <details className="capability-field capability-field--wide" open={confirmRestore || undefined}><summary>插件默认连接（只读）</summary><pre>{pretty(packageDefinition)}</pre>
           {onRestoreDefaults && <div className="capability-detail-actions">{confirmRestore ? <>
-            <p>恢复上方默认目的地和认证设置，并清除不再使用的本机凭据与授权。不会修改插件文件或吊销远端密钥。</p>
+            <p>恢复默认连接后，不再使用的本机凭据和授权也会清除。</p>
             <button className="secondary-ghost" disabled={busy} onClick={() => setConfirmRestore(false)}>取消恢复</button>
             <button className="danger-ghost" disabled={busy} onClick={() => void (async () => {
               setBusy(true); setError('');
@@ -195,27 +206,32 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
         {connectionInputs.map((input) => input.private ? <label key={input.name} className="capability-field capability-field--wide"><span>{input.title}{input.required ? '（连接所需）' : '（可选）'}</span>
           <input type="password" autoComplete="new-password" aria-label={input.title} value={inputValues[input.name] ?? ''} placeholder="留空保留本机值；尚未配置时可先保存" onChange={(event) => {setInputValues({...inputValues, [input.name]: event.target.value}); setClearInputs({...clearInputs, [input.name]: false});}} />
           <button type="button" className="danger-ghost" onClick={() => {setInputValues({...inputValues, [input.name]: ''}); setClearInputs({...clearInputs, [input.name]: true});}}>{clearInputs[input.name] ? '保存时清除该值' : '清除本机值'}</button>
-        </label> : <p key={input.name} className="capability-field capability-field--wide">{input.title}：{input.default} <small>此普通参数已应用到下方连接字段，可直接修改对应字段。</small></p>)}
+        </label> : <p key={input.name} className="capability-field capability-field--wide">{input.title}：{input.default} </p>)}
         {kind === 'stdio' ? <>
-          <label className="capability-field capability-field--wide"><span>命令</span><input aria-label="命令" disabled={Boolean(packageDefinition)} value={command} onChange={(event) => setCommand(event.target.value)} placeholder="npx" /><small>启用后会在本机启动这个命令，请只使用可信来源。</small></label>
+          <label className="capability-field capability-field--wide"><span>命令</span><input aria-label="命令" disabled={Boolean(packageDefinition)} value={command} onChange={(event) => setCommand(event.target.value)} placeholder="npx" /></label>
           <label className="capability-field capability-field--wide"><span>参数（JSON 数组）</span><textarea disabled={Boolean(packageDefinition)} value={args} onChange={(event) => setArgs(event.target.value)} /></label>
           <label className="capability-field"><span>工作目录（相对项目）</span><input disabled={Boolean(packageDefinition)} value={cwd} onChange={(event) => setCwd(event.target.value)} /></label>
           {secretRows(envSecrets, setEnvSecrets, '秘密环境变量')}
         </> : <>
           <label className="capability-field capability-field--wide"><span>服务地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://example.com/mcp" /></label>
+          {inline && <div className="interaction-form-section capability-field--wide"><KeyRound size={14} />认证</div>}
           <label className="capability-field capability-field--wide"><span>认证方式</span><select value={auth} onChange={(event) => setAuth(event.target.value)}><option value="none">无需认证</option><option value="bearer">Bearer Token</option><option value="static_headers">秘密 Header</option><option value="oauth">浏览器登录（OAuth）</option></select></label>
           {auth === 'bearer' && <><label className="capability-field"><span>Token 来源</span><select value={bearerSource} onChange={(event) => { setBearerSource(event.target.value); setBearer(''); setClearBearer(false); }}><option value="managed">本机保存</option><option value="environment">Host 环境变量</option></select></label>
             {bearerSource === 'environment' ? <label className="capability-field"><span>Token 环境变量名</span><input aria-label="Token 环境变量名" value={bearerEnvironment} onChange={(event) => setBearerEnvironment(event.target.value)} /><small>只引用 Host 启动时继承的变量；不能引用 PULSARA_API_KEY。</small></label>
-              : <label className="capability-field capability-field--wide"><span>Token</span><input type="password" autoComplete="new-password" value={bearer} onChange={(event) => { setBearer(event.target.value); setClearBearer(false); }} placeholder={previousAuth.reference ? '留空保留已保存的值' : '仅保存到本机'} />{Boolean(previousAuth.reference) && object(previousAuth.reference).source !== 'environment' && <button className="danger-ghost" onClick={() => { setBearer(''); setClearBearer(true); }}>{clearBearer ? '保存时清除凭据' : '清除已保存凭据'}</button>}</label>}
+              : <label className="capability-field capability-field--wide"><span>Token</span><div className="mcp-token-input"><input aria-label="Token" type={showBearer ? 'text' : 'password'} autoComplete="new-password" value={bearer} onChange={(event) => { setBearer(event.target.value); setClearBearer(false); }} placeholder={previousAuth.reference ? '留空保留已保存的值' : '填写 Token'} /><button type="button" aria-label={showBearer ? '隐藏密钥' : '显示密钥'} onClick={() => setShowBearer(!showBearer)}>{showBearer ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>{Boolean(previousAuth.reference) && object(previousAuth.reference).source !== 'environment' && <button className="danger-ghost" onClick={() => { setBearer(''); setClearBearer(true); }}>{clearBearer ? '保存时清除凭据' : '清除已保存凭据'}</button>}</label>}
           </>}
           {auth === 'static_headers' && secretRows(headerSecrets, setHeaderSecrets, '秘密 Header')}
-          {auth === 'oauth' && <><p className="capability-field--wide">先保存连接，再从服务详情中点击“登录授权”。保存不会弹出浏览器，也不会自动启用服务。</p><label className="capability-field"><span>客户端 ID（可选）</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} /></label><label className="capability-field"><span>客户端密钥来源</span><select value={clientSecretSource} onChange={(event) => {setClientSecretSource(event.target.value); setClientSecret(''); setClearClientSecret(false);}}><option value="none">不使用客户端密钥</option><option value="managed">本机保存</option><option value="environment">Host 环境变量</option></select></label>
+          {auth === 'oauth' && <><label className="capability-field"><span>客户端 ID（可选）</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} /></label><label className="capability-field"><span>客户端密钥来源</span><select value={clientSecretSource} onChange={(event) => {setClientSecretSource(event.target.value); setClientSecret(''); setClearClientSecret(false);}}><option value="none">不使用客户端密钥</option><option value="managed">本机保存</option><option value="environment">Host 环境变量</option></select></label>
             {clientSecretSource === 'environment' && <label className="capability-field"><span>客户端密钥环境变量名</span><input value={clientSecretEnvironment} onChange={(event) => setClientSecretEnvironment(event.target.value)} /></label>}
             {clientSecretSource === 'managed' && <label className="capability-field"><span>客户端密钥</span><input type="password" autoComplete="new-password" value={clientSecret} onChange={(event) => { setClientSecret(event.target.value); setClearClientSecret(false); }} placeholder={previousAuth.client_secret ? '留空保留' : ''} />{Boolean(previousAuth.client_secret) && <button className="danger-ghost" onClick={() => { setClientSecret(''); setClearClientSecret(true); }}>保存时清除密钥值</button>}</label>}
             <label className="capability-field"><span>请求权限（scope，可选）</span><input value={scope} onChange={(event) => setScope(event.target.value)} /></label><label className="capability-field"><span>本机回调地址</span><input value={redirect} onChange={(event) => setRedirect(event.target.value)} /></label><label className="capability-field"><span>资源地址（可选）</span><input value={resource} onChange={(event) => setResource(event.target.value)} /></label><label className="capability-field"><span>客户端元数据 URL（可选）</span><input value={clientMetadata} onChange={(event) => setClientMetadata(event.target.value)} /></label></>}
         </>}
+        {!packageDefinition && <div className="interaction-connection-settings capability-field--wide"><label className="capability-check capability-field--wide"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> {inline ? '启用此连接' : '启用此服务'}</label>
+        <label className="capability-check capability-field--wide"><input type="checkbox" checked={subagents} onChange={(event) => setSubagents(event.target.checked)} /> {inline ? '允许子任务使用' : '也向委派 Agent 提供'}</label>
+        </div>}
         <details className="capability-field capability-field--wide mcp-advanced"><summary><span>更多连接选项</span><ChevronDown size={15} aria-hidden="true" /></summary>
           <div className="mcp-advanced-fields">
+          {inline && <label className="capability-field"><span>服务 ID</span><input disabled={Boolean(server)} value={id} onChange={(event) => setId(event.target.value)} /></label>}
           <label className="capability-field"><span>{kind === 'stdio' ? '普通环境变量' : '普通 Header'}（JSON 对象，不填写密钥）</span><textarea value={kind === 'stdio' ? env : headers} onChange={(event) => kind === 'stdio' ? setEnv(event.target.value) : setHeaders(event.target.value)} /></label>
           {kind !== 'stdio' && <label className="capability-check"><input type="checkbox" checked={allowLocal} onChange={(event) => setAllowLocal(event.target.checked)} />允许本机 HTTP 测试地址</label>}
           {!packageDefinition && <>
@@ -239,17 +255,15 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
           </>}
           </div>
         </details>
-        {!packageDefinition && <><label className="capability-check capability-field--wide"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />启用此服务</label>
-        <label className="capability-check capability-field--wide"><input type="checkbox" checked={subagents} onChange={(event) => setSubagents(event.target.checked)} />也向委派 Agent 提供</label></>}
         {destinationChanged && retainsCredential && <label className="capability-check capability-field--wide"><input type="checkbox" checked={retainConfirmed} onChange={(event) => setRetainConfirmed(event.target.checked)} />我确认将保留的凭据用于新的连接目标。</label>}
         {error && <p role="alert" className="capability-field--wide">{error}</p>}
-        {previousAuth.type === 'oauth' && onAuthorization && <div className="capability-field--wide"><small>以下操作使用已保存的连接，不使用当前未保存的修改。</small><div className="capability-detail-actions">
+        {previousAuth.type === 'oauth' && onAuthorization && <div className="capability-field--wide"><McpAuthorizationStatus owner={authorizationKey} /><small>以下操作使用已保存的连接，不使用当前未保存的修改。</small><div className="capability-detail-actions">
           {(['login', 'status', 'cancel', 'logout'] as const).map((action) => <button className="secondary-action" disabled={busy} key={action} onClick={() => void (async () => {
             setBusy(true); try { await onAuthorization(action); } finally { setBusy(false); }
           })()}>{({login: '登录授权', status: '查看授权状态', cancel: '取消登录', logout: '清除本机授权'})[action]}</button>)}
         </div></div>}
       </div>
-      <footer><button className="secondary-action" disabled={busy} onClick={onClose}>取消</button>{onTest && <button className="secondary-action" disabled={busy || !id.trim() || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit(true)}><PlugZap size={14} />测试连接</button>}<button className="capability-primary" disabled={busy || !id.trim() || !(kind === 'stdio' ? command : endpoint) || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit()}>{busy ? <LoaderCircle size={14} /> : <Save size={14} />}保存连接</button></footer>
+      <footer className={inline ? 'interaction-editor-footer' : undefined}><button className="secondary-action" disabled={busy} onClick={onClose}>取消</button>{onTest && <button className="secondary-action" disabled={busy || !id.trim() || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit(true)}><PlugZap size={14} />测试连接</button>}<button className="capability-primary" disabled={busy || !id.trim() || !(kind === 'stdio' ? command : endpoint) || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit()}>{busy ? <LoaderCircle size={14} /> : !inline && <Save size={14} />}{inline ? '保存并继续' : '保存连接'}{inline && !busy && <ArrowRight size={14} />}</button></footer>
     </section>
   </div>;
 }

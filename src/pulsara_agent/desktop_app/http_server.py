@@ -489,6 +489,9 @@ class LocalHttpServer:
             "/api/capabilities/mcp/import/preview", self._preview_mcp_import
         )
         self._app.router.add_post("/api/capabilities/mcp/import", self._import_mcp)
+        self._app.router.add_post(
+            "/api/capabilities/mcp/authorization-result", self._model_mcp_authorization_status
+        )
         self._app.router.add_put(
             "/api/capabilities/mcp/{server_id}", self._update_user_mcp_server
         )
@@ -1538,20 +1541,17 @@ class LocalHttpServer:
         return web.json_response(payload)
 
     async def _inspect_user_capabilities(self, request: web.Request) -> web.Response:
-        payload = await self.sessions.inspect_user_capabilities(
-            active_session_id=request.query.get("active_session_id")
-        )
+        if request.query:
+            raise ValueError("unexpected capability inspection field")
+        payload = await self.sessions.inspect_user_capabilities()
         return web.json_response(payload)
 
     async def _refresh_user_capabilities(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        active_session_id = _optional_body_string(body, "active_session_id")
-        if set(body) - {"active_session_id"}:
+        if body:
             raise ValueError("unexpected capability refresh field")
         return web.json_response(
-            await self.sessions.refresh_user_capabilities(
-                active_session_id=active_session_id
-            )
+            await self.sessions.refresh_user_capabilities()
         )
 
     async def _open_capability_root(self, request: web.Request) -> web.Response:
@@ -1568,14 +1568,13 @@ class LocalHttpServer:
 
     async def _install_user_skill(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"source_path", "active_session_id", "name", "description"}:
+        if set(body) - {"source_path", "name", "description"}:
             raise ValueError("unexpected Skill install field")
         source_path = body.get("source_path")
         if not isinstance(source_path, str):
             raise ValueError("Skill source path is required")
         payload = await self.sessions.install_user_skill(
             source_path=source_path,
-            active_session_id=_optional_body_string(body, "active_session_id"),
             name=_optional_body_string(body, "name"),
             description=_optional_body_string(body, "description"),
         )
@@ -1583,7 +1582,7 @@ class LocalHttpServer:
 
     async def _set_user_skill_enabled(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"path", "enabled", "active_session_id"}:
+        if set(body) - {"path", "enabled"}:
             raise ValueError("unexpected Skill enablement field")
         path = body.get("path")
         enabled = body.get("enabled")
@@ -1593,13 +1592,12 @@ class LocalHttpServer:
             await self.sessions.set_user_skill_enabled(
                 skill_path=path,
                 enabled=enabled,
-                active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
 
     async def _remove_skill(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"path", "expected", "active_session_id"}:
+        if set(body) - {"path", "expected"}:
             raise ValueError("unexpected Skill removal field")
         path = _optional_body_string(body, "path")
         raw = body.get("expected")
@@ -1620,8 +1618,6 @@ class LocalHttpServer:
             **{name: int(value) for name, value in raw.items()}
         )
         if "session_id" in request.match_info:
-            if "active_session_id" in body:
-                raise ValueError("Project Skill removal cannot select another session")
             return web.json_response(
                 await self.sessions.remove_session_skill(
                     request.match_info["session_id"],
@@ -1633,7 +1629,6 @@ class LocalHttpServer:
             await self.sessions.remove_user_skill(
                 skill_path=path,
                 expected=expected,
-                active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
 
@@ -1656,7 +1651,6 @@ class LocalHttpServer:
             "classifications",
             "values",
             "transport",
-            "active_session_id",
         }:
             raise ValueError("unexpected MCP import field")
         selected = _optional_body_string(body, "selected_server_id")
@@ -1670,7 +1664,6 @@ class LocalHttpServer:
                 values=_mcp_import_values(body, "values"),
                 transport=_optional_body_string(body, "transport"),
                 allow_http_localhost=body.get("allow_http_localhost", False),
-                active_session_id=_optional_body_string(body, "active_session_id"),
                 session_id=request.match_info.get("session_id"),
             ),
             status=201,
@@ -1678,7 +1671,7 @@ class LocalHttpServer:
 
     async def _create_user_mcp_server(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"server_id", "config", "secret_changes", "active_session_id"}:
+        if set(body) - {"server_id", "config", "secret_changes"}:
             raise ValueError("unexpected MCP field")
         server_id = _optional_body_string(body, "server_id")
         config = body.get("config")
@@ -1689,7 +1682,6 @@ class LocalHttpServer:
                 server_id=server_id,
                 config=config,
                 secret_changes=_mcp_secret_changes(body),
-                active_session_id=_optional_body_string(body, "active_session_id"),
             ),
             status=201,
         )
@@ -1700,7 +1692,6 @@ class LocalHttpServer:
             "config",
             "expected_identity",
             "secret_changes",
-            "active_session_id",
             "retain_credentials_confirmed",
         }:
             raise ValueError("unexpected MCP field")
@@ -1714,7 +1705,6 @@ class LocalHttpServer:
                 config=config,
                 expected=expected,
                 secret_changes=_mcp_secret_changes(body),
-                active_session_id=_optional_body_string(body, "active_session_id"),
                 retain_credentials_confirmed=_retain_credentials_confirmed(body),
             )
         )
@@ -1744,7 +1734,7 @@ class LocalHttpServer:
 
     async def _remove_user_mcp_server(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"expected_identity", "active_session_id"}:
+        if set(body) - {"expected_identity"}:
             raise ValueError("unexpected MCP removal field")
         expected = _optional_body_string(body, "expected_identity")
         if expected is None:
@@ -1753,7 +1743,6 @@ class LocalHttpServer:
             await self.sessions.remove_user_mcp_server(
                 server_id=request.match_info["server_id"],
                 expected=expected,
-                active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
 
@@ -1767,6 +1756,16 @@ class LocalHttpServer:
             ),
             status=202,
         )
+
+    async def _model_mcp_authorization_status(self, request: web.Request) -> web.Response:
+        from pulsara_agent.mcp_credentials import owner_from_dict
+
+        body = await self._json_body(request)
+        if set(body) != {"owner", "config_identity"} or not isinstance(body["config_identity"], str):
+            raise ValueError("invalid MCP authorization result target")
+        return web.json_response(self.sessions.core.mcp_management.oauth.completed_login_state(
+            owner_from_dict(body["owner"]), body["config_identity"]
+        ))
 
     async def _mcp_authorization(self, request: web.Request) -> web.Response:
         if request.method != "GET" and await self._json_body(request):
@@ -1858,7 +1857,6 @@ class LocalHttpServer:
         body = await self._json_body(request)
         if set(body) - {
             "source_path",
-            "active_session_id",
             "source_format",
             "classifications",
             "public_values",
@@ -1869,7 +1867,6 @@ class LocalHttpServer:
             raise ValueError("Plugin source path is required")
         payload = await self.sessions.install_user_plugin(
             source_path=source_path,
-            active_session_id=_optional_body_string(body, "active_session_id"),
             source_format=_optional_body_string(body, "source_format") or "native",
             classifications=_plugin_import_strings(body, "classifications"),
             public_values=_plugin_import_strings(body, "public_values"),
@@ -1887,7 +1884,6 @@ class LocalHttpServer:
         if set(body) - {
             "enabled",
             "package_install_id",
-            "active_session_id",
             "connection_review",
         }:
             raise ValueError("unexpected Plugin enablement field")
@@ -1904,7 +1900,6 @@ class LocalHttpServer:
                 package_install_id=package_install_id,
                 enabled=enabled,
                 connection_review=connection_review,
-                active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
 
@@ -1927,7 +1922,7 @@ class LocalHttpServer:
 
     async def _remove_user_plugin(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"active_session_id", "package_install_id"}:
+        if set(body) - {"package_install_id"}:
             raise ValueError("unexpected Plugin removal field")
         package_install_id = body.get("package_install_id")
         if not isinstance(package_install_id, str) or not package_install_id:
@@ -1936,7 +1931,6 @@ class LocalHttpServer:
             await self.sessions.remove_user_plugin(
                 plugin_id=request.match_info["plugin_id"],
                 package_install_id=package_install_id,
-                active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
 
@@ -1952,7 +1946,6 @@ class LocalHttpServer:
             "overlay",
             "secret_changes",
             "retain_credentials_confirmed",
-            "active_session_id",
         }:
             raise ValueError("unexpected Plugin connection field")
         package = body.get("package_install_id")
@@ -1976,7 +1969,6 @@ class LocalHttpServer:
                 else None,
                 secret_changes=_mcp_secret_changes(body),
                 retain_credentials_confirmed=_retain_credentials_confirmed(body),
-                active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
 

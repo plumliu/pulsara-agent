@@ -162,7 +162,7 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab }: WorkspaceProps) 
   const sessionId = workspace?.sessionId ?? '';
   const readWidth = () => {
     const saved = Number(uiPreferences.getItem(`pulsara-workspace-width:${sessionId}`));
-    return Number.isFinite(saved) && saved >= workspaceMinWidth ? saved : 460;
+    return Number.isFinite(saved) && saved >= workspaceMinWidth ? saved : workspaceMinWidth;
   };
   const [size, setSize] = useState(() => ({ sessionId, width: readWidth() }));
   if (size.sessionId !== sessionId) setSize({ sessionId, width: readWidth() });

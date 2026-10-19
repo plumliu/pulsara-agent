@@ -1,16 +1,18 @@
+import { mcpAuthorizationKey } from './mcp-authorization';
 import { McpEditor } from './mcp-editor';
 import type { McpEditInput, PluginMcpConnection, PluginMcpEditInput, UserMcpServerCapability, UserPluginCapability } from '../lib/pulsara-types';
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
-export function PluginConnectionEditor({ plugin, connection, onClose, onSave, onAuthorization }: {
+export function PluginConnectionEditor({ plugin, connection, onClose, onSave, onAuthorization, presentation = 'dialog', scopeLabel }: {
+  presentation?: 'dialog' | 'inline'; scopeLabel?: string;
   plugin: Pick<UserPluginCapability, 'name' | 'enabled' | 'packageInstallId'>; connection: PluginMcpConnection; onClose: () => void;
   onSave: (input: PluginMcpEditInput) => Promise<boolean>;
   onAuthorization?: (action: 'login' | 'status' | 'cancel' | 'logout') => Promise<void>;
 }) {
   const transport = record(connection.config.transport);
   const server: UserMcpServerCapability = {
-    id: connection.serverId, name: `${plugin.name} · ${connection.serverId}`, enabled: plugin.enabled,
+    id: connection.serverId, name: String(connection.config.display_name ?? connection.serverId), enabled: plugin.enabled,
     status: plugin.enabled ? 'configured' : 'disabled', required: false, availableToSubagents: true,
     toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0, instructions: '', hasFailure: false,
     transport: { kind: transport.type === 'stdio' ? 'stdio' : 'http', summary: String(transport.command ?? transport.endpoint ?? '') },
@@ -34,5 +36,5 @@ export function PluginConnectionEditor({ plugin, connection, onClose, onSave, on
       secretChanges: input.secretChanges, retainCredentialsConfirmed: input.retainCredentialsConfirmed,
     });
   };
-  return <McpEditor server={server} credentialOwner={connection.credentialOwner} connectionInputs={connection.connectionInputs} packageDefinition={connection.defaults} onClose={onClose} onSave={save} onAuthorization={onAuthorization} onRestoreDefaults={connection.overlay ? () => onSave({overlay: null, secretChanges: []}) : undefined} />;
+  return <McpEditor presentation={presentation} title={presentation === 'inline' ? `配置 ${server.name} 连接` : undefined} sourceName={presentation === 'inline' ? plugin.name : undefined} scopeLabel={scopeLabel} authorizationKey={mcpAuthorizationKey('plugin', plugin.packageInstallId, connection.serverId)} server={server} credentialOwner={connection.credentialOwner} connectionInputs={connection.connectionInputs} packageDefinition={connection.defaults} onClose={onClose} onSave={save} onAuthorization={onAuthorization} onRestoreDefaults={connection.overlay ? () => onSave({overlay: null, secretChanges: []}) : undefined} />;
 }

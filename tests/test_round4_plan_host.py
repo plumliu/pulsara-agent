@@ -958,3 +958,68 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
         await core.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_pending_review_submission_returns_rejection_without_losing_protocol_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage2_migrated_postgres_database,
+) -> None:
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
+    from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer, _Connection
+
+    async def scenario() -> None:
+        model = _DetachedDraftModel()
+        model.release.set()
+        core, session = await _open_test_session(
+            tmp_path=tmp_path, model=model,
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
+            monkeypatch=monkeypatch,
+        )
+        try:
+            entered = await session.enter_plan(
+                command_id=random_id('command'), entry_reason='review prompt admission',
+                resume_permission_mode=PermissionMode.ACCEPT_EDITS,
+            )
+            await asyncio.wait_for(session.run_turn(
+                PromptContent.text('prepare a plan'), command_id=random_id('command'),
+                requested_permission_mode=PermissionMode.ACCEPT_EDITS,
+            ), timeout=10)
+            attachment = random_id('attachment')
+            assert await session.attach_controller(attachment)
+            state = _Connection(attachment_id=attachment, attachment_generation=1,
+                host_session=session, granted_role=wire.ATTACHMENT_ROLE_CONTROLLER, authenticated=True)
+            gateway = TerminalKernelProtocolServer(socket_path=tmp_path/'protocol.sock', session_provider=lambda _: session)
+            command = random_id('command')
+            request = wire.CommandRequest(request_id=random_id('request'), command_id=command,
+                client_submission_id=command, command_kind=wire.SUBMIT_PROMPT,
+                prompt_content=wire.PromptContent(parts=[wire.PromptContentPart(text='message after this plan')]),
+                requested_permission_mode=wire.PERMISSION_MODE_ACCEPT_EDITS)
+            rejected = await gateway._command(state, request)
+            assert rejected.command_outcome.status == wire.REJECTED
+            assert rejected.command_outcome.public_code == 'PLAN_REVIEW_PENDING'
+            assert rejected.command_outcome.command_id == command
+            assert await session.query_command(command) is None
+            assert session.has_controller_attachment(attachment)
+            with session.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                deadline_monotonic=monotonic()+5,
+            ) as connection:
+                assert connection.execute('SELECT count(*) AS n FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND command_id=%s', (session.session_id, command)).fetchone()['n'] == 0
+                review = connection.execute("SELECT i.id, w.workflow_revision FROM pulsara_v3.plan_interactions i JOIN pulsara_v3.plan_workflows w ON w.id=i.plan_workflow_id AND w.session_id=i.session_id WHERE i.session_id=%s AND i.kind='DRAFT_REVIEW' AND i.status='OPEN'", (session.session_id,)).fetchone()
+            assert review is not None
+            cancelled = await session.resolve_plan_draft_review(
+                command_id=random_id('command'), workflow_id=entered.target_id,
+                expected_workflow_revision=int(review['workflow_revision']),
+                interaction_id=str(review['id']), decision=PlanDraftDecision.CANCEL, feedback=None,
+            )
+            assert cancelled.draft_decision is PlanDraftDecision.CANCEL
+            admitted = await gateway._command(state, request)
+            assert admitted.command_outcome.status in (wire.PENDING, wire.SUCCEEDED)
+            await asyncio.wait_for(model.implementation_seen.wait(), timeout=10)
+        finally:
+            await core.close_session(session.host_session_id)
+            await core.shutdown()
+
+    asyncio.run(scenario())

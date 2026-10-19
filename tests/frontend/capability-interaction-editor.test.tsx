@@ -13,7 +13,7 @@ it('uses the shared connection editor and submits private values once, separatel
   expect((screen.getByLabelText('服务 ID') as HTMLInputElement).disabled).toBe(true);
   fireEvent.change(screen.getByLabelText('认证方式'), {target: {value: 'bearer'}});
   fireEvent.change(screen.getByLabelText('Token'), {target: {value: 'form-private-fixture'}});
-  fireEvent.click(screen.getByRole('button', {name: '保存连接'}));
+  fireEvent.click(screen.getByRole('button', {name: '保存并继续'}));
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
   const resolution = resolve.mock.calls[0][0];
   expect(resolution.kind).toBe('capability');
@@ -30,7 +30,7 @@ it('does not turn a shared editor post-save close into a second CANCEL', async (
   render(<CapabilityInteractionEditor onResolve={resolve} form={{action: 'ADD_LOCAL_MCP', scope: 'USER',
     prefill: {server_id: 'docs', config: {transport: {type: 'streamable_http', endpoint: 'https://example.org/mcp'}}},
     credential_owner: {kind: 'local', scope_key: 'user', server_id: 'docs', plugin_id: null}}} />);
-  fireEvent.click(screen.getByRole('button', {name: '保存连接'}));
+  fireEvent.click(screen.getByRole('button', {name: '保存并继续'}));
   expect(resolve).toHaveBeenCalledTimes(1);
   await act(async () => { complete(true); });
   expect(resolve).toHaveBeenCalledTimes(1);
@@ -42,10 +42,10 @@ it('shows normalized Plugin components and requires an explicit review before en
   render(<CapabilityInteractionEditor onResolve={resolve} form={{action: 'SET_PLUGIN_ENABLED', scope: 'USER',
     prefill: {plugin_id: 'example', enabled: true}, plugin: {skills: [{name: 'research', description: 'Investigate sources'}],
       mcp: [{server_id: 'docs', config: {transport: {type: 'streamable_http', endpoint: 'https://example.org/mcp'}, auth: {type: 'bearer'}}, credentials: [{name: 'bearer', present: true}]}], hooks: [{event: 'SessionStart', command: 'node hooks/start.js'}]}}} />);
-  const confirm = screen.getByRole('button', {name: '确认并继续'}) as HTMLButtonElement;
+  const confirm = screen.getByRole('button', {name: '启用插件'}) as HTMLButtonElement;
   expect(confirm.disabled).toBe(true);
   expect(screen.getByText(/Investigate sources/)).toBeTruthy();
-  expect(screen.getByText(/MCP · docs/)).toBeTruthy();
+  expect(screen.getByText('docs')).toBeTruthy();
   expect(screen.getByText('https://example.org/mcp')).toBeTruthy();
   expect(screen.getByText('认证：Bearer Token')).toBeTruthy();
   expect(screen.getByText('bearer：已配置')).toBeTruthy();
@@ -77,7 +77,7 @@ it('requires a full Hook source review and submits only private user acceptance'
   expect(screen.getByText(/当前远端工具目录尚不完整/)).toBeTruthy();
   expect(screen.getByText(/上下文阈值：300/)).toBeTruthy();
   expect(screen.getByText(/PLUGIN_ROOT/)).toBeTruthy();
-  const submit = screen.getByRole('button', {name: '确认并继续'});
+  const submit = screen.getByRole('button', {name: '信任并继续'});
   expect(submit.hasAttribute('disabled')).toBe(true);
   fireEvent.click(screen.getByRole('checkbox'));
   fireEvent.click(submit);

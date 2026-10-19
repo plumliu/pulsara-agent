@@ -125,6 +125,8 @@ Bring your research services, specialist workflows, and project tools into the s
 - **Skills** teach agents a repeatable way to handle specialist work. Install one for a new domain or ask the agent to create one for a recurring assignment.
 - **MCP** puts external tools, data sources, resources, and prompts within the agent's reach. Configure connections and authentication in the workbench.
 - **Plugins** bring related Skills, MCP services, and hooks together in a package.
+
+MCP catalogs follow change notifications supported by the server. Changing a connection target requires confirmation before retaining existing credentials, including credentials embedded in templates; explicitly supplied replacements are evaluated as replacements. MCP schema validation uses only resources within the schema document and reports evaluation failures locally. Application errors, server protocol errors, and transport failures remain distinct, and structured results preserve explicit null values. Connection shutdown and disconnect handling follow the [MCP correctness specification](PULSARA_MCP_CHAIN_CORRECTNESS_HARD_CUT_IMPLEMENTATION.zh.md).
 - **Hooks** attach configured actions to supported moments in the agent lifecycle.
 
 Keep capabilities available across your work or scope them to a project. Manage them in the interface, or ask the agent to inspect and configure them. Built-in installer Skills guide the agent through adding Skills, MCP servers, and plugins.

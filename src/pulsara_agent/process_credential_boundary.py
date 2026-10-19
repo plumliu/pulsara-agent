@@ -301,6 +301,9 @@ class _ProcessCredentialClientBoundary:
             item.lower() for item in credential_header_names
         )
 
+    def _validate_transport_credentials(self, request, guard: ProcessCredentialGuard) -> None:
+        """Transport-owned credentials, if any, join the same admission gate."""
+
     async def _send_single_request(
         self, request: httpx.Request | httpx2.Request
     ) -> httpx.Response | httpx2.Response:
@@ -332,6 +335,7 @@ class _ProcessCredentialClientBoundary:
             await guard_context.__aexit__(None, None, None)
 
         try:
+            self._validate_transport_credentials(request, guard)
             _validate_http_request_secret_boundary(
                 request,
                 guard,

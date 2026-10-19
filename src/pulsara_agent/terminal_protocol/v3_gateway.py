@@ -783,11 +783,23 @@ class TerminalKernelProtocolServer:
                 content = _prompt_content_from_wire(request.prompt_content)
             except (TypeError, ValueError):
                 return _error(request.request_id, "PROMPT_INVALID")
-            outcome = await state.host_session.submit_prompt(
-                command_id=request.command_id,
-                content=content,
-                requested_permission_mode=requested_permission,
-            )
+            try:
+                outcome = await state.host_session.submit_prompt(
+                    command_id=request.command_id,
+                    content=content,
+                    requested_permission_mode=requested_permission,
+                )
+            except ConversationKernelConflict as exc:
+                if str(exc) != "PLAN_REVIEW_PENDING":
+                    raise
+                # Review fences are a known non-admission, not an unknown
+                # transport outcome. Keep the attachment and original draft.
+                from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
+
+                outcome = KernelCommandOutcome(
+                    request.command_id, "REJECTED", "", "PLAN_REVIEW_PENDING",
+                    "请先批准、修改或取消当前方案，再发送新消息。",
+                )
         elif request.command_kind == wire.CANCEL_QUEUED_PROMPT:
             outcome = await state.host_session.cancel_queued_prompt(
                 command_id=request.command_id,

@@ -24,6 +24,7 @@
   "build": {
     "appId": "dev.pulsara.desktop",
     "productName": "Pulsara",
+    "protocols": [{ "name": "Pulsara", "schemes": ["pulsara"] }],
     "executableName": "pulsara",
     "directories": {
       "output": "release"

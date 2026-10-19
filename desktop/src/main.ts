@@ -9,6 +9,7 @@ import { UiPreferences } from './ui-preferences';
 import { cliLauncherScript, cliStatus, registerCli, type CliRegistration } from './cli-install';
 import { BrowserOwner } from './browser-owner';
 import { StartupCover } from './startup-cover';
+import { isOAuthReturn } from './oauth-return';
 
 const resources = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', 'resources');
 function resolveHome(): string {
@@ -140,10 +141,15 @@ async function requestQuit() {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', focusWindow);
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    if (isOAuthReturn(url)) focusWindow();
+  });
   app.on('activate', focusWindow);
   app.on('before-quit', event => { event.preventDefault(); void requestQuit(); });
   app.on('window-all-closed', () => { /* The explicit Quit action owns process shutdown. */ });
   void app.whenReady().then(async () => {
+    if (app.isPackaged) app.setAsDefaultProtocolClient('pulsara');
     window = new BrowserWindow({width: 1440, height: 920, minWidth: 760, minHeight: 520, backgroundColor:'#f3f0e7', title:'Pulsara',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
       trafficLightPosition: {x: 16, y: 16},
@@ -181,6 +187,7 @@ else {
     handle('reset-database',()=>resetDatabase(),true);
     handle('read-ui-preferences', () => uiPreferences.read());
     handle('startup-settled', () => startupCover!.finish());
+    handle('focus', focusWindow);
     handle('browser-create', value => browser!.create(value));
     handle('browser-command', value => browser!.command(value));
     handle('browser-close', value => browser!.close(value));

@@ -16,7 +16,6 @@ from threading import RLock
 from typing import Callable, Mapping
 from uuid import uuid4
 
-from jsonschema import validators
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     CapabilitySourceKind,
@@ -61,7 +60,6 @@ from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     context_fingerprint,
     freeze_json,
-    thaw_json,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
@@ -101,6 +99,7 @@ from .contracts import (
     scope_mcp_discovery_snapshot,
 )
 from .naming import mangle_mcp_tool_names
+from .schema import McpOutputSchemaMismatch, mcp_schema_validator
 from .input_required import (
     McpInputRequiredRoundOwner,
     McpInputRequiredUnsupported,
@@ -133,10 +132,6 @@ class McpSnapshotStale(RuntimeError):
     pass
 
 
-class _McpOutputSchemaMismatch(ValueError):
-    """An exact MCP result contradicts its frozen advertised output schema."""
-
-
 _DEFAULT_MCP_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 _SUPPORTED_MCP_SCHEMA_DIALECTS = frozenset(
     {
@@ -145,6 +140,14 @@ _SUPPORTED_MCP_SCHEMA_DIALECTS = frozenset(
         _DEFAULT_MCP_SCHEMA_DIALECT,
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _McpConnectOutcome:
+    """Result owned by the existing physical connection-attempt task."""
+
+    state: McpServerState
+    failure: str | None = None
 
 
 class McpSlotLease:
@@ -267,8 +270,8 @@ class McpPhysicalOperationPermit:
         if self._released:
             return
         self._released = True
-        self._semaphore.release()
         self._host_semaphore.release()
+        self._semaphore.release()
         self.permit._slot.release_operation(self.permit)  # noqa: SLF001
 
 
@@ -421,29 +424,24 @@ class McpConnectionSlot:
             self._accepting_new_leases = True
 
     @asynccontextmanager
-    async def catalog_operation(self):
+    async def catalog_operation(self, *, discovery_reservation: asyncio.Semaphore):
         # SDK listings mutate its output-schema cache. Drain every pre-fence
         # admission before listing, including bounded HTTP calls, then own the
         # existing lane. Do not duplicate SDK caches or result validators.
         while self.active_dispatch_count:
             await asyncio.sleep(0.01)
-        await self._host_lane.acquire()
-        try:
-            await self._lane.acquire()
+        # Waiting for discovery memory is also queueing, not physical I/O.
+        # Semaphore contexts unwind every partial acquisition in reverse order.
+        async with self._lane, discovery_reservation, self._host_lane:
+            with self._lock:
+                if self._dispatch_fence is McpDispatchFenceState.CLOSED:
+                    raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+                self._active_operation_count += 1
             try:
-                with self._lock:
-                    if self._dispatch_fence is McpDispatchFenceState.CLOSED:
-                        raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
-                    self._active_operation_count += 1
-                try:
-                    yield
-                finally:
-                    with self._lock:
-                        self._active_operation_count -= 1
+                yield
             finally:
-                self._lane.release()
-        finally:
-            self._host_lane.release()
+                with self._lock:
+                    self._active_operation_count -= 1
 
     def release_lease(self, lease: McpSlotLease) -> None:
         with self._lock:
@@ -538,11 +536,13 @@ class McpConnectionSlot:
             self._require_permit(permit)
             if permit.state is not McpDispatchPermitState.ATTEMPT_ACCEPTED:
                 raise RuntimeError("MCP attempt is not accepted")
-        await self._host_lane.acquire()
+        # A request waiting on its server must not reserve capacity that an
+        # unrelated ready server can use for actual physical I/O.
+        await self._lane.acquire()
         try:
-            await self._lane.acquire()
+            await self._host_lane.acquire()
         except BaseException:
-            self._host_lane.release()
+            self._lane.release()
             raise
         with self._lock:
             try:
@@ -552,8 +552,8 @@ class McpConnectionSlot:
                 permit.state = McpDispatchPermitState.LANE_ACQUIRED
                 self._active_operation_count += 1
             except BaseException:
-                self._lane.release()
                 self._host_lane.release()
+                self._lane.release()
                 raise
         return McpPhysicalOperationPermit(permit, self._lane, self._host_lane)
 
@@ -702,6 +702,12 @@ class McpBoundToolExecutor:
                                 result
                             )
                         )
+                except McpOutputSchemaMismatch as exc:
+                    return _known_mcp_system_failure(
+                        error_code="MCP_OUTPUT_SCHEMA_MISMATCH",
+                        remote_identity=remote_identity,
+                        message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
+                    )
                 except McpProtocolConformanceError as exc:
                     self.lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_PROTOCOL_CONFORMANCE_FAILED", retryable=False
@@ -720,6 +726,22 @@ class McpBoundToolExecutor:
                             error_code="MCP_TRANSPORT_UNWRITTEN",
                             remote_identity=remote_identity,
                         )
+                    return _mcp_invocation_failure(
+                        error=exc,
+                        client=self.lease._slot.client,  # noqa: SLF001
+                        remote_identity=remote_identity,
+                        effect_kind=self.policy.effect_kind,
+                    )
+                except MCPError as exc:
+                    if not _mcp_error_is_transport_failure(exc):
+                        return _known_mcp_remote_error(
+                            error=exc,
+                            client=self.lease._slot.client,  # noqa: SLF001
+                            remote_identity=remote_identity,
+                        )
+                    self.lease._slot.report_transport_failure(  # noqa: SLF001
+                        "MCP_TRANSPORT_FAILED", retryable=True
+                    )
                     return _mcp_invocation_failure(
                         error=exc,
                         client=self.lease._slot.client,  # noqa: SLF001
@@ -748,14 +770,7 @@ class McpBoundToolExecutor:
                         raise McpProtocolConformanceError(
                             "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
                         )
-                    _validate_tool_output_schema(self.semantic, result)
                     body = _render_typed_result(result)
-                except _McpOutputSchemaMismatch as exc:
-                    return _known_mcp_system_failure(
-                        error_code="MCP_OUTPUT_SCHEMA_MISMATCH",
-                        remote_identity=remote_identity,
-                        message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
-                    )
                 except MemoryError:
                     raise
                 except Exception as exc:
@@ -1073,6 +1088,12 @@ class McpInstalledRuntimeGeneration:
                         effect_kind=McpEffectKind.READ_ONLY,
                     )
                 except MCPError as exc:
+                    if not _mcp_error_is_transport_failure(exc):
+                        return _known_mcp_remote_error(
+                            error=exc,
+                            client=client,
+                            remote_identity=remote_identity,
+                        )
                     runtime_lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_TRANSPORT_FAILED", retryable=True
                     )
@@ -1309,9 +1330,12 @@ class McpHostSupervisor:
         self._slots: dict[str, McpConnectionSlot] = {}
         self._all_slots: set[McpConnectionSlot] = set()
         self._slot_close_tasks: set[asyncio.Task[None]] = set()
+        # Current-attempt lookup may be replaced while an old attempt still
+        # owns physical cleanup. Keep that owner until its task has joined.
+        self._connection_tasks: set[asyncio.Task[_McpConnectOutcome]] = set()
         self._pending: dict[str, McpInstallationCandidate] = {}
         self._installed: dict[str, McpInstallationCandidate] = {}
-        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._tasks: dict[str, asyncio.Task[_McpConnectOutcome]] = {}
         self._refresh_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_counts = {item.server_id: 0 for item in self.configs}
@@ -1394,7 +1418,7 @@ class McpHostSupervisor:
         reconnect: list[str] = []
         retire_slots: list[McpConnectionSlot] = []
         release_candidates: list[McpInstallationCandidate] = []
-        cancel_tasks: list[asyncio.Task[None]] = []
+        cancel_tasks: list[asyncio.Task[None] | asyncio.Task[_McpConnectOutcome]] = []
         close_config_anchors: list[object] = []
         with self._lock:
             if self._closed:
@@ -1569,10 +1593,12 @@ class McpHostSupervisor:
                 name=f"mcp-connect:{server_id}:{generation}",
             )
             self._tasks[server_id] = task
+            self._connection_tasks.add(task)
+            task.add_done_callback(self._connection_tasks.discard)
             task.add_done_callback(self._consume_connection_outcome)
 
     @staticmethod
-    def _consume_connection_outcome(task: asyncio.Task[None]) -> None:
+    def _consume_connection_outcome(task: asyncio.Task[_McpConnectOutcome]) -> None:
         if task.cancelled():
             return
         with suppress(BaseException):
@@ -1629,7 +1655,7 @@ class McpHostSupervisor:
         refresh_generation: int,
         config: McpServerConfig,
         attempt_anchor: object | None,
-    ) -> None:
+    ) -> _McpConnectOutcome:
         box: dict[str, McpConnectionSlot] = {}
 
         async def notification(method: str) -> None:
@@ -1701,12 +1727,11 @@ class McpHostSupervisor:
             attempt_anchor = None
             box["slot"] = slot
             superseded_pending: McpInstallationCandidate | None = None
-            async with asyncio.timeout(self._connect_attempt_timeout_seconds):
-                # ``client.open`` already performs initialize/discover and may
-                # retain a bounded server response.  Acquire the Host aggregate
-                # reservation before that first parse and keep it until the
-                # normalized installation candidate is quoted and published.
-                async with self._discovery_reservations:
+            # Waiting for the shared memory reservation is scheduling, not a
+            # remote connection attempt. Start its budget only after admission;
+            # keep the reservation through parsing and candidate publication.
+            async with self._discovery_reservations:
+                async with asyncio.timeout(self._connect_attempt_timeout_seconds):
                     await client.open()
                     with self._lock:
                         if (
@@ -1786,13 +1811,24 @@ class McpHostSupervisor:
                     )
                     self._slot_close_tasks.add(task)
                     task.add_done_callback(self._slot_close_tasks.discard)
+            return _McpConnectOutcome(McpServerState.READY)
         except BaseException as exc:
             if candidate_lease is not None:
                 candidate_lease.release()
             if slot is not None:
                 slot.begin_close()
             if client is not None:
-                await client.aclose()
+                close = asyncio.create_task(
+                    client.aclose(), name=f"mcp-connect-close:{server_id}:{attempt_generation}"
+                )
+                while not close.done():
+                    try:
+                        await asyncio.shield(close)
+                    except asyncio.CancelledError:
+                        # Replacement or Host close cannot detach the exact
+                        # physical cleanup, even if cancellation arrives again.
+                        continue
+                close.result()
             if slot is not None:
                 slot.close_physical_lifetime()
             with self._lock:
@@ -1831,6 +1867,12 @@ class McpHostSupervisor:
                         )
                     if not isinstance(exc, ValueError):
                         self._schedule_retry_locked(server_id)
+            return _McpConnectOutcome(
+                McpServerState.FAILED_TERMINAL
+                if isinstance(exc, ValueError)
+                else McpServerState.FAILED_RETRYABLE,
+                type(exc).__name__,
+            )
         finally:
             if attempt_anchor is not None:
                 _close_physical_lifetime_anchor(attempt_anchor)
@@ -1972,38 +2014,39 @@ class McpHostSupervisor:
                 dirty = slot.dirty_generation
             lease = None
             try:
-                async with slot.catalog_operation():
-                    async with self._discovery_reservations:
-                        async with asyncio.timeout(self._connect_attempt_timeout_seconds):
-                            snapshot, policies = await discover_mcp_catalog(slot.client, config)
-                        with self._lock:
-                            if (self._closed or self._slots.get(server_id) is not slot
-                                    or self._config_by_id.get(server_id) is not config
-                                    or self._attempt_generation[server_id] != attempt
-                                    or slot.dispatch_fence_state is McpDispatchFenceState.CLOSED):
-                                return
-                            if (self._refresh_generation[server_id] != refresh
-                                    or slot.dirty_generation != dirty):
-                                continue
-                            lease = slot.prepare_refresh_lease(dirty)
-                            candidate = _candidate(
-                                config=config, epoch=self._epoch,
-                                attempt_generation=attempt, lease=lease,
-                                snapshot=snapshot, policies=policies,
-                            )
-                            effective = {**self._installed, **self._pending, server_id: candidate}
-                            if sum(item.normalized_physical_bytes for item in effective.values()) > (
-                                DEFAULT_MCP_WIRE_BOUNDS.maximum_discovery_candidate_bytes_per_host
-                            ):
-                                raise ValueError("MCP Host discovery candidate byte bound exceeded")
-                            previous = self._pending.get(server_id)
-                            slot.complete_refresh(lease)
-                            self._pending[server_id] = candidate
-                            lease = None  # Candidate now owns this lease.
-                            self._set_catalog_state_locked(server_id, McpServerState.READY)
-                        if previous is not None:
-                            previous.slot_lease.release()
-                        return
+                async with slot.catalog_operation(
+                    discovery_reservation=self._discovery_reservations
+                ):
+                    async with asyncio.timeout(self._connect_attempt_timeout_seconds):
+                        snapshot, policies = await discover_mcp_catalog(slot.client, config)
+                    with self._lock:
+                        if (self._closed or self._slots.get(server_id) is not slot
+                                or self._config_by_id.get(server_id) is not config
+                                or self._attempt_generation[server_id] != attempt
+                                or slot.dispatch_fence_state is McpDispatchFenceState.CLOSED):
+                            return
+                        if (self._refresh_generation[server_id] != refresh
+                                or slot.dirty_generation != dirty):
+                            continue
+                        lease = slot.prepare_refresh_lease(dirty)
+                        candidate = _candidate(
+                            config=config, epoch=self._epoch,
+                            attempt_generation=attempt, lease=lease,
+                            snapshot=snapshot, policies=policies,
+                        )
+                        effective = {**self._installed, **self._pending, server_id: candidate}
+                        if sum(item.normalized_physical_bytes for item in effective.values()) > (
+                            DEFAULT_MCP_WIRE_BOUNDS.maximum_discovery_candidate_bytes_per_host
+                        ):
+                            raise ValueError("MCP Host discovery candidate byte bound exceeded")
+                        previous = self._pending.get(server_id)
+                        slot.complete_refresh(lease)
+                        self._pending[server_id] = candidate
+                        lease = None  # Candidate now owns this lease.
+                        self._set_catalog_state_locked(server_id, McpServerState.READY)
+                    if previous is not None:
+                        previous.slot_lease.release()
+                    return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2208,6 +2251,8 @@ class McpHostSupervisor:
     def inspect_discovery_catalog(
         self,
         scope: ModelInputScopeKind = ModelInputScopeKind.ROOT,
+        *,
+        live: bool = False,
     ) -> McpDiscoveryCatalogInspection:
         """Freeze the latest bounded discovery for management/UI inspection.
 
@@ -2216,6 +2261,9 @@ class McpHostSupervisor:
         exclusively to ``install_pending_at_safe_point``; this read-only view
         lets management surfaces report what the peer actually exposed without
         mutating the current provider/tool generation.
+
+        Management reads use ``live`` to observe the existing physical task and
+        slot owners. Retained provider semantics are not connection evidence.
         """
 
         with self._lock:
@@ -2240,6 +2288,9 @@ class McpHostSupervisor:
                         config,
                         supervisor_epoch=self._epoch,
                     )
+                    and (not live or candidate.slot_lease._slot.lease_is_current(  # noqa: SLF001
+                        candidate.slot_lease
+                    ))
                 ):
                     candidates[config.server_id] = candidate
             semantics, _collisions = _aggregate_provider_projection(
@@ -2280,7 +2331,7 @@ class McpHostSupervisor:
                 tools.append(McpCatalogToolInspection(semantic, policy))
             return McpDiscoveryCatalogInspection(
                 catalog_snapshot=self._catalog_from_candidates_locked(
-                    scope, candidates
+                    scope, candidates, live=live,
                 ),
                 configured_servers=tuple(
                     McpConfiguredServerInspection(
@@ -2288,7 +2339,7 @@ class McpHostSupervisor:
                         resolved_config_identity=config.resolved_config_identity,
                         source_kind=_mcp_config_source_kind(config),
                         status_matches_config=(
-                            self._state_config_identity.get(config.server_id)
+                            live or self._state_config_identity.get(config.server_id)
                             == config.resolved_config_identity
                         ),
                     )
@@ -2535,6 +2586,8 @@ class McpHostSupervisor:
         self,
         scope: ModelInputScopeKind,
         candidates: Mapping[str, McpInstallationCandidate],
+        *,
+        live: bool = False,
     ) -> McpCatalogSnapshot:
         entries: list[McpServerCatalogEntry] = []
         _semantics, collision_facts = _aggregate_provider_projection(
@@ -2553,6 +2606,11 @@ class McpHostSupervisor:
             ):
                 continue
             candidate = candidates.get(config.server_id)
+            state, failure = (
+                self._live_state_locked(config, candidate)
+                if live
+                else (self._state[config.server_id], self._failure.get(config.server_id))
+            )
             snapshot = (
                 scope_mcp_discovery_snapshot(
                     candidate.discovery_snapshot,
@@ -2575,7 +2633,7 @@ class McpHostSupervisor:
                 McpServerCatalogEntry(
                     server_id=config.server_id,
                     display_name=config.display_name,
-                    status=self._state[config.server_id],
+                    status=state,
                     required=config.required,
                     exposed_tool_count=len(visible_tools),
                     discovered_tool_count=(
@@ -2590,7 +2648,7 @@ class McpHostSupervisor:
                         )
                     ),
                     sanitized_instructions=(snapshot.sanitized_instructions if snapshot else ""),
-                    stable_failure_category=self._failure.get(config.server_id),
+                    stable_failure_category=failure,
                     tool_surface_semantic_fingerprint=(
                         snapshot.tool_surface_semantic_fingerprint if snapshot else None
                     ),
@@ -2599,7 +2657,7 @@ class McpHostSupervisor:
                         if snapshot
                         else context_fingerprint(
                             "mcp-catalog-empty-server:v1",
-                            (config.server_id, self._state[config.server_id].value),
+                            (config.server_id, state.value),
                         )
                     ),
                     scope_subagents=(
@@ -2614,8 +2672,43 @@ class McpHostSupervisor:
             provider_name_collision_facts=collision_facts,
         )
 
+    def _live_state_locked(
+        self, config: McpServerConfig, candidate: McpInstallationCandidate | None,
+    ) -> tuple[McpServerState, str | None]:
+        """Project physical owners without publishing a catalog transition."""
+        if not config.enabled:
+            return McpServerState.DISABLED, None
+        if candidate is not None:
+            return McpServerState.READY, None
+        task = self._tasks.get(config.server_id)
+        if task is not None:
+            if not task.done():
+                state = self._state[config.server_id]
+                return (McpServerState.DISCOVERING if state is McpServerState.DISCOVERING
+                        else McpServerState.CONNECTING), None
+            if task.cancelled():
+                return McpServerState.FAILED_RETRYABLE, "CancelledError"
+            error = task.exception()
+            if error is not None:
+                return McpServerState.FAILED_RETRYABLE, type(error).__name__
+            outcome = task.result()
+            if outcome.state is not McpServerState.READY:
+                return outcome.state, outcome.failure
+        # Transport failure already withdraws the candidate and records its
+        # stable category. A healthy attempt result cannot overrule that loss.
+        state = self._state[config.server_id]
+        if (self._state_config_identity.get(config.server_id) == config.resolved_config_identity
+                and state in {McpServerState.FAILED_RETRYABLE, McpServerState.FAILED_TERMINAL}):
+            return state, self._failure.get(config.server_id)
+        slot = self._slots.get(config.server_id)
+        if slot is not None:
+            if slot.dispatch_fence_state is McpDispatchFenceState.CLOSED:
+                return McpServerState.RETIRING, None
+            return McpServerState.DISCOVERING, None
+        return McpServerState.CONNECTING, None
+
     def reconnect(self, server_id: str) -> None:
-        active_connect: asyncio.Task[None] | None = None
+        active_connect: asyncio.Task[_McpConnectOutcome] | None = None
         with self._lock:
             if server_id not in self._config_by_id:
                 raise KeyError(server_id)
@@ -2672,7 +2765,7 @@ class McpHostSupervisor:
             if self._closed:
                 return
             self._closed = True
-            tasks = tuple(self._tasks.values()) + tuple(self._refresh_tasks.values())
+            tasks = tuple(self._connection_tasks) + tuple(self._refresh_tasks.values())
             tasks += tuple(self._periodic_tasks.values())
             tasks += tuple(self._retry_tasks.values())
             slot_close_tasks = tuple(self._slot_close_tasks)
@@ -2695,7 +2788,7 @@ class McpHostSupervisor:
         for candidate in installed:
             candidate.slot_lease.release()
         for task in tasks:
-            if not task.done():
+            if not task.done() and not task.cancelling():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         # Terminate exact physical transports first.  Product-operation tasks
@@ -2800,20 +2893,16 @@ async def discover_mcp_catalog(
             validate_schema(item.input_schema, DEFAULT_MCP_WIRE_BOUNDS)
             if item.input_schema.get("type") != "object":
                 raise ValueError("MCP tool input schema is not an object")
-            _reject_external_refs(item.input_schema)
             input_dialect = _mcp_schema_dialect(item.input_schema)
-            input_validator = validators.validator_for(item.input_schema)
-            input_validator.check_schema(item.input_schema)
+            mcp_schema_validator(item.input_schema)
             frozen = freeze_json(item.input_schema)
             if not isinstance(frozen, FrozenJsonObjectFact):
                 raise TypeError("MCP tool schema did not freeze to an object")
             output_schema = None
             if item.output_schema is not None:
                 validate_schema(item.output_schema, DEFAULT_MCP_WIRE_BOUNDS)
-                _reject_external_refs(item.output_schema)
                 _mcp_schema_dialect(item.output_schema)
-                output_validator = validators.validator_for(item.output_schema)
-                output_validator.check_schema(item.output_schema)
+                mcp_schema_validator(item.output_schema)
                 output_schema = freeze_json(item.output_schema)
                 if not isinstance(output_schema, FrozenJsonObjectFact):
                     raise TypeError("MCP output schema did not freeze to an object")
@@ -2968,7 +3057,11 @@ async def _list_pages(
     items: list[object] = []
     seen: set[str] = set()
     for _ in range(MAXIMUM_DISCOVERY_PAGES_PER_METHOD):
-        params = types.PaginatedRequestParams(cursor=cursor) if cursor else None
+        params = (
+            types.PaginatedRequestParams(cursor=cursor)
+            if cursor is not None
+            else None
+        )
         result = await method(params=params)  # type: ignore[operator]
         if client.require_closed_result_type(result) != "complete":
             raise RuntimeError("MCP listing cannot require input")
@@ -3155,19 +3248,6 @@ def _bounded_public_identity(value: str, maximum_bytes: int) -> str:
     ):
         raise ValueError("MCP public identity contains terminal controls")
     return value
-
-
-def _reject_external_refs(value: object) -> None:
-    stack = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, dict):
-            ref = item.get("$ref")
-            if isinstance(ref, str) and not ref.startswith("#"):
-                raise ValueError("external MCP schema references are unsupported")
-            stack.extend(item.values())
-        elif isinstance(item, list):
-            stack.extend(item)
 
 
 def _mcp_schema_dialect(value: Mapping[str, object]) -> str:
@@ -3470,45 +3550,18 @@ def _discovery_snapshot_physical_bytes(snapshot: McpDiscoverySnapshot) -> int:
 
 def _render_typed_result(result: types.CallToolResult) -> bytes:
     payload = result.model_dump(by_alias=True, mode="json", exclude_none=True)
+    if (
+        "structured_content" in result.model_fields_set
+        and result.structured_content is None
+    ):
+        # An explicit JSON null is a modern structured result, distinct from
+        # an omitted field. exclude_none otherwise erases that observation.
+        payload["structuredContent"] = None
     payload.pop("_meta", None)
     data = canonical_json_bytes(payload)
     if len(data) > MAXIMUM_MCP_REMOTE_BODY_BYTES:
         raise RuntimeError("MCP_REMOTE_BODY_BOUND_EXCEEDED")
     return data
-
-
-def _validate_tool_output_schema(
-    semantic: McpToolSemanticFact,
-    result: types.CallToolResult,
-) -> None:
-    """Validate an exact response against the descriptor from its pinned slot.
-
-    This is deliberately performed after the physical response is known and
-    before result lowering.  A mismatch is therefore a known typed tool
-    failure, never an ambiguous effect and never a reason to call the server
-    again.
-    """
-
-    if semantic.output_schema is None:
-        return
-    if (
-        "structured_content" not in result.model_fields_set
-        or result.structured_content is None
-    ):
-        raise _McpOutputSchemaMismatch("structured MCP result is absent")
-    schema = thaw_json(semantic.output_schema)
-    _mcp_schema_dialect(schema)
-    validator_type = validators.validator_for(schema)
-    try:
-        validator_type.check_schema(schema)
-        validator = validator_type(schema)
-        error = next(validator.iter_errors(result.structured_content), None)
-    except MemoryError:
-        raise
-    except Exception as exc:
-        raise _McpOutputSchemaMismatch(f"MCP output schema cannot validate: {exc}") from exc
-    if error is not None:
-        raise _McpOutputSchemaMismatch(f"{error.json_path}: {error.message}")
 
 
 def _mcp_remote_identity(
@@ -3558,6 +3611,36 @@ def _mcp_invocation_failure(
                 "remote_outcome": "UNKNOWN",
                 "retry_performed": False,
                 "guidance": guidance,
+            }
+        ),
+        remote_identity=remote_identity,
+    )
+
+
+def _mcp_error_is_transport_failure(error: MCPError) -> bool:
+    # SDK 2.1.0 uses these same public codes for local dispatcher close/timeout
+    # and peer replies. Keep those ambiguous codes conservative; its other
+    # request errors represent a received JSON-RPC ErrorData, not dead I/O.
+    return error.code in {types.CONNECTION_CLOSED, types.REQUEST_TIMEOUT}
+
+
+def _known_mcp_remote_error(
+    *, error: MCPError, client: BoundedMcpSdkClient, remote_identity: str
+) -> McpKnownToolResult:
+    # The response and its data already crossed the transport's exact-secret
+    # scrub boundary. Keep its diagnostic payload, without replaying the call
+    # or treating a server rejection as a reason to retire a healthy slot.
+    return McpKnownToolResult(
+        state="SYSTEM_ERROR",
+        content=canonical_json_bytes(
+            {
+                "error": "MCP_REMOTE_ERROR",
+                "remote_error": {
+                    "code": error.code,
+                    "message": client.diagnostic_message(error),
+                    **({"data": error.data} if error.data is not None else {}),
+                },
+                "retry_performed": False,
             }
         ),
         remote_identity=remote_identity,

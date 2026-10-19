@@ -25,7 +25,7 @@ export function HookSourceReview({hook}: {hook: Record<string, unknown>}) {
             {Array.isArray(definition.matching_aliases) && definition.matching_aliases.map((item, n) => {const mapping = record(item); return <p key={n}>{Array.isArray(mapping.aliases) ? mapping.aliases.join('、') : ''} → {String(mapping.tool_name)}</p>;})}
             <p>声明环境：<code>{JSON.stringify(hook.declaration_environment)}</code></p>
             {definition.commandWindows != null && <><p>Windows 命令</p><pre>{String(definition.commandWindows)}</pre></>}
-            <p>超时：{String(definition.timeout)} 秒 · 异步：{String(definition.async)} · 上下文阈值：{String(definition.additionalContextLimit)}</p>
+            <p>超时：{String(definition.timeout)} 秒</p><p>异步：{String(definition.async)}</p><p>上下文阈值：{String(definition.additionalContextLimit)}</p>
             <p>{String(definition.statusMessage ?? '')}</p>
             </div>
           </details>

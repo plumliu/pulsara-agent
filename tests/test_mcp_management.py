@@ -13,6 +13,8 @@ from pulsara_agent.capability.mcp_management import (
     config_to_entry,
 )
 from pulsara_agent.mcp_credentials import (
+    BoundSecretValue,
+    EnvironmentVariableReference,
     McpCredentialBinding,
     ManagedLocalCredentialReference,
     secret_to_dict,
@@ -473,6 +475,194 @@ def test_retained_credentials_new_destination_needs_confirmation_in_shared_owner
         assert updated.config.transport.endpoint == "https://new.example/mcp"
         assert service.settings.resolve_mcp_secret(binding) == "private"
         await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def _credential_destination_entry(kind, reference, destination):
+    if kind == "stdio":
+        return {
+            "transport": {
+                "type": "stdio",
+                "command": destination,
+                "secret_env": {"MCP_TOKEN": reference},
+            }
+        }
+    auth = {
+        "bearer": {"type": "bearer", "reference": reference},
+        "static_headers": {"type": "static_headers", "headers": {"X-Token": reference}},
+        "oauth": {
+            "type": "oauth",
+            "client_id": "test-client",
+            "client_secret": reference,
+        },
+    }[kind]
+    return {
+        "transport": {"type": "streamable_http", "endpoint": destination},
+        "auth": auth,
+    }
+
+
+@pytest.mark.parametrize("kind", ["bearer", "static_headers", "stdio", "oauth"])
+@pytest.mark.parametrize("source", ["managed", "environment"])
+@pytest.mark.parametrize("template_change", ["wrap", "rewrite", "unwrap"])
+def test_secret_template_changes_cannot_bypass_destination_confirmation(
+    tmp_path, monkeypatch, kind, source, template_change
+):
+    async def scenario():
+        service = LocalMcpManagementService(
+            LocalSettingsStore(tmp_path / "private.yaml"),
+            user_config_path=tmp_path / "mcp.yaml",
+        )
+        target = LocalMcpTarget("test")
+        binding = McpCredentialBinding(target.owner, "bearer")
+        if source == "managed":
+            reference = ManagedLocalCredentialReference(binding)
+            changes = (McpSecretMutation(binding, "retained-test-credential"),)
+        else:
+            monkeypatch.setenv("MCP_DESTINATION_TEST_TOKEN", "retained-test-credential")
+            reference = EnvironmentVariableReference("MCP_DESTINATION_TEST_TOKEN")
+            changes = ()
+        old_reference = reference if template_change == "wrap" else BoundSecretValue(
+            ("old:", reference)
+        )
+        new_reference = reference if template_change == "unwrap" else BoundSecretValue(
+            ("new:", reference)
+        )
+        old_destination = "old-command" if kind == "stdio" else "https://old.example/mcp"
+        new_destination = "new-command" if kind == "stdio" else "https://new.example/mcp"
+        try:
+            created = await service.create(
+                target,
+                _credential_destination_entry(kind, secret_to_dict(old_reference), old_destination),
+                changes,
+            )
+            candidate = _credential_destination_entry(
+                kind, secret_to_dict(new_reference), new_destination
+            )
+            prepared = await service.prepare_mutation("UPDATE_LOCAL_MCP", target, candidate)
+            assert prepared.requires_destination_confirmation
+            with pytest.raises(ValueError, match="确认"):
+                await service.update(target, candidate, expected=config_guard(created.config))
+            with pytest.raises(ValueError, match="确认"):
+                await service.test(target, candidate, workspace_root=tmp_path)
+            assert config_guard(service.inspect(target)) == config_guard(created.config)
+            accepted = await service.update(
+                target, candidate, expected=config_guard(created.config),
+                retain_credentials_confirmed=True,
+            )
+            assert accepted.applied
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["bearer", "static_headers", "stdio", "oauth"])
+def test_replacing_managed_secret_for_new_destination_needs_no_retention_confirmation(
+    tmp_path, kind
+):
+    async def scenario():
+        service = LocalMcpManagementService(
+            LocalSettingsStore(tmp_path / "private.yaml"),
+            user_config_path=tmp_path / "mcp.yaml",
+        )
+        target = LocalMcpTarget("test")
+        binding = McpCredentialBinding(target.owner, "bearer")
+        reference = ManagedLocalCredentialReference(binding)
+        old_destination = "old-command" if kind == "stdio" else "https://old.example/mcp"
+        new_destination = "new-command" if kind == "stdio" else "https://new.example/mcp"
+        try:
+            created = await service.create(
+                target,
+                _credential_destination_entry(kind, secret_to_dict(reference), old_destination),
+                (McpSecretMutation(binding, "old-test-credential"),),
+            )
+            candidate = _credential_destination_entry(
+                kind, secret_to_dict(BoundSecretValue((reference, ":new"))), new_destination
+            )
+            accepted = await service.update(
+                target, candidate, expected=config_guard(created.config),
+                secrets=(McpSecretMutation(binding, "replacement-test-credential"),),
+            )
+            assert accepted.applied
+            assert service.settings.resolve_mcp_secret(binding) == "replacement-test-credential"
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["bearer", "static_headers", "stdio", "oauth"])
+def test_missing_secret_template_can_change_destination_without_retention_confirmation(
+    tmp_path, kind
+):
+    async def scenario():
+        service = LocalMcpManagementService(
+            LocalSettingsStore(tmp_path / "private.yaml"),
+            user_config_path=tmp_path / "mcp.yaml",
+        )
+        target = LocalMcpTarget("test")
+        binding = McpCredentialBinding(target.owner, "bearer")
+        reference = ManagedLocalCredentialReference(binding)
+        old_destination = "old-command" if kind == "stdio" else "https://old.example/mcp"
+        new_destination = "new-command" if kind == "stdio" else "https://new.example/mcp"
+        try:
+            created = await service.create(
+                target,
+                _credential_destination_entry(kind, secret_to_dict(reference), old_destination),
+            )
+            candidate = _credential_destination_entry(
+                kind, secret_to_dict(BoundSecretValue((reference, ":new"))), new_destination
+            )
+            prepared = await service.prepare_mutation("UPDATE_LOCAL_MCP", target, candidate)
+            assert prepared.missing_credentials
+            assert not prepared.requires_destination_confirmation
+            assert (await service.update(
+                target, candidate, expected=config_guard(created.config)
+            )).applied
+            assert service.settings.resolve_mcp_secret(binding) is None
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_replacing_one_template_secret_does_not_confirm_other_retained_secrets(
+    tmp_path, monkeypatch
+):
+    async def scenario():
+        service = LocalMcpManagementService(
+            LocalSettingsStore(tmp_path / "private.yaml"),
+            user_config_path=tmp_path / "mcp.yaml",
+        )
+        target = LocalMcpTarget("test")
+        binding = McpCredentialBinding(target.owner, "bearer")
+        managed = ManagedLocalCredentialReference(binding)
+        monkeypatch.setenv("MCP_DESTINATION_TEST_TOKEN", "retained-test-credential")
+        environment = EnvironmentVariableReference("MCP_DESTINATION_TEST_TOKEN")
+        reference = BoundSecretValue((managed, ":", environment))
+        try:
+            created = await service.create(
+                target,
+                _credential_destination_entry(
+                    "bearer", secret_to_dict(reference), "https://old.example/mcp"
+                ),
+                (McpSecretMutation(binding, "old-test-credential"),),
+            )
+            candidate = _credential_destination_entry(
+                "bearer", secret_to_dict(BoundSecretValue((environment, ":", managed))),
+                "https://new.example/mcp",
+            )
+            with pytest.raises(ValueError, match="确认"):
+                await service.update(
+                    target, candidate, expected=config_guard(created.config),
+                    secrets=(McpSecretMutation(binding, "replacement-test-credential"),),
+                )
+            assert service.settings.resolve_mcp_secret(binding) == "old-test-credential"
+            assert config_guard(service.inspect(target)) == config_guard(created.config)
+        finally:
+            await service.aclose()
 
     asyncio.run(scenario())
 

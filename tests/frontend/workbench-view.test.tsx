@@ -935,6 +935,50 @@ describe('completed reply process disclosure', () => {
   // Collapsed processes must unmount their complex bodies, not merely hide them.
   const hiddenProgress = () => screen.queryByText(progress.body) === null;
 
+  it('keeps one executing heading across live reasoning and committed tool cycles', () => {
+    const committed = { ...progress, historyGroupId: 'root-process', historyWindowId: 'tail',
+      entryOwnerKind: 'EXECUTED_TURN' as const };
+    const draft = (id: string) => ({ id, turnId: 'turn-one', role: 'assistant' as const,
+      assistantKind: 'live' as const, time: '', body: '', status: 'running' as const,
+      reasoning: [{ id: `${id}-reason`, kind: 'full' as const, body: `思考 ${id}`, active: true }] });
+    const base = { activeTurnId: 'turn-one', isRunning: true,
+      artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(),
+      history: { hasOlder: false, loading: false, windows: [{ id: 'tail',
+        firstEntryId: 'progress', lastEntryId: 'progress', hasOlder: false, hasNewer: false, loading: false }] } };
+    const view = render(<ConversationMessages {...base} messages={[committed, draft('thinking-one')]} />);
+    const heading = view.container.querySelector('.assistant-heading');
+    const check = () => {
+      expect(view.container.querySelectorAll('.assistant-heading')).toHaveLength(1);
+      expect(view.container.querySelector('.assistant-heading')).toBe(heading);
+      expect(within(heading as HTMLElement).getByText('正在执行')).toBeTruthy();
+      expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
+    };
+    check();
+    const tool = { ...committed, id: 'next-tool', body: '', traces: [{ ...progress.traces[0], id: 'read-two' }] };
+    view.rerender(<ConversationMessages {...base} messages={[committed, tool]} />);
+    check();
+    view.rerender(<ConversationMessages {...base} messages={[committed, tool, draft('thinking-two')]} />);
+    check();
+    expect(screen.getByText('思考 thinking-two')).toBeTruthy();
+    view.rerender(<ConversationMessages {...base} isRunning={false} messages={[committed, tool,
+      { ...final, historyGroupId: 'root-process', historyWindowId: 'tail' }]} />);
+    expect(view.container.querySelectorAll('.assistant-heading')).toHaveLength(1);
+    expect(screen.queryByText('正在执行')).toBeNull();
+    expect(screen.getByText(final.body)).toBeTruthy();
+  });
+
+  it('does not join live reasoning across an unloaded history gap', () => {
+    const view = render(<ConversationMessages activeTurnId="turn-one" isRunning
+      messages={[{ ...progress, historyGroupId: 'root-process', historyWindowId: 'older' }, {
+        id: 'live', role: 'assistant', turnId: 'turn-one', assistantKind: 'live',
+        status: 'running', time: '', body: '', reasoning: [{ id: 'reason', kind: 'full', body: '当前思考' }],
+      }]} history={{ hasOlder: false, loading: false, windows: [{ id: 'older',
+        firstEntryId: 'progress', lastEntryId: 'progress', hasOlder: false, hasNewer: true, loading: false }] }}
+      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
+    expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(2);
+    expect(screen.getByText('后续记录尚未加载')).toBeTruthy();
+  });
+
   it.each([1, 3])('folds %s leading completion notifications without an earlier assistant step', count => {
     const notices = Array.from({ length: count }, (_, i) => ({
       id: `completion-${i}`, turnId: 'turn-one', role: 'user' as const,
@@ -1918,4 +1962,27 @@ it('resumes tail following on a downward gesture at the bottom even without a sc
   fireEvent.wheel(thread, { deltaY: 100 });
   await waitFor(() => expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull());
   expect(top).toBe(600);
+});
+
+it('keeps tail-follow while scrolling a contained plan document, including its edges', async () => {
+  const view = render(<WorkbenchView {...props({isRunning: false, interaction: {id: 'plan-scroll', kind: 'plan-draft', workflowId: 'workflow', workflowRevision: 1}, onReadInteraction: async () => ({kind: 'plan-draft', body: '## Long plan\n\n1. first\n2. second'})})} />);
+  await screen.findByRole('heading', {name: 'Long plan'});
+  const thread = view.container.querySelector('.thread-scroll')! as HTMLElement;
+  const plan = view.container.querySelector('.plan-draft-body')! as HTMLElement;
+  plan.style.overflowY = 'auto'; plan.style.overscrollBehaviorY = 'contain';
+  Object.defineProperties(thread, {scrollHeight: {value: 2000, configurable: true}, clientHeight: {value: 500, configurable: true}});
+  Object.defineProperties(plan, {scrollHeight: {value: 1000, configurable: true}, clientHeight: {value: 300, configurable: true}});
+  thread.scrollTop = 1500;
+  for (const top of [200, 0]) {
+    plan.scrollTop = top;
+    fireEvent.wheel(plan.querySelector('li')!, {deltaY: -100});
+    fireEvent.scroll(plan);
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+    expect(thread.scrollTop).toBe(1500);
+  }
+  fireEvent.click(screen.getByRole('button', {name: '提出修改'}));
+  fireEvent.keyDown(screen.getByRole('textbox', {name: '你想调整哪里？'}), {key: 'ArrowUp'});
+  expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+  fireEvent.wheel(thread, {deltaY: -100});
+  expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
 });

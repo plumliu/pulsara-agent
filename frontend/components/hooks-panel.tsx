@@ -52,7 +52,7 @@ export function HooksPanel({api, query, refresh, inventory, onCountChange, onNot
   useEffect(() => {
     const controller = new AbortController();
     void api.list(controller.signal).then(value => {if (!controller.signal.aborted) {
-      setCatalog(value); setError('');
+      setCatalog({sources: value.sources, details: value.details}); setError('');
       onCountChange?.(value.details.length ? undefined : value.sources.reduce((total, source) => total + (source.enabled && source.source_disposition === 'COMPLETE' && source.trust_state === 'TRUSTED' ? source.definition_count : 0), 0));
     }}, cause => {
       if (!controller.signal.aborted) {setError(cause instanceof Error ? cause.message : '暂时无法读取 Hook 来源。'); onCountChange?.(undefined);}
@@ -61,14 +61,23 @@ export function HooksPanel({api, query, refresh, inventory, onCountChange, onNot
   }, [api, refresh, attempt, inventory, onCountChange]);
   useEffect(() => {
     if (expanded !== 'local') return;
+    const source = catalog?.sources.find(source => !source.plugin_id);
+    if (!source) {setLocal({loading: false, error: ''}); return;}
+    if (error || (source.exists !== false && (source.source_disposition !== 'COMPLETE' || source.trust_state === 'UNAVAILABLE'))) {
+      setLocal({loading: false, error: error || '暂时无法读取规则。'});
+      return;
+    }
     const controller = new AbortController();
+    // Read-only rows follow the accepted source inventory. Dialogs retain their
+    // own frozen initial config, draft and CAS baseline while these reads refresh.
+    setLocal({loading: true, error: ''});
     void api.config(controller.signal).then(config => {
       if (!controller.signal.aborted) setLocal({config, loading: false, error: ''});
     }, cause => {
       if (!controller.signal.aborted) setLocal({loading: false, error: cause instanceof Error ? cause.message : '暂时无法读取规则。'});
     });
     return () => controller.abort();
-  }, [api, expanded, refresh, attempt]);
+  }, [api, expanded, catalog, error]);
   const open = async (source: HookSource, mode: 'json' | 'rule' | 'trust') => {
     if (openingRef.current) return;
     openingRef.current = true;

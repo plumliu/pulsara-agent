@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol
 
 import yaml
 
@@ -378,6 +378,14 @@ def _validate_mcp_configuration(config) -> None:
         raise ValueError("stdio MCP uses secret env, not HTTP authentication")
 
 
+class McpAuthorizationProvider(Protocol):
+    async def __call__(self) -> tuple[str, tuple[str, ...]]: ...
+
+    def rejection_observer(self, authorization: str) -> Callable[[], None]:
+        """Capture the exact saved grant before HTTP transmission."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class McpServerConfig:
     server_id: str
@@ -407,9 +415,9 @@ class McpServerConfig:
     secret_resolver: McpSecretResolver | None = field(
         default=None, repr=False, compare=False
     )
-    authorization_provider: (
-        Callable[[], Awaitable[tuple[str, tuple[str, ...]]]] | None
-    ) = field(default=None, repr=False, compare=False)
+    authorization_provider: McpAuthorizationProvider | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         _validate_mcp_configuration(self)

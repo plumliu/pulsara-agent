@@ -14,6 +14,11 @@ if (!document.elementFromPoint) {
   document.elementFromPoint = () => document.querySelector('[contenteditable="true"]');
 }
 
+// jsdom has no native scrolling; tests that verify movement supply their own spy.
+if (!HTMLElement.prototype.scrollBy) {
+  HTMLElement.prototype.scrollBy = () => undefined;
+}
+
 let objectUrlSequence = 0;
 if (!URL.createObjectURL) {
   URL.createObjectURL = () => `blob:pulsara-test:${objectUrlSequence += 1}`;

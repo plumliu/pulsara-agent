@@ -1101,9 +1101,7 @@ class LocalSessionController:
             "capabilities": await self._session_capability_payload(handle),
         }
 
-    async def inspect_user_capabilities(
-        self, *, active_session_id: str | None = None
-    ) -> dict[str, object]:
+    async def inspect_user_capabilities(self) -> dict[str, object]:
         """Read the user-owned Skill, MCP, and Plugin inventory."""
 
         skills_task = asyncio.to_thread(_inspect_user_skills)
@@ -1112,19 +1110,22 @@ class LocalSessionController:
         skills, mcp_configs, plugins = await asyncio.gather(
             skills_task, mcp_task, plugins_task
         )
-        live_inspection: KernelCapabilityCatalogInspection | None = None
-        if active_session_id:
-            async with self._lock:
-                handle = self._by_session.get(active_session_id)
-                if handle is not None:
-                    live_inspection = handle.session.inspect_capability_catalog()
         try:
+            # Read only published, available owners. Lifecycle operations can
+            # already be quiescing a Host that is still in the publication map.
+            # This read never resumes a cold Session or starts another MCP.
+            async with self._lock:
+                live_inspections = tuple(
+                    handle.session.inspect_capability_catalog()
+                    for session_id, handle in sorted(self._by_session.items())
+                    if session_id not in self._operations
+                )
             return _user_capability_payload(
                 skills=skills,
                 mcp_configs=mcp_configs,
                 plugins=plugins,
                 secret_resolver=self.core.mcp_management.settings.read().mcp_secret,
-                live_inspection=live_inspection,
+                live_inspections=live_inspections,
             )
         finally:
             if isinstance(plugins, PluginInspectionOutcome):
@@ -1392,15 +1393,11 @@ class LocalSessionController:
             ), action="TRUST_HOOK_SOURCE", plugin_id=plugin_id,
         )
 
-    async def refresh_user_capabilities(
-        self, *, active_session_id: str | None = None
-    ) -> dict[str, object]:
+    async def refresh_user_capabilities(self) -> dict[str, object]:
         """Adopt current user sources in every live Session, then inspect them."""
 
         updated, attention = await self._reload_live_capabilities()
-        payload = await self.inspect_user_capabilities(
-            active_session_id=active_session_id
-        )
+        payload = await self.inspect_user_capabilities()
         payload["adoption"] = {
             "updated_sessions": updated,
             "attention_sessions": attention,
@@ -1442,7 +1439,6 @@ class LocalSessionController:
         self,
         *,
         source_path: str,
-        active_session_id: str | None = None,
         name: str | None = None,
         description: str | None = None,
     ) -> dict[str, object]:
@@ -1463,9 +1459,7 @@ class LocalSessionController:
             if outcome.destination_path is not None and (outcome.disposition.value == "INSTALLED" or (outcome.prior_disposition is not None and outcome.prior_disposition.value == "INSTALLED"))
             else 0
         )
-        capabilities = await self.inspect_user_capabilities(
-            active_session_id=active_session_id
-        )
+        capabilities = await self.inspect_user_capabilities()
         return {
             "operation": _skill_install_payload(outcome),
             "adoption": {
@@ -1482,7 +1476,6 @@ class LocalSessionController:
         *,
         skill_path: str,
         enabled: bool,
-        active_session_id: str | None = None,
     ) -> dict[str, object]:
         requested = Path(skill_path.strip()).expanduser()
         if not skill_path.strip() or not requested.is_absolute():
@@ -1507,9 +1500,7 @@ class LocalSessionController:
             enabled=enabled,
         )
         pending = await self._mark_capability_refresh(action="SET_LOOSE_SKILL_ENABLED", target={"kind":"SKILL", "skill_path":str(requested)}, result="ENABLED" if enabled else "DISABLED", enabled=enabled)
-        capabilities = await self.inspect_user_capabilities(
-            active_session_id=active_session_id
-        )
+        capabilities = await self.inspect_user_capabilities()
         return {
             "adoption": {
                 "updated_sessions": 0,
@@ -1530,7 +1521,6 @@ class LocalSessionController:
         *,
         skill_path: str,
         expected: LocalSkillRemovalIdentity,
-        active_session_id: str | None = None,
     ) -> dict[str, object]:
         path = Path(skill_path).expanduser()
         service = LocalSkillManagementService()
@@ -1571,9 +1561,7 @@ class LocalSessionController:
                 "pending_sessions": pending,
                 "attention_sessions": 0,
             },
-            "capabilities": await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            ),
+            "capabilities": await self.inspect_user_capabilities(),
         }
 
     @_settled_capability_mutation(owns_lane=False)
@@ -1583,14 +1571,13 @@ class LocalSessionController:
         server_id: str,
         config: dict[str, object],
         secret_changes: tuple[McpSecretMutation, ...] = (),
-        active_session_id: str | None = None,
     ) -> dict[str, object]:
         outcome = await self.core.mcp_management.create(
             LocalMcpTarget(server_id),
             config,
             secret_changes,
         )
-        return await self._user_mcp_settlement(outcome, "ADDED", active_session_id, server_id=server_id)
+        return await self._user_mcp_settlement(outcome, "ADDED", server_id=server_id)
 
     async def preview_mcp_import(
         self, *, content: str, shape: str, server_id: str | None
@@ -1612,7 +1599,6 @@ class LocalSessionController:
         values: dict[str, str],
         transport: str | None,
         allow_http_localhost: bool = False,
-        active_session_id: str | None = None,
         session_id: str | None = None,
     ):
         drafts = await asyncio.to_thread(
@@ -1650,7 +1636,7 @@ class LocalSessionController:
         )
         if handle:
             return await self._workspace_mcp_settlement(handle, outcome, "ADDED", server_id=selected_server_id)
-        return await self._user_mcp_settlement(outcome, "ADDED", active_session_id, server_id=selected_server_id)
+        return await self._user_mcp_settlement(outcome, "ADDED", server_id=selected_server_id)
 
     @_settled_capability_mutation(owns_lane=False)
     async def update_user_mcp_server(
@@ -1660,7 +1646,6 @@ class LocalSessionController:
         config: dict[str, object],
         expected: str,
         secret_changes: tuple[McpSecretMutation, ...] = (),
-        active_session_id: str | None = None,
         retain_credentials_confirmed: bool = False,
     ) -> dict[str, object]:
         outcome = await self.core.mcp_management.update(
@@ -1670,7 +1655,7 @@ class LocalSessionController:
             secrets=secret_changes,
             retain_credentials_confirmed=retain_credentials_confirmed,
         )
-        return await self._user_mcp_settlement(outcome, "UPDATED", active_session_id, server_id=server_id)
+        return await self._user_mcp_settlement(outcome, "UPDATED", server_id=server_id)
 
     async def test_mcp_server(
         self,
@@ -1710,14 +1695,13 @@ class LocalSessionController:
         *,
         server_id: str,
         expected: str,
-        active_session_id: str | None = None,
     ) -> dict[str, object]:
         outcome = await self.core.mcp_management.remove(
             LocalMcpTarget(server_id), expected=expected
         )
-        return await self._user_mcp_settlement(outcome, "REMOVED", active_session_id, server_id=server_id)
+        return await self._user_mcp_settlement(outcome, "REMOVED", server_id=server_id)
 
-    async def _user_mcp_settlement(self, outcome, status, active_session_id, *, server_id):
+    async def _user_mcp_settlement(self, outcome, status, *, server_id):
         # No canonical mutation lane is held while physical consumers adopt/drain.
         pending = await self._mark_capability_refresh(
             action={"ADDED":"ADD_LOCAL_MCP", "REMOVED":"REMOVE_LOCAL_MCP"}.get(status, "UPDATE_LOCAL_MCP"),
@@ -1739,9 +1723,7 @@ class LocalSessionController:
                 "pending_sessions": pending,
                 "attention_sessions": 0,
             },
-            "capabilities": await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            ),
+            "capabilities": await self.inspect_user_capabilities(),
         }
 
     async def authorize_mcp(
@@ -1776,7 +1758,8 @@ class LocalSessionController:
             else:
                 handle = await self.resume_session(session_id)
                 workspace_root = handle.session.workspace.workspace_root
-        owner = LocalMcpTarget(server_id, workspace_root).owner
+        target = LocalMcpTarget(server_id, workspace_root)
+        owner = target.owner
         manager = self.core.mcp_management.oauth
         if action == "cancel":
             await manager.cancel(owner)
@@ -1784,14 +1767,16 @@ class LocalSessionController:
             await manager.logout(owner)
         elif action != "status":
             raise ValueError("invalid MCP authorization action")
-        return manager.login_state(owner)
+        config = await asyncio.to_thread(self.core.mcp_management.inspect, target)
+        if config is None:
+            return {"state": "idle", "error": None}
+        return manager.login_state(owner, config)
 
     @_settled_capability_mutation(owns_lane=False)
     async def install_user_plugin(
         self,
         *,
         source_path: str,
-        active_session_id: str | None = None,
         source_format="native",
         classifications=(),
         public_values=(),
@@ -1809,9 +1794,7 @@ class LocalSessionController:
                 action="INSTALL_PLUGIN", target={"kind":"PLUGIN", "plugin_id":published.identity.plugin_id},
                 result="CLEANUP_ATTENTION" if isinstance(outcome, CleanupUnavailablePluginInstallOutcome) or published.cleanup_attention else published.disposition.value,
             )
-        capabilities = await self.inspect_user_capabilities(
-            active_session_id=active_session_id
-        )
+        capabilities = await self.inspect_user_capabilities()
         return {
             "operation": _plugin_install_operation(outcome),
             "capabilities": capabilities,
@@ -1838,7 +1821,6 @@ class LocalSessionController:
         package_install_id: str,
         enabled: bool,
         connection_review,
-        active_session_id: str | None = None,
     ) -> dict[str, object]:
         outcome = await self.core.set_user_plugin_enabled(
             plugin_id=plugin_id,
@@ -1851,9 +1833,7 @@ class LocalSessionController:
             if isinstance(outcome, SettledPluginEnablementOutcome)
             else 0
         )
-        capabilities = await self.inspect_user_capabilities(
-            active_session_id=active_session_id
-        )
+        capabilities = await self.inspect_user_capabilities()
         return {
             "operation": _plugin_enablement_operation(outcome),
             "adoption": {
@@ -1870,7 +1850,6 @@ class LocalSessionController:
         *,
         plugin_id: str,
         package_install_id: str,
-        active_session_id: str | None = None,
     ) -> dict[str, object]:
         outcome = await self.core.remove_user_plugin(plugin_id, package_install_id)
         pending = (
@@ -1878,9 +1857,7 @@ class LocalSessionController:
             if isinstance(outcome, RemovedPluginOutcome)
             else 0
         )
-        capabilities = await self.inspect_user_capabilities(
-            active_session_id=active_session_id
-        )
+        capabilities = await self.inspect_user_capabilities()
         return {
             "operation": _plugin_removal_operation(outcome),
             "adoption": {
@@ -1902,7 +1879,6 @@ class LocalSessionController:
         overlay,
         secret_changes,
         retain_credentials_confirmed=False,
-        active_session_id=None,
     ):
         from pulsara_agent.plugins.connection_management import (
             ReplacePluginMcpConnectionRequest,
@@ -1937,9 +1913,7 @@ class LocalSessionController:
                 "pending_sessions": pending,
                 "attention_sessions": 0,
             },
-            "capabilities": await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            ),
+            "capabilities": await self.inspect_user_capabilities(),
         }
 
     async def plugin_mcp_authorization(
@@ -3264,41 +3238,64 @@ def _user_capability_payload(
     mcp_configs: tuple[McpServerConfig, ...],
     plugins: object,
     secret_resolver,
-    live_inspection: KernelCapabilityCatalogInspection | None,
+    live_inspections: tuple[KernelCapabilityCatalogInspection, ...],
 ) -> dict[str, object]:
-    live_catalog = (
-        {item.server_id: item for item in live_inspection.mcp_catalog.servers}
-        if live_inspection is not None
-        else {}
-    )
-    live_tools: dict[str, list[dict[str, object]]] = {}
-    live_configs = (
-        {item.server_id: item for item in live_inspection.mcp_configured_servers}
-        if live_inspection is not None
-        else {}
-    )
-    if live_inspection is not None:
-        for item in live_inspection.mcp_tools:
-            live_tools.setdefault(item.server_id, []).append(
-                {
-                    "name": item.provider_name,
-                    "remote_name": item.remote_name,
-                    "description": item.description,
-                    "effect": item.effect,
-                    "available_to_subagents": item.available_to_subagents,
-                    "parallel_safe": item.parallel_safe,
-                }
+    # Select one coherent observation for each exact current USER config.
+    # A working connection anywhere wins over another Session still connecting
+    # or failing. Never union catalogs: remote state can differ across Sessions.
+    state_priority = {
+        "READY": 7,
+        "DISCOVERING": 6,
+        "CONNECTING": 5,
+        "FAILED_RETRYABLE": 4,
+        "FAILED_TERMINAL": 3,
+        "RETIRING": 2,
+        "CLOSED": 1,
+        "DISABLED": 0,
+    }
+    current_configs = {item.server_id: item for item in mcp_configs}
+    observations = {}
+    for inspection in live_inspections:
+        catalogs = {item.server_id: item for item in inspection.mcp_catalog.servers}
+        for observed in inspection.mcp_configured_servers:
+            config = current_configs.get(observed.server_id)
+            live = catalogs.get(observed.server_id)
+            if (
+                config is None
+                or live is None
+                or not observed.status_matches_config
+                or observed.source_kind != McpLocalConfigSourceKind.USER.value
+                or observed.resolved_config_identity != config.resolved_config_identity
+            ):
+                continue
+            # Prefer the fuller coherent catalog within the same live state;
+            # equal observations retain the first stable Session-id ordering.
+            rank = (
+                state_priority[live.status.value],
+                live.exposed_tool_count,
+                live.resource_count,
+                live.resource_template_count,
+                live.prompt_count,
             )
+            prior = observations.get(config.server_id)
+            if prior is None or rank > prior[0]:
+                observations[config.server_id] = (rank, live, inspection)
     mcp_servers = []
     for config in mcp_configs:
-        live_config = live_configs.get(config.server_id)
-        exact_user_config = (
-            live_config is not None
-            and live_config.status_matches_config
-            and live_config.source_kind == McpLocalConfigSourceKind.USER.value
-            and live_config.resolved_config_identity == config.resolved_config_identity
-        )
-        live = live_catalog.get(config.server_id) if exact_user_config else None
+        observation = observations.get(config.server_id)
+        live = observation[1] if observation is not None else None
+        live_tools = [
+            {
+                "name": item.provider_name,
+                "remote_name": item.remote_name,
+                "description": item.description,
+                "effect": item.effect,
+                "available_to_subagents": item.available_to_subagents,
+                "parallel_safe": item.parallel_safe,
+            }
+            for item in observation[2].mcp_tools
+            if item.server_id == config.server_id
+        ] if observation is not None else []
         if not config.enabled:
             status = "DISABLED"
         elif live is None:
@@ -3346,9 +3343,7 @@ def _user_capability_payload(
                     live.stable_failure_category if live is not None else None
                 ),
                 "transport": transport,
-                "tools": (
-                    live_tools.get(config.server_id, []) if live is not None else []
-                ),
+                "tools": live_tools,
             }
         )
     return {

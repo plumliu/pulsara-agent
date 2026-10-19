@@ -7,7 +7,7 @@ user submission or execute directly, never both; no lookup registry is involved.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from pulsara_agent.capability.local_skill_management import (
@@ -41,6 +41,8 @@ from pulsara_agent.capability.mcp_management import (
     config_guard,
     config_to_entry,
     credential_presence,
+    managed_bindings,
+    _require_destination_confirmation,
 )
 from pulsara_agent.plugins.connection_management import (
     ReplacePluginMcpConnectionRequest,
@@ -263,25 +265,54 @@ class CapabilityManagementCall:
                 "review the complete current Hook definitions before trusting them"
             )
         retained = body.get("retain_credentials_confirmed", False)
-        if (
-            "credential_destination_confirmation" in candidate.user_inputs
-            and not retained
-        ):
-            raise ValueError("confirm credential reuse for the changed destination")
         # The native parser validates secret bindings against the actual target,
         # without persisting them or returning a secret-bearing config to the UI.
+        current_config = next_config = None
         if candidate.local_mutation and candidate.local_mutation.entry is not None:
-            self.service.mcp.parse(
-                candidate.local_mutation.target,
+            target = candidate.local_mutation.target
+            next_config = self.service.mcp.parse(
+                target,
                 thaw_json(candidate.local_mutation.entry),
                 transient_secrets=changes,
             )
-        elif changes:
-            owner = plugin_connection_owner(
-                candidate.plugin.identity, arguments["server_id"]
-            )
+            current_config = self.service.mcp.inspect(target)
+        elif action is Action.CONFIGURE_PLUGIN_MCP_CONNECTION:
+            plugin = candidate.plugin
+            assert plugin is not None
+            owner = plugin_connection_owner(plugin.identity, arguments["server_id"])
             if any(change.binding.owner != owner for change in changes):
                 raise ValueError("credential does not belong to this Plugin component")
+            server = next(
+                item
+                for item in plugin.summary.mcp.mcp_servers
+                if item.local_server_id == arguments["server_id"]
+            )
+            current_config = self.service._connection(plugin, server)
+            overlay = (
+                overlay_from_dict(arguments["overlay"])
+                if arguments["overlay"] is not None else None
+            )
+            overlays = tuple(
+                item
+                for item in plugin.mcp_connection_overlays
+                if item.local_server_id != arguments["server_id"]
+            )
+            if overlay is not None:
+                overlays = tuple(sorted(
+                    (*overlays, overlay), key=lambda item: item.local_server_id
+                ))
+            next_config = self.service._connection(
+                replace(plugin, mcp_connection_overlays=overlays), server
+            )
+        if next_config is not None:
+            references = managed_bindings(next_config)
+            if any(change.binding not in references for change in changes):
+                raise ValueError("secret mutation is not referenced by this connection")
+            # Preparation cannot see private replacements. Recheck the same
+            # canonical rule after their ownership and references are validated.
+            _require_destination_confirmation(
+                current_config, next_config, changes, retained
+            )
         return CapabilityFormValues(
             freeze_json(arguments),
             changes,
@@ -709,11 +740,21 @@ class CapabilityManagementCall:
             flow = await service.mcp.oauth.begin(owner, current)
             assert flow.task is not None
             await flow.task
-        return self._result(
+        result = self._result(
             prepared,
             "APPLIED",
             {"authorized": prepared.intent.action is Action.AUTHORIZE_MCP},
         )
+        if prepared.intent.action is Action.AUTHORIZE_MCP:
+            # Existing committed tool settlement carries the exact credential owner
+            # to the desktop; no separate durable authorization notification.
+            result["authorization"] = {
+                "owner": asdict(owner),
+                "config_identity": flow.config.resolved_config_identity,
+                "display_identity": config_guard(flow.config),
+                "package_install_id": prepared.plugin.package_install_id if prepared.plugin else None,
+            }
+        return result
 
     @staticmethod
     def _result(prepared, status, current):

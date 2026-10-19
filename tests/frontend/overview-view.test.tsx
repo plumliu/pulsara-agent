@@ -9,9 +9,7 @@ function renderOverview(overrides: Partial<ComponentProps<typeof OverviewView>> 
   return render(
     <OverviewView
       sessions={[]}
-      activeSessionId=""
       runtimeStatus="online"
-      agentTasks={[]}
       modelConfigurations={[]}
       onNavigate={() => {}}
       onOpenSession={() => {}}
@@ -55,11 +53,11 @@ it('shows four recent sessions with shared presence and opens the selected sessi
     updatedAt: '刚刚',
     live: index < 2,
   }));
-  const { container } = renderOverview({ sessions, activeSessionId: 'session-0', onOpenSession });
+  const { container } = renderOverview({ sessions, onOpenSession });
 
   expect(container.querySelectorAll('.recent-table > button')).toHaveLength(4);
-  expect(container.querySelectorAll('.recent-table .session-presence--current')).toHaveLength(1);
-  expect(container.querySelectorAll('.recent-table .session-presence--loaded')).toHaveLength(1);
+  expect(container.querySelectorAll('.recent-table .session-presence--current')).toHaveLength(0);
+  expect(container.querySelectorAll('.recent-table .session-presence--loaded')).toHaveLength(2);
   expect(container.querySelectorAll('.recent-table .session-presence--resumable')).toHaveLength(2);
   expect(screen.queryByText('任务 4')).toBeNull();
   expect(screen.getByText('共 5 个会话')).toBeTruthy();
@@ -67,17 +65,18 @@ it('shows four recent sessions with shared presence and opens the selected sessi
   expect(onOpenSession).toHaveBeenCalledWith('session-2');
 });
 
-it('counts running tasks and shows model and retrieval configuration', () => {
+it('aggregates task counts across sessions and shows model and retrieval configuration', () => {
   const { container } = renderOverview({
-    agentTasks: (['running', 'completed', 'pending'] as const).map((status) => ({
-      id: status,
-      label: status,
-      role: 'worker',
-      objective: 'Test task',
-      status,
-      completionAccepted: status === 'completed',
-      dependencyIds: [],
-      color: 'amber',
+    sessions: [
+      { total: 7, active: 2, waiting: 1, attention: 0 },
+      { total: 5, active: 3, waiting: 0, attention: 1 },
+    ].map((taskCounts, index) => ({
+      id: `session-${index}`,
+      title: `任务 ${index}`,
+      subtitle: '/workspace/project',
+      updatedAt: '刚刚',
+      status: 'running',
+      taskCounts,
     })),
     localSettings: {
       postgres: null,
@@ -97,7 +96,8 @@ it('counts running tasks and shows model and retrieval configuration', () => {
     })),
   });
 
-  expect(container.querySelectorAll('.metric-grid article')[1]?.querySelector('strong')?.textContent).toBe('1');
+  expect(container.querySelectorAll('.metric-grid article')[1]?.querySelector('strong')?.textContent).toBe('5');
+  expect(screen.getByText('共 12 个任务')).toBeTruthy();
   expect(screen.getByText('1 组可用 · 1 组不可用')).toBeTruthy();
   expect(screen.getByText('已开启')).toBeTruthy();
   expect(screen.getByText('已关闭')).toBeTruthy();
