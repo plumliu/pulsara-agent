@@ -19,6 +19,7 @@ import {
 } from "../lib/visualization-environment";
 
 import visualizationShell from "../../src/pulsara_agent/conversation_kernel/visualization_shell.js";
+import visualizationScrollbars from "../../src/pulsara_agent/conversation_kernel/visualization_scrollbars.css?raw";
 const scriptValue = (value: string) =>
   JSON.stringify(value).replace(/</g, "\\u003c");
 
@@ -61,7 +62,7 @@ export function htmlPreviewShell(source: HtmlPreviewSource): string {
     : undefined;
   const html = local
     ? ""
-    : `${source.html}${source.measure ? visualizationFrameMeasurementScript : ""}`;
+    : `${source.html}<style>${visualizationScrollbars}</style>${source.measure ? visualizationFrameMeasurementScript : ""}`;
   const bootstrap = local
     ? ""
     : `<script>addEventListener('click',event=>{const link=event.target.closest?.('a[href]');if(link && !link.getAttribute('href').startsWith('#')){event.preventDefault();event.stopImmediatePropagation();parent.postMessage({type:'pulsara-snapshot-target-unavailable'},'*');}},true);</script>${source.environment ? environmentBootstrap(source.environment) : ""}${source.allowTextSelection === false ? nonselectableContent : ""}`;

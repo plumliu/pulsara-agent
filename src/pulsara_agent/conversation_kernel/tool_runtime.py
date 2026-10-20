@@ -126,7 +126,7 @@ from pulsara_agent.conversation_kernel.html_resources import (
     freeze_html_resources,
 )
 from pulsara_agent.conversation_kernel.visualization import (
-    FrozenVisualizationOccurrence, materialize_visualizations, read_visualization_file, validate_html_path,
+    FrozenVisualizationOccurrence, materialize_visualizations, read_visualization_text, validate_html_path,
 )
 from pulsara_agent.conversation_kernel.visualization_screenshot import (
     VisualizationScreenshotError,
@@ -3468,9 +3468,11 @@ class DirectKernelToolPort:
                 KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
             )
             html_source = source.kind is ViewImageSourceKind.PATH and Path(source.value).suffix.lower() in {".html", ".htm"}
+            svg_source = source.kind is ViewImageSourceKind.PATH and Path(source.value).suffix.lower() == ".svg"
+            browser_source = html_source or svg_source
             if source.kind is ViewImageSourceKind.PATH:
                 physical = await self._physical_io.run_tool_invocation(
-                    _read_html_candidate if html_source else _read_local_image_candidate,
+                    _read_browser_image_candidate if browser_source else _read_local_image_candidate,
                     tool,
                     call,
                     maximum_bytes,
@@ -3563,18 +3565,23 @@ class DirectKernelToolPort:
                     ),
                 )
             if source.kind is ViewImageSourceKind.PATH:
-                if not isinstance(candidate, LocalHtmlReadCandidate if html_source else LocalImageReadCandidate):
+                if not isinstance(candidate, LocalHtmlReadCandidate if browser_source else LocalImageReadCandidate):
                     raise TypeError(
                         "view_image path read returned an invalid candidate"
                     )
-                if html_source:
+                if browser_source:
                     try:
-                        html = await freeze_html_resources(
-                            candidate.payload, candidate.access_path,
-                            io=self._physical_io, validator=self._image_validator,
-                            deadline_monotonic=deadline,
-                        )
-                        png = await self._visualization_screenshots.render(html, deadline_monotonic=deadline)
+                        if svg_source:
+                            png = await self._visualization_screenshots.render(
+                                candidate.payload, deadline_monotonic=deadline, svg=True,
+                            )
+                        else:
+                            html = await freeze_html_resources(
+                                candidate.payload, candidate.access_path,
+                                io=self._physical_io, validator=self._image_validator,
+                                deadline_monotonic=deadline,
+                            )
+                            png = await self._visualization_screenshots.render(html, deadline_monotonic=deadline)
                     except TimeoutError:
                         return KernelToolResult(
                             state="SYSTEM_ERROR", content=b'{"error":"HTML_PREPARATION_DEADLINE_EXPIRED"}',
@@ -3641,7 +3648,8 @@ class DirectKernelToolPort:
                     )
                 image = candidate
             content = FrozenPromptContent((LLMTextPart(
-                "Current HTML still screenshot; 1200×800 viewport, light theme, visible, reduced motion; capture may crop to content-root bounds. Playback unverified. Publication rereads the file." if html_source else "Image loaded."
+                "Current HTML still screenshot; 1200×800 viewport, light theme, visible, reduced motion; capture may crop to content-root bounds. Playback unverified. Publication rereads the file." if html_source else
+                "SVG image rendered at its dimensions or viewBox aspect ratio, without cropping. Scripts and external resources disabled." if svg_source else "Image loaded."
             ), image))
             content = bind_prompt_images(content, workspace_id=invocation_context.workspace_id)
             increment = allowance.quote_owner.quote(
@@ -3979,7 +3987,7 @@ class DirectKernelToolPort:
                 outcome = ProcessLocalEffectSettlementOutcome.DISCARDED
             self._todo_settlements.pop(token.token_id, None)
             if installation is not None:
-                self._offer_todo_installation(installation)
+                self.offer_todo_installation(installation)
             return ProcessLocalEffectSettlementResult(outcome)
         if not isinstance(token.prepared, PreparedTerminalMonitorRegistration):
             raise TypeError("process-local settlement token kind is unknown")
@@ -4024,7 +4032,9 @@ class DirectKernelToolPort:
             scope_subagent_task_id=identity.subagent_task_id,
         )
 
-    def _offer_todo_installation(self, installation: TodoInstallation) -> None:
+    def offer_todo_installation(self, installation: TodoInstallation | None) -> None:
+        if installation is None:
+            return
         snapshot = installation.installed_snapshot
         identity = snapshot.run_identity
         self._offer_todo_snapshot(
@@ -4308,16 +4318,18 @@ def _execute_tool_call(
     return tool.execute(call)
 
 
-def _read_html_candidate(tool: ViewImageTool, call: ToolCall, maximum_bytes: int, *, deadline_monotonic: float) -> LocalHtmlReadCandidate | ToolExecutionResult:
+def _read_browser_image_candidate(tool: ViewImageTool, call: ToolCall, maximum_bytes: int, *, deadline_monotonic: float) -> LocalHtmlReadCandidate | ToolExecutionResult:
     # HTML is bounded by MAXIMUM_BLOB_BYTES in the reader; maximum_bytes is
     # the separate PNG budget and must not constrain source text.
     source = parse_view_image_source(dict(call.arguments))
     try:
-        validate_html_path(source.value)
+        if Path(source.value).suffix.lower() != ".svg":
+            validate_html_path(source.value)
         path = tool._read_access_path(source.value)
-        body = read_visualization_file(path.resolve())
+        kind = "SVG" if path.suffix.lower() == ".svg" else "HTML"
+        body = read_visualization_text(path.resolve(), kind=kind, allow_empty=False)
         if body is None:
-            raise ValueError("HTML_NOT_FOUND")
+            raise ValueError(f"{kind}_NOT_FOUND")
         return LocalHtmlReadCandidate(body, path, source.value)
     except (ValueError, OSError) as exc:
         return tool._error(call, str(exc) if isinstance(exc, ValueError) else "HTML_READ_FAILED", source.value)

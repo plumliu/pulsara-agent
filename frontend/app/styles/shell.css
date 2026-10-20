@@ -31,11 +31,11 @@
 .rail-nav--bottom { margin-top: auto; }
 .rail-button { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; background: transparent; color: var(--rail-muted); transition: .16s ease; }
 .rail-button:hover { color: #fff; background: rgba(255,255,255,.065); }
-.rail-button.is-active { color: #f5cb7f; background: rgba(224,171,88,.13); }
+.rail-button.is-active, .rail-button.rail-profile { color: #f5cb7f; background: rgba(224,171,88,.13); }
 .rail-button.is-active::before { content: ""; position: absolute; left: -11px; width: 3px; height: 18px; border-radius: 0 3px 3px 0; background: #e5ad58; }
 .rail-button::after { content: attr(data-tooltip); position: absolute; left: calc(100% + 11px); z-index: 100; padding: 6px 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 6px; background: #25272d; color: #f1eee7; font-size: var(--type-small); white-space: nowrap; opacity: 0; pointer-events: none; transform: translateX(-4px); transition: .14s ease; box-shadow: var(--shadow-md); }
 .rail-button:hover::after { opacity: 1; transform: translateX(0); }
-.rail-avatar { width: 27px; height: 27px; margin-top: 8px; }
+.rail-profile > .person-avatar { width: 27px; height: 27px; }
 
 .session-sidebar {
   position: relative;

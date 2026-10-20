@@ -2029,6 +2029,7 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
     idle_marks: list[str] = []
     host._runner = _Runner()
     host._tools = SimpleNamespace(
+        offer_todo_installation=lambda _installation: None,
         todo_owner=SimpleNamespace(
             mark_root_idle=lambda *, exact_turn_id: idle_marks.append(exact_turn_id)
         )

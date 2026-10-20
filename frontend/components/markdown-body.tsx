@@ -282,7 +282,12 @@ function MarkdownLink({ href = '', children, onNotify }: { href?: string; childr
   return <a href={kind === 'local' ? href : undefined} role="link" tabIndex={0}
     onClick={event => {
       event.preventDefault();
-      if (kind === 'local' && context) context.open(href, event.currentTarget, context.basePreview, event.metaKey || event.ctrlKey);
+      if (kind === 'local' && context) {
+        // Markdown supplies a URL, not a native path. Keep its existing escapes
+        // and fragment when crossing the native-path file-preview entry point.
+        const address = href.startsWith('/') ? new URL(href, 'file:///').href : href;
+        context.open(address, event.currentTarget, context.basePreview, event.metaKey || event.ctrlKey);
+      }
       else onNotify('无法打开文件', kind === 'invalid' ? '无法识别这个文件地址。' : '此内容没有可用的会话文件连接。', 'warning');
     }} onKeyDown={event => { if (event.key === 'Enter' && !event.currentTarget.hasAttribute('href')) event.currentTarget.click(); }}>
     {content}

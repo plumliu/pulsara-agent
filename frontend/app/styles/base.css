@@ -51,6 +51,8 @@
 
 .person-avatar { display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; overflow: hidden; border-radius: 9px; background: var(--paper-deep); color: var(--blue); }
 .person-avatar > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.person-avatar--default { border-radius: 0; background: transparent; }
+.person-avatar--default > img { object-fit: contain; }
 .person-avatar--agent { background: var(--paper-deep); color: var(--muted); }
 
 :root[data-theme='dark'] {

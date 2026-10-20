@@ -1,4 +1,4 @@
-import { AlarmClock, Bot, LoaderCircle, UserRound } from 'lucide-react';
+import { AlarmClock, Bot, LoaderCircle } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { RuntimeAdapter } from '../lib/runtime-adapter';
 import { AvatarCropDialog } from './avatar-crop-dialog';
@@ -40,11 +40,12 @@ export function UserAvatarProvider({ adapter, children }: { adapter: RuntimeAdap
 export function UserAvatar({ className = '' }: { className?: string }) {
   const { src } = useContext(AvatarContext);
   const [failedSrc, setFailedSrc] = useState<string>();
-  return <span className={`person-avatar ${className}`} role="img" aria-label="用户头像">
-    {src && src !== failedSrc
+  const custom = Boolean(src && src !== failedSrc);
+  return <span className={`person-avatar${custom ? '' : ' person-avatar--default'} ${className}`} role="img" aria-label="用户头像">
+    {custom
       // Local image, no Next image service.
       ? <img src={src} alt="" draggable={false} onError={() => setFailedSrc(src)} />
-      : <UserRound size={15} aria-hidden="true" />}
+      : <img src="/assets/pulsara-icon.png" alt="" draggable={false} />}
   </span>;
 }
 

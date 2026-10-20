@@ -1214,7 +1214,7 @@ function AssistantMessage({
                 )}
                 <time className="response-time">{message.time}</time>
               </div>
-            ) : isStreaming || message.assistantKind === 'live' ? <div className="response-actions" aria-hidden="true" /> : null}
+            ) : null}
           </div>
         </>
       )}
@@ -1230,6 +1230,12 @@ function AssistantMessage({
 
     </article>
   );
+}
+
+function isEmptyLiveAssistant(message: Message): boolean {
+  return message.role === 'assistant' && message.assistantKind === 'live'
+    && !message.body.trim() && !message.reasoning?.length && !message.traces?.length
+    && !message.subagentRuns?.length && !message.visualizations?.length;
 }
 
 function isCompleteAnswer(message: Message, taskFinalAnswerId?: string): boolean {
@@ -1435,7 +1441,7 @@ export function ConversationMessages({
     const fallback = message.pendingAssistant;
     const knownAssistant = fallback && assistant({ ...message, ...fallback,
       assistantKind: 'live', status: 'completed', forkEligible: false, visualizations: undefined,
-      reasoning: fallback.body ? undefined : fallback.reasoning,
+      reasoning: message.historyIncludeReasoning === false ? undefined : fallback.reasoning,
     }, true);
     return <HistoryMessageHost key={message.id} message={message}
       contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
@@ -1476,7 +1482,7 @@ export function ConversationMessages({
     run = [];
   };
   type TimelineItem = { message: Message; windowId?: string } | { notice: TurnInterruptionNotice; windowId: string };
-  const timeline: TimelineItem[] = messages.map(message => ({ message, windowId: message.historyWindowId
+  const timeline: TimelineItem[] = messages.filter(message => !isEmptyLiveAssistant(message)).map(message => ({ message, windowId: message.historyWindowId
     ?? history?.windows.find(window => window.entryIds?.includes(message.id) || window.firstEntryId === message.id || window.lastEntryId === message.id)?.id }));
   for (const notice of interruptionNotices.filter(item => !item.displayAfterMessageId)) {
     // USER_CONTROL_FEEDBACK has no chat bubble. Its exact retained canonical
@@ -1911,7 +1917,7 @@ export function WorkbenchView({
   const preparingSubmission = !isRunning && runtimeStatus === 'online'
     && conversationSubmissions.find(item => ['synchronizing', 'queued'].includes(item.status));
   const awaitingFirstActivity = isRunning && runtimeStatus === 'online' && activeTurnId && !interaction
-    && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId);
+    && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && !isEmptyLiveAssistant(message));
   const conversationCommandIds = new Set(conversationSubmissions.map(item => item.commandId));
   const queuedDisplayCount = queuedCount - queuedPrompts.filter(item => conversationCommandIds.has(item.commandId)).length;
   const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'

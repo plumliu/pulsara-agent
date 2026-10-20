@@ -62,6 +62,10 @@ it('updates the profile, rail, message and preview together while keeping agent 
   const state = setup();
   await waitFor(() => expect(state.userAvatar).toHaveBeenCalledOnce());
   expect(state.avatars()).toHaveLength(4);
+  for (const avatar of state.avatars()) {
+    expect(avatar.classList.contains('person-avatar--default')).toBe(true);
+    expect(avatar.querySelector('img')?.getAttribute('src')).toBe('/assets/pulsara-icon.png');
+  }
   const file = new File(['image'], 'portrait.png', { type: 'image/png' });
   await selectAndSave(file);
   await waitFor(() => expect(screen.getByRole('button', { name: '替换头像' })).toBeTruthy());
@@ -80,7 +84,7 @@ it('updates the profile, rail, message and preview together while keeping agent 
   await waitFor(() => expect(state.avatars()[0].querySelector('img')?.getAttribute('src')).not.toBe(urls[0]));
   fireEvent.click(screen.getByRole('button', { name: '恢复默认' }));
   await waitFor(() => expect(screen.getByRole('button', { name: '上传头像' })).toBeTruthy());
-  expect(state.avatars().every(avatar => !avatar.querySelector('img'))).toBe(true);
+  expect(state.avatars().every(avatar => avatar.querySelector('img')?.getAttribute('src') === '/assets/pulsara-icon.png')).toBe(true);
 });
 
 it('keeps the previous avatar on upload failure and ignores a stale focus read', async () => {

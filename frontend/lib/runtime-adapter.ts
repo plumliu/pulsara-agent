@@ -4095,12 +4095,13 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       const message = messages.find(item => item.id === draft.committedEntryId || item.sourceEntryIds?.includes(draft.committedEntryId!));
       if (!message) continue;
       if (message.turnId !== draft.turnId) { this.drafts.delete(identity); continue; }
-      if (message.historyContextState === 'ready' && message.contentState === 'ready') {
+      if (message.historyContextState === 'ready' && message.contentState === 'ready'
+        && (!message.reasoningContentState || message.reasoningContentState === 'ready')) {
         this.drafts.delete(identity);
       } else {
         message.pendingAssistant = {
           body: message.contentState === 'ready' ? message.body : draft.body,
-          reasoning: draft.reasoning,
+          reasoning: message.reasoningContentState === 'ready' ? message.reasoning : draft.reasoning,
           traces: message.traces?.length ? message.traces : draft.traces,
         };
       }

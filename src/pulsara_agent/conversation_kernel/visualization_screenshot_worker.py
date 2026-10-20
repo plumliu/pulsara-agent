@@ -1,4 +1,4 @@
-"""Disposable browser process for a single self-contained HTML preview."""
+"""Disposable browser process for one isolated HTML or SVG preview."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from pathlib import Path
 from io import BytesIO
 from math import isfinite
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, sync_playwright
+from pulsara_agent.llm.input import MAXIMUM_PROMPT_IMAGE_PIXELS
 
 
 _VIEWPORT_WIDTH = 1200
@@ -27,6 +28,56 @@ def _usable_root_box(box: dict[str, float] | None) -> bool:
         and x + width <= _VIEWPORT_WIDTH
         and y + height <= _VIEWPORT_HEIGHT
     )
+
+
+def _render_svg(page: Page, source: str) -> bytes:
+    # Chromium owns XML, SVG length units and image decoding. Only the detached
+    # document is inspected; SVG executes nowhere, even if it contains scripts.
+    dimensions = page.evaluate(
+        """({source, pixelLimit}) => {
+          const doc = new DOMParser().parseFromString(source, 'image/svg+xml');
+          const svg = doc.documentElement;
+          if (doc.querySelector('parsererror') || svg.localName !== 'svg'
+              || svg.namespaceURI !== 'http://www.w3.org/2000/svg')
+            throw new Error('SVG_DOCUMENT_INVALID');
+          const absolute = name => {
+            const value = svg[name].baseVal;
+            return svg.hasAttribute(name) && value.unitType !== 2 && value.value > 0
+              ? value.value : undefined;
+          };
+          const box = svg.viewBox.baseVal;
+          const ratio = box.width > 0 && box.height > 0 ? box.width / box.height : undefined;
+          let width = absolute('width'), height = absolute('height');
+          if (ratio) {
+            if (width && !height) height = width / ratio;
+            if (height && !width) width = height * ratio;
+            if (!width && !height) { width = box.width; height = box.height; }
+          }
+          // The browser's standard replaced-element fallback for unsized SVG.
+          width = Math.ceil(width || 300); height = Math.ceil(height || 150);
+          if (!Number.isFinite(width) || !Number.isFinite(height)
+              || width < 1 || height < 1 || width * height > pixelLimit)
+            throw new Error('IMAGE_RESOURCE_EXCEEDED');
+          svg.setAttribute('width', String(width));
+          svg.setAttribute('height', String(height));
+          return {width, height, source: new XMLSerializer().serializeToString(svg)};
+        }""",
+        {"source": source, "pixelLimit": MAXIMUM_PROMPT_IMAGE_PIXELS},
+    )
+    page.set_viewport_size({"width": dimensions["width"], "height": dimensions["height"]})
+    page.set_content(
+        """<!doctype html><meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'">
+        <style>html,body{margin:0;overflow:hidden}img{display:block}</style><img alt="">"""
+    )
+    page.locator("img").evaluate(
+        """async (img, source) => {
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(source);
+          await img.decode();
+        }""",
+        dimensions["source"],
+    )
+    return page.screenshot(type="png", timeout=10_000)
 
 
 def main() -> None:
@@ -58,9 +109,12 @@ def main() -> None:
             context.route("**/*", lambda route: route.abort())
             page = context.new_page()
             page.set_default_timeout(10_000)
+            if "--svg" in sys.argv:
+                sys.stdout.buffer.write(_render_svg(page, html))
+                return
             document = page.evaluate(
                 "args => {" + shell + "; return visualizationShell(args); }",
-                {"html": html, "bootstrap": environment},
+                {"html": html + "<style>" + Path(__file__).with_name("visualization_scrollbars.css").read_text() + "</style>", "bootstrap": environment},
             )
             page.set_content(document, wait_until="load", timeout=10_000)
             frame = page.locator("#content").element_handle().content_frame()

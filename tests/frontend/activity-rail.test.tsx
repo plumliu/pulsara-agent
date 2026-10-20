@@ -14,10 +14,13 @@ it('keeps every desktop destination directly accessible', () => {
   expect(screen.queryByRole('button', { name: '更多', exact: true })).toBeNull();
 });
 
-it('marks the current destination and keeps settings directly accessible', () => {
+it('opens settings from the profile and marks the settings gear as current', () => {
   const navigate = vi.fn();
-  render(<ActivityRail activeView="memory" onNavigate={navigate} />);
+  const view = render(<ActivityRail activeView="memory" onNavigate={navigate} />);
   expect(screen.getByRole('button', { name: '记忆', exact: true }).getAttribute('aria-current')).toBe('page');
-  fireEvent.click(screen.getByRole('button', { name: '设置', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: '用户设置', exact: true }));
   expect(navigate).toHaveBeenCalledExactlyOnceWith('settings');
+  view.rerender(<ActivityRail activeView="settings" onNavigate={navigate} />);
+  expect(screen.getByRole('button', { name: '设置', exact: true }).getAttribute('aria-current')).toBe('page');
+  expect(screen.getByRole('button', { name: '记忆', exact: true }).hasAttribute('aria-current')).toBe(false);
 });

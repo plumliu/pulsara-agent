@@ -3494,3 +3494,35 @@ it.each([{}, { plan: null }, { plan: '' }, { plan: ' \n\t\u3000' }])('projects n
     resultSummary:'已退出规划，继续处理任务。',
   });
 });
+
+it('keeps settled live reasoning until the exact canonical reasoning bytes are hydrated', async () => {
+  vi.stubGlobal('crypto', webcrypto);
+  const text = 'still visible reasoning';
+  const bytes = Buffer.from(text);
+  const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const entry = {entry_id:'entry-reason',turn_id:'turn-live',entry_sequence:'1',entry_kind:'ASSISTANT_MESSAGE',scope_kind:'ROOT',
+    blocks:[{block_id:'text',block_kind:'TEXT',content:inlineContent('commentary')}],
+    reasoning_blocks:[{block_id:'reason-canonical',ordinal:'0',presentation_kind:'REASONING_PRESENTATION_FULL',
+      content:{kind:'CANONICAL_BLOB',digest,size:String(bytes.length),media_type:'text/plain',codec:'utf-8'}}]};
+  const events = [
+    {live_revision:'1',event_type:'THINKING_START',draft_identity:'draft-live',turn_id:'turn-live',scope_kind:'ROOT',
+      payload:{thinking_start:{block_identity:'reason-live',presentation_kind:'REASONING_PRESENTATION_FULL'}}},
+    {live_revision:'2',event_type:'THINKING_DELTA',draft_identity:'draft-live',turn_id:'turn-live',scope_kind:'ROOT',
+      payload:{thinking_delta:{block_identity:'reason-live',delta:text}}},
+  ];
+  const responses = [connectPayload([], {active_turns:[{turn_id:'turn-live',scope_kind:'ROOT',status:'RUNNING'}]}, events),
+    {observation:{through_event_sequence:'1',committed:[{projection_kind:'IMMUTABLE_ENTRY',entry}],
+      settlements:[{kind:'LIVE_GENERATION_COMMITTED',draft_identity:'draft-live',committed_entry_id:'entry-reason'}]}}];
+  stubRuntimeFetch(vi.fn(async input => new Response(JSON.stringify(String(input).endsWith('/read-content')
+    ? {content:{digest,complete_size:String(bytes.length),offset_bytes:'0',content:bytes.toString('base64'),complete:true}}
+    : responses.shift()), {status:200})));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().messages[0].reasoning?.[0].body).toBe(text);
+  await connection.observe();
+  await vi.waitFor(() => expect(connection.current().messages[0].historyContextState).toBe('ready'));
+  expect(connection.current().messages[0]).toMatchObject({contentState:'ready',reasoningContentState:'unloaded',
+    pendingAssistant:{body:'commentary',reasoning:[{body:text}]}});
+  await connection.hydrateEntries!(['entry-reason'], undefined, true);
+  expect(connection.current().messages[0].reasoning?.[0].body).toBe(text);
+  expect(connection.current().messages[0]).not.toHaveProperty('pendingAssistant');
+});

@@ -719,3 +719,17 @@ it('preserves file URL fragments on a new view and a deduplicated view', async (
     expect(screen.getAllByRole('tab')).toHaveLength(1);expect(reader.close).toHaveBeenCalledOnce();
   } finally {HTMLElement.prototype.scrollIntoView=original;}
 });
+
+it.each([
+  ['/Users/demo/网店经营数据/促销复盘看板.html', 'file:///Users/demo/%E7%BD%91%E5%BA%97%E7%BB%8F%E8%90%A5%E6%95%B0%E6%8D%AE/%E4%BF%83%E9%94%80%E5%A4%8D%E7%9B%98%E7%9C%8B%E6%9D%BF.html'],
+  ['/tmp/%E5%9B%BE%20one.html#section', 'file:///tmp/%E5%9B%BE%20one.html#section'],
+  ['/tmp/100%25.html', 'file:///tmp/100%25.html'],
+])('opens Markdown URL %s without encoding it as a native path again', async (href, expected) => {
+  vi.stubGlobal('CSS', {escape: (value: string) => value});
+  const reader = api();
+  render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}>
+    <MarkdownBody body={`[看板](${href})`} onNotify={notify} />
+  </FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('link', {name:'看板'}));
+  await waitFor(() => expect(reader.open).toHaveBeenCalledWith(expected, undefined, undefined));
+});

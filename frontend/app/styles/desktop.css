@@ -57,6 +57,7 @@
 .desktop-shell .workbench { --conversation-width: 720px; --conversation-gutter: 48px; --conversation-scrollbar-width: 10px; }
 .desktop-shell .workbench .thread-scroll { scrollbar-gutter: stable; }
 .desktop-shell .workbench .thread-scroll::-webkit-scrollbar { width: var(--conversation-scrollbar-width); }
+.desktop-shell .workbench .jump-to-bottom { left: calc((100% - var(--conversation-scrollbar-width)) / 2); }
 .desktop-shell .workbench .thread-column { width: min(var(--conversation-width), calc(100% - 2 * var(--conversation-gutter))); }
 /* Match the scroll viewport's reserved right gutter, including before it overflows. */
 .desktop-shell .workbench .composer-wrap { padding-left: var(--conversation-gutter); padding-right: calc(var(--conversation-gutter) + var(--conversation-scrollbar-width)); }

@@ -496,3 +496,20 @@ def test_script_language_and_explicit_type_follow_browser_classification(tmp_pat
             assert frame.evaluate("executed") is True
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize('source', [
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"/>',
+    b'<svg xmlns="http://www.w3.org/2000/svg"><not-closed>',
+])
+def test_svg_renderer_rejects_invalid_or_over_pixel_budget_instead_of_cropping(source):
+    from pulsara_agent.conversation_kernel.visualization_screenshot import VisualizationScreenshotError
+    async def exercise():
+        owner = VisualizationScreenshotOwner()
+        try:
+            with pytest.raises(VisualizationScreenshotError, match='PREVIEW_RENDER_FAILED'):
+                await owner.render(source, svg=True, deadline_monotonic=monotonic()+15)
+        finally:
+            await owner.aclose()
+        assert not owner._processes
+    asyncio.run(exercise())

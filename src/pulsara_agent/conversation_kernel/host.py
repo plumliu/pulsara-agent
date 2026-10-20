@@ -2423,7 +2423,9 @@ class KernelHostSession:
                         turn_id=active_turn_id,
                     )
                 if manual is None and active_turn_id is not None:
-                    self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
+                    self._tools.offer_todo_installation(
+                        self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
+                    )
                 if manual is None:
                     if active_turn_id is not None:
                         self._mark_feedback_target_ended_locked(active_turn_id)
@@ -2454,8 +2456,8 @@ class KernelHostSession:
                 if self._active_task is task:
                     active_turn_id = self._active_turn_id
                     if active_turn_id is not None:
-                        self._tools.todo_owner.mark_root_idle(
-                            exact_turn_id=active_turn_id
+                        self._tools.offer_todo_installation(
+                            self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
                         )
                         self._mark_feedback_target_ended_locked(active_turn_id)
                     self._clear_active_root_locked()
@@ -4505,7 +4507,9 @@ class KernelHostSession:
                 ),
             )
             if not finalization_failed:
-                self._tools.todo_owner.mark_root_idle(exact_turn_id=accepted.turn_id)
+                self._tools.offer_todo_installation(
+                    self._tools.todo_owner.mark_root_idle(exact_turn_id=accepted.turn_id)
+                )
         return task
 
     async def _interrupt_queued_admission_until_safe(

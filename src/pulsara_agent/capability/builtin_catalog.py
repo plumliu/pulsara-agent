@@ -481,6 +481,7 @@ OPEN_IN_PULSARA_DESCRIPTION = (
     "Accepted targets are display requests, not confirmation of opening. Display starts after the tool result "
     "without waiting for your final answer; later display failures are not returned to you. "
     "Webpages load normally but you receive no page contents or rendering verification. "
+    "The tasks panel displays subagent tasks only, not the TODO checklist or Plan Mode. "
     "This does not start servers, run commands, reconnect MCP, or publish inline visualizations. ROOT only."
 )
 OPEN_IN_PULSARA_SCHEMA = {
@@ -881,13 +882,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "view_image": _descriptor(
         name="view_image",
         description=(
-            "Inspect one PNG, JPEG or static WebP image, or screenshot a local .html/.htm file "
+            "Inspect one PNG, JPEG, static WebP or SVG image, or screenshot a local .html/.htm file "
             "for the model. This does not open or control the user's preview tab or publish "
             "an inline visualization. "
             "Provide exactly one of path or image_ref. Use image_ref only to reread an "
             "exact reference already shown beside an image or in a historical image "
             "placeholder within the current workspace; copy it "
-            "unchanged. HTML screenshots use an isolated 1200×800 browser viewport "
+            "unchanged. SVG is rendered directly at its dimensions or viewBox aspect ratio, "
+            "without cropping; scripts and external resources are disabled. "
+            "HTML screenshots use an isolated 1200×800 browser viewport "
             "(light theme, reduced motion, network blocked), capturing the content "
             "root's bounds or the viewport. Root captures omit content outside those "
             "bounds. They show the current file's rendered appearance without "
@@ -1218,7 +1221,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "tracking progress is useful, not for a simple one-step task. When "
             "advancing work, normally mark the finished item completed and move the "
             "next item to in_progress in the same call. At most one item may be "
-            "in_progress. Use items=[] to clear the checklist."
+            "in_progress. Use items=[] to clear the checklist. Runtime clears the ROOT "
+            "checklist when execution becomes idle, not while waiting for user input. "
+            "This is not a persistent backlog or the Tasks tab, which displays "
+            "subagent tasks only, independently of Plan Mode."
         ),
         input_schema=object_schema(
             properties={

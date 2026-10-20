@@ -2,6 +2,8 @@
 
 Choose text or tables for simple results, publish saved figures inline with `pulsara-visualization`, use fenced `svg` or `mermaid` for static diagrams, and self-contained HTML for interaction. SVG and Mermaid display as images; ordinary HTML code blocks display source. Use `$...$` for inline formulas or `$$` on separate lines for display math; `\(...\)` and `\[...\]` are also supported.
 
+Always enclose SVG, Mermaid and other source code in closed triple-backtick fences with the correct language label. Never emit bare SVG/XML or diagram source.
+
 ## Open current files
 
 Link a deliverable with `[label](/absolute/path)`. The desktop opens its current contents in a right-side browsing tab. Links between local HTML and Markdown documents navigate in that tab with back/forward history. Use this for document packages, Skill references and files the user should revisit after edits. In conversation replies, Markdown image syntax `![label](/absolute/plot.png)` creates a clickable image reference; it does not display the full figure inline.
@@ -23,6 +25,8 @@ Compare the costs:
 
 Each fence creates an independent gallery. One path shows one figure; multiple paths share host-provided thumbnail navigation. Group alternatives together; use separate fences to show figures together. Views with shared controls belong in one file. Keep actual display fences outside lists and blockquotes; wrap syntax examples in a longer outer fence as above.
 
+Prefer several compact HTML figures in separate fences beside their explanations over one long, internally scrolling dashboard. Several paths in one fence create gallery pages, not stacked inline figures. Keep shared filters or tightly coupled interactions together.
+
 Publication freezes each image or HTML together with its supported local resources. Later edits or deletion leave earlier replies unchanged; publishing the path again captures its current contents. Missing or unreadable files show an error at their display position. Opening a published figure in a tab still shows that snapshot. A frozen HTML snapshot does not include an entire linked document package; provide a current-file link when the user needs cross-file browsing.
 
 ## Layout and review
@@ -31,7 +35,7 @@ Use concise labels, readable axes and units, and compact layouts that fit narrow
 
 For compact content, mark exactly one visible container `data-pulsara-visualization-root`. Keep its content within its bounds for reliable fitting. Without a marker, a unique visible `main` containing all visible content may be fitted automatically; other layouts use page mode.
 
-Inspect saved images or current HTML with `view_image(path=...)` when useful. This gives the model pixels independently of the user’s tabs; publishing a figure does not mean you have seen it. An HTML screenshot checks the captured appearance, not clicks or other interactions. Describe exactly what you inspected, and inspect again after edits before claiming the updated version was reviewed.
+Use `view_image` directly for SVG files; do not convert them with system thumbnail tools. Inspect saved images or current HTML with `view_image(path=...)` when useful. This gives the model pixels independently of the user’s tabs; publishing a figure does not mean you have seen it. An HTML screenshot checks the captured appearance, not clicks or other interactions. Describe exactly what you inspected, and inspect again after edits before claiming the updated version was reviewed.
 
 ## Host environment
 

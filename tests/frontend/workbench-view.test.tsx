@@ -1028,7 +1028,7 @@ describe('completed reply process disclosure', () => {
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, draft] })} />);
     expect(hiddenProgress()).toBe(false);
     const streamingLayout = screen.getByText(draft.body).closest('.assistant-markdown')?.className;
-    expect(screen.getByText(draft.body).closest('.assistant-copy')?.querySelector('.response-actions')?.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.getByText(draft.body).closest('.assistant-copy')?.querySelector('.response-actions')).toBeNull();
     // A committed assistant text without terminal-final eligibility is not enough.
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, { ...final, rootFinal: false, forkEligible: false }] })} />);
     expect(hiddenProgress()).toBe(false);
@@ -2132,4 +2132,33 @@ it('keeps tail-follow while scrolling a contained plan document, including its e
   expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
   fireEvent.wheel(thread, {deltaY: -100});
   expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
+});
+
+it('retains the preparation layout until a live draft actually contains activity', () => {
+  const base = props({isRunning:true,activeTurnId:'turn-empty',messages:[]});
+  const view = render(<WorkbenchView {...base} />);
+  const waiting = screen.getByRole('article', {name:'Pulsara 处理状态'});
+  view.rerender(<WorkbenchView {...base} messages={[{id:'live-empty',turnId:'turn-empty',role:'assistant',assistantKind:'live',status:'running',time:'',body:''}]} />);
+  expect(screen.getByRole('article', {name:'Pulsara 处理状态'})).toBe(waiting);
+  expect(view.container.querySelector('.conversation-run')).toBeNull();
+  view.rerender(<WorkbenchView {...base} messages={[{id:'live-empty',turnId:'turn-empty',role:'assistant',assistantKind:'live',status:'running',time:'',body:'开始分析'}]} />);
+  expect(screen.queryByRole('article', {name:'Pulsara 处理状态'})).toBeNull();
+  expect(screen.getByText('开始分析')).toBeTruthy();
+  expect(view.container.querySelector('.response-actions')).toBeNull();
+});
+
+it('preserves thought beside commentary throughout canonical reasoning hydration', () => {
+  const reason = [{id:'reason',kind:'full' as const,body:'核对数据口径'}];
+  const message = {id:'entry',turnId:'turn-one',role:'assistant' as const,assistantKind:'progress' as const,status:'completed' as const,
+    time:'',body:'接下来分析趋势',historyContextState:'ready' as const,contentState:'ready' as const,reasoningContentState:'unloaded' as const,
+    pendingAssistant:{body:'接下来分析趋势',reasoning:reason}};
+  const base = props({isRunning:true,activeTurnId:'turn-one'});
+  const view = render(<WorkbenchView {...base} messages={[message]} />);
+  expect(screen.getByText('核对数据口径')).toBeTruthy();
+  expect(screen.getByText(message.body)).toBeTruthy();
+  expect(screen.queryByText('已保存，正文读取中…')).toBeNull();
+  const run = view.container.querySelector('.conversation-run');
+  view.rerender(<WorkbenchView {...base} messages={[{...message,pendingAssistant:undefined,reasoning:reason,reasoningContentState:'ready'}]} />);
+  expect(screen.getByText('核对数据口径')).toBeTruthy();
+  expect(view.container.querySelector('.conversation-run')).toBe(run);
 });

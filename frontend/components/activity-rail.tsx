@@ -55,7 +55,14 @@ export function ActivityRail({ activeView, onNavigate }: ActivityRailProps) {
         >
           <Settings size={17} strokeWidth={1.8} />
         </button>
-        <UserAvatar className="rail-avatar" />
+        <button
+          className="rail-button rail-profile"
+          onClick={() => onNavigate('settings')}
+          aria-label="用户设置"
+          data-tooltip="用户设置"
+        >
+          <UserAvatar />
+        </button>
       </div>
     </nav>
   );

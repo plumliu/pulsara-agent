@@ -426,13 +426,13 @@ def test_html_source_limits_are_independent_of_image_allowance(tmp_path):
         ViewImageTool,
     )
     from pulsara_agent.ports.tool_execution import ToolCall
-    from pulsara_agent.conversation_kernel.tool_runtime import _read_html_candidate
+    from pulsara_agent.conversation_kernel.tool_runtime import _read_browser_image_candidate
     from pulsara_agent.conversation_kernel.html_resources import LocalHtmlReadCandidate
 
     path = tmp_path / "chart.html"
     path.write_text("<h1>" + "x" * 10000 + "</h1>")
     tool = ViewImageTool(tmp_path)
-    candidate = _read_html_candidate(
+    candidate = _read_browser_image_candidate(
         tool,
         ToolCall("call", "view_image", {"path": "chart.html"}),
         100,

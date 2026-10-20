@@ -19,7 +19,7 @@ MAXIMUM_PENDING_TODO_SETTLEMENTS_PER_RUN = 64
 
 class TodoRunPhase(StrEnum):
     ACTIVE = "ACTIVE"
-    IDLE_RETAINED = "IDLE_RETAINED"
+    IDLE = "IDLE"
     CLOSING = "CLOSING"
 
 
@@ -175,7 +175,7 @@ class TodoRunStateOwner:
             old = self._root
             if old is not None and old.pending_settlements:
                 raise RuntimeError("ROOT TODO run changed with pending settlement")
-            if old is not None and old.phase is not TodoRunPhase.IDLE_RETAINED and not (
+            if old is not None and old.phase is not TodoRunPhase.IDLE and not (
                 allow_closing_predecessor and old.phase is TodoRunPhase.CLOSING
             ):
                 raise RuntimeError("ROOT TODO run changed before becoming idle")
@@ -240,7 +240,7 @@ class TodoRunStateOwner:
             record.phase = TodoRunPhase.ACTIVE
             return True
 
-    def mark_root_idle(self, *, exact_turn_id: str) -> None:
+    def mark_root_idle(self, *, exact_turn_id: str) -> TodoInstallation | None:
         with self._lock:
             record = self._root
             if record is None or record.last_turn_id != exact_turn_id:
@@ -248,7 +248,20 @@ class TodoRunStateOwner:
             if record.pending_settlements:
                 raise RuntimeError("ROOT TODO run became idle before settlement drain")
             if record.phase is TodoRunPhase.ACTIVE:
-                record.phase = TodoRunPhase.IDLE_RETAINED
+                record.phase = TodoRunPhase.IDLE
+                if record.current_snapshot.ordered_items:
+                    # Keep only the empty run identity for a later external
+                    # continuation. Idle never retains a current checklist.
+                    snapshot = FrozenTodoSnapshot(
+                        run_identity=record.run_identity,
+                        revision=record.current_snapshot.revision + 1,
+                        ordered_items=(),
+                        pending_count=0,
+                        in_progress_count=0,
+                        completed_count=0,
+                    )
+                    record.current_snapshot = snapshot
+                    return TodoInstallation(snapshot, exact_turn_id, TodoLiveDisposition.CLEARED)
 
     def require_active(
         self,

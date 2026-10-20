@@ -490,6 +490,33 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert len(resync.current_todos) == 1
         assert resync.current_todos[0].todo_run_id == after.run_identity.todo_run_id
         assert resync.current_todos[0].todo_revision == 1
+
+        # Exercise the production ROOT completion boundary, owner, live bus and
+        # wire projection together. A stale completed task must not clear it.
+        from pulsara_agent.conversation_kernel.host import KernelHostSession
+        from unittest.mock import AsyncMock, Mock
+        active = asyncio.current_task()
+        host = SimpleNamespace(_lock=asyncio.Lock(), _active_task=active,
+            _active_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', _closing=False,
+            _compaction=SimpleNamespace(take_manual=AsyncMock(return_value=None)),
+            _tools=port, _mark_feedback_target_ended_locked=Mock(),
+            _clear_active_root_locked=Mock())
+        await KernelHostSession._settle_active_root_task(host, object())
+        assert port.todo_owner.current_snapshots()[0].ordered_items
+        await KernelHostSession._settle_active_root_task(host, active)
+        host._clear_active_root_locked.assert_called_once()
+        cleared = port.todo_owner.current_snapshots()[0]
+        assert cleared.ordered_items == () and cleared.revision == 2
+        assert after.ordered_items[1].status.value == 'pending'
+        events = live_bus.observe(observer, after_revision=baseline, maximum_events=4).events
+        assert len(events) == 2
+        wire = _live_to_wire(generation, events[-1])
+        assert wire.payload.todo_snapshot_updated.disposition == 'CLEARED'
+        assert not wire.payload.todo_snapshot_updated.ordered_items
+        assert port.todo_owner.mark_root_idle(exact_turn_id=host._active_turn_id) is None
+        port.todo_owner.bind_continuation(scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None, turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
+        assert not port.todo_owner.current_snapshots()[0].ordered_items
         await port.aclose(timeout_seconds=2)
 
     asyncio.run(exercise())
@@ -804,3 +831,28 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         assert terminalized == [('turn:nzc36cttgo7xxki7bcjc7ops7a', "USER_STOPPED")]
 
     asyncio.run(exercise())
+
+
+def test_root_idle_clears_only_root_and_cannot_precede_pending_settlement():
+    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
+    owner.activate_root_run(_root_activation())
+    owner.activate_child_run(_child_activation())
+    snapshots = []
+    for scope, task, turn in [
+        (ModelInputScopeKind.SUBAGENT_TASK, 'task:jjp4dy4hmhapm5toxqet6i7qkm', 'turn:nbjllslbuktypzvmqopgumgyjy'),
+        (ModelInputScopeKind.ROOT, None, 'turn:nzc36cttgo7xxki7bcjc7ops7a'),
+    ]:
+        prepared = owner.prepare_replace(scope_kind=scope, scope_subagent_task_id=task, exact_turn_id=turn,
+            attempt_id='attempt:dvce4jlhrqd3hzcfpszy4gujye', proposed_result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
+            candidate=parse_todo_replacement({'items':[{'text':'unfinished','status':'pending'}]}), acknowledgement=b'{}')
+        if scope is ModelInputScopeKind.ROOT:
+            with pytest.raises(RuntimeError, match='settlement drain'):
+                owner.mark_root_idle(exact_turn_id=turn)
+        snapshots.append(owner.commit(prepared).installed_snapshot)
+    child, root = snapshots
+    owner.bind_continuation(scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None, turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
+    assert owner.mark_root_idle(exact_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a') is None
+    assert owner.snapshot(scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None) is root
+    cleared = owner.mark_root_idle(exact_turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
+    assert not cleared.installed_snapshot.ordered_items
+    assert owner.snapshot(scope_kind=ModelInputScopeKind.SUBAGENT_TASK, scope_subagent_task_id='task:jjp4dy4hmhapm5toxqet6i7qkm') is child

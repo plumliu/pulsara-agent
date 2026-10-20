@@ -14,7 +14,8 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "types": [
-      "node"
+      "node",
+      "vite/client"
     ],
     "resolveJsonModule": true,
     "isolatedModules": true,

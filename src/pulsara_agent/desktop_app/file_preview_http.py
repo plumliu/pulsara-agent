@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+from pathlib import Path
 from typing import Callable
 
 from aiohttp import web
@@ -19,7 +20,11 @@ HEADERS = {
 }
 # The current frame reports only bounded-scope navigation intents. The trusted
 # outer frame verifies source + token; the backend revalidates every document.
-OBSERVATION_SCRIPT = b"""<!doctype html><script>
+OBSERVATION_SCRIPT = (
+    b"<!doctype html><style>"
+    + (Path(__file__).parent.parent / "conversation_kernel" / "visualization_scrollbars.css").read_bytes()
+    + b"</style><script>"
+    + b"""
 (()=>{
 const token=location.pathname.split('/')[3];
 const report=(type,extra={})=>parent.postMessage({type,token,...extra},'*');
@@ -41,6 +46,7 @@ addEventListener('message',event=>{
 });
 })();
 </script>"""
+)
 
 
 async def blocking(function, *args):

@@ -790,3 +790,47 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
             await port.aclose(timeout_seconds=2)
             await validator.aclose()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('dimensions,size', [
+    ('width="1200" height="380" viewBox="0 0 1200 380"', (1200, 380)),
+    ('viewBox="0 0 120 600"', (120, 600)),
+    ('width="100%" height="100%" viewBox="0 0 600 120"', (600, 120)),
+    ('width="300" viewBox="0 0 600 120"', (300, 60)),
+])
+def test_svg_view_image_real_browser_preserves_complete_frame(tmp_path, dimensions, size):
+    from io import BytesIO
+    from PIL import Image
+
+    async def scenario():
+        (tmp_path / '完整图.svg').write_text(
+            f'<svg xmlns="http://www.w3.org/2000/svg" {dimensions}>'
+            '<rect width="100%" height="100%" fill="#123456"/>'
+            '<script>document.documentElement.remove()</script>'
+            '<image href="http://127.0.0.1:1/private.png"/>'
+            '</svg>'
+        )
+        validator = HostPromptImageValidator()
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:hi4pnm7cfz5jwlcsfvvcx4rpjq', session_id='session:eghkqizzionnli27oxvk6kkcgu',
+            live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy(), image_validator=validator)
+        borrow, context = direct_tool_invocation_context(port, session_id='session:eghkqizzionnli27oxvk6kkcgu', tool_name='view_image',
+            tool_call_id='call:svg', attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm', turn_id='turn:4s6voic575fjaadstkw7z4cttq', assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy')
+        allowance = FrozenImageToolResourceAllowance(call_ordinal=0, tool_call_id='call:svg',
+            executor_binding_fingerprint=borrow.execution_binding('view_image').executor_binding_fingerprint,
+            canonical_bytes=1_000_000, logical_bytes=1_000_000, wire_bytes=1_000_000, input_tokens=10000,
+            quote_owner=SimpleNamespace(quote=lambda **kwargs: FrozenImageToolResourceIncrement(canonical_bytes=100, logical_bytes=100, wire_bytes=100, input_tokens=100)))
+        try:
+            result = await port.invoke(tool_name='view_image', arguments={'path':'完整图.svg'}, tool_call_id='call:svg',
+                attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm', turn_id='turn:4s6voic575fjaadstkw7z4cttq', assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
+                invocation_context=replace(context, input_modalities=('text','image'), image_resource_allowance=allowance))
+            assert result.state == 'SUCCESS', result.content
+            part = next(part for part in result.content.parts if isinstance(part, LLMImagePart))
+            assert (part.width, part.height) == size
+            pixels = Image.open(BytesIO(part.immutable_bytes)).convert('RGB')
+            for point in ((0,0), (size[0]-1, size[1]-1), (size[0]//2,size[1]//2)):
+                assert pixels.getpixel(point) == (18,52,86)
+        finally:
+            borrow.close()
+            await port.aclose(timeout_seconds=2)
+            await validator.aclose()
+    asyncio.run(scenario())
