@@ -3610,6 +3610,9 @@ describe('PulsaraApp', () => {
     fireEvent.click(await screen.findByRole('button', { name: /综合审阅/ }));
     fireEvent.click(await screen.findByRole('button', { name: '其他任务组依赖来源：事实核对' }));
     const detail = await screen.findByRole('complementary', { name: '事实核对 详情' });
+    await waitFor(() => expect(adapter.listSessionTaskActivities).toHaveBeenLastCalledWith(
+      'session:bwpogagzox7onyn52iumyctnkq', 'source', undefined,
+    ));
     const reads = adapter.readSessionTask.mock.calls.length;
     const activityReads = adapter.listSessionTaskActivities.mock.calls.length;
     const emitWorker = async () => { await act(async () => {
