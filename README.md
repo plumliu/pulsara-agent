@@ -1,7 +1,4 @@
-<p align="center">
-  <img src="frontend/public/assets/pulsara-icon.png" width="72" height="72" alt="Pulsara logo">
-</p>
-<h1 align="center">Pulsara</h1>
+<h1 align="center"><img src="frontend/public/assets/pulsara-icon.png" width="40" height="40" align="middle" alt=""> Pulsara</h1>
 <p align="center"><strong>Your own team of agents.</strong></p>
 <p align="center">
   <a href="https://github.com/plumliu/pulsara-agent/releases/latest">Download</a> &nbsp; | &nbsp;
