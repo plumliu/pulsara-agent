@@ -104,3 +104,15 @@ dnspython 拥有 DNS 编解码、响应关联、CNAME 答案解释和 resolver �
 ## 会话内能力配置呈现
 
 会话中的添加 MCP、编辑 MCP 和配置插件 MCP 连接改为内嵌卡片，继续复用共享 MCP 编辑器的配置组装、私密输入分离、凭据目的地确认及插件 overlay/恢复默认逻辑。能力页的用户级入口继续由其原 owner 提供；会话卡片只结算所属会话的现有 interaction，不增加接口或授权范围。权限、规划和能力卡片共用标题、内容和操作栏样式。规划不显示额外的 Plan Mode 标签，输入提示使用通用文案，授权只使用通用图标，不增加品牌获取或注释式说明。
+
+## 原生 MCP 初步接入阈值（2026-10-20 用户确认）
+
+本次只调整 cold epoch 的原生 MCP 接入预算，不改变工具加载、调用、权限、重连或退化机制：具有可用原生 wire 投影的 MCP 工具合计不超过 **128 个**，这些 MCP 原生工具定义的 Pulsara v3 启发式估算 token 合计必须 **小于 64,000**。两个条件均不包含内置工具。全部服务合计计算，不按服务分别享有额度；超限仍整批转 meta，不新增局部选择或服务优先级。
+
+复用 provider adapter 的真实工具 JSON 投影和 `PulsaraHeuristicTokenEstimatorV3.estimate_json`。adapter 在轻量 eligibility quote 中携带每个 wire 工具定义的估算值；planner 求和做产品接纳，最终 materialize 复核与 quote 一致。逐工具估算分别向上取整，包含该 API 的工具包装、名称、描述和参数 schema，不包含 SYSTEM、消息或工具结果。它比将整个 tools 数组一次取整略保守；不再实现另一套 token 算法，也不为测量保留全部未选中的 wire schema。
+
+内置工具原有 64 个构成上限和既有 1 MiB 原生集合字节边界保留。最终 projection set 和 model-input compiler 的数量边界从这两个独立构成上限推导为 64 + 128，不再用旧的共享 64 个上限误伤已接纳的 MCP。完整 provider 输入仍须经过现有实际预算接纳；64,000 是本次用户确认的 MCP 产品预算，不声称是 SDK／供应商限制。
+
+已有 epoch 不重新按新阈值升级或改写 tools；新接纳只发生于既有 cold epoch 或显式 adopted-compaction successor。既有 meta descriptor 结果边界及大 schema 退化问题不在本次修订范围内。
+
+当前真实目录测量：Notion 65 个工具，逐工具估算仍小于 64,000，可单独原生接入；Firecrawl、Notion 和 stdio-smoke 同时启用时合计超过 64,000，按用户确认继续整体走 meta。回归需覆盖 128／129 个、63,999／64,000 token、内置工具不占 MCP 额度、真实 Notion schema 的 SDK 发现与工具调用，以及同 epoch 前缀不变。

@@ -201,12 +201,15 @@ def _planning_view(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
     )
-    mcp_snapshot = _source_snapshot(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        facts=mcp_facts,
-        conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
+    mcp_snapshots = tuple(
+        _source_snapshot(
+            source_kind=CapabilitySourceKind.MCP_SERVER,
+            source_id=source_id,
+            facts=tuple(fact for fact in mcp_facts if fact.identity.source.stable_source_id == source_id),
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+        )
+        for source_id in sorted({fact.identity.source.stable_source_id for fact in mcp_facts} or {"fixture"})
     )
     skill_snapshot = _source_snapshot(
         source_kind=CapabilitySourceKind.LOCAL_SKILL_CATALOG,
@@ -226,7 +229,7 @@ def _planning_view(
     mcp_owner = issue_mcp_capability_source_snapshot_set(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
-        source_snapshots=(mcp_snapshot,),
+        source_snapshots=mcp_snapshots,
         catalog_snapshot=catalog,
         inspection_inputs=(),
         owner_authenticity=object(),
@@ -265,7 +268,7 @@ def _planning_view(
     inspectability = tuple(
         freeze_mcp_inspectability_fact(
             target=McpToolCapabilityRef(
-                server_id="fixture", remote_tool_name=fact.identity.stable_name
+                server_id=fact.identity.source.stable_source_id, remote_tool_name=fact.identity.stable_name
             ),
             version=tool_capability_version_ref(fact),
             descriptor_payload_fingerprint=context_fingerprint(
@@ -286,7 +289,7 @@ def _planning_view(
     mcp_input = FrozenMcpCapabilityProjectionInput(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
-        source_snapshots=(mcp_snapshot,),
+        source_snapshots=mcp_snapshots,
         catalog_semantic_fingerprint=catalog.semantic_fingerprint,
         inspectability_facts=inspectability,
     )
@@ -693,7 +696,7 @@ def test_round9_cold_mcp_native_aggregate_is_all_direct_or_all_meta() -> None:
             origin=ToolCapabilityOrigin.MCP,
             schema={"type": "object", "properties": {}},
         )
-        for index in range(64)
+        for index in range(129)
     )
     plan = _finalized_plan(
         view=_planning_view(builtin_facts=(builtin,), mcp_facts=mcp_facts)
@@ -701,7 +704,7 @@ def test_round9_cold_mcp_native_aggregate_is_all_direct_or_all_meta() -> None:
     assert tuple(item.name for item in plan.direct_tool_surface.tool_specs) == (
         "builtin_echo",
     )
-    assert len(plan.mcp_catalog_route_projection.routes) == 64
+    assert len(plan.mcp_catalog_route_projection.routes) == 129
     assert {item.route for item in plan.mcp_catalog_route_projection.routes} == {
         ToolCapabilityRouteKind.NEW_MCP_META_ONLY
     }
@@ -1196,3 +1199,144 @@ def test_round9_owner_snapshot_issuers_and_registry_merge_have_closed_callers() 
             if name in observed:
                 observed[name].add(relative)
     assert observed == allowed
+
+
+@pytest.mark.parametrize("builtin_count", [0, 39, 64])
+@pytest.mark.parametrize("mcp_count", [128, 129])
+def test_mcp_native_count_budget_excludes_builtins(builtin_count, mcp_count):
+    builtins = tuple(
+        _fact(
+            source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
+            source_id="builtin-registry",
+            name=f"builtin_{i:03}",
+            origin=ToolCapabilityOrigin.BUILTIN,
+            schema={"type": "object", "properties": {}},
+        )
+        for i in range(builtin_count)
+    )
+    mcps = tuple(
+        _fact(
+            source_kind=CapabilitySourceKind.MCP_SERVER,
+            source_id="fixture",
+            name=f"remote_{i:03}",
+            origin=ToolCapabilityOrigin.MCP,
+            schema={"type": "object", "properties": {}},
+        )
+        for i in range(mcp_count)
+    )
+    plan = _finalized_plan(view=_planning_view(builtin_facts=builtins, mcp_facts=mcps))
+    assert len(plan.direct_tool_surface.tool_specs) == builtin_count + (
+        mcp_count if mcp_count == 128 else 0
+    )
+    assert {route.route for route in plan.mcp_catalog_route_projection.routes} == {
+        ToolCapabilityRouteKind.DIRECT
+        if mcp_count == 128
+        else ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+    }
+
+
+@pytest.mark.parametrize("wire_api", ["openai_chat_completions", "openai_responses"])
+@pytest.mark.parametrize("tokens", [63_999, 64_000, 64_001])
+def test_mcp_native_token_boundary_uses_actual_wire_estimator_and_excludes_builtins(
+    wire_api, tokens
+):
+    def mcp(padding):
+        return _fact(
+            source_kind=CapabilitySourceKind.MCP_SERVER,
+            source_id="fixture",
+            name="remote",
+            origin=ToolCapabilityOrigin.MCP,
+            schema={
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "description": "x" * padding}
+                },
+            },
+        )
+
+    initial = _planning_view(builtin_facts=(), mcp_facts=(mcp(0),), wire_api=wire_api)
+    base = initial.planning_input.native_wire.entries[0].wire_estimated_tokens
+    large = mcp(4 * (tokens - base))
+    builtin = _fact(
+        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
+        source_id="builtin-registry",
+        name="builtin",
+        origin=ToolCapabilityOrigin.BUILTIN,
+        schema={
+            "type": "object",
+            "properties": {"value": {"type": "string", "description": "y" * 16_000}},
+        },
+    )
+    view = _planning_view(
+        builtin_facts=(builtin,), mcp_facts=(large,), wire_api=wire_api
+    )
+    quote = next(
+        q
+        for q in view.planning_input.native_wire.entries
+        if q.version.provider_name == large.canonical_tool_spec.name
+    )
+    assert quote.wire_estimated_tokens == tokens
+    plan = _finalized_plan(view=view)
+    assert len(plan.direct_tool_surface.tool_specs) == (2 if tokens < 64_000 else 1)
+    assert plan.mcp_catalog_route_projection.routes[0].route is (
+        ToolCapabilityRouteKind.DIRECT
+        if tokens < 64_000
+        else ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+    )
+
+
+def test_mcp_native_token_budget_is_shared_across_servers_and_does_not_rebase_epoch():
+    def mcp(server, padding):
+        return _fact(
+            source_kind=CapabilitySourceKind.MCP_SERVER,
+            source_id=server,
+            name=f"mcp__{server}__remote",
+            origin=ToolCapabilityOrigin.MCP,
+            schema={
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "description": "x" * padding}
+                },
+            },
+        )
+
+    facts = []
+    for server in ("first", "second"):
+        view = _planning_view(builtin_facts=(), mcp_facts=(mcp(server, 0),))
+        base = view.planning_input.native_wire.entries[0].wire_estimated_tokens
+        facts.append(mcp(server, 4 * (32_000 - base)))
+    cold = _finalized_plan(
+        view=_planning_view(builtin_facts=(), mcp_facts=tuple(facts))
+    )
+    assert len(cold.mcp_catalog_route_projection.routes) == 2
+    assert all(
+        route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+        for route in cold.mcp_catalog_route_projection.routes
+    )
+    predecessor = InstalledCapabilityEpochPredecessor(
+        expected_continuity_revision=1,
+        continuity_epoch_nonce="epoch:bsrg4gjfyl4eyhiftnis4ez7p4",
+        tool_surface=cold.direct_tool_surface,
+        direct_projection_set=cold.direct_projection_set,
+        mcp_route_projection=cold.mcp_catalog_route_projection,
+    )
+    # Removing the second server fits the budget, but only a cold epoch may
+    # install native tools. The current epoch keeps its exact provider prefix.
+    warm = _finalized_plan(
+        view=_planning_view(
+            builtin_facts=(), mcp_facts=(facts[0],), predecessor=predecessor
+        )
+    )
+    assert warm.direct_tool_surface == cold.direct_tool_surface
+    assert warm.direct_projection_set == cold.direct_projection_set
+    assert (
+        warm.mcp_catalog_route_projection.routes[0].route
+        is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+    )
+    next_cold = _finalized_plan(
+        view=_planning_view(builtin_facts=(), mcp_facts=(facts[0],))
+    )
+    assert (
+        next_cold.mcp_catalog_route_projection.routes[0].route
+        is ToolCapabilityRouteKind.DIRECT
+    )

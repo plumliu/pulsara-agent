@@ -17,6 +17,8 @@ from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
     FrozenToolSpec,
     ModelInputScopeKind,
+    MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT,
+    MAXIMUM_MCP_NATIVE_TOOL_COUNT,
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -34,7 +36,7 @@ if TYPE_CHECKING:
 MAXIMUM_CAPABILITY_MCP_SOURCES = 64
 MAXIMUM_CAPABILITY_SOURCE_REGISTRATIONS = 66
 MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES = 4 * 1024 * 1024
-MAXIMUM_NATIVE_TOOL_COUNT = 64
+MCP_NATIVE_TOOL_TOKEN_THRESHOLD = 64_000
 MAXIMUM_NATIVE_TOOL_BYTES = 1024 * 1024
 
 
@@ -374,11 +376,13 @@ class FrozenNativeToolWireEligibilityQuote:
     native_function_tool_wire_contract_fingerprint: str
     wire_tool_fingerprint: str
     wire_utf8_bytes: int
+    wire_estimated_tokens: int
 
     def __post_init__(self) -> None:
         if (
             not self.wire_tool_fingerprint
             or not 0 < self.wire_utf8_bytes <= MAXIMUM_NATIVE_TOOL_BYTES
+            or self.wire_estimated_tokens <= 0
         ):
             raise ValueError("native tool eligibility quote is invalid")
 
@@ -465,7 +469,10 @@ class FrozenNativeToolProjectionSet:
                 != self.native_function_tool_wire_contract_fingerprint
             ):
                 raise ValueError("native projection does not exact-join version")
-        if len(self.tool_versions) > MAXIMUM_NATIVE_TOOL_COUNT:
+        # Derived composition bound: builtins and MCP have separate admissions.
+        if len(self.tool_versions) > (
+            MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT + MAXIMUM_MCP_NATIVE_TOOL_COUNT
+        ):
             raise ValueError("native tool count bound exceeded")
         if sum(item.wire_utf8_bytes for item in self.projections) > (
             MAXIMUM_NATIVE_TOOL_BYTES

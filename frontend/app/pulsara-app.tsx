@@ -59,6 +59,7 @@ import type {
   ArchivedSessionDeletionItem,
   AppView,
   CapabilitySnapshot,
+  CapabilityOperation,
   McpEditInput,
   McpImportSelection,
   McpServerCapability,
@@ -78,6 +79,13 @@ import type {
 } from '../lib/pulsara-types';
 
 const defaultAdapter = new LocalHttpRuntimeAdapter();
+
+function capabilityAdoptionMessages(adoption: UserCapabilitySnapshot['adoption']): string[] {
+  const messages: string[] = [];
+  if (adoption?.attentionSessions) messages.push(`${adoption.attentionSessions} 个已打开会话需要稍后重试。`);
+  if (adoption?.pendingSessions) messages.push(`${adoption.pendingSessions} 个会话将在下次模型请求前的安全时机载入。`);
+  return messages;
+}
 
 const emptyWorkspace: Workspace = {
   id: 'local',
@@ -236,7 +244,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const [bulkDeleteTarget, setBulkDeleteTarget] = useState<SessionSummary[]>();
   const [bulkDeletion, setBulkDeletion] = useState<{ items: ArchivedSessionDeletionItem[]; running: boolean; refreshError?: string }>();
   const [bulkResultsOpen, setBulkResultsOpen] = useState(false);
-  const [bulkResultsViewed, setBulkResultsViewed] = useState(false);
+  const [bulkNoticeDismissed, setBulkNoticeDismissed] = useState(false);
   const bulkDeletionOwner = useRef<{ active: boolean; running: boolean; items: ArchivedSessionDeletionItem[] } | undefined>(undefined);
   useEffect(() => () => {
     if (bulkDeletionOwner.current) bulkDeletionOwner.current.active = false;
@@ -283,7 +291,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const userCapabilitiesRef = useRef<UserCapabilitySnapshot | undefined>(undefined);
   const completeUserPlugins = useRef<UserCapabilitySnapshot['plugins'] | undefined>(undefined);
   const userCapabilityLoads = useRef<Promise<void>>(Promise.resolve());
-  const userCapabilityReloadError = useRef<string | undefined>(undefined);
   const refreshVisibleUserCapabilities = useRef<(() => void) | undefined>(undefined);
   const userCapabilityReadAbort = useRef<AbortController | undefined>(undefined);
   const userCapabilityPageAbort = useRef<AbortController | undefined>(undefined);
@@ -399,12 +406,19 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     tone: ToastMessage['tone'] = 'neutral',
   ) => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
-    setToasts((current) => [...current.slice(-2), { id, title, detail, tone }]);
+    setToasts((current) => [...current, { id, title, detail, tone }]);
     window.setTimeout(
       () => setToasts((current) => current.filter((toast) => toast.id !== id)),
       4200,
     );
   }, []);
+
+  const notifyUserCapabilityResult = useCallback((title: string, result: {
+    operation: CapabilityOperation; capabilities: UserCapabilitySnapshot;
+  }) => {
+    const detail = [result.operation.message, ...capabilityAdoptionMessages(result.capabilities.adoption)].filter(Boolean).join(' ');
+    notify(title, detail, result.operation.success && !result.capabilities.adoption?.attentionSessions ? 'success' : 'warning');
+  }, [notify]);
 
   const {
     statuses: mcpAuthorizationStatuses, run: runMcpAuthorization,
@@ -751,7 +765,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, []);
 
   const acceptUserCapabilities = useCallback((next: UserCapabilitySnapshot) => {
-    userCapabilitiesRef.current = next;
+    const inventory = { ...next };
+    delete inventory.adoption;
+    userCapabilitiesRef.current = inventory;
     // An unavailable inspection cannot prove that a saved owner disappeared.
     // Retain the last complete values so recovery can still detect replacements.
     if (next.plugins.status === 'ready') {
@@ -768,8 +784,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       }
       completeUserPlugins.current = next.plugins;
     }
-    setUserCapabilities(next);
-    setUserCapabilityError(userCapabilityReloadError.current);
+    setUserCapabilities(inventory);
+    setUserCapabilityError(undefined);
     setUserCapabilityLoading(false);
   }, [invalidateMcpAuthorization]);
 
@@ -778,7 +794,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     // of the selected session, just as the session mutation owner does locally.
     userCapabilityAttempt.current += 1;
     userCapabilityReadAbort.current?.abort();
-    userCapabilityReloadError.current = undefined;
     acceptUserCapabilities(next);
     if (next.mcp.servers.some(server => (
       server.status === 'connecting' || server.status === 'discovering' || server.status === 'updating'
@@ -795,23 +810,23 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         ? signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
         : undefined;
       if (controller) userCapabilityReadAbort.current = controller;
-      if (refresh) userCapabilityReloadError.current = undefined;
       setUserCapabilityLoading(true);
-      setUserCapabilityError(userCapabilityReloadError.current);
+      setUserCapabilityError(undefined);
       try {
         const next = refresh
           ? await adapter.refreshUserCapabilities()
           : await adapter.inspectUserCapabilities(readSignal);
         if (refresh) {
-          // A dispatched reload has effects even after navigation or another
-          // mutation. Settle its summary without rolling back newer inventory.
+          // A dispatched reload settles even after navigation or a newer mutation.
+          // Report its result once without rolling back newer inventory.
           const inventory = attempt === userCapabilityAttempt.current
             ? next : userCapabilitiesRef.current ?? next;
-          acceptUserCapabilities({ ...inventory, adoption: next.adoption });
+          acceptUserCapabilities(inventory);
+          notify(next.adoption?.attentionSessions ? '部分会话需要重试' : '会话能力已重新加载',
+            capabilityAdoptionMessages(next.adoption).join(' ') || undefined,
+            next.adoption?.attentionSessions ? 'warning' : 'success');
         } else if (!readSignal?.aborted && attempt === userCapabilityAttempt.current) {
-          // Ordinary inspection has no adoption result; it cannot settle or
-          // erase the most recent explicit operation's existing UI summary.
-          acceptUserCapabilities({ ...next, adoption: next.adoption ?? userCapabilitiesRef.current?.adoption });
+          acceptUserCapabilities(next);
         }
       } catch (error) {
         if (!refresh && (readSignal?.aborted || attempt !== userCapabilityAttempt.current)) return;
@@ -819,8 +834,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           error instanceof Error ? error.message : undefined,
           '暂时无法读取这台设备上的能力。',
         );
-        if (refresh) userCapabilityReloadError.current = message;
-        setUserCapabilityError(userCapabilityReloadError.current ?? message);
+        if (refresh) notify('会话能力未重新加载', message, 'warning');
+        else setUserCapabilityError(message);
         setUserCapabilityLoading(false);
       } finally {
         if (controller && userCapabilityReadAbort.current === controller) userCapabilityReadAbort.current = undefined;
@@ -832,7 +847,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const operation = userCapabilityLoads.current.then(load, load);
     userCapabilityLoads.current = operation;
     await operation;
-  }, [adapter, acceptUserCapabilities]);
+  }, [adapter, acceptUserCapabilities, notify]);
 
   const forgetSession = useCallback((sessionId: string) => {
     workspaceControl.current?.forgetSession(sessionId);
@@ -960,7 +975,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     bulkDeletionOwner.current = owner;
     invalidateSessionList();
     setBulkDeleteTarget(undefined);
-    setBulkResultsViewed(false);
+    setBulkNoticeDismissed(false);
     const ownsBatch = () => owner.active && bulkDeletionOwner.current === owner;
     const publish = () => { if (ownsBatch()) setBulkDeletion({ items: [...owner.items], running: owner.running }); };
     const update = (index: number, status: ArchivedSessionDeletionItem['status'], detail?: string) => {
@@ -2480,52 +2495,52 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     try {
       const result = await adapter.installUserSkill(input);
       adoptUserCapabilityMutation(result.capabilities);
-      notify(result.operation.success ? '技能已安装' : '技能没有安装', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(result.operation.success ? '技能已安装' : '技能没有安装', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('技能安装失败', productMessage(error instanceof Error ? error.message : undefined, '请检查本地目录后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const installDevicePlugin = useCallback(async (sourcePath: string, options?: PluginImportOptions): Promise<boolean> => {
     try {
       const result = await adapter.installUserPlugin(sourcePath, options);
       adoptUserCapabilityMutation(result.capabilities);
-      notify(result.operation.success ? '插件已安装' : '插件没有安装', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(result.operation.success ? '插件已安装' : '插件没有安装', result);
       return result.operation.success;
     } catch (error) {
       notify('插件安装失败', productMessage(error instanceof Error ? error.message : undefined, '请检查本地目录后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, notify]);
+  }, [adapter, adoptUserCapabilityMutation, notify, notifyUserCapabilityResult]);
 
   const createDeviceMcp = useCallback(async (input: McpEditInput): Promise<boolean> => {
     try {
       const result = await adapter.createUserMcp(input);
       adoptUserCapabilityMutation(result.capabilities);
-      notify(result.operation.success ? 'MCP 服务已添加' : 'MCP 服务没有添加', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(result.operation.success ? 'MCP 服务已添加' : 'MCP 服务没有添加', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('MCP 服务添加失败', productMessage(error instanceof Error ? error.message : undefined, '请检查连接信息后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const importDeviceMcp = useCallback(async (input: McpImportSelection): Promise<boolean> => {
     try {
       const result = await adapter.importUserMcp(input);
       adoptUserCapabilityMutation(result.capabilities);
-      notify(result.operation.success ? 'MCP 已导入' : 'MCP 没有导入', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(result.operation.success ? 'MCP 已导入' : 'MCP 没有导入', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('MCP 导入失败', productMessage(error instanceof Error ? error.message : undefined, '请处理预览中的字段后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const toggleDeviceMcp = useCallback(async (
     server: UserMcpServerCapability,
@@ -2534,40 +2549,40 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     try {
       const result = await adapter.updateUserMcp({serverId: server.id, config: {...server.config, enabled}, secretChanges: []}, server.currentIdentity);
       adoptUserCapabilityMutation(result.capabilities);
-      notify(enabled ? 'MCP 服务已开启' : 'MCP 服务已关闭', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(enabled ? 'MCP 服务已开启' : 'MCP 服务已关闭', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('MCP 状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const editDeviceMcp = useCallback(async (server: UserMcpServerCapability, input: McpEditInput): Promise<boolean> => {
     try {
       const result = await adapter.updateUserMcp(input, server.currentIdentity);
       adoptUserCapabilityMutation(result.capabilities);
-      notify('MCP 配置已更新', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult('MCP 配置已更新', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('MCP 配置未更新', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重新打开编辑。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const removeDeviceMcp = useCallback(async (server: UserMcpServerCapability): Promise<boolean> => {
     try {
       const result = await adapter.removeUserMcp(server.id, server.currentIdentity);
       adoptUserCapabilityMutation(result.capabilities);
-      notify('MCP 服务已移除', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult('MCP 服务已移除', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('MCP 服务未移除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const deviceMcpAuthorization = useCallback(async (server: UserMcpServerCapability, action: 'login' | 'status' | 'cancel' | 'logout') => {
     await runMcpAuthorization(mcpAuthorizationKey('device', server.id, server.currentIdentity), action,
@@ -2578,14 +2593,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     try {
       const result = await adapter.removeUserSkill(skill);
       adoptUserCapabilityMutation(result.capabilities);
-      notify(result.operation.success ? '技能已删除' : '技能未删除', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(result.operation.success ? '技能已删除' : '技能未删除', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('技能未删除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const pluginMcpAuthorization = useCallback(async (plugin: UserPluginCapability, connection: PluginMcpConnection, action: 'login' | 'status' | 'cancel' | 'logout') => {
     await runMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId, connection.serverId), action,
@@ -2602,14 +2617,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         enabled,
       );
       adoptUserCapabilityMutation(result.capabilities);
-      notify(enabled ? '技能已开启' : '技能已关闭', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(enabled ? '技能已开启' : '技能已关闭', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('技能状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const toggleDevicePlugin = useCallback(async (
     plugin: UserPluginCapability,
@@ -2623,14 +2638,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         plugin.connectionReview ?? [],
       );
       adoptUserCapabilityMutation(result.capabilities);
-      notify(enabled ? '插件已开启' : '插件已关闭', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(enabled ? '插件已开启' : '插件已关闭', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('插件状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const removeDevicePlugin = useCallback(async (plugin: UserPluginCapability): Promise<boolean> => {
     try {
@@ -2641,14 +2656,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         }
       }
       adoptUserCapabilityMutation(result.capabilities);
-      notify(result.operation.success ? '插件已移除' : '插件没有移除', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult(result.operation.success ? '插件已移除' : '插件没有移除', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('插件没有移除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, invalidateMcpAuthorization, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, invalidateMcpAuthorization, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const editPluginConnection = useCallback(async (
     plugin: UserPluginCapability,
@@ -2661,14 +2676,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         invalidateMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId, connection.serverId));
       }
       adoptUserCapabilityMutation(result.capabilities);
-      notify('插件连接', result.operation.message, result.operation.success ? 'success' : 'warning');
+      notifyUserCapabilityResult('插件连接', result);
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('插件连接未保存', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
-  }, [adapter, adoptUserCapabilityMutation, invalidateMcpAuthorization, loadCapabilities, notify]);
+  }, [adapter, adoptUserCapabilityMutation, invalidateMcpAuthorization, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const openCapabilityRoot = useCallback(async (root: 'agents' | 'pulsara'): Promise<void> => {
     try {
@@ -3243,16 +3258,19 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}
       />}
       <ToastStack
-        toasts={[...toasts, ...(bulkDeletion && !bulkResultsOpen && !bulkDeleteTarget && !deleteTarget && (bulkDeletion.running || !bulkResultsViewed) ? [{
+        toasts={[...toasts, ...(bulkDeletion && !bulkResultsOpen && !bulkDeleteTarget && !deleteTarget && !bulkNoticeDismissed ? [{
           id: -1,
           title: `${bulkDeletion.running ? '正在删除归档会话' : '归档会话删除结果'} · 已处理 ${bulkDeletion.items.filter(item => !['pending', 'running'].includes(item.status)).length} / ${bulkDeletion.items.length}`,
           detail: '点击查看详情',
           onClick: () => {
             setBulkResultsOpen(true);
-            if (!bulkDeletion.running) setBulkResultsViewed(true);
+            if (!bulkDeletion.running) setBulkNoticeDismissed(true);
           },
         }] : [])]}
-        onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
+        onDismiss={(id) => {
+          if (id === -1) setBulkNoticeDismissed(true);
+          else setToasts(current => current.filter(toast => toast.id !== id));
+        }}
       />
       {renameTarget && <SessionRenameDialog key={renameTarget.id} session={renameTarget}
         onClose={() => setRenameTarget(undefined)} onSave={async title => {
@@ -3269,7 +3287,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       {bulkResultsOpen && bulkDeletion && <SessionDeletionDialog sessions={bulkDeletion.items.map(item => item.session)} results={bulkDeletion.items}
         busy={bulkDeletion.running} error={bulkDeletion.refreshError} onConfirm={() => {}} onClose={() => {
           setBulkResultsOpen(false);
-          if (!bulkDeletion.running) setBulkResultsViewed(true);
+          if (!bulkDeletion.running) setBulkNoticeDismissed(true);
         }}
         onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
     </main>

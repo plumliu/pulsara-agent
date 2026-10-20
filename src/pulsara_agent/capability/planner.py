@@ -18,7 +18,9 @@ from pulsara_agent.capability.contracts import (
     InstalledCapabilityEpochPredecessor,
     McpInspectDeliveryDisposition,
     MAXIMUM_NATIVE_TOOL_BYTES,
-    MAXIMUM_NATIVE_TOOL_COUNT,
+    MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT,
+    MAXIMUM_MCP_NATIVE_TOOL_COUNT,
+    MCP_NATIVE_TOOL_TOKEN_THRESHOLD,
     McpToolCapabilityRef,
     ToolCapabilityVersionRef,
     ToolCapabilityOrigin,
@@ -129,7 +131,7 @@ class KernelToolCapabilityPlanner:
                 raise TypeError("native tool eligibility union is open")
 
         if (
-            len(builtin) > MAXIMUM_NATIVE_TOOL_COUNT
+            len(builtin) > MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT
             or sum(
                 len(item.canonical_tool_spec.canonical_bytes)
                 for item in builtin
@@ -156,7 +158,11 @@ class KernelToolCapabilityPlanner:
         if isinstance(predecessor, EmptyCapabilityEpochPredecessor):
             candidate = (*builtin, *mcp_eligible)
             all_direct = (
-                len(candidate) <= MAXIMUM_NATIVE_TOOL_COUNT
+                len(mcp_eligible) <= MAXIMUM_MCP_NATIVE_TOOL_COUNT
+                and sum(
+                    eligibility[tool_capability_version_ref(item)].wire_estimated_tokens
+                    for item in mcp_eligible
+                ) < MCP_NATIVE_TOOL_TOKEN_THRESHOLD
                 and sum(
                     len(item.canonical_tool_spec.canonical_bytes)
                     for item in candidate

@@ -36,11 +36,16 @@ it.each([650, 30_000])('serializes a slow explicit reload across the %ims cadenc
   expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
 
   await act(async () => reload.resolve({ ...userCapabilitySnapshot, adoption: attention }));
-  expect(screen.getByText(attentionText)).toBeTruthy();
+  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
   expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 1);
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '刷新能力' })));
   expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 2);
-  expect(screen.getByText(attentionText)).toBeTruthy();
+  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
+  await act(async () => vi.advanceTimersByTimeAsync(4200));
+  expect(screen.queryByText(attentionText)).toBeNull();
+  await act(async () => fireEvent.focus(window));
+  expect(screen.queryByText(attentionText)).toBeNull();
+  expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
 });
 
 it('settles one real HTTP reload across navigation and cancels queued old-page reads', async () => {
@@ -79,7 +84,7 @@ it('settles one real HTTP reload across navigation and cancels queued old-page r
   await act(async () => post.resolve(new Response(JSON.stringify({ ...wire, adoption: {
     updated_sessions: 0, pending_sessions: 0, attention_sessions: 1,
   } }), { status: 200 })));
-  expect(screen.getByText(attentionText)).toBeTruthy();
+  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
   expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
   expect((screen.getByRole('button', { name: '刷新能力' }) as HTMLButtonElement).disabled).toBe(false);
   expect(fetcher.mock.calls.filter(([url]) => String(url) === '/api/capabilities/refresh')).toHaveLength(1);
@@ -97,10 +102,52 @@ it('does not roll back an intervening mutation when an earlier reload settles', 
   await screen.findByRole('switch', { name: '开启 personal-pdf' });
   await act(async () => reload.resolve({ ...userCapabilitySnapshot, adoption: attention }));
   expect(screen.getByRole('switch', { name: '开启 personal-pdf' })).toBeTruthy();
-  expect(screen.getByText(attentionText)).toBeTruthy();
+  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
 });
 
-it('retains an explicit reload failure through queued GETs without replaying the POST', async () => {
+it('reports a real HTTP MCP mutation once in the existing toast without keeping a page banner', async () => {
+  const http = new LocalHttpRuntimeAdapter();
+  const pendingText = '2 个会话将在下次模型请求前的安全时机载入。';
+  const fetcher = vi.fn<typeof fetch>(async (path, init) => {
+    expect(String(path)).toBe('/api/capabilities/mcp/personal-docs');
+    expect(init?.method).toBe('PUT');
+    expect(JSON.parse(init!.body as string)).toEqual(expect.objectContaining({
+      expected_identity: 'current-personal-docs', config: expect.objectContaining({ enabled: false }),
+    }));
+    return new Response(JSON.stringify({
+      operation: { status: 'UPDATED', success: true, message: 'MCP 配置已保存。' },
+      capabilities: { roots: [], skills: { status: 'ready', items: [], issues: [], roots: [] },
+        plugins: { status: 'ready', items: [], details: [] }, mcp: { servers: [] } },
+      adoption: { updated_sessions: 0, pending_sessions: 2, attention_sessions: 0 },
+    }), { status: 200 });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const adapter = new FakeAdapter();
+  adapter.updateUserMcp.mockImplementation((input, expected) => http.updateUserMcp(input, expected));
+  const connect = vi.spyOn(adapter, 'connect');
+  await openCapabilities(adapter);
+  fireEvent.click(screen.getByRole('tab', { name: /MCP/ }));
+  vi.useFakeTimers();
+  await act(async () => fireEvent.click(screen.getByRole('switch', { name: '关闭 个人文档' })));
+  const toast = screen.getByRole('button', { name: /MCP 服务已关闭/ });
+  expect(toast.textContent).toContain(pendingText);
+  expect(document.querySelectorAll('.toast')).toHaveLength(1);
+  expect(document.querySelector('.capability-page-notice')).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(fetcher.mock.calls[0][1]?.headers).not.toHaveProperty('X-Pulsara-Connection-Id');
+  expect(connect).not.toHaveBeenCalled();
+  await act(async () => vi.advanceTimersByTimeAsync(4200));
+  expect(document.querySelector('.toast')).toBeNull();
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '刷新能力' })));
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '总览' })));
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '能力' })));
+  await act(async () => fireEvent.focus(window));
+  expect(screen.queryByText(new RegExp(pendingText))).toBeNull();
+  expect(document.querySelector('.toast')).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('shows an explicit reload failure once as a toast without masking queued GET results or replaying the POST', async () => {
   const adapter = new FakeAdapter();
   await openCapabilities(adapter);
   vi.useFakeTimers();
@@ -111,11 +158,12 @@ it('retains an explicit reload failure through queued GETs without replaying the
   await act(async () => vi.advanceTimersByTimeAsync(30_000));
   adapter.inspectUserCapabilities.mockRejectedValueOnce(new Error('目录暂时读取失败。'));
   await act(async () => reload.reject(new Error('显式能力重载失败，请稍后重试。')));
-  expect(screen.getByText('显式能力重载失败，请稍后重试。')).toBeTruthy();
-  expect(screen.queryByText('目录暂时读取失败。')).toBeNull();
+  expect(screen.getByText('显式能力重载失败，请稍后重试。').closest('.toast')).toBeTruthy();
+  expect(screen.getByText('目录暂时读取失败。').closest('.capability-page-notice')).toBeTruthy();
   await act(async () => vi.advanceTimersByTimeAsync(30_000));
   expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
-  expect(screen.getByText('显式能力重载失败，请稍后重试。')).toBeTruthy();
+  expect(screen.queryByText('显式能力重载失败，请稍后重试。')).toBeNull();
+  expect(screen.queryByText('目录暂时读取失败。')).toBeNull();
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' })));
   expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(2);
   expect(screen.queryByText('显式能力重载失败，请稍后重试。')).toBeNull();

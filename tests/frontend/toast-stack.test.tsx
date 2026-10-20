@@ -19,7 +19,7 @@ it.each(['remove', 'close'])('preserves an existing toast and its animation when
   modal.setAttribute('data-test-modal', '');
   document.body.append(modal);
   const cancel = vi.fn();
-  const animate = vi.fn(() => ({ cancel }));
+  const animate = vi.fn(() => ({ cancel, finished: Promise.resolve() }));
   const originalAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'animate');
   Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, value: animate });
   const dismiss = vi.fn();
@@ -37,8 +37,8 @@ it.each(['remove', 'close'])('preserves an existing toast and its animation when
     fireEvent.click(toast);
     expect(dismiss).toHaveBeenCalledExactlyOnceWith(1);
     view.rerender(<ToastStack toasts={[]} onDismiss={dismiss} />);
-    expect(screen.queryByText('连接测试通过')).toBeNull();
-    expect(cancel).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.queryByText('连接测试通过')).toBeNull());
+    expect(cancel).toHaveBeenCalledTimes(2);
   } finally {
     cleanup();
     modal.remove();

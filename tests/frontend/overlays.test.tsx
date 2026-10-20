@@ -53,7 +53,7 @@ it.each([false, true])('keeps the save toast visible when its modal is removed i
     expect(screen.queryByRole('dialog')).toBeNull();
     const toast = screen.getByRole('button', { name: '模型配置已保存' });
     expect(toast.isConnected).toBe(true);
-    expect(openedPopovers.has(toast.parentElement!)).toBe(true);
+    expect(openedPopovers.has(toast.closest<HTMLElement>('.toast-stack')!)).toBe(true);
   });
   fireEvent.click(screen.getByRole('button', { name: '模型配置已保存' }));
   expect(screen.queryByText('模型配置已保存')).toBeNull();
@@ -67,7 +67,7 @@ it('moves an active toast into an open modal and back when the modal closes', as
   const expectOpenToastIn = (parent: HTMLElement) => {
     const toast = screen.getByRole('button', { name: '连接正常' });
     expect(parent.contains(toast)).toBe(true);
-    expect(openedPopovers.has(toast.parentElement!)).toBe(true);
+    expect(openedPopovers.has(toast.closest<HTMLElement>('.toast-stack')!)).toBe(true);
   };
   dialog.setAttribute('open', '');
   await waitFor(() => expectOpenToastIn(dialog));

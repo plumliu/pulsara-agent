@@ -226,8 +226,6 @@ export function CapabilityView({
         </div>
 
         {error && <div className="capability-page-notice"><CircleAlert size={15} /><span>{error}</span></div>}
-        {snapshot?.adoption && snapshot.adoption.attentionSessions > 0 && <div className="capability-page-notice"><CircleAlert size={15} /><span>{snapshot.adoption.attentionSessions} 个已打开会话需要稍后重试。</span></div>}
-        {snapshot?.adoption && snapshot.adoption.pendingSessions > 0 && <div className="capability-page-notice"><CircleAlert size={15} /><span>配置已保存，{snapshot.adoption.pendingSessions} 个会话将在下次模型请求前的安全时机载入。</span></div>}
 
         <div className="capability-page-list">
           <div hidden={tab !== 'hooks'}><HooksPanel api={hooks} query={query} refresh={hooksRefresh} inventory={snapshot} onCountChange={setHookCount} onNotify={onNotify}/></div>

@@ -5,7 +5,8 @@ import {
   FolderPlus,
   X,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { SessionWorkspaceSelection, ToastMessage } from '../lib/pulsara-types';
 
@@ -111,30 +112,123 @@ function subscribeToModalChange(onChange: () => void): () => void {
 
 const noModalSubscription = () => () => {};
 
-function Toast({ toast, onDismiss }: { toast: ToastMessage; onDismiss: (id: number) => void }) {
+function Toast({ toast, exiting, onDismiss, onExitComplete }: {
+  toast: ToastMessage; exiting: boolean;
+  onDismiss: (id: number) => void; onExitComplete: (id: number) => void;
+}) {
   const button = useRef<HTMLButtonElement>(null);
+  const entrance = useRef<Animation | undefined>(undefined);
+  const drag = useRef<{ pointerId: number; x: number; y: number; width: number } | undefined>(undefined);
+  const suppressClick = useRef(false);
+  const [offset, setOffset] = useState(0);
+  const cancelEntrance = useCallback(() => { entrance.current?.cancel(); entrance.current = undefined; }, []);
+  const releaseDrag = useCallback((target: HTMLButtonElement) => {
+    const current = drag.current;
+    drag.current = undefined;
+    if (current && target.hasPointerCapture(current.pointerId)) target.releasePointerCapture(current.pointerId);
+  }, []);
+  const startDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (exiting || event.button !== 0 || event.isPrimary === false || drag.current) return;
+    suppressClick.current = false;
+    drag.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      width: event.currentTarget.getBoundingClientRect().width };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const moveDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const current = drag.current;
+    if (exiting || !current || current.pointerId !== event.pointerId) return;
+    const x = event.clientX - current.x;
+    const y = event.clientY - current.y;
+    if (Math.hypot(x, y) < 6) { setOffset(0); return; }
+    suppressClick.current = true;
+    cancelEntrance();
+    setOffset(x > Math.abs(y) ? x : 0);
+    if (x >= Math.min(96, current.width * .3) && x > Math.abs(y)) {
+      releaseDrag(event.currentTarget);
+      onDismiss(toast.id);
+    }
+  };
+  const finishDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const current = drag.current;
+    if (exiting || !current || current.pointerId !== event.pointerId) return;
+    const x = event.clientX - current.x;
+    const y = event.clientY - current.y;
+    if (Math.hypot(x, y) >= 6) suppressClick.current = true;
+    releaseDrag(event.currentTarget);
+    if (x >= Math.min(96, current.width * .3) && x > Math.abs(y)) {
+      setOffset(x);
+      onDismiss(toast.id);
+    } else setOffset(0);
+  };
+  const cancelDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (drag.current?.pointerId !== event.pointerId) return;
+    releaseDrag(event.currentTarget);
+    if (!exiting) setOffset(0);
+  };
   useEffect(() => {
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-    // A toast can move out of a closing modal. Animate its lifetime once,
-    // rather than restarting a CSS entrance animation when it is reattached.
-    const animation = button.current?.animate?.([
+    // Moving the portal between modals preserves this element's lifetime.
+    entrance.current = button.current?.animate?.([
       { opacity: 0, transform: 'translateY(8px) scale(.985)' },
       { opacity: 1, transform: 'none' },
     ], { duration: 220, easing: 'ease-out' });
-    return () => animation?.cancel();
-  }, []);
-  return <button ref={button} className={`toast toast--${toast.tone ?? 'neutral'}`} onClick={toast.onClick ?? (() => onDismiss(toast.id))}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span>{toast.onClick ? <ChevronRight size={11} aria-hidden="true" /> : <X size={11} />}</button>;
+    return cancelEntrance;
+  }, [cancelEntrance]);
+  useLayoutEffect(() => {
+    const target = button.current;
+    if (!exiting || !target) return;
+    cancelEntrance();
+    releaseDrag(target);
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || !target.animate) {
+      onExitComplete(toast.id);
+      return;
+    }
+    const style = window.getComputedStyle(target);
+    const distance = offset + window.innerWidth - target.getBoundingClientRect().left + 24;
+    const animation = target.animate([
+      { translate: style.translate, opacity: style.opacity },
+      { translate: `${distance}px 0`, opacity: 0 },
+    ], { duration: 220, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'forwards' });
+    let current = true;
+    void animation.finished.then(() => { if (current) onExitComplete(toast.id); }, () => {});
+    return () => { current = false; animation.cancel(); };
+  }, [exiting, offset, onExitComplete, toast.id, cancelEntrance, releaseDrag]);
+  return <button ref={button} className={`toast toast--${toast.tone ?? 'neutral'}${offset > 0 && !exiting ? ' is-dragging' : ''}${exiting ? ' is-exiting' : ''}`}
+    style={{ translate: `${offset}px 0` }} disabled={exiting}
+    onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={finishDrag}
+    onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}
+    onClick={event => {
+      // A captured drag can still produce a click. Keyboard activation remains.
+      if (suppressClick.current && event.detail !== 0) { event.preventDefault(); return; }
+      (toast.onClick ?? (() => onDismiss(toast.id)))();
+    }}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span>{toast.onClick ? <ChevronRight size={11} aria-hidden="true" /> : <X size={11} />}</button>;
 }
 
 export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDismiss: (id: number) => void }) {
   const stackRef = useRef<HTMLDivElement>(null);
+  const items = useRef(new Map<number, HTMLDivElement>());
+  const positions = useRef(new Map<number, { element: HTMLDivElement; top: number; animation?: Animation }>());
+  const [presentToasts, setPresentToasts] = useState(toasts);
+  useLayoutEffect(() => {
+    // Retain removed nodes only until their shared exit animation completes.
+    setPresentToasts(current => [
+      ...current.map(toast => toasts.find(next => next.id === toast.id) ?? toast),
+      ...toasts.filter(toast => !current.some(existing => existing.id === toast.id)),
+    ]);
+  }, [toasts]);
+  const finishExit = useCallback((id: number) => {
+    setPresentToasts(current => current.filter(toast => toast.id !== id));
+  }, []);
   const [portalHost] = useState<HTMLDivElement | null>(() => (
     typeof window === 'undefined' ? null : window.document.createElement('div')
   ));
-  const hasToasts = toasts.length > 0;
+  const hasToasts = presentToasts.length > 0;
   const modal = useSyncExternalStore(hasToasts ? subscribeToModalChange : noModalSubscription, activeModal, () => null);
 
-  useLayoutEffect(() => () => { portalHost?.remove(); }, [portalHost]);
+  useLayoutEffect(() => () => {
+    for (const position of positions.current.values()) position.animation?.cancel();
+    portalHost?.remove();
+  }, [portalHost]);
 
   useLayoutEffect(() => {
     // Wait for the modal observer if this commit has just detached its target.
@@ -149,9 +243,31 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDi
     return () => { if (stack.isConnected && stack.matches(':popover-open')) stack.hidePopover(); };
   }, [modal, hasToasts, portalHost]);
 
+  useLayoutEffect(() => {
+    const next = new Map<number, { element: HTMLDivElement; top: number; animation?: Animation }>();
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    for (const [id, element] of items.current) {
+      const previous = positions.current.get(id);
+      const transform = window.getComputedStyle(element).transform;
+      const offset = transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).m42 : 0;
+      const top = element.getBoundingClientRect().top - offset;
+      const distance = previous?.element === element ? previous.top - top + offset : 0;
+      previous?.animation?.cancel();
+      const animation = !reducedMotion && Math.abs(distance) > .5 ? element.animate?.([
+        { transform: `translateY(${distance}px)` }, { transform: 'none' },
+      ], { duration: 220, easing: 'cubic-bezier(.2,.7,.2,1)' }) : undefined;
+      next.set(id, { element, top, animation });
+    }
+    for (const [id, previous] of positions.current) if (!next.has(id)) previous.animation?.cancel();
+    positions.current = next;
+  }, [presentToasts]);
+
   const content = (
     <div ref={stackRef} className="toast-stack" popover="manual" aria-live="polite">
-      {toasts.map((toast) => <Toast key={toast.id} toast={toast} onDismiss={onDismiss} />)}
+      {presentToasts.map((toast) => <div className="toast-stack__item" key={toast.id}
+        ref={element => { if (element) items.current.set(toast.id, element); else items.current.delete(toast.id); }}>
+        <Toast toast={toast} exiting={!toasts.some(current => current.id === toast.id)} onDismiss={onDismiss} onExitComplete={finishExit} />
+      </div>)}
     </div>
   );
   return portalHost && hasToasts ? createPortal(content, portalHost) : null;

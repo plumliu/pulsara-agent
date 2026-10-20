@@ -1508,7 +1508,7 @@ class _LargeSurfaceFakeMcpSession(_FakeMcpSession):
                     },
                     annotations=types.ToolAnnotations(readOnlyHint=True),
                 )
-                for index in range(64)
+                for index in range(129)
             ],
         )
 
@@ -2592,7 +2592,7 @@ def test_round6_unsupported_input_required_preserves_external_effect_unknown(
     assert body["retry_performed"] is False
 
 
-def test_round6_direct_surface_over_64_tools_fails_without_truncation(
+def test_round6_mcp_surface_over_128_tools_routes_whole_cohort_to_meta(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:

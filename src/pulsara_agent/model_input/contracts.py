@@ -228,6 +228,8 @@ class StructuredModelInputCompileError(ValueError):
 
 MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS = 4_096
 MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES = 16 << 20
+MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT = 64
+MAXIMUM_MCP_NATIVE_TOOL_COUNT = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +239,10 @@ class StructuredModelInputLimits:
     maximum_single_source_variant_bytes: int = 1 << 20
     maximum_aggregate_full_source_bytes: int = 2 << 20
     maximum_aggregate_source_variant_bytes: int = 4 << 20
-    maximum_tool_specs: int = 64
+    # Composition bound; MCP admission separately excludes builtin tools.
+    maximum_tool_specs: int = (
+        MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT + MAXIMUM_MCP_NATIVE_TOOL_COUNT
+    )
     maximum_tool_spec_canonical_bytes: int = 1 << 20
     maximum_compile_working_set_bytes: int = 64 << 20
     maximum_diagnostics: int = 64

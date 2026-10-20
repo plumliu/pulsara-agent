@@ -29,6 +29,7 @@ from pulsara_agent.capability.contracts import (
     tool_capability_version_ref,
 )
 from pulsara_agent.llm.input import ToolSpec
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -401,6 +402,7 @@ def freeze_openai_native_tool_eligibility(
     """
 
     contract = openai_native_function_tool_contract_fingerprint(wire_api)
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     entries: list[
         FrozenNativeToolWireEligibilityQuote | FrozenNativeToolWireIncompatibility
     ] = []
@@ -448,6 +450,9 @@ def freeze_openai_native_tool_eligibility(
                     native_function_tool_wire_contract_fingerprint=contract,
                     wire_tool_fingerprint=wire_fingerprint,
                     wire_utf8_bytes=wire_bytes,
+                    wire_estimated_tokens=estimator.estimate_json(
+                        thaw_json(frozen_wire)
+                    ),
                 )
             )
         except (OpenAIFunctionSchemaIncompatible, OverflowError) as exc:
@@ -499,6 +504,7 @@ def materialize_openai_native_tool_projection_set(
     """Materialize only the exact bounded cohort selected by the planner."""
 
     contract = openai_native_function_tool_contract_fingerprint(wire_api)
+    estimator = PulsaraHeuristicTokenEstimatorV3()
     if (
         eligibility.conversation_scope_kind is not conversation_scope_kind
         or eligibility.scope_subagent_task_id != scope_subagent_task_id
@@ -528,6 +534,8 @@ def materialize_openai_native_tool_projection_set(
         if (
             wire_bytes != item.wire_utf8_bytes
             or wire_fingerprint != item.wire_tool_fingerprint
+            or estimator.estimate_json(thaw_json(frozen_wire))
+            != item.wire_estimated_tokens
         ):
             raise ValueError("native Tool materialization drifted from quote")
         projections.append(
