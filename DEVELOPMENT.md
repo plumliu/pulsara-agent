@@ -1,12 +1,12 @@
 # Build Pulsara / 从源码构建 Pulsara
 
-For the desktop app, download an installer from [Releases](https://github.com/plumliu/pulsara-agent/releases/latest). User setup and updates are covered in [INSTALL.md](INSTALL.md).
+macOS users can download the alpha.3 DMG from [Releases](https://github.com/plumliu/pulsara-agent/releases/latest). Ubuntu users should build the current source using this guide; the available alpha.2 deb packages do not include the latest fixes. User setup and updates are covered in [INSTALL.md](INSTALL.md).
 
-本页面向贡献者。直接使用 Pulsara 请下载[桌面安装包](https://github.com/plumliu/pulsara-agent/releases/latest)，安装与更新见 [INSTALL.md](INSTALL.md)。修改代码前请阅读 [AGENTS.md](AGENTS.md)。
+macOS 用户可下载 alpha.3 [桌面安装包](https://github.com/plumliu/pulsara-agent/releases/latest)。Ubuntu 用户建议按本页从当前源码构建，现有 alpha.2 deb 不含最新修复。本页也适用于贡献者；安装与更新见 [INSTALL.md](INSTALL.md)，修改代码前请阅读 [AGENTS.md](AGENTS.md)。
 
 ## English
 
-GitHub Actions run manually for now; pushes (including tags) and pull requests do not trigger them. Start a workflow from the Actions page when needed. To build a release draft, manually run Native Desktop Packages against its version tag.
+GitHub Actions run manually for now; pushes (including tags) and pull requests do not trigger them. Start a workflow from the Actions page when needed. The current alpha.3 release was built and published locally with only a macOS DMG. The retained Native Desktop Packages draft workflow and assembly script expect one DMG and two Ubuntu deb installers.
 
 Build on the target platform. `mise.toml` pins Node.js 22.23.3 and uv 0.13.4, retains protoc 34.0, and `.python-version` pins uv-managed Python 3.12.15. The repository `.venv` remains uv-owned. Native builds need a C compiler, `make`, `pkg-config`, Bison, and Flex. macOS builds need Xcode command-line tools and `dylibbundler`; Ubuntu builds need `binutils`, `patchelf`, `xz-utils`, and `libopenblas0`. These are build-machine requirements.
 
@@ -35,6 +35,24 @@ mise owns task ordering and content-based freshness; uv owns locked Python depen
 - `mise run --force desktop:postgres` or `mise run --force desktop:python-dependencies` explicitly rebuilds that resource. The old manual `--skip-*` switches are removed. Cache hits still pass architecture/version checks, and packaging always runs the relocation smoke in a disposable database.
 
 uv installs with copy mode and browser binaries are copied from Playwright's own cache before relocation. Native rewriting must never modify SDK cache files. Keep `desktop/build`, `desktop/resources` and mise's local cache between builds; clearing them deliberately makes the next build cold.
+
+### Ubuntu 24.04 native build
+
+Install `mise` first, then run the following as your normal desktop user. Use `sudo` only for system dependencies and the final package installation. The same steps work on amd64 and arm64; ARM64 users should change the final filename to `Pulsara-0.1.0-alpha.3-linux-arm64.deb`. The build includes the latest source and does not publish anything.
+
+```bash
+sudo apt update
+sudo apt install -y build-essential bison flex pkg-config binutils patchelf \
+  libopenblas0 xz-utils ca-certificates curl git libyaml-0-2 libcrypt1
+git clone https://github.com/plumliu/pulsara-agent.git
+cd pulsara-agent
+mise trust
+mise install
+mise run desktop:bootstrap
+mise exec -- .venv/bin/python -m playwright install-deps chromium
+mise run --jobs 1 desktop:package
+sudo apt install ./desktop/release/Pulsara-0.1.0-alpha.3-linux-amd64.deb
+```
 
 ### Ubuntu container builds
 
@@ -71,7 +89,7 @@ Database integration fixtures and Ubuntu package checks are described in [tests/
 
 ## 中文
 
-GitHub Actions 暂时仅手动运行，推送（包括标签）和 Pull Request 均不自动触发。需要时在 Actions 页面手动启动；生成 Release 草稿时，对版本标签运行 Native Desktop Packages。
+GitHub Actions 暂时仅手动运行，推送（包括标签）和 Pull Request 均不自动触发。需要时在 Actions 页面手动启动。当前 alpha.3 在本地构建并发布，仅上传 macOS DMG；保留的 Native Desktop Packages 草稿工作流和汇总脚本仍要求一个 DMG 与两个 Ubuntu deb。
 
 请在目标平台构建。`mise.toml` 固定 Node.js 22.23.3、uv 0.13.4，并保留 protoc 34.0；`.python-version` 固定由 uv 管理的 Python 3.12.15。仓库 `.venv` 仍由 uv 管理。原生构建还需要 C 编译器、`make`、`pkg-config`、Bison 和 Flex。macOS 还需要 Xcode command-line tools 与 `dylibbundler`；Ubuntu 需要 `binutils`、`patchelf`、`xz-utils` 和 `libopenblas0`。这些依赖用于构建机。
 
@@ -100,6 +118,24 @@ mise 管理任务依赖和内容变化判断，uv 管理锁定的 Python 依赖�
 - 可用 `mise run --force desktop:postgres` 或 `mise run --force desktop:python-dependencies` 强制重建某项资源，旧的手动 `--skip-*` 参数已移除。缓存命中仍需校验架构和版本；打包前始终在临时数据库中执行搬移检查。
 
 uv 使用复制模式安装，浏览器也先从 Playwright 缓存复制到产物目录，再做原生库搬移；不能修改 SDK 缓存里的二进制文件。两次构建之间保留 `desktop/build`、`desktop/resources` 和 mise 本地缓存。主动清理它们后，下次将重新构建。
+
+### Ubuntu 24.04 本机构建
+
+先安装 `mise`，再以普通桌面用户执行以下命令，仅安装系统依赖和最终 deb 时使用 `sudo`。amd64 和 arm64 步骤相同；ARM64 用户把最后的文件名改为 `Pulsara-0.1.0-alpha.3-linux-arm64.deb`。生成的安装包包含最新源码，不会执行发布。
+
+```bash
+sudo apt update
+sudo apt install -y build-essential bison flex pkg-config binutils patchelf \
+  libopenblas0 xz-utils ca-certificates curl git libyaml-0-2 libcrypt1
+git clone https://github.com/plumliu/pulsara-agent.git
+cd pulsara-agent
+mise trust
+mise install
+mise run desktop:bootstrap
+mise exec -- .venv/bin/python -m playwright install-deps chromium
+mise run --jobs 1 desktop:package
+sudo apt install ./desktop/release/Pulsara-0.1.0-alpha.3-linux-amd64.deb
+```
 
 ### Ubuntu 容器构建
 

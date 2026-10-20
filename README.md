@@ -58,11 +58,13 @@ Save preferences, project constraints, and decisions in memory for later tasks t
 
 | System | Installer |
 | --- | --- |
-| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-macos-arm64.dmg) |
+| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.3/Pulsara-0.1.0-alpha.3-macos-arm64.dmg) |
 | Ubuntu 24.04, amd64 | [Download deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-amd64.deb) |
 | Ubuntu 24.04, arm64 | [Download deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-arm64.deb) |
 
-1. Install and open Pulsara. Drag the macOS app into Applications, or install the matching Ubuntu deb.
+Ubuntu users should [build the current version from source](DEVELOPMENT.md). The alpha.2 deb downloads above do not include the latest alpha.3 fixes.
+
+1. Install and open Pulsara. On macOS, drag the app into Applications. On Ubuntu, build from source and install the resulting deb.
 2. Add a model connection in Settings. Choose the provider, model, and API protocol, then follow the prompts for authentication or custom settings.
 3. Start a quick session and drop in files, or open a project directory. Give it the job.
 
