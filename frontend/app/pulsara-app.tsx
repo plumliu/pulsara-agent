@@ -5,7 +5,7 @@ import { uiPreferences } from '../lib/ui-preferences';
 import { randomIdentity, isCanonicalIdentity } from '../lib/identity';
 
 import { DesktopWorkspaceProvider, type WorkspaceControl } from '../components/desktop-workspace';
-import { DesktopTitlebar } from '../components/desktop-titlebar';
+import { DesktopTitlebar, DesktopWindowControls } from '../components/desktop-titlebar';
 import { FilePreviewProvider } from '../components/file-browser';
 import { UserAvatarProvider } from '../components/user-avatar';
 
@@ -3293,6 +3293,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           if (!bulkDeletion.running) setBulkNoticeDismissed(true);
         }}
         onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
+      <DesktopWindowControls />
     </main>
     </ToolResultDisplayContext.Provider>
     </PresentationProvider>

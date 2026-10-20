@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DesktopWorkspace, DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
-import { DesktopTitlebar } from '../../frontend/components/desktop-titlebar';
+import { DesktopTitlebar, DesktopWindowControls } from '../../frontend/components/desktop-titlebar';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { rejectDirectoryDrop } from '../../frontend/lib/file-drop';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
@@ -160,6 +160,44 @@ it('leaves session title and workspace switch with the session header and keeps 
   expect(maximize).not.toHaveBeenCalled();
   fireEvent.doubleClick(view.container.querySelector('header')!);
   expect(maximize).toHaveBeenCalledOnce();
+});
+
+it('routes Linux window controls to the desktop host without maximizing on a button double-click', () => {
+  const minimize = vi.fn(), maximize = vi.fn(), close = vi.fn();
+  window.pulsaraDesktop = { platform: 'linux', minimize, toggleMaximize: maximize, closeWindow: close } as unknown as PulsaraDesktop;
+  const view = render(<main><DesktopTitlebar workbench title="Session" onToggleSidebar={vi.fn()} onToggleWorkspace={vi.fn()} /><DesktopWindowControls /></main>);
+  expect(screen.getByRole('group', { name: '窗口控制' }).parentElement).toBe(view.container.querySelector('main'));
+  fireEvent.click(screen.getByRole('button', { name: '最小化' }));
+  fireEvent.click(screen.getByRole('button', { name: '最大化或还原' }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭窗口' }));
+  fireEvent.doubleClick(screen.getByRole('button', { name: '关闭窗口' }));
+  expect(minimize).toHaveBeenCalledOnce();
+  expect(maximize).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it.each(['linux', 'darwin'] as const)('places workspace categories below the top row only on Linux (%s)', platform => {
+  window.pulsaraDesktop = { platform } as PulsaraDesktop;
+  const toolbar = <nav aria-label="工作区入口"><button>能力</button><button>任务</button><button>后台进程</button><button>新建网页</button></nav>;
+  const collapse = vi.fn();
+  function WithCategories() {
+    workspace = useDesktopWorkspace()!;
+    return <DesktopWorkspace isOpen onClose={collapse} toolbar={toolbar} renderTab={() => null} />;
+  }
+  const view = render(<DesktopWorkspaceProvider sessionId="a" onShow={vi.fn()}>
+    <WithCategories />
+  </DesktopWorkspaceProvider>);
+  act(() => workspace.open({ id: 'a-file', sessionId: 'a', title: 'guide.md', kind: 'file' }));
+  const topbar = view.container.querySelector('.workspace-topbar')!;
+  const categories = screen.getByRole('navigation', { name: '工作区入口' });
+  expect(topbar.contains(categories)).toBe(platform === 'darwin');
+  if (platform === 'linux') {
+    expect(categories.parentElement).toBe(topbar.nextElementSibling);
+    expect(categories.parentElement!.nextElementSibling).toBe(view.container.querySelector('.workspace-tab-strip'));
+  }
+  expect(topbar.contains(screen.getByRole('button', { name: '收起工作区' }))).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: '收起工作区' }));
+  expect(collapse).toHaveBeenCalledOnce();
 });
 
 it('collapses only after closing the current session last tab and retains other sessions', () => {

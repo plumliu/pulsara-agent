@@ -4,26 +4,32 @@ Choose text or tables for simple results, publish saved figures inline with `pul
 
 Always enclose SVG, Mermaid and other source code in closed triple-backtick fences with the correct language label. Never emit bare SVG/XML or diagram source.
 
+For a static SVG diagram, put the SVG source directly in a `svg` fence:
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40">
+  <rect width="160" height="40" rx="8" fill="#536fd3"/>
+</svg>
+```
+
 ## Open current files
 
 Link a deliverable with `[label](/absolute/path)`. The desktop opens its current contents in a right-side browsing tab. Links between local HTML and Markdown documents navigate in that tab with back/forward history. Use this for document packages, Skill references and files the user should revisit after edits. In conversation replies, Markdown image syntax `![label](/absolute/plot.png)` creates a clickable image reference; it does not display the full figure inline.
 
 ## Create and publish
 
-Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. For simple visuals, consider a single HTML file. Local image paths may be absolute or relative to the file that references them. Use inline SVG for icons such as Lucide. Network resources are unavailable. Paths in publication fences resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access. Resources inside HTML/CSS resolve relative to the declaring file.
+Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. For simple visuals, consider a single HTML file. Local image paths may be absolute or relative to the file that references them. Embed animated SVG and SVG icons such as Lucide inside the HTML. Network resources are unavailable. Paths in publication fences resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access. Resources inside HTML/CSS resolve relative to the declaring file.
 
-In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing file paths or known `image:` references copied unchanged, one per line. The only supported file extensions are **`.png`, `.jpg`, `.jpeg`, `.webp` (static only), `.html` and `.htm`**. Do not put `.svg` paths in these fences; use a fenced `svg` code block or embed the SVG in an HTML file instead. Supported images do not need an HTML wrapper or a prior `view_image` call:
+In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing file paths or known `image:` references copied unchanged, one per line. The only supported file extensions are **`.png`, `.jpg`, `.jpeg`, `.webp` (static only), `.html` and `.htm`**. Do not put `.svg` paths or SVG source in these fences; use a fenced `svg` code block or embed the SVG in an HTML file instead. Supported images do not need an HTML wrapper or a prior `view_image` call:
 
-````markdown
 Compare the costs:
 
 ```pulsara-visualization
 .pulsara/visualizations/cost.html
 .pulsara/visualizations/cost-breakdown.png
 ```
-````
 
-Each fence creates an independent gallery. One path shows one figure; multiple paths share host-provided thumbnail navigation. Group alternatives together; use separate fences to show figures together. Views with shared controls belong in one file. Keep actual display fences outside lists and blockquotes; wrap syntax examples in a longer outer fence as above.
+Each fence creates an independent gallery. One path shows one figure; multiple paths share host-provided thumbnail navigation. Group alternatives together; use separate fences to show figures together. Views with shared controls belong in one file. Keep display fences outside lists and blockquotes.
 
 Prefer several compact HTML figures in separate fences beside their explanations over one long, internally scrolling dashboard. Several paths in one fence create gallery pages, not stacked inline figures. Keep shared filters or tightly coupled interactions together.
 

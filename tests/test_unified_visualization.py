@@ -100,6 +100,20 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
             assert linked[1].html == b"<h1>chart</h1>"
             assert linked[2].state is VisualizationOccurrenceState.FAILED
 
+            # SVG has a code-fence/HTML route, not a raw image-file publication
+            # route. The separate view_image SVG reader remains supported.
+            svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><rect width="20" height="20"/></svg>'
+            (tmp_path / "diagram.svg").write_text(svg)
+            (tmp_path / "diagram.html").write_text(f"<main>{svg}</main>")
+            vectors = await prepare(
+                "```pulsara-visualization\ndiagram.svg\ndiagram.html\n```"
+            )
+            assert vectors[0].state is VisualizationOccurrenceState.FAILED
+            assert vectors[0].failure_code == "IMAGE_DECODE_FAILED"
+            assert vectors[1].state is VisualizationOccurrenceState.READY
+            assert b"<svg" in vectors[1].html
+            assert await prepare(f"```svg\n{svg}\n```") == ()
+
             # A logical watchdog is never an ordinary missing-file item.
             class TimedIO:
                 async def run(self, *args, **kwargs):

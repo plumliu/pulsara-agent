@@ -1,6 +1,6 @@
 ---
 name: pulsara-sheets
-description: Read, create, edit, convert, and verify spreadsheet files (.xlsx/.xlsm/.xls/.xlsb, CSV/TSV), including formulas, formatting, templates, and editable charts. Use for Excel 表格、工作簿、公式、制表、图表 and transformations under specified rules.
+description: Read, create, edit, convert, and verify spreadsheet files (.xlsx/.xlsm/.xls/.xlsb, CSV/TSV), with formulas, formatting, templates, editable charts, and specified transformations. Use for Excel 表格与工作簿处理; use pulsara-data-analysis to interpret data, investigate patterns, or choose analytical methods.
 ---
 
 # Pulsara Sheets
@@ -18,7 +18,7 @@ Follow the user's requested calculations, template, and editing scope. Preserve 
 | Add or format charts | Bind native chart series to workbook cells; verify ranges, axes, labels, and layout | [Charts and layout](references/charts-layout.md) |
 | Convert formats or handle passwords | Choose a reader/editor for the actual input format and requested output | [Formats, text files, and passwords](references/formats-passwords.md) |
 
-Implement specified calculations and charts here. For defining metrics, choosing statistical methods, or interpreting patterns and uncertainty, consult `pulsara-data-analysis` when available. A workbook input alone does not require analysis.
+Use `pulsara-data-analysis` to define metrics, select analytical methods, or interpret patterns and uncertainty. Combine the Skills when the requested workbook also needs analysis.
 
 Reuse an environment or install task dependencies with uv, venv, or Conda. Bundled scripts are optional code references: use, adapt, or replace them. Resolve their paths relative to this `SKILL.md`; dependencies are declared for `uv run --script`. Check availability before relying on an application or cloud service.
 

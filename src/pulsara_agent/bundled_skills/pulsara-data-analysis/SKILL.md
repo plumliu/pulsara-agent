@@ -1,6 +1,6 @@
 ---
 name: pulsara-data-analysis
-description: Explore, clean, combine, and analyze data with Python or SQL, including EDA, ETL, comparisons, trends, and statistical methods; present findings with charts or interactive HTML. Use for 数据分析、数据清洗、探索分析、统计分析 and interactive data visualizations.
+description: Explore, clean, combine, and interpret structured data to answer questions, compare results, explain changes, and assess uncertainty; present findings with charts, reports, or interactive dashboards. Use for 数据分析、数据清洗、统计分析; use pulsara-sheets for workbook editing and specified spreadsheet operations.
 ---
 
 # Pulsara Data Analysis
@@ -9,7 +9,7 @@ Answer the user's question at the depth it needs. Use existing context to establ
 
 ## Work from the question
 
-Explore unfamiliar data, prepare it as needed, compute the result, and check the claims you will make. Move between exploration, transformation, and analysis when findings require it. A specified calculation can be direct; a complex task can use a full EDA, ETL, or statistical workflow. Read only the relevant guidance:
+Choose the exploration, preparation, calculation, or statistical steps the question needs, and check the claims you will make. Read only the relevant guidance:
 
 | Need | Reference |
 | --- | --- |
@@ -29,4 +29,4 @@ Use a suitable existing environment or prepare task dependencies with uv, venv, 
 - Choose text, tables, saved images, static diagrams or interactive HTML to suit the result. For inline figures, file browsing and HTML authoring, read [visualization-render.md](references/visualization-render.md). Simple numeric answers can remain text.
 - Verify the consequential numbers against inputs or a suitable independent calculation. Check that charts, filters, labels, units, and the written explanation refer to the same data. Deliver the useful findings and material limitations; create a Notebook, formal report, or extra exports when the task calls for them.
 
-For workbook editing, formulas, formatting, or native Excel charts, consult `pulsara-sheets` when available. It also handles workbook transformations and calculations under specified rules. Use the task's purpose to choose the Skill: an XLSX input, `groupby`, or a mean calculation alone does not require a full analysis workflow. For analytical results delivered as an editable workbook, use the two Skills for their respective responsibilities.
+Use `pulsara-sheets` for workbook editing, formulas, formatting, native charts, and specified spreadsheet operations. Combine the Skills when an analysis also requires an editable workbook; choose guidance by the work rather than the input format.
