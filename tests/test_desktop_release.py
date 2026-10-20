@@ -1,7 +1,6 @@
 """Release boundaries: committed versions, exact assets, and draft-only uploads."""
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 
@@ -34,7 +33,7 @@ def test_versions_match_real_committed_metadata_and_tag(release_root):
         release.check_versions(release_root)
 
 
-def test_assembly_requires_all_three_installers_and_hashes_actual_bytes(release_root, tmp_path):
+def test_assembly_requires_and_copies_exactly_three_installers(release_root, tmp_path):
     source, output = tmp_path / "artifacts", tmp_path / "output"
     names = release.installer_names("0.1.0-alpha.1")
     for index, name in enumerate(names):
@@ -42,9 +41,10 @@ def test_assembly_requires_all_three_installers_and_hashes_actual_bytes(release_
         path.parent.mkdir(parents=True)
         path.write_bytes(f"installer {index}".encode())
     files = release.assemble(release_root, source, output, "v0.1.0-alpha.1", "plumliu/pulsara-agent")
-    assert [path.name for path in files] == [*names, "SHA256SUMS"]
-    for line, name in zip((output / "SHA256SUMS").read_text().splitlines(), names):
-        assert line == f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}"
+    assert [path.name for path in files] == list(names)
+    assert sorted(path.name for path in output.iterdir()) == sorted([*names, "release-notes.md"])
+    for index, name in enumerate(names):
+        assert (output / name).read_bytes() == f"installer {index}".encode()
     notes = (output / "release-notes.md").read_text()
     assert "{{" not in notes
     assert all(f"/releases/download/v0.1.0-alpha.1/{name}" in notes for name in names)
@@ -68,7 +68,7 @@ def test_github_draft_create_retry_and_published_refusal(tmp_path, monkeypatch, 
     }
     calls = []
     files = []
-    for name in (*release.installer_names("0.1.0-alpha.1"), "SHA256SUMS"):
+    for name in release.installer_names("0.1.0-alpha.1"):
         path = tmp_path / name
         path.write_bytes(name.encode())
         files.append(path)

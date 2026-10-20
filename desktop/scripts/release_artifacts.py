@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -69,18 +68,13 @@ def assemble(root: Path, artifacts: Path, output: Path, tag: str, repository: st
         if path.is_symlink() or path.stat().st_size == 0:
             raise ValueError("Installer must be a nonempty regular file")
         shutil.copyfile(path, output / path.name)
-    checksums = []
-    for name in expected:
-        with (output / name).open("rb") as source:
-            checksums.append(f"{hashlib.file_digest(source, 'sha256').hexdigest()}  {name}\n")
-    (output / "SHA256SUMS").write_text("".join(checksums))
     template = (root / "desktop/release-notes.md").read_text()
     downloads = "\n".join(
         f"- [{label}](https://github.com/{repository}/releases/download/{tag}/{name})"
         for label, name in zip(("macOS 15+，Apple Silicon", "Ubuntu 24.04，amd64", "Ubuntu 24.04，arm64"), expected)
     )
     (output / "release-notes.md").write_text(template.replace("{{version}}", version).replace("{{downloads}}", downloads))
-    return [output / name for name in (*expected, "SHA256SUMS")]
+    return [output / name for name in expected]
 
 
 def gh(*args: str):

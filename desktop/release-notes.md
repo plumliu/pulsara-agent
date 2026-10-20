@@ -6,7 +6,7 @@
 
 {{downloads}}
 
-附件中的 `SHA256SUMS` 用于核对下载完整性。GitHub 的 Source code 压缩包是源码，不是安装包。
+GitHub 的 Source code 压缩包是源码，不是安装包。
 
 ## 安装
 

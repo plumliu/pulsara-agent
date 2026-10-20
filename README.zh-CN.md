@@ -1,213 +1,78 @@
-<h1 align="center">
-  <img src="frontend/public/assets/pulsara-icon.png" width="36" height="36" alt="">
-  Pulsara
-</h1>
-
 <p align="center">
-  <strong>一支 Agent 团队。你选的模型。你自己的电脑。</strong>
+  <img src="frontend/public/assets/pulsara-icon.png" width="72" height="72" alt="Pulsara logo">
 </p>
-
+<h1 align="center">Pulsara</h1>
+<p align="center"><strong>你自己的 Agent 团队。</strong></p>
 <p align="center">
-  <img src="assets/banner.png" alt="Pulsara — 持久会话、可审阅的工作记录、语义记忆" width="100%">
-</p>
-
-<p align="center">
-  <a href="#打开工作台">打开工作台</a> ·
-  <a href="#全程工作所需">探索能力</a> ·
-  <a href="#让一支团队一起推进">Agent 团队</a> ·
-  <a href="#交付拿得走用得上的成果">成果交付</a> ·
-  <a href="#打造你的工作台">扩展生态</a> ·
+  <a href="https://github.com/plumliu/pulsara-agent/releases/latest">下载桌面版</a> &nbsp; | &nbsp;
+  <a href="assets/Pulsara-demo.mp4">观看演示</a> &nbsp; | &nbsp;
+  <a href="INSTALL.md">安装说明</a> &nbsp; | &nbsp;
   <a href="README.md">English</a>
 </p>
 
-**Pulsara 让一支专属 AI 团队，投入你的代码、研究和数据工作。** 给它一个任务：追查 Bug、比较几种方案、把数据做成仪表盘，或准备一份可供审阅的文档。它会规划工作、委派任务、调用工具，并在本地优先的可视化工作台中完成交付。
+## 演示
 
-多个 Agent 可以并行工作，从同一次调查分出不同方向，也能把积累的知识带入后续对话。稳定的提示词前缀为长任务的缓存复用打下基础。你可以在桌面工作台中跟进进展、随时调整方向，直接查看生成的代码、文档和交互成果。
+[![观看 Pulsara 演示](assets/demo-preview.jpg)](assets/Pulsara-demo.mp4)
 
-**把值得投入的大任务，交给 Pulsara。**
+<table>
+  <tr>
+    <td width="50%" align="center"><strong>比较三种方法在不同样本下的误差，给我 Python 绘图脚本。</strong></td>
+    <td width="50%" align="center"><strong>设计一个知识库系统，画个架构图并整理下组件职责给我。</strong></td>
+  </tr>
+  <tr>
+    <td><a href="assets/demo-img/research-chart-with-source.png"><img src="assets/demo-img/research-chart-with-source.png" width="100%" alt="科研图表与 Python 源码并排展示"></a></td>
+    <td><a href="assets/demo-img/architecture-diagram-and-notes.png"><img src="assets/demo-img/architecture-diagram-and-notes.png" width="100%" alt="架构图与组件职责文档并排展示"></a></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><strong>画一张“咖啡从产地到杯子”的流程信息图，包含种植、处理、烘焙、研磨和萃取。</strong></td>
+    <td width="50%" align="center"><strong>帮我规划作品集网站，整理需求和站点地图。</strong></td>
+  </tr>
+  <tr>
+    <td><a href="assets/demo-img/coffee-journey-svg.png"><img src="assets/demo-img/coffee-journey-svg.png" width="100%" alt="咖啡从种植到萃取的 SVG 流程图"></a></td>
+    <td><a href="assets/demo-img/project-plan-and-sitemap.png"><img src="assets/demo-img/project-plan-and-sitemap.png" width="100%" alt="作品集网站需求与站点地图"></a></td>
+  </tr>
+</table>
 
-## 全程工作所需
+## 大任务就让一支团队来干！
 
-| 能力 | 你能用它做什么 |
+让一个 Agent 追查问题，另一个比较方案，再安排独立审阅。Pulsara 可以按任务搭配模型，每个 Subagent 都有自己的上下文；你能打开任务图点进任何一个任务，看它做到了哪里。
+
+一份扎实的调查还可以接着用。已完成子任务的对话和工具历史，能交给后续任务继续推进。实现与审阅从同一份发现出发，各自判断，省掉重新解释整个问题的功夫。
+
+> 追一下这个 Bug，比较两种修法。选定后帮我改好，让另一个 Agent 独立审阅，再跑相关测试。
+
+## 随时都能提需求！
+
+工具调用、后台命令和子代理进度都能展开看。临时想起一个新想法，就能把那条消息及时告诉 Pulsara。
+
+你也能选中回复针对它做批注，比反复讲“刚才那个文件”省心多了。
+
+## 工作再繁杂 Pulsara 也跟得上！
+
+耗时命令可以放到后台，Agent 继续推进别的工作。对话变长后可以压缩上下文，保存的会话让你下次回来仍有记录可查。
+
+Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持缓存的模型服务复用已经处理过的输入，命中时能省下费用、缩短等待。
+
+你的偏好、项目约束和已有决策可以存进记忆，留给后续任务检索。在记忆页里能直接查看、修改或删除。
+
+## 装好就能开工！
+
+[下载最新桌面版](https://github.com/plumliu/pulsara-agent/releases/latest)
+
+| 系统 | 安装包 |
 | --- | --- |
-| **并行 Agent 团队** | 让调查、实现和审阅分别由不同 Agent 推进，每个 Agent 都有自己的上下文与模型。 |
-| **上下文分支** | 从同一次已完成的调查出发，让不同方案分别承接它的对话和工具调用历史。 |
-| **持久记忆** | 把你的偏好、项目知识和已有决策带入下一个任务。 |
-| **长任务推进** | 通过上下文压缩、后台终端和已保存的对话，持续推进复杂调查。 |
-| **提示词缓存复用** | 保持输入前缀一致，让支持缓存的供应商复用已处理的输入，在命中时降低输入成本和响应延迟。 |
-| **可用的成果** | 得到可运行的代码、交互式仪表盘、Word 文档、可编辑的工作簿、PDF 和图表。 |
-| **Skills、MCP 与插件** | 为 Agent 接入任务所需的专业工作流程、外部服务和项目工具。 |
-| **可视化工作台** | 查看任务对话与工具活动，审阅计划，并在工作进行时调整方向。 |
-| **自由选择模型** | 组合兼容 OpenAI 的服务和自托管端点，为不同任务选择模型与推理强度。 |
+| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.1/Pulsara-0.1.0-alpha.1-macos-arm64.dmg) |
+| Ubuntu 24.04，amd64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.1/Pulsara-0.1.0-alpha.1-linux-amd64.deb) |
+| Ubuntu 24.04，arm64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.1/Pulsara-0.1.0-alpha.1-linux-arm64.deb) |
 
-## 让一支团队一起推进
+1. 安装并打开 Pulsara。macOS 把应用拖进“应用程序”，Ubuntu 安装对应的 deb。
+2. 在设置中添加模型连接，选择提供方、模型和 API 协议，按界面提示填写认证信息或自定义配置。
+3. 开一个快速开始会话，拖进文件，或者直接打开项目目录。把任务交给它。
 
-让一个 Agent 追踪代码实现，另一个核对关键假设，再让第三个分析数据。Pulsara 的协调 Agent 会委派任务、汇总发现，并据此推进下一步。
+当前是桌面预览版。macOS 首次打开的系统授权、更新方式与数据位置写在[安装说明](INSTALL.md)里。偏爱终端的话，应用也带了 `pulsara` 命令行入口。
 
-每个任务都有自己的对话和进度。打开任务图，查看工作如何展开，阅读某个 Agent 的发现，或检查它继承的上下文。Agent 可以把工作安排成多个阶段，并将已有结果交给后续任务使用。
+## 拿你的任务来试试
 
-### 一次调查，多个方向
+欢迎把作品和使用体验带到 [Issues](https://github.com/plumliu/pulsara-agent/issues)，也欢迎提需求、报 Bug。想一起做 Pulsara，可以看[开发指南](DEVELOPMENT.md)和 [Pull requests](https://github.com/plumliu/pulsara-agent/pulls)。
 
-一次扎实的调查，值得继续发挥作用。Pulsara 可以让新任务承接这次调查的对话与工具调用历史，也可以让多个分支从这里分别出发。
-
-```mermaid
-flowchart LR
-    A["A · 调查问题"] -->|"继承 A 的上下文"| B["B · 实现方案"]
-    A -->|"继承 A 的上下文"| C["C · 审视方案"]
-    A -->|"继承 A 的上下文"| D["D · 探索另一种思路"]
-```
-
-负责实现的 Agent 带着调查结果开始工作。负责审阅的 Agent 从同一组发现出发，独立推进自己的判断。另一个 Agent 则可以探索替代方案。每个分支形成自己的后续历史，同时使用共享工作目录中的项目文件。
-
-为明确的小检查选择快速模型，为复杂设计选择更强的模型，再让独立的审阅者复核结果。团队推进时，你可以查看每个任务的对话。
-
-## 让长任务持续推进
-
-接下需要反复打磨的重构、不断发现新问题的调查，或明天还要继续推进的项目。
-
-Pulsara 能搜索文件、编辑代码、运行命令并检查输出。耗时的命令可以留在后台终端中运行，Agent 同时继续下一步。随着对话增长，上下文压缩会腾出空间；已保存的历史让你回来时仍能接着这份工作。
-
-工作进行时，你可以补充纠正信息、排入下一条指令，或停止运行重新考虑。计划模式让 Agent 先调查并提出方案，供你审阅后再开始实施。
-
-## 为提示词缓存而设计
-
-**长上下文是一笔投入，Pulsara 让它保持可复用。**
-
-在同一段连续上下文中，系统指令和工具定义逐字节保持不变。新消息、工具结果和你的补充指令只追加到历史末尾，保留此前调用已经建立的输入前缀。压缩后的新上下文同样遵循这一原则。
-
-这种连续性为[供应商的提示词缓存](https://developers.openai.com/api/docs/guides/prompt-caching)提供了稳定的命中基础。复用缓存前缀可以降低输入处理成本，并让响应更快开始。越多步骤沿用不断增长的历史，越多已经处理过的上下文就能继续参与复用。
-
-输入预算优先使用最近一次兼容请求中供应商报告的 input token 数，再估算其后追加的实际请求内容。本次 usage 缺失时保留旧的兼容锚点；没有锚点时使用启发式估算。文字和 JSON 共用同一规则：中日韩文字及宽标点按每码点一个 token，其余文字按 UTF-8 字节数除以四，再向上取整。重新打开对话后仍可查询历史 usage，新上下文则从全量估算起步。详见[usage 与输入预算契约](archived_docs/PULSARA_PROVIDER_USAGE_ANCHORED_INPUT_BUDGET_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。
-
-输入框旁的圆环显示当前模型的上下文占用，悬停可查看估算用量与可用输入额度。切换模型后重新估算；达到压缩阈值时标红。未发送内容不计入预览。详见[上下文圆环契约](archived_docs/PULSARA_CONTEXT_USAGE_INDICATOR_IMPLEMENTATION_SPEC.zh.md)。
-
-目录模型可在设置中调整上下文额度，范围为 256,000 tokens 至 models.dev 上限，默认采用最大值。额度影响输入与压缩阈值，输出仍使用供应商最大值。详见[上下文额度契约](archived_docs/PULSARA_MODEL_CONTEXT_ALLOWANCE_IMPLEMENTATION_SPEC.zh.md)。
-
-## 让积累的知识继续发挥作用
-
-让下一次工作，从已有的偏好、项目决策和约束出发。
-
-Pulsara 可以记住你的写作风格，保留项目决策背后的理由，并检索以前对话中的知识。关键词和语义搜索帮助 Agent 找到与当前任务相关的信息。记忆之间的关联连接已有知识，新的决策也可以取代旧的结论。
-
-打开记忆页，查看保存了什么、检查可用的来源信息、修改偏好，或删除不再适用的内容。你可以直接查看和管理这份持续积累的记忆。
-
-## 交付拿得走、用得上的成果
-
-打开交互式仪表盘，探索分析结果。把可编辑的工作簿交给同事。用批注和修订审阅 Word 文档。直接在项目中运行修复后的代码。
-
-Pulsara 把这些成果带进工作台：对话内的交互式 HTML、SVG 与 Mermaid 图表、数学公式、图片和文件预览。你可以打开引用的文件，查看完整工具输出，或导出成果，继续用于下一步工作。
-
-内置 Skills 为这些交付提供专门的工作流程：
-
-| 工作 | 内置 Skill |
-| --- | --- |
-| **文档** | [pulsara-docs](src/pulsara_agent/bundled_skills/pulsara-docs/SKILL.md)：创建和编辑 Word 文档，处理模板、批注与修订。 |
-| **电子表格** | [pulsara-sheets](src/pulsara_agent/bundled_skills/pulsara-sheets/SKILL.md)：转换数据、编写公式、设置工作簿格式，并生成可编辑图表。 |
-| **PDF** | [pulsara-pdf](src/pulsara_agent/bundled_skills/pulsara-pdf/SKILL.md)：阅读、提取和创建 PDF 文档。 |
-| **数据分析** | [pulsara-data-analysis](src/pulsara_agent/bundled_skills/pulsara-data-analysis/SKILL.md)：探索数据集，使用 Python 和 SQL 分析，并构建交互式 HTML 报告。 |
-
-### 给它一个真正的任务
-
-> **工程开发：**“追查这个 Bug，比较两种修复方式，让另一个 Agent 审阅选定的方案，然后运行相关测试。”
-
-> **研究：**“用已经连接的研究工具比较这些方案。核对来源，质疑关键假设，再做一份可视化简报。”
-
-> **数据分析：**“分析这些表格，解释发生了什么变化，给我一个交互式仪表盘和一份可编辑的工作簿。”
-
-> **文档：**“阅读这些材料，用 Word 起草一份提案，再根据我的批注修改。”
-
-## 打造你的工作台
-
-设置中的“已归档会话”支持“删除全部”。确认范围覆盖当前完整列表的所有分页；执行时已取消归档的会话会跳过。右下角通知显示进度和未读结果，切换页面后仍可查看；最终结果查看一次后通知消失，未完成项可在结果弹窗中重试。保存的记忆和工作目录保留。刷新工作台或退出应用会停止发送剩余条目，已被服务接纳的删除仍会结算。
-
-把你的研究服务、专业工作流程和项目工具，接入同一个工作台。
-
-- **Skills** 教会 Agent 用可重复的流程处理专业工作。为新领域安装一个 Skill，或让 Agent 为经常重复的任务创建一个。
-- **MCP** 让 Agent 能调用外部工具，访问数据源、资源和提示词。在工作台中配置连接与认证。
-- **插件** 将相关的 Skills、MCP 服务和 Hooks 打包在一起。
-
-MCP 目录会跟随服务端支持的变化通知更新。更换连接目标并沿用已有凭据时，需要确认，包括模板中引用的凭据；明确输入新凭据时按实际替换情况判断。MCP schema 校验只使用文档内资源，评估失败在工具内报告；应用错误、服务端协议错误和传输失败分别处理，结构化结果保留显式 null。连接关闭与断链处理遵循 [MCP 链路正确性规范](PULSARA_MCP_CHAIN_CORRECTNESS_HARD_CUT_IMPLEMENTATION.zh.md)。
-- **Hooks** 在 Agent 工作过程中的受支持时点，执行你配置的动作。
-
-你可以让能力在不同项目中通用，也可以把它们限定在某个项目内。在界面中管理，或让 Agent 检查和配置。内置安装 Skills 会指导 Agent 添加 Skills、MCP 服务和插件。
-
-在输入框中输入 `/` 可选择本轮使用的技能，输入 `@` 可引用文件或目录。
-
-## 为每个任务选择合适的模型
-
-为快速查询选择一个模型，为复杂实现选择另一个，再为独立审阅安排第三个。每个委派任务都可以使用自己的模型与推理设置。
-
-通过 Chat Completions 或 Responses 接入兼容 OpenAI 的服务与自托管端点。在工作台中选择模型和受支持的推理强度，按任务需要搭配你的 Agent 团队。
-
-工作台、对话历史和记忆保存在你的电脑上。由你选择驱动工作的模型连接。
-
-## 工作进展尽在眼前
-
-对话、Agent、能力、记忆和终端，都汇集在工作台中。按目录查找会话，或搜索历史。展开工具活动，打开某个 Agent 的对话，查看后台命令的进展。
-
-选中回复的一部分，给出精确反馈。分叉会话，探索另一个方向。在 Agent 采取下一步行动前审阅计划、回答它的问题。目标变化时，随时调整方向或停止运行。
-
-**把工作交给 Agent，把关键判断留在你手中。**
-
-## 打开工作台
-
-预览版安装包通过 [GitHub Releases](https://github.com/plumliu/pulsara-agent/releases) 提供，安装、更新和 macOS 首次允许打开的步骤见[安装说明](INSTALL.md)。
-
-打开已安装的 **Pulsara** 桌面应用。应用会启动随包 PostgreSQL 和 Python 内核，再显示工作台。在界面中选择工作目录，并在设置中配置模型。桌面资源包含 Python、PostgreSQL 及搜索/向量扩展、ripgrep 和截图所需的浏览器。
-
-桌面构建目标为 macOS 15+ ARM64、Ubuntu 24.04 x86_64/ARM64。构建目标不等于所有平台均已完成安装实测；后端 CI 也不能代替桌面验收。当前验证范围见[桌面实现与验收方案](PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md)。
-
-关闭窗口后，应用继续驻留，可从 Dock 或托盘返回。选择 **Pulsara → 退出 Pulsara** 才会完整退出；应用先停止并结算当前工作，再关闭数据库。Linux 无可用托盘时，关闭窗口会提供最小化或退出选项。
-
-应用数据默认保存在 `~/.pulsara`；绝对路径的 `PULSARA_HOME` 可指定其他目录。模型凭据继续使用现有本机设置，专用数据库位于 `desktop/postgres`。首次桌面启动建立独立数据库，不导入原开发库历史。普通重启保留数据；开发期不兼容更新可以要求明确确认“重置专用数据库”，清除会话、记忆和定时任务，保留工作目录文件与模型设置。
-
-### 可选命令行工具
-
-CLI 已随应用提供。macOS 在首次启动时自动注册 `~/.local/bin/pulsara`，后续启动更新自己的入口；deb 包负责注册 `/usr/bin/pulsara`。在 **设置 → 通用 → 本地服务 → 命令行入口** 查看状态、重新检查或修复。遇到已有命令时自动注册会保留它，由用户明确选择“重置”。应用不会自动修改 shell 配置；若终端找不到命令，请把入口目录加入 `PATH`，并用 `command -v pulsara` 核对。命令使用随包 Python，无需单独安装。
-
-```bash
-pulsara app
-pulsara --help
-pulsara config-check
-pulsara db status
-pulsara db verify
-```
-
-`pulsara app` 启动或聚焦同一桌面实例，交付启动请求后即返回；关闭该终端不会停止应用。`skills`、`plugins`、`mcp`、`hooks` 保留原管理命令。数据库诊断查询正在运行的应用专用实例；应用关闭时明确报告不可用。公开 CLI 不再提供 Web 服务参数、外部 DSN 配置或 `db migrate`。桌面启动器不接受旧的权限、Skill 等运行参数；请使用工作台中的会话与能力管理入口。
-
-### 从源码构建桌面应用
-
-请在目标平台构建。构建机需要 Node.js 22.13+、npm、`uv` 管理的 Python 3.12、C 编译器、`make`、`pkg-config`、Bison 和 Flex。macOS 还需要 Xcode command-line tools 与 `dylibbundler`；Ubuntu 需要 `binutils`、`pax-utils`（提供 `lddtree`）、`patchelf` 和 `libopenblas0`。这些依赖用于构建机。
-
-资源脚本从固定上游源码构建 PostgreSQL **17.9** 与 **pgvector 0.8.1**，下载对应 macOS ARM64 Sequoia 或 Ubuntu Noble PG17 x86_64/ARM64 的 **pg_search 0.26.1** 包，校验下载并收集动态库依赖，再打包可搬移 Python 运行时及 Playwright Chromium。因此 macOS 资源构建需要 macOS 15 或更新版本。如需使用自行准备的匹配扩展产物，可以同时传入 `--extension-lib`（动态库目录）和 `--extension-share`（control/SQL 目录）；同样执行版本和架构检查。
-
-在仓库根目录运行：
-
-```bash
-uv sync --frozen --managed-python --no-install-project
-.venv/bin/python tools/prepare_ripgrep.py
-uv sync --frozen --managed-python
-npm --prefix frontend ci
-npm --prefix frontend run build:desktop
-npm --prefix desktop ci
-.venv/bin/python desktop/scripts/prepare_resources.py
-npm --prefix desktop run package:dir
-```
-
-未封装的应用位于 `desktop/release`。`npm --prefix desktop run package` 生成配置中的 DMG 或 Linux deb 产物。发布签名与公证需要单独配置，本地构建不带发布签名。Python 变更后重新运行资源脚本；UI 变更后先重新构建前端，再更新资源。`npm --prefix desktop start` 使用已准备的随包资源运行 Electron 开发壳，不提供另一套浏览器产品入口。
-
-后端检查使用仓库环境，桌面壳检查使用 Node 测试运行器：
-
-```bash
-.venv/bin/python -m pytest -m 'not postgres'
-npm --prefix frontend test
-npm --prefix desktop test
-```
-
-数据库集成夹具与 Ubuntu 包检查见 [tests/linux/README.md](tests/linux/README.md)。实际桌面验收还包括原生资源、退出、重开与真实模型任务，范围以桌面方案为准。
-
----
-
-基于带类型约束的 Python 运行时、React 工作台和 PostgreSQL 构建，提供持久会话与记忆，以及 ripgrep 驱动的文件搜索。
-
-[分享想法或反馈问题](https://github.com/plumliu/pulsara-agent/issues) · [参与贡献](https://github.com/plumliu/pulsara-agent/pulls)
+如果它对你有帮助，给 Pulsara 点个 Star吧。

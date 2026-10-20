@@ -56,15 +56,4 @@ pulsara --help
 pulsara app
 ```
 
-## 校验下载 / Verify downloads
-
-下载 `SHA256SUMS`，将对应文件的计算结果与其中一行比较。Download `SHA256SUMS` and compare the matching checksum:
-
-```sh
-# macOS
-shasum -a 256 Pulsara-0.1.0-alpha.1-macos-arm64.dmg
-# Ubuntu
-sha256sum Pulsara-0.1.0-alpha.1-linux-amd64.deb
-```
-
 反馈问题请提供系统、架构、版本及复现步骤：[GitHub Issues](https://github.com/plumliu/pulsara-agent/issues)。不要提交 API Key 或 OAuth 令牌。Include the OS, architecture, version and reproduction steps, without credentials.
