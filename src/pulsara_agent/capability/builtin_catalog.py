@@ -485,24 +485,56 @@ OPEN_IN_PULSARA_DESCRIPTION = (
     "Use a task target with an actual task_id to open its group and select that task directly. "
     "This does not start servers, run commands, reconnect MCP, or publish inline visualizations. ROOT only."
 )
-OPEN_IN_PULSARA_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["targets"],
-    "properties": {"targets": {
-        "type": "array", "minItems": 1, "items": {},
+OPEN_IN_PULSARA_SCHEMA = object_schema(
+    required=["targets"],
+    properties={"targets": {
+        "type": "array",
+        "minItems": 1,
         "description": (
-            'Ordered targets, each exactly one of: {"type":"file","path":"..."}, '
-            '{"type":"browser","url":"https://..."}, {"type":"terminal","process_id":"..."}, '
-            '{"type":"task","task_id":"task:..."}, '
-            '{"type":"mcp","runtime_server_id":"..."}, or {"type":"panel","name":"capabilities|tasks|background|browser"}. '
-            'Panel browser creates a blank webpage with no URL; duplicates within a batch share one blank tab, later calls create a new one. '
-            'No extra fields. File paths are relative to this conversation workspace; absolute paths, ~ and '
-            '${PULSARA_HOME} are supported. Browser URLs must include HTTP(S), without credentials. '
-            'Copy process_id from terminal results/listings and runtime_server_id from capability inspection. '
-            'Copy task_id from spawn_agent, spawn_agent_group, or list_agent_tasks; it opens the task\'s group in this conversation. '
-            'Do not provide host, session or tab IDs.'
+            "Ordered display targets. Invalid items are reported individually without rejecting valid siblings. "
+            "Do not provide host, session or tab IDs."
         ),
+        "items": {"anyOf": [
+            object_schema(required=["type", "path"], properties={
+                "type": {"const": "file"},
+                "path": {"type": "string", "minLength": 1, "description": (
+                    "Local file path, relative to this conversation workspace or absolute; "
+                    "~ and ${PULSARA_HOME} are supported."
+                )},
+            }),
+            object_schema(required=["type", "url"], properties={
+                "type": {"const": "browser"},
+                "url": {"type": "string", "minLength": 1,
+                        "description": "Complete HTTP(S) URL without credentials."},
+            }),
+            object_schema(required=["type", "process_id"], properties={
+                "type": {"const": "terminal"},
+                "process_id": {"type": "string", "minLength": 1,
+                               "description": "Copy from terminal results or process listings."},
+            }),
+            object_schema(required=["type", "task_id"], properties={
+                "type": {"const": "task"},
+                "task_id": {"type": "string", "minLength": 1, "description": (
+                    "Copy the actual task_id from spawn_agent, spawn_agent_group, or list_agent_tasks; "
+                    "opens its group in this conversation and selects the task."
+                )},
+            }),
+            object_schema(required=["type", "runtime_server_id"], properties={
+                "type": {"const": "mcp"},
+                "runtime_server_id": {"type": "string", "minLength": 1,
+                                      "description": "Copy from capability inspection."},
+            }),
+            object_schema(required=["type", "name"], properties={
+                "type": {"const": "panel"},
+                "name": {"type": "string", "enum": ["capabilities", "tasks", "background", "browser"],
+                         "description": (
+                             "Overview panel. browser creates a blank webpage; duplicates in one batch "
+                             "share a blank tab, later calls create a new one."
+                         )},
+            }),
+        ]},
     }},
-}
+)
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {

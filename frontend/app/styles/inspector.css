@@ -4,6 +4,7 @@
 .inspector-section .section-label small svg { animation: spin .9s linear infinite; }
 
 .task-inventory-notice { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 8px 0 12px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; color: var(--violet); background: var(--violet-soft); }
+.task-inventory-notice > p { grid-column: 1 / -1; min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .task-inventory-notice > svg { animation: spin .9s linear infinite; }
 .task-inventory-notice span { min-width: 0; }
 .task-inventory-notice strong,

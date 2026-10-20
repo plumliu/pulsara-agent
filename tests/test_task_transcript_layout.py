@@ -152,3 +152,25 @@ def test_task_detail_sticky_header_covers_scrolled_execution_dots(browser, theme
         assert result == {"overlaps": True, "headerOnTop": True}
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("width", [240, 620])
+def test_task_error_text_uses_full_notice_width_and_wraps_normally(browser, width):
+    page = browser.new_page(viewport={"width": 900, "height": 700})
+    try:
+        page.set_content(f'''<html><style>{CSS}</style><aside style="width:{width}px">
+          <div class="task-inventory-notice"><p role="alert">请求的本地资源已失效。</p></div>
+          <div class="task-inventory-notice"><p role="alert">{"任务暂时无法读取，请稍后重试。" * 12}</p></div>
+        </aside></html>''')
+        metrics = page.locator('[role="alert"]').evaluate_all('''items => items.map(item => {
+            const box = item.getBoundingClientRect(), host = item.parentElement;
+            const range = document.createRange(); range.selectNodeContents(item);
+            return {width: box.width, available: host.clientWidth - 20,
+                lines: range.getClientRects().length, overflow: item.scrollWidth > item.clientWidth};
+        })''')
+        assert all(item["width"] == pytest.approx(item["available"]) for item in metrics)
+        assert metrics[0]["lines"] == 1
+        assert metrics[1]["lines"] > 1
+        assert all(not item["overflow"] for item in metrics)
+    finally:
+        page.close()

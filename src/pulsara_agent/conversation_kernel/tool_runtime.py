@@ -1281,9 +1281,7 @@ class DirectKernelToolPort:
         if entry is not None:
             schema = _json_schema_value(entry.descriptor.input_schema)
             try:
-                validator = validators.validator_for(schema)
-                validator.check_schema(schema)
-                validator(schema).validate(dict(arguments))
+                _validate_builtin_call_schema(tool_name, schema, arguments)
             except ValidationError as exc:
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -1857,9 +1855,7 @@ class DirectKernelToolPort:
         entry = builtin_tool_catalog_entry(tool_name)
         schema = _json_schema_value(entry.descriptor.input_schema)
         try:
-            validator = validators.validator_for(schema)
-            validator.check_schema(schema)
-            validator(schema).validate(dict(arguments))
+            _validate_builtin_call_schema(tool_name, schema, arguments)
         except ValidationError as exc:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -4532,6 +4528,24 @@ def _workspace_relative_handoff_path(value: Path, root: Path) -> str:
         return resolved.relative_to(root).as_posix()
     except ValueError:
         return "<outside-workspace>"
+
+
+def _validate_builtin_call_schema(
+    tool_name: str, schema: dict[str, object], arguments: Mapping[str, object]
+) -> None:
+    validator = validators.validator_for(schema)
+    validator.check_schema(schema)
+    for error in validator(schema).iter_errors(dict(arguments)):
+        # Display targets settle independently; only their outer call shape is
+        # an admission failure. Keep the same structured schema on both wires.
+        if (
+            tool_name == "open_in_pulsara"
+            and len(error.absolute_path) >= 2
+            and error.absolute_path[0] == "targets"
+            and isinstance(error.absolute_path[1], int)
+        ):
+            continue
+        raise error
 
 
 def _json_schema_value(value: Mapping[str, object]) -> dict[str, object]:
