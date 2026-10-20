@@ -12,7 +12,7 @@ Link a deliverable with `[label](/absolute/path)`. The desktop opens its current
 
 Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. For simple visuals, consider a single HTML file. Local image paths may be absolute or relative to the file that references them. Use inline SVG for icons such as Lucide. Network resources are unavailable. Paths in publication fences resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access. Resources inside HTML/CSS resolve relative to the declaring file.
 
-In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing HTML, PNG, JPEG or static WebP paths, or known `image:` references copied unchanged, one per line. Images do not need an HTML wrapper or a prior `view_image` call:
+In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing file paths or known `image:` references copied unchanged, one per line. The only supported file extensions are **`.png`, `.jpg`, `.jpeg`, `.webp` (static only), `.html` and `.htm`**. Do not put `.svg` paths in these fences; use a fenced `svg` code block or embed the SVG in an HTML file instead. Supported images do not need an HTML wrapper or a prior `view_image` call:
 
 ````markdown
 Compare the costs:

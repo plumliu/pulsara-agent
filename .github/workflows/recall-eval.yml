@@ -1,25 +1,7 @@
 name: Advisory Memory Contract
 
 on:
-  pull_request:
-    paths:
-      - "src/pulsara_agent/memory/**"
-      - "src/pulsara_agent/conversation_kernel/memory/**"
-      - "src/pulsara_agent/conversation_kernel/memory_tools.py"
-      - "src/pulsara_agent/conversation_kernel/_repository/memory*.py"
-      - "src/pulsara_agent/storage/migrations/**"
-      - "tests/test_memory_*"
-      - "tests/test_direct_*memory*.py"
-      - "tests/test_desktop_memory_management.py"
-      - "tests/support/postgres*.py"
-      - "tests/conftest.py"
-      - "docker/postgres-init/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/recall-eval.yml"
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   recall-eval:

@@ -6,6 +6,8 @@ For the desktop app, download an installer from [Releases](https://github.com/pl
 
 ## English
 
+GitHub Actions run manually for now; pushes (including tags) and pull requests do not trigger them. Start a workflow from the Actions page when needed. To build a release draft, manually run Native Desktop Packages against its version tag.
+
 Build on the target platform using Node.js 22.13+, npm, `uv` with managed Python 3.12, a C compiler, `make`, `pkg-config`, Bison, and Flex. macOS builds need Xcode command-line tools and `dylibbundler`; Ubuntu builds need `binutils`, `pax-utils` (`lddtree`), `patchelf`, and `libopenblas0`. These are build-machine requirements.
 
 The resource builder builds PostgreSQL **17.9** and **pgvector 0.8.1** from pinned upstream source archives, downloads the pinned **pg_search 0.26.1** package for macOS ARM64 Sequoia or Ubuntu Noble PG17 x86_64/ARM64, verifies downloads, and bundles their native dependencies. It also packages a relocatable Python runtime and Playwright Chromium. Building macOS resources therefore requires macOS 15 or newer. To supply your own matching extension payload instead, pass both `--extension-lib` (native libraries) and `--extension-share` (control/SQL files); the same version and architecture checks apply.
@@ -37,6 +39,8 @@ Database integration fixtures and Ubuntu package checks are described in [tests/
 
 
 ## 中文
+
+GitHub Actions 暂时仅手动运行，推送（包括标签）和 Pull Request 均不自动触发。需要时在 Actions 页面手动启动；生成 Release 草稿时，对版本标签运行 Native Desktop Packages。
 
 请在目标平台构建。构建机需要 Node.js 22.13+、npm、`uv` 管理的 Python 3.12、C 编译器、`make`、`pkg-config`、Bison 和 Flex。macOS 还需要 Xcode command-line tools 与 `dylibbundler`；Ubuntu 需要 `binutils`、`pax-utils`（提供 `lddtree`）、`patchelf` 和 `libopenblas0`。这些依赖用于构建机。
 
