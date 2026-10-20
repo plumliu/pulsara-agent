@@ -25,7 +25,7 @@ npm --prefix desktop ci
 npm --prefix desktop run package:dir
 ```
 
-The unpacked application is written under `desktop/release`. `npm --prefix desktop run package` produces the configured DMG or Linux deb artifacts. Release signing and notarization require separate release configuration; the local build is unsigned. Re-run the resource builder after Python changes, and rebuild the frontend before refreshing resources after UI changes. `npm --prefix desktop start` runs the Electron development shell against prepared bundled resources; it does not expose a second browser-based product entry.
+The unpacked application is written under `desktop/release`. `npm --prefix desktop run package` produces the configured DMG or Linux deb artifacts. Linux packaging uses electron-builder's ICNS conversion to supply standard `hicolor` PNG sizes; a lone 1024px PNG lands in a directory Ubuntu's theme does not index. Release signing and notarization require separate release configuration; the local build is unsigned. Re-run the resource builder after Python changes, and rebuild the frontend before refreshing resources after UI changes. `npm --prefix desktop start` runs the Electron development shell against prepared bundled resources; it does not expose a second browser-based product entry.
 
 Backend checks use the repository environment; desktop shell checks use Node's test runner:
 

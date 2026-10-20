@@ -6,6 +6,45 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const prepare = require('./linux-hooks.cjs');
 
+test('Electron Builder desktop entry matches the runtime identity and installed icon', async () => {
+  const metadata = require('../package.json');
+  const { LinuxTargetHelper } = require('app-builder-lib/out/targets/LinuxTargetHelper');
+  const linux = metadata.build.linux;
+  const helper = new LinuxTargetHelper({
+    info: { metadata },
+    platformSpecificBuildOptions: linux,
+    executableName: linux.executableName,
+    config: metadata.build,
+    appInfo: { productName: metadata.productName, sanitizedProductName: metadata.productName,
+      description: metadata.description },
+    fileAssociations: [],
+  });
+  const entry = await helper.computeDesktopEntry(linux);
+  const fields = Object.fromEntries(entry.split('\n').filter(line => line.includes('='))
+    .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+  assert.equal(helper.getDesktopFileName() + '.desktop', metadata.desktopName);
+  assert.equal(fields.StartupWMClass + '.desktop', metadata.desktopName);
+  assert.equal(fields.Icon, 'pulsara-desktop');
+  assert.equal(fields.Exec, '/opt/Pulsara/pulsara-desktop %U');
+  assert.equal(fields.MimeType, 'x-scheme-handler/pulsara;');
+});
+
+test('Linux icon conversion supplies standard hicolor sizes', async () => {
+  const metadata = require('../package.json');
+  const { convertIcon, getPngSize } = require('app-builder-lib/out/util/iconConverter');
+  const output = await fs.mkdtemp(path.join(os.tmpdir(), 'pulsara-icons-'));
+  try {
+    const result = await convertIcon({ sources: [metadata.build.linux.icon],
+      fallbackSources: [], roots: [path.resolve(__dirname, '..')], format: 'set', outDir: output });
+    assert.equal(result.isFallback, false);
+    for (const size of [32, 128, 256, 512]) {
+      const icon = result.icons.find(icon => icon.size === size);
+      assert.ok(icon, `Missing ${size}px icon for the hicolor theme`);
+      assert.deepEqual(await getPngSize(icon.file), { width: size, height: size });
+    }
+  } finally { await fs.rm(output, { recursive: true, force: true }); }
+});
+
 test('Debian CLI lifecycle preserves an unrelated command and removes only its own symlink', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pulsara-deb-'));
   try {

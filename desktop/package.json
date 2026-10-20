@@ -1,6 +1,7 @@
 {
   "name": "pulsara-desktop",
   "productName": "Pulsara",
+  "desktopName": "pulsara-desktop.desktop",
   "version": "0.1.0-alpha.2",
   "description": "Pulsara local agent workbench",
   "author": "Pulsara",
@@ -67,10 +68,11 @@
       "artifactName": "Pulsara-${version}-macos-${arch}.${ext}"
     },
     "linux": {
+      "syncDesktopName": true,
       "target": [
         "deb"
       ],
-      "icon": "assets/pulsara.png",
+      "icon": "assets/pulsara.icns",
       "category": "Utility",
       "desktop": {
         "entry": {

@@ -73,7 +73,8 @@ with `npm --prefix desktop test`; Python lifecycle tests exercise the private
 host channel, owner lock, database initialization and ordinary shutdown owner.
 Neither suite substitutes for running the installed Electron artifact.
 
-Ubuntu GUI/VM checks cover title-bar controls, close/return/quit, directory and
+Ubuntu GUI/VM checks cover the application icon in the Dock, Alt+Tab and tray,
+title-bar controls, close/return/quit, directory and
 file selection, real-path drag/drop, capability directories, native file open
 and reveal, independent preview tabs, history navigation, and a real model task.
 Check the desktop environment that is actually available and record it. Backend

@@ -18,6 +18,7 @@ function resolveHome(): string {
 }
 const home = resolveHome();
 const startupFile = path.resolve(__dirname, '..', 'assets', 'startup.html');
+const desktopIcon = path.resolve(__dirname, '..', 'assets', 'pulsara.png');
 app.setName('Pulsara');
 app.setPath('userData', path.join(home, 'desktop', 'electron'));
 const uiPreferences = new UiPreferences(path.join(app.getPath('userData'), 'ui-preferences.json'));
@@ -150,6 +151,7 @@ else {
   void app.whenReady().then(async () => {
     if (app.isPackaged) app.setAsDefaultProtocolClient('pulsara');
     window = new BrowserWindow({width: 1440, height: 920, minWidth: 760, minHeight: 520, backgroundColor:'#f3f0e7', title:'Pulsara',
+      ...(process.platform === 'linux' ? {icon: desktopIcon} : {}),
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
       trafficLightPosition: {x: 16, y: 16},
       webPreferences: {preload:path.join(__dirname,'preload.js'), sandbox:true, contextIsolation:true, nodeIntegration:false, webviewTag:false, navigateOnDragDrop:false}});
@@ -170,7 +172,7 @@ else {
     });
     if (process.platform === 'linux') {
       try {
-        tray = new Tray(nativeImage.createFromPath(path.resolve(__dirname,'../assets/tray.png')));
+        tray = new Tray(nativeImage.createFromPath(desktopIcon).resize({width:32,height:32}));
         tray.setToolTip('Pulsara'); tray.setContextMenu(Menu.buildFromTemplate([{label:'打开 Pulsara',click:focusWindow},{label:'退出 Pulsara',click:()=>void requestQuit()}]));
         tray.on('click',focusWindow);
       } catch { tray = undefined; }
