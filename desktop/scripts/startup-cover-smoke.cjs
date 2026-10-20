@@ -1,14 +1,51 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { once } = require('node:events');
 const { StartupCover } = require('../dist/startup-cover');
 
 let host;
+// A failing native regression must exit rather than leave Electron's exception dialog open.
+process.on('uncaughtException', error => { console.error(error); app.exit(1); });
+async function within(promise, message) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), 2000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+function coverView() { return host.contentView.children.find(child => child.webContents !== host.webContents); }
+async function fadeStarted(contents) {
+  await contents.executeJavaScript(`(() => {
+    const animate = document.body.animate.bind(document.body);
+    document.body.animate = (...args) => {
+      const animation = animate(...args);
+      window.fadeCount = (window.fadeCount || 0) + 1;
+      console.log('startup-fade-started');
+      return animation;
+    };
+  })()`);
+  return { started: new Promise(resolve => {
+    const listener = event => {
+      if (event.message === 'startup-fade-started') {
+        contents.removeListener('console-message', listener);
+        resolve();
+      }
+    };
+    contents.on('console-message', listener);
+  }) };
+}
 app.whenReady().then(async () => {
   app.dock?.hide();
-  host = new BrowserWindow({ show: false, width: 1000, height: 700, webPreferences: { sandbox: true } });
-  const cover = new StartupCover(host, path.resolve(__dirname, '../assets/startup.html'), path.resolve(__dirname, '../dist/preload.js'));
+  const preload = path.resolve(__dirname, '../dist/preload.js');
+  host = new BrowserWindow({ show: false, width: 1000, height: 700, webPreferences: { sandbox: true, preload } });
+  const cover = new StartupCover(host, path.resolve(__dirname, '../assets/startup.html'), preload);
+  ipcMain.handle('desktop:startup-settled', event => {
+    assert.equal(event.sender, host.webContents);
+    assert.equal(event.senderFrame, host.webContents.mainFrame);
+    return cover.finish();
+  });
   await cover.show();
   console.log('Startup document loaded');
   const view = host.contentView.children.find(child => child.webContents !== host.webContents);
@@ -42,15 +79,69 @@ app.whenReady().then(async () => {
   await destroyed;
   assert.equal(contents.isDestroyed(), true);
   await cover.finish(); // Reloads after the initial cover was removed are harmless.
+
+  // Exercise the production preload -> IPC -> cover -> renderer interaction gate.
+  // The assertion runs while the native window is still hidden, before revealing it.
+  await host.loadURL('data:text/html,<div id="root" inert>Workbench ready</div>');
+  for (const transition of ['hide', 'minimize', 'destroy-contents', 'replace']) {
+    host.restore();
+    host.showInactive();
+    await cover.show();
+    const pendingView = coverView();
+    const pendingContents = pendingView.webContents;
+    const { started } = await fadeStarted(pendingContents);
+    const ready = host.webContents.executeJavaScript(`(() => {
+      document.getElementById('root').inert = true;
+      return Promise.all([window.pulsaraDesktop.startupSettled(), window.pulsaraDesktop.startupSettled()]).then(() => {
+        document.getElementById('root').inert = false;
+      });
+    })()`);
+    await within(started, `${transition}: fade never started`);
+    assert.equal(await pendingContents.executeJavaScript('window.fadeCount'), 1, 'concurrent startup notifications share one fade');
+    let replacement;
+    if (transition === 'hide') host.hide();
+    if (transition === 'minimize') host.minimize();
+    if (transition === 'destroy-contents') pendingContents.close();
+    if (transition === 'replace') {
+      await cover.show('replacement error');
+      replacement = coverView();
+    }
+    await within(ready, `${transition}: startup IPC remained blocked`);
+    assert.equal(await host.webContents.executeJavaScript('document.getElementById("root").inert'), false);
+    assert.equal(pendingContents.isDestroyed(), true);
+    assert.equal(host.contentView.children.includes(pendingView), false);
+    if (replacement) {
+      assert.equal(coverView(), replacement, 'old fade must not remove its replacement');
+      assert.equal(await replacement.webContents.executeJavaScript('document.getElementById("status").textContent'), 'replacement error');
+      host.hide();
+      await cover.finish();
+    }
+    console.log(`PASS: ${transition} settles startup IPC and releases the renderer interaction gate`);
+  }
+
+  // Electron can clear view.webContents before the cover owner disposes the view.
+  await cover.show();
+  const earlyDestroyed = coverView();
+  const earlyContents = earlyDestroyed.webContents;
+  const earlyClosed = once(earlyContents, 'destroyed');
+  earlyContents.close();
+  await earlyClosed;
+  assert.equal(earlyDestroyed.webContents, undefined);
+  await cover.finish();
   await cover.show('fixture startup failure');
   const failure = host.contentView.children.find(child => child.webContents !== host.webContents);
   const failureContents = failure.webContents;
   assert.equal(await failureContents.executeJavaScript('document.getElementById("actions").hidden'), false);
   assert.equal(await failureContents.executeJavaScript('document.getElementById("status").textContent'), 'fixture startup failure');
   const failureDestroyed = once(failureContents, 'destroyed');
+  host.showInactive();
+  const { started: closingStarted } = await fadeStarted(failureContents);
+  const closing = cover.finish();
+  await within(closingStarted, 'closing: fade never started');
   host.destroy();
+  await within(closing, 'closing: fade remained blocked after native window destruction');
   await failureDestroyed;
   assert.equal(failureContents.isDestroyed(), true);
   console.log('PASS: one startup document survives workbench navigation; logo centered; fade, error controls, trust and cleanup verified.');
   app.quit();
-}).catch(error => { console.error(error); host?.destroy(); app.exit(1); });
+}).catch(error => { console.error(error); app.exit(1); });

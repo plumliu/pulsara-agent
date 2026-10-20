@@ -33,7 +33,10 @@ Backend checks use the repository environment; desktop shell checks use Node's t
 .venv/bin/python -m pytest -m 'not postgres'
 npm --prefix frontend test
 npm --prefix desktop test
+npm --prefix desktop run test:startup
 ```
+
+The startup regression runs real Electron windows with the production preload and IPC. Hiding, minimizing, replacing or destroying a fading startup cover must settle startup immediately; a background animation must not keep the workbench inert. Electron owns native view destruction, and cover cleanup also handles an already destroyed WebContents.
 
 Database integration fixtures and Ubuntu package checks are described in [tests/linux/README.md](tests/linux/README.md). Actual desktop acceptance also checks native resources, shutdown, restart, and real model work as specified in the desktop plan.
 
@@ -67,6 +70,9 @@ npm --prefix desktop run package:dir
 .venv/bin/python -m pytest -m 'not postgres'
 npm --prefix frontend test
 npm --prefix desktop test
+npm --prefix desktop run test:startup
 ```
+
+启动回归使用真实 Electron 窗口、生产 preload 与 IPC。淡出期间隐藏、最小化、替换或销毁遮罩都必须及时结算启动，不能因后台动画使工作台持续不可交互。原生视图销毁由 Electron 管理，遮罩清理同时处理 WebContents 已销毁的情况。
 
 数据库集成夹具与 Ubuntu 包检查见 [tests/linux/README.md](tests/linux/README.md)。实际桌面验收还包括原生资源、退出、重开与真实模型任务，范围以桌面方案为准。

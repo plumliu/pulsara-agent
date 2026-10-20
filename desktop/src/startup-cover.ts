@@ -1,18 +1,29 @@
-import { WebContentsView, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
+import { WebContentsView, type BrowserWindow, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { pathToFileURL } from 'node:url';
+
+type Cover = {
+  view: WebContentsView;
+  contents: WebContents;
+  finishing?: Promise<void>;
+  endFade?: () => void;
+};
 
 /** Keep the original startup document above the workbench across navigation. */
 export class StartupCover {
-  private view?: WebContentsView;
+  private current?: Cover;
 
   constructor(private host: BrowserWindow, private file: string, private preload: string) {
     host.on('resize', () => this.resize());
+    // Hidden renderers may not deliver animation completion until shown again.
+    const finishHidden = () => { if (this.current?.finishing) this.dispose(); };
+    host.on('hide', finishHidden);
+    host.on('minimize', finishHidden);
     host.once('closed', () => this.dispose());
   }
 
   private resize() {
     const [width, height] = this.host.getContentSize();
-    this.view?.setBounds({ x: 0, y: 0, width, height });
+    this.current?.view.setBounds({ x: 0, y: 0, width, height });
   }
 
   async show(error = '', phase = error ? 'failed' : 'starting') {
@@ -21,45 +32,68 @@ export class StartupCover {
       preload: this.preload, sandbox: true, contextIsolation: true,
       nodeIntegration: false, webviewTag: false, navigateOnDragDrop: false,
     } });
-    this.view = view;
+    const contents = view.webContents;
+    const cover: Cover = { view, contents };
+    this.current = cover;
+    contents.once('destroyed', () => { if (this.current === cover) this.dispose(); });
     view.setBackgroundColor('#00000000');
-    view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    view.webContents.on('will-navigate', event => event.preventDefault());
-    view.webContents.on('will-attach-webview', event => event.preventDefault());
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    contents.on('will-navigate', event => event.preventDefault());
+    contents.on('will-attach-webview', event => event.preventDefault());
     this.resize();
     this.host.contentView.addChildView(view);
-    await view.webContents.loadFile(this.file, { query: { error, phase } });
+    await contents.loadFile(this.file, { query: { error, phase } });
   }
 
   accepts(event: IpcMainInvokeEvent): boolean {
-    const contents = this.view?.webContents;
-    return Boolean(contents && event.sender === contents && event.senderFrame === contents.mainFrame
+    const contents = this.current?.contents;
+    return Boolean(contents && !contents.isDestroyed() && event.sender === contents && event.senderFrame === contents.mainFrame
       && event.senderFrame.url.split('?')[0] === pathToFileURL(this.file).href);
   }
 
   async finish() {
-    const view = this.view;
-    if (!view || view.webContents.isDestroyed()) return;
-    if (!this.host.isVisible() || this.host.isMinimized()) {
+    const cover = this.current;
+    if (!cover) return;
+    if (cover.finishing) return cover.finishing;
+    if (cover.contents.isDestroyed() || !this.host.isVisible() || this.host.isMinimized()) {
       this.dispose();
       return;
     }
-    try {
-      await view.webContents.executeJavaScript(`document.body.animate(
-        [{ opacity: 1 }, { opacity: 0 }],
-        { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 200, fill: 'forwards' }
-      ).finished.then(() => undefined)`);
-    } finally {
-      // An error/reset screen may have replaced the cover while it was fading.
-      if (this.view === view) this.dispose();
-    }
+    const retired = new Promise<void>(resolve => { cover.endFade = resolve; });
+    cover.finishing = (async () => {
+      try {
+        await Promise.race([retired, cover.contents.executeJavaScript(`(() => {
+          if (document.hidden) return;
+          return new Promise(resolve => {
+            const finish = () => {
+              document.removeEventListener('visibilitychange', hidden);
+              resolve();
+            };
+            const hidden = () => { if (document.hidden) finish(); };
+            document.addEventListener('visibilitychange', hidden);
+            document.body.animate(
+              [{ opacity: 1 }, { opacity: 0 }],
+              { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 200, fill: 'forwards' }
+            ).finished.then(finish, finish);
+          });
+        })()`)]);
+      } catch (error) {
+        if (this.current === cover && !cover.contents.isDestroyed()) throw error;
+      } finally {
+        // An error/reset screen may have replaced the cover while it was fading.
+        if (this.current === cover) this.dispose();
+      }
+    })();
+    return cover.finishing;
   }
 
   private dispose() {
-    const view = this.view;
-    this.view = undefined;
-    if (!view) return;
-    if (!this.host.isDestroyed()) this.host.contentView.removeChildView(view);
-    if (!view.webContents.isDestroyed()) view.webContents.close();
+    const cover = this.current;
+    this.current = undefined;
+    if (!cover) return;
+    cover.endFade?.();
+    if (!this.host.isDestroyed()) this.host.contentView.removeChildView(cover.view);
+    // Electron clears view.webContents when its native WebContents is destroyed.
+    if (!cover.contents.isDestroyed()) cover.contents.close();
   }
 }
