@@ -3,15 +3,49 @@ name: Native Desktop Packages
 on:
   workflow_dispatch:
   pull_request:
-    paths: ['desktop/**', 'frontend/**', 'src/**', 'pyproject.toml', 'uv.lock', 'tools/prepare_ripgrep.py', '.github/workflows/desktop-package.yml']
+    paths: ['desktop/**', 'frontend/**', 'src/**', 'tests/**', 'pyproject.toml', 'uv.lock', 'tools/prepare_ripgrep.py', '.github/workflows/desktop-package.yml', '.github/workflows/ubuntu-tests.yml']
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: read
 
 jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Verify committed release versions
+        shell: bash
+        run: |
+          uv python install 3.12
+          uv sync --locked --dev --no-install-project
+          args=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          uv run --no-sync python desktop/scripts/release_artifacts.py check "${args[@]}"
+      - name: Frontend regression, types and lint
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend test
+          frontend/node_modules/.bin/tsc --noEmit -p frontend/tsconfig.json
+          npm --prefix frontend run lint
+
+  backend:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/ubuntu-tests.yml
+    permissions:
+      contents: read
+
   package:
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +103,7 @@ jobs:
         run: |
           uv run --no-sync python desktop/scripts/prepare_resources.py
           uv run --no-sync python desktop/scripts/smoke_resources.py
+          uv run --no-sync python desktop/scripts/release_artifacts.py check --resources desktop/resources
       - name: Package native installer
         run: npm --prefix desktop run package -- --${{ matrix.platform }} --${{ matrix.arch }} --publish never
       - name: Install Debian package and verify command ownership
@@ -77,7 +112,10 @@ jobs:
           sudo apt-get install -y ./desktop/release/*.deb
           test "$(readlink /usr/bin/pulsara)" = /opt/Pulsara/resources/bin/pulsara
           /usr/bin/pulsara --help
+          expected_version=$(uv run --no-sync python -c 'from pulsara_agent import __version__; print(__version__)')
+          test "$(/usr/bin/pulsara --version)" = "$expected_version"
           /usr/bin/pulsara-desktop --pulsara-cli --help
+          test "$(/usr/bin/pulsara-desktop --pulsara-cli --version)" = "$expected_version"
           sudo apt-get remove -y pulsara-desktop
           test ! -L /usr/bin/pulsara
       - uses: actions/upload-artifact@v7
@@ -86,5 +124,28 @@ jobs:
           path: |
             desktop/release/*.dmg
             desktop/release/*.deb
-            desktop/release/*.AppImage
           if-no-files-found: error
+
+  draft:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [frontend, backend, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-draft-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pulsara-desktop-*
+          path: release-input
+      - name: Assemble and upload a prerelease draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv python install 3.12
+          uv sync --locked --dev --no-install-project
+          uv run --no-sync python desktop/scripts/release_artifacts.py draft --tag "$GITHUB_REF_NAME" --artifacts release-input --output release-assets --repository "$GITHUB_REPOSITORY"

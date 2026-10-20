@@ -151,6 +151,8 @@ Select part of a response to give precise feedback. Fork a conversation to explo
 
 ## Open the workbench
 
+Download preview installers from [GitHub Releases](https://github.com/plumliu/pulsara-agent/releases). See the [installation and update guide](INSTALL.md), including the macOS unsigned-app instructions.
+
 Open the installed **Pulsara** desktop application. The app starts its bundled PostgreSQL instance and Python runtime, then opens the workbench. Choose a working directory and configure your models in Settings. Python, PostgreSQL, its search/vector extensions, ripgrep, and the screenshot browser are included in the desktop resources.
 
 The desktop targets macOS 15+ ARM64 and Ubuntu 24.04 x86_64/ARM64. These are build targets; backend CI does not by itself establish desktop installation acceptance on every target. See the [desktop implementation and acceptance plan](PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md) for the current validation scope.
@@ -161,7 +163,7 @@ Application data lives under `~/.pulsara` by default. An absolute `PULSARA_HOME`
 
 ### Optional command-line tools
 
-The CLI is bundled with the app. macOS and AppImage register `~/.local/bin/pulsara` on first launch and refresh their own launcher on subsequent starts; deb packages manage `/usr/bin/pulsara`. Open **Settings → General → Local services → Command-line entry** to inspect, recheck, or repair it. Existing commands are preserved until you explicitly choose Reset to point the entry to the desktop version. Pulsara does not edit shell profiles: add the entry directory to your terminal PATH if needed and check `command -v pulsara`. AppImage launchers reference the original AppImage file; reopen the app after moving it to update the entry. Commands use bundled Python without a separate installation.
+The CLI is bundled with the app. macOS registers `~/.local/bin/pulsara` on first launch and refresh their own launcher on subsequent starts; deb packages manage `/usr/bin/pulsara`. Open **Settings → General → Local services → Command-line entry** to inspect, recheck, or repair it. Existing commands are preserved until you explicitly choose Reset to point the entry to the desktop version. Pulsara does not edit shell profiles: add the entry directory to your terminal PATH if needed and check `command -v pulsara`. Commands use bundled Python without a separate installation.
 
 ```bash
 pulsara app
@@ -192,7 +194,7 @@ npm --prefix desktop ci
 npm --prefix desktop run package:dir
 ```
 
-The unpacked application is written under `desktop/release`. `npm --prefix desktop run package` produces the configured DMG or Linux AppImage/deb artifacts. Release signing and notarization require separate release configuration; the local build is unsigned. Re-run the resource builder after Python changes, and rebuild the frontend before refreshing resources after UI changes. `npm --prefix desktop start` runs the Electron development shell against prepared bundled resources; it does not expose a second browser-based product entry.
+The unpacked application is written under `desktop/release`. `npm --prefix desktop run package` produces the configured DMG or Linux deb artifacts. Release signing and notarization require separate release configuration; the local build is unsigned. Re-run the resource builder after Python changes, and rebuild the frontend before refreshing resources after UI changes. `npm --prefix desktop start` runs the Electron development shell against prepared bundled resources; it does not expose a second browser-based product entry.
 
 Backend checks use the repository environment; desktop shell checks use Node's test runner:
 

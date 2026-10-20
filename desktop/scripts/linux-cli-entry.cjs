@@ -1,8 +1,7 @@
 /** electron-builder afterPack adapter for the installed Linux executable.
  *
- * electron-builder owns AppRun, mounting and desktop integration. Its current
- * AppImage options do not provide an AppRun customization hook. This small
- * executable wrapper dispatches management commands before Electron starts,
+ * electron-builder owns the Debian desktop integration and sandbox setup.
+ * This small executable wrapper dispatches management commands before Electron starts,
  * so headless CLI use does not require a display or acquire the GUI singleton.
  */
 const { rename, writeFile } = require('node:fs/promises');
@@ -18,11 +17,6 @@ module.exports = async function afterPack(context) {
   await writeFile(executable, `#!/bin/sh
 set -eu
 PULSARA_APP_DIRECTORY=$(dirname "$(readlink -f "$0")")
-# electron-builder AppRun can prepend its sandbox option. Consume it only for
-# the management dispatcher; GUI invocation keeps every original argument.
-if [ "\${1-}" = "--no-sandbox" ] && [ "\${2-}" = "--pulsara-cli" ]; then
-  shift
-fi
 if [ "\${1-}" = "--pulsara-cli" ]; then
   shift
   exec "$PULSARA_APP_DIRECTORY/resources/python/bin/python3" -m pulsara_agent "$@"

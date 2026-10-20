@@ -25,15 +25,6 @@ def installed_launch_command(executable: Path | None = None) -> list[str]:
         target = (manifest.parent / value["executable"]).resolve()
         if not target.is_file() or not os.access(target, os.X_OK):
             raise RuntimeError(f"Pulsara desktop executable is unavailable: {target}")
-        app_image, app_directory = os.environ.get("APPIMAGE"), os.environ.get("APPDIR")
-        if app_image and app_directory and Path(app_directory).resolve() == manifest.parent.parent.resolve():
-            # AppImage owns the mounted resources only while its direct CLI
-            # child runs. A GUI handoff must start the original image, giving
-            # the new desktop process its own mount lifetime.
-            image = Path(app_image)
-            if not image.is_absolute() or not image.is_file() or not os.access(image, os.X_OK):
-                raise RuntimeError("Pulsara AppImage is unavailable; reinstall the CLI from its current location")
-            return [str(image), "--pulsara-launch"]
         return [str(target), *value.get("args", []), "--pulsara-launch"]
     raise RuntimeError("Pulsara desktop is not installed for this command; install the CLI from Pulsara desktop")
 

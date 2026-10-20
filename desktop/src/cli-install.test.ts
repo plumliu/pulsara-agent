@@ -7,22 +7,23 @@ import { test } from 'node:test';
 import { cliLauncherScript } from './cli-install';
 
 const afterPack = require('../scripts/linux-cli-entry.cjs');
-const { generateAppRunScript } = require('app-builder-lib/out/targets/appimage/appImageUtil');
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
-test('installed AppImage CLI survives absent mounted resources and preserves arguments and exit status', async () => {
+test('installed desktop CLI resolves bundled Python and preserves arguments and exit status', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pulsara cli's "));
   try {
-    const image = path.join(root, "Pulsara's image.AppImage");
+    const resources = path.join(root, 'relocated resources');
+    const python = path.join(resources, 'python/bin/python3');
     const fixture = path.join(root, 'fixture.cjs');
+    await mkdir(path.dirname(python), { recursive: true });
     await writeFile(fixture, 'console.log(JSON.stringify(process.argv.slice(2))); process.exit(37);');
-    await writeFile(image, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fixture)} "$@"\n`, { mode: 0o755 });
+    await writeFile(python, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fixture)} "$@"\n`, { mode: 0o755 });
     const cli = path.join(root, 'pulsara');
-    await writeFile(cli, cliLauncherScript('/unmounted/nonexistent/resources', image), { mode: 0o755 });
+    await writeFile(cli, cliLauncherScript(resources), { mode: 0o755 });
     const args = ['mcp', 'a b', "quote's", '$(touch forbidden)', '中文'];
     const result = spawnSync(cli, args, { encoding: 'utf8' });
     assert.equal(result.status, 37, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout), ['--pulsara-cli', ...args]);
+    assert.deepEqual(JSON.parse(result.stdout), ['-m', 'pulsara_agent', ...args]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -42,25 +43,13 @@ test('Linux packaged CLI dispatches before Electron without a display; GUI retai
     delete env.DISPLAY;
     delete env.WAYLAND_DISPLAY;
     const args = ['mcp', 'a b', "quote's", '$(touch forbidden)', '中文'];
-    for (const prefix of [['--pulsara-cli'], ['--no-sandbox', '--pulsara-cli']]) {
-      const result = spawnSync(executable, [...prefix, ...args], { encoding: 'utf8', env });
-      assert.equal(result.status, 29, result.stderr);
-      assert.deepEqual(JSON.parse(result.stdout), ['python', '-m', 'pulsara_agent', ...args]);
-    }
+    const management = spawnSync(executable, ['--pulsara-cli', ...args], { encoding: 'utf8', env });
+    assert.equal(management.status, 29, management.stderr);
+    assert.deepEqual(JSON.parse(management.stdout), ['python', '-m', 'pulsara_agent', ...args]);
     const result = spawnSync(executable, ['--no-sandbox', '--pulsara-launch'], { encoding: 'utf8' });
     assert.equal(result.status, 29, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), ['electron', '--no-sandbox', '--pulsara-launch']);
 
-    // Exercise the dependency's actual launcher, including its sandbox probe;
-    // this adapter must not grow its own AppImage mount or AppRun implementation.
-    const appRun = path.join(root, 'AppRun');
-    await writeFile(appRun, generateAppRunScript({ ExecutableName: 'pulsara-desktop', ProductName: 'Pulsara', ProductFilename: 'Pulsara' }), { mode: 0o755 });
-    delete env.APPIMAGE_EXIT_AFTER_INSTALL;
-    const fromAppRun = spawnSync(appRun, ['--pulsara-cli', ...args], {
-      encoding: 'utf8', env: { ...env, APPDIR: root, APPIMAGE: '/persistent/Pulsara.AppImage' },
-    });
-    assert.equal(fromAppRun.status, 29, fromAppRun.stderr);
-    assert.deepEqual(JSON.parse(fromAppRun.stdout), ['python', '-m', 'pulsara_agent', ...args]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

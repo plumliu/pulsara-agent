@@ -2306,7 +2306,9 @@ describe('PulsaraApp', () => {
     })));
     expect(add).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+    const save = screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
     await waitFor(() => expect(add).toHaveBeenCalledWith(expect.objectContaining({
       source: 'user_declared',
       input_modalities: ['text', 'image'],

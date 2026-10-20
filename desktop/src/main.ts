@@ -85,12 +85,11 @@ function handle(name: string, action: (value?: any) => unknown, startupAllowed =
   ipcMain.handle(`desktop:${name}`, (event, value) => { trusted(event, startupAllowed); return action(value); });
 }
 function cliRegistration(): CliRegistration {
-  const appImage = process.platform === 'linux' ? process.env.APPIMAGE : undefined;
-  const packageTarget = process.platform === 'linux' && !appImage && resources.startsWith('/opt/')
+  const packageTarget = process.platform === 'linux' && resources.startsWith('/opt/')
     ? path.join(resources, 'bin', 'pulsara') : undefined;
   return {
     destination: packageTarget ? '/usr/bin/pulsara' : path.join(os.homedir(), '.local', 'bin', 'pulsara'),
-    script: cliLauncherScript(resources, appImage), packageTarget, searchPath: process.env.PATH ?? '',
+    script: cliLauncherScript(resources), packageTarget, searchPath: process.env.PATH ?? '',
   };
 }
 // Registration is best effort and independent of kernel/database startup.

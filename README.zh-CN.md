@@ -151,6 +151,8 @@ MCP 目录会跟随服务端支持的变化通知更新。更换连接目标并�
 
 ## 打开工作台
 
+预览版安装包通过 [GitHub Releases](https://github.com/plumliu/pulsara-agent/releases) 提供，安装、更新和 macOS 首次允许打开的步骤见[安装说明](INSTALL.md)。
+
 打开已安装的 **Pulsara** 桌面应用。应用会启动随包 PostgreSQL 和 Python 内核，再显示工作台。在界面中选择工作目录，并在设置中配置模型。桌面资源包含 Python、PostgreSQL 及搜索/向量扩展、ripgrep 和截图所需的浏览器。
 
 桌面构建目标为 macOS 15+ ARM64、Ubuntu 24.04 x86_64/ARM64。构建目标不等于所有平台均已完成安装实测；后端 CI 也不能代替桌面验收。当前验证范围见[桌面实现与验收方案](PULSARA_DESKTOP_MIGRATION_AND_BUNDLED_POSTGRESQL_PLAN.zh.md)。
@@ -161,7 +163,7 @@ MCP 目录会跟随服务端支持的变化通知更新。更换连接目标并�
 
 ### 可选命令行工具
 
-CLI 已随应用提供。macOS 与 AppImage 在首次启动时自动注册 `~/.local/bin/pulsara`，后续启动更新自己的入口；deb 包负责注册 `/usr/bin/pulsara`。在 **设置 → 通用 → 本地服务 → 命令行入口** 查看状态、重新检查或修复。遇到已有命令时自动注册会保留它，由用户明确选择“重置”。应用不会自动修改 shell 配置；若终端找不到命令，请把入口目录加入 `PATH`，并用 `command -v pulsara` 核对。AppImage 入口指向原始 AppImage 文件，移动后重新打开应用即可更新。命令使用随包 Python，无需单独安装。
+CLI 已随应用提供。macOS 在首次启动时自动注册 `~/.local/bin/pulsara`，后续启动更新自己的入口；deb 包负责注册 `/usr/bin/pulsara`。在 **设置 → 通用 → 本地服务 → 命令行入口** 查看状态、重新检查或修复。遇到已有命令时自动注册会保留它，由用户明确选择“重置”。应用不会自动修改 shell 配置；若终端找不到命令，请把入口目录加入 `PATH`，并用 `command -v pulsara` 核对。命令使用随包 Python，无需单独安装。
 
 ```bash
 pulsara app
@@ -192,7 +194,7 @@ npm --prefix desktop ci
 npm --prefix desktop run package:dir
 ```
 
-未封装的应用位于 `desktop/release`。`npm --prefix desktop run package` 生成配置中的 DMG 或 Linux AppImage/deb 产物。发布签名与公证需要单独配置，本地构建不带发布签名。Python 变更后重新运行资源脚本；UI 变更后先重新构建前端，再更新资源。`npm --prefix desktop start` 使用已准备的随包资源运行 Electron 开发壳，不提供另一套浏览器产品入口。
+未封装的应用位于 `desktop/release`。`npm --prefix desktop run package` 生成配置中的 DMG 或 Linux deb 产物。发布签名与公证需要单独配置，本地构建不带发布签名。Python 变更后重新运行资源脚本；UI 变更后先重新构建前端，再更新资源。`npm --prefix desktop start` 使用已准备的随包资源运行 Electron 开发壳，不提供另一套浏览器产品入口。
 
 后端检查使用仓库环境，桌面壳检查使用 Node 测试运行器：
 

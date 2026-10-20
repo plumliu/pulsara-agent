@@ -206,28 +206,6 @@ def test_installed_launcher_resolves_relative_product_manifest(tmp_path):
         installed_launch_command(interpreter)
 
 
-def test_appimage_gui_handoff_uses_original_image_and_checks_mount_identity(tmp_path, monkeypatch):
-    mount = tmp_path / "mount"
-    resources = mount / "resources"
-    interpreter = resources / "python" / "bin" / "python3"
-    interpreter.parent.mkdir(parents=True)
-    gui = mount / "pulsara-desktop"
-    gui.write_text("#!/bin/sh\n")
-    gui.chmod(0o755)
-    (resources / "desktop-launch.json").write_text(json.dumps({"executable": "../pulsara-desktop"}))
-    image = tmp_path / "Pulsara's image.AppImage"
-    image.write_text("#!/bin/sh\n")
-    image.chmod(0o755)
-    monkeypatch.setenv("APPIMAGE", str(image))
-    monkeypatch.setenv("APPDIR", str(mount))
-    assert installed_launch_command(interpreter) == [str(image), "--pulsara-launch"]
-    image.unlink()
-    with pytest.raises(RuntimeError, match="AppImage is unavailable"):
-        installed_launch_command(interpreter)
-    monkeypatch.setenv("APPDIR", str(tmp_path / "unrelated-image"))
-    assert installed_launch_command(interpreter) == [str(gui), "--pulsara-launch"]
-
-
 def test_lost_status_pipe_still_closes_application(desktop_home):
     async def exercise():
         reader = asyncio.StreamReader()

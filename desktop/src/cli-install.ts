@@ -2,12 +2,8 @@ import path from 'node:path';
 
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
-/** The AppImage filename outlives its temporary mount; bundled Python does not. */
-export function cliLauncherScript(resources: string, appImage?: string): string {
-  if (appImage && !path.isAbsolute(appImage)) throw new Error('AppImage 路径必须为绝对路径。');
-  const command = appImage
-    ? `${shellQuote(appImage)} --pulsara-cli`
-    : `${shellQuote(path.join(resources, 'python', 'bin', 'python3'))} -m pulsara_agent`;
+export function cliLauncherScript(resources: string): string {
+  const command = `${shellQuote(path.join(resources, 'python', 'bin', 'python3'))} -m pulsara_agent`;
   return `#!/bin/sh\n# Pulsara desktop command-line launcher\nexec ${command} "$@"\n`;
 }
 

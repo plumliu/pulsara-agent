@@ -1,7 +1,7 @@
 {
   "name": "pulsara-desktop",
   "productName": "Pulsara",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "description": "Pulsara local agent workbench",
   "author": "Pulsara",
   "private": true,
@@ -24,7 +24,14 @@
   "build": {
     "appId": "dev.pulsara.desktop",
     "productName": "Pulsara",
-    "protocols": [{ "name": "Pulsara", "schemes": ["pulsara"] }],
+    "protocols": [
+      {
+        "name": "Pulsara",
+        "schemes": [
+          "pulsara"
+        ]
+      }
+    ],
     "executableName": "pulsara",
     "directories": {
       "output": "release"
@@ -56,11 +63,11 @@
       "icon": "assets/pulsara.icns",
       "minimumSystemVersion": "15.0.0",
       "category": "public.app-category.productivity",
-      "identity": null
+      "identity": null,
+      "artifactName": "Pulsara-${version}-macos-${arch}.${ext}"
     },
     "linux": {
       "target": [
-        "AppImage",
         "deb"
       ],
       "icon": "assets/pulsara.png",
@@ -78,7 +85,8 @@
       "afterRemove": "build/linux-after-remove.sh",
       "recommends": [],
       "appArmorProfile": "build/linux-apparmor-profile",
-      "maintainer": "Pulsara maintainers"
+      "maintainer": "Pulsara maintainers",
+      "artifactName": "Pulsara-${version}-linux-${arch}.${ext}"
     },
     "afterPack": "scripts/linux-cli-entry.cjs"
   },
