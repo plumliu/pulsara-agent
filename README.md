@@ -1,15 +1,15 @@
-<h1 align="center"><img src="frontend/public/assets/pulsara-icon.png" width="40" height="40" align="middle" alt=""> Pulsara</h1>
+<h1 align="center"><img src="frontend/public/assets/pulsara-icon.png" width="36" height="36" align="top" alt=""> Pulsara</h1>
 <p align="center"><strong>Your own team of agents.</strong></p>
 <p align="center">
   <a href="https://github.com/plumliu/pulsara-agent/releases/latest">Download</a> &nbsp; | &nbsp;
-  <a href="assets/Pulsara-demo.mp4">Watch the demo</a> &nbsp; | &nbsp;
+  <a href="#demo">Watch the demo</a> &nbsp; | &nbsp;
   <a href="INSTALL.md">Installation</a> &nbsp; | &nbsp;
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 ## Demo
 
-[![Watch the Pulsara demo](assets/demo-preview.jpg)](assets/Pulsara-demo.mp4)
+https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
 
 <table>
   <tr>
