@@ -259,6 +259,7 @@ def test_memory_suffix_quote_prices_only_actual_wire_items(api, project):
 def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
     from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
     from pulsara_agent.model_input.contracts import (
+        ContextSourceAbsenceKind,
         ContextSourceKind,
         compiled_message_placements_fingerprint,
     )
@@ -278,10 +279,21 @@ def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
 
     request = identity_request()
     compiled = StructuredModelInputCompiler().compile(request)
-    # Unified identity fixture: retained complete semantic proofs remain deterministic.
+    # CAPABILITY_CHANGE added a registered NOT_APPLICABLE source to this fixture.
+    # Its collection commitment and downstream identities therefore differ from
+    # the pre-capability-change fixture; the identity algorithm stays unchanged.
+    # These values also reproduce from the introducing commit cb14d547.
+    capability_change = next(
+        fact for fact in request.sources.absent_facts
+        if fact.source_kind is ContextSourceKind.CAPABILITY_CHANGE
+    )
+    assert capability_change.absence_kind is ContextSourceAbsenceKind.NOT_APPLICABLE
+    assert request.sources.collection_fingerprint == (
+        "sha256:7d54766298a815cd6003bacfe8c86ed8482d3c07b927345552990f62e32f37cc"
+    )
     assert (
         compiled.compiled_semantic_fingerprint
-        == "sha256:8da1339f6700d4547a05633bd0dd6c9e7b0709b6e03f0f8167baee8d12a84aa3"
+        == "sha256:3a4ceda70608d8b234f174086f6b3e679075f4fc6c9e2152f2fc865e1b5b63a8"
     )
     port = _port()
     execution, _ = _prepared_execution(port)
@@ -324,7 +336,7 @@ def test_canonical_identity_goldens_survive_removal_of_semantic_token_fields():
         )
         assert (
             parent_context_call_subject_identity_digest(subject)
-            == "sha256:b433f66c6a5c8fe18aba5a0c69e4d8e2a89676bbac0f6ebcbfae8c1b18cb6b5a"
+            == "sha256:17825cc948f54539f046e63e26ad985a69605ed217e4c4ef0e2a49202fdf7303"
         )
     finally:
         execution.surface_borrow.close()
@@ -334,8 +346,8 @@ def test_cold_and_installed_append_identity_goldens():
     from tests.support.unified_budget_identity_cases import append_identity_digests
 
     assert append_identity_digests() == (
-        "sha256:29698143b9310a2366c0e5d183bff1e15dcf3a80d21d6cefc111c0c49faa3844",
-        "sha256:e46cf6d997f7aa3a3a049b7455561d8c29a943ffdafa0a020040b7af6333b1c7",
+        "sha256:83908d7cc7ee01f769461f1875d547ba8b3de7272676fc6c0a74dc0e0479a3fb",
+        "sha256:15d5907d39dd19b517dd3a310362a61a16d49b37dcc87bb520ae0d9d0d0b77ad",
     )
 
 

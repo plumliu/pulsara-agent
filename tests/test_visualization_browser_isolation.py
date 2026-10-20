@@ -502,7 +502,8 @@ def test_reference_probe_does_not_extend_scroll_range_for_failed_or_small_chart(
             for width in [760, 1200]:
                 page = browser.new_page(viewport={'width':width,'height':800})
                 for content in ['<div class="inline-visualization__status">HTML_NOT_FOUND</div>', '<div style="height:165px">compact chart</div>']:
-                    page.set_content('<style>'+css+'</style><div class="thread-scroll" style="height:500px"><div class="thread-column"><section class="inline-visualization"><dialog open class="has-thumbnails"><div class="inline-visualization__figure"><div class="inline-visualization__page"><div class="inline-visualization__viewport-probe"></div><div class="inline-visualization__stage">'+content+'</div></div></div><aside class="inline-visualization__controls"><button>next</button></aside></dialog></section><p>after chart</p></div></div>')
+                    page.set_content('<style>'+css+'</style><div class="thread-scroll" style="height:500px"><div class="thread-column"><section class="inline-visualization"><div class="inline-visualization__layout has-thumbnails"><div class="inline-visualization__figure"><div class="inline-visualization__page"><div class="inline-visualization__viewport-probe"></div><div class="inline-visualization__stage">'+content+'</div></div></div><aside class="inline-visualization__controls"><button>next</button></aside></div></section><p>after chart</p></div></div>')
+                    # Match the production non-modal layout, retaining the probe and crop ancestors.
                     # Real reference measurement still exists, but must not create blank scrolling.
                     assert page.locator('.inline-visualization__viewport-probe').evaluate('el=>el.clientHeight') == 960
                     assert page.locator('.thread-scroll').evaluate('el=>el.scrollHeight') == 500
@@ -520,7 +521,7 @@ def test_zoom_control_reveals_on_iframe_hover_and_keyboard_focus() -> None:
         browser = playwright.chromium.launch(headless=True)
         try:
             page = browser.new_page(reduced_motion='reduce')
-            page.set_content('<style>'+css+'</style><section class="inline-visualization"><dialog open><div class="inline-visualization__figure"><iframe title="chart" srcdoc="<h1>Chart</h1>" style="width:600px;height:200px"></iframe><button class="inline-visualization__zoom">Zoom</button></div></dialog></section>')
+            page.set_content('<style>'+css+'</style><section class="inline-visualization"><div class="inline-visualization__layout"><div class="inline-visualization__figure"><iframe title="chart" srcdoc="<h1>Chart</h1>" style="width:600px;height:200px"></iframe><button class="inline-visualization__zoom">Zoom</button></div></div></section>')
             button = page.locator('button')
             page.mouse.move(1000, 500)
             assert button.evaluate('el=>getComputedStyle(el).opacity') == '0'
@@ -547,7 +548,7 @@ def test_short_chart_omits_zoom_space_and_regular_chart_keeps_zoom_clickable() -
                 # Include the production clip ancestors; a figure-only fixture misses this bug.
                 compact = ' data-visualization-compact="true"' if height < 46 else ''
                 control = '' if height < 46 else '<div class="inline-visualization__zoom-anchor"><button class="inline-visualization__zoom" onclick="this.dataset.clicked=1">Zoom</button></div>'
-                page.set_content('<style>'+css+'</style><section class="inline-visualization"><dialog open><div class="inline-visualization__figure"><div class="inline-visualization__page"><div class="inline-visualization__viewport-probe"></div><div class="inline-visualization__stage"'+compact+' style="height:'+str(height)+'px"><div class="inline-visualization__crop" style="height:'+str(height)+'px"><iframe style="width:600px;height:500px" srcdoc="short chart"></iframe></div>'+control+'</div></div></div></dialog></section>')
+                page.set_content('<style>'+css+'</style><section class="inline-visualization"><div class="inline-visualization__layout"><div class="inline-visualization__figure"><div class="inline-visualization__page"><div class="inline-visualization__viewport-probe"></div><div class="inline-visualization__stage"'+compact+' style="height:'+str(height)+'px"><div class="inline-visualization__crop" style="height:'+str(height)+'px"><iframe style="width:600px;height:500px" srcdoc="short chart"></iframe></div>'+control+'</div></div></div></div></section>')
                 stage = page.locator('.inline-visualization__stage').bounding_box()
                 assert stage['height'] == height
                 button = page.locator('button')
