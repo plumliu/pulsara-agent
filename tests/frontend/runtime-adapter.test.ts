@@ -2377,6 +2377,65 @@ describe('source text fidelity hard cut', () => {
     ]);
   });
 
+  it.each(['LIVE_GENERATION_ABORTED', 'LIVE_GENERATION_COMMITTED'])('does not retain a settled root preview without an exact committed entry: %s', async kind => {
+    const responses = [connectPayload([], { active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }] }, [{
+      live_revision: '1', event_type: 'TEXT_DELTA', draft_identity: 'draft', turn_id: 'turn-1', scope_kind: 'ROOT',
+      payload: { text_delta: { delta: 'advisory text' } },
+    }]), { observation: { through_event_sequence: '1',
+      committed: [{ projection_kind: 'CURRENT_CONTROL', current_control: { active_turns: [] } }],
+      settlements: [{ kind, draft_identity: 'draft' }],
+    } }];
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages[0].body).toBe('advisory text');
+    const settled = await connection.observe();
+    expect(settled.messages).toHaveLength(0);
+    expect(settled.isRunning).toBe(false);
+  });
+
+  it('keeps known tool card content while its attached canonical result body is being read', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    const output = 'canonical tool output';
+    const reference = blobContent(output);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const request = { entry_id: 'request', turn_id: 'turn-1', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{ block_id: 'call-block', block_kind: 'TOOL_CALL', tool_call_id: 'call', tool_name: 'read_file' }] };
+    const responses = [connectPayload([request], {
+      active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }],
+      tool_attempts: [{ attempt_id: 'attempt', assistant_entry_id: 'request', tool_call_id: 'call' }],
+    }, [{ live_revision: '1', event_type: 'TOOL_RESULT_DELTA', turn_id: 'turn-1', scope_kind: 'ROOT',
+      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt', payload: { tool_result_delta: { text: 'visible streamed tool output' } } }]),
+      { observation: { through_event_sequence: '2', settlements: [{ kind: 'LIVE_GENERATION_COMMITTED',
+        channel_kind: 'LIVE_CHANNEL_TOOL_RESULT', channel_attempt_id: 'attempt', committed_entry_id: 'result' }],
+        committed: [{ projection_kind: 'IMMUTABLE_ENTRY', entry: {
+        entry_id: 'result', turn_id: 'turn-1', entry_sequence: '2', entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: reference, tool_result: { assistant_entry_id: 'request', tool_call_id: 'call', result_state: 'SUCCESS' },
+      } }] } }];
+    stubRuntimeFetch(vi.fn(async input => {
+      if (String(input).endsWith('/read-content')) {
+        await gate;
+        return new Response(JSON.stringify({ content: { digest: reference.digest, complete_size: reference.size,
+          offset_bytes: '0', content: Buffer.from(output).toString('base64'), complete: true } }), { status: 200 });
+      }
+      return new Response(JSON.stringify(responses.shift()), { status: 200 });
+    }));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await vi.waitFor(() => expect(connection.current().messages[0].historyContextState).toBe('ready'));
+    await connection.observe();
+    expect(connection.current().messages[0]).toMatchObject({ contentState: 'unloaded',
+      pendingAssistant: { traces: [{ id: 'call', status: 'completed', resultEntryId: 'result', resultText: 'visible streamed tool output' }] } });
+    expect(connection.current().messages[0].traces?.[0].resultText).not.toBe('visible streamed tool output');
+    const read = connection.hydrateEntries!(['result']);
+    expect(connection.current().messages[0].contentState).toBe('loading');
+    expect(connection.current().messages[0].pendingAssistant?.traces?.[0].id).toBe('call');
+    release(); await read;
+    expect(connection.current().messages[0].contentState).toBe('ready');
+    expect(connection.current().messages[0]).not.toHaveProperty('pendingAssistant');
+    expect(connection.current().messages[0].traces?.[0].resultText).toBe(output);
+  });
+
   it('preserves split live deltas, final text, canonical snapshot, and reconnect content', async () => {
     const first = '\n中文 read_';
     const second = 'file /tmp/ROOT Kernel HostSession read-only bypass-permissions exit_code = 0\n';

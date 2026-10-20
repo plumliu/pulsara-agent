@@ -1,4 +1,6 @@
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
+import { createHash, webcrypto } from 'node:crypto';
+import { LocalHttpRuntimeAdapter } from '../../frontend/lib/runtime-adapter';
 import { ToolResultDisplayContext } from '../../frontend/lib/tool-result-display';
 import type { ReactElement, PropsWithChildren } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -1025,14 +1027,15 @@ describe('completed reply process disclosure', () => {
     const draft = { ...final, id: 'live-final', assistantKind: 'live' as const, status: 'running' as const, rootFinal: false, forkEligible: false };
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, draft] })} />);
     expect(hiddenProgress()).toBe(false);
-    expect(screen.getByText(draft.body).closest('.assistant-markdown')?.classList.contains('assistant-markdown--pretty')).toBe(false);
+    const streamingLayout = screen.getByText(draft.body).closest('.assistant-markdown')?.className;
+    expect(screen.getByText(draft.body).closest('.assistant-copy')?.querySelector('.response-actions')?.getAttribute('aria-hidden')).toBe('true');
     // A committed assistant text without terminal-final eligibility is not enough.
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, { ...final, rootFinal: false, forkEligible: false }] })} />);
     expect(hiddenProgress()).toBe(false);
     expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
     view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [progress, steer, final] })} />);
     expect(hiddenProgress()).toBe(true);
-    expect(screen.getByText(final.body).closest('.assistant-markdown')?.classList.contains('assistant-markdown--pretty')).toBe(true);
+    expect(screen.getByText(final.body).closest('.assistant-markdown')?.className).toBe(streamingLayout);
     expect(screen.getByText(steer.body).closest('.conversation-run__step')?.hasAttribute('inert')).toBe(false);
     expect(screen.queryByText(progress.body)).toBeNull();
     expect(screen.getByText(steer.body).closest('[inert]')).toBeNull();
@@ -1852,6 +1855,150 @@ describe('source location disclosure demand', () => {
     expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
     expect(view.container.querySelector('[data-task-id="worker"]')).toBeTruthy();
   });
+});
+
+it('keeps the same expanded tool card when its committed result arrives and rejects an old result read', async () => {
+  let resolveOld!: (page: ToolArtifactPage) => void;
+  const read = vi.fn(() => new Promise<ToolArtifactPage>(resolve => { resolveOld = resolve; }));
+  const display = (resultEntryId?: string) => <WorkbenchView {...props({
+    activeTurnId: 'turn-one', onReadToolArtifact: read, messages: [{
+      id: 'tool-request', turnId: 'turn-one', role: 'assistant', time: '', body: '', assistantKind: 'tool-request',
+      traces: [{ id: 'call', kind: 'mcp', toolName: 'mcp__demo__read', title: '读取', subtitle: '',
+        status: resultEntryId ? 'completed' : 'running', resultEntryId, resultText: resultEntryId ?? 'streamed output',
+        artifact: resultEntryId ? { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' } : undefined,
+      }],
+    }],
+  })} />;
+  const view = render(display());
+  fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__demo__read' }));
+  const button = screen.getByRole('button', { name: '收起工具详情：mcp__demo__read' });
+  view.rerender(display('result-one'));
+  expect(screen.getByRole('button', { name: '收起工具详情：mcp__demo__read' })).toBe(button);
+  fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
+  view.rerender(display('result-two'));
+  await act(async () => resolveOld({ resultEntryId: 'result-one', text: 'stale result page',
+    offsetChars: 0, returnedChars: 17, totalChars: 17, hasMore: false }));
+  expect(screen.queryByText('stale result page')).toBeNull();
+  expect(screen.getByRole('button', { name: '收起工具详情：mcp__demo__read' })).toBe(button);
+  expect(screen.getByRole('region', { name: '工具原始结果' }).textContent).toContain('result-two');
+});
+
+it('keeps a streamed final visible until exact canonical grouping and body reads finish', async () => {
+  vi.stubGlobal('crypto', webcrypto);
+  const text = '这段最终回复应当连续显示，直到正式记录准备好。';
+  const bytes = Buffer.from(text);
+  const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  let releaseContext!: () => void, releaseBody!: () => void;
+  const contextGate = new Promise<void>(resolve => { releaseContext = resolve; });
+  const bodyGate = new Promise<void>(resolve => { releaseBody = resolve; });
+  const previous = [{ entry_id: 'request-before-final', turn_id: 'turn-final', entry_sequence: '1',
+    entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+    blocks: [{ block_id: 'tool-block', block_kind: 'TOOL_CALL', tool_call_id: 'tool-before-final', tool_name: 'mcp__demo__read' }] },
+  { entry_id: 'result-before-final', turn_id: 'turn-final', entry_sequence: '2', entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+    content: { kind: 'INLINE', inline_content: Buffer.from('tool completed').toString('base64') },
+    tool_result: { assistant_entry_id: 'request-before-final', tool_call_id: 'tool-before-final', result_state: 'SUCCESS' } }];
+  const entry = { entry_id: 'final-entry', turn_id: 'turn-final', entry_sequence: '3',
+    entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT', root_final: true, fork_eligible: true,
+    blocks: [{ block_id: 'text-final', block_kind: 'TEXT', content: {
+      kind: 'CANONICAL_BLOB', digest, size: String(bytes.length), codec: 'utf-8', media_type: 'text/plain',
+    } }] };
+  vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    let value: unknown;
+    if (String(url).endsWith('/connections')) value = {
+      connection_id: 'connection-final', connection_generation: 1, session_id: 'session-one', role: 'controller',
+      snapshot: { snapshot: { session_id: 'session-one', writer_generation: '1', event_sequence_cut: '2',
+        entries: previous, control: { active_turns: [{ turn_id: 'turn-final', scope_kind: 'ROOT', status: 'RUNNING' }] } } },
+      live_hello: { live_owner_epoch: '1', live_revision: '1', live_snapshot: { events: [{
+        live_revision: '1', event_type: 'TEXT_DELTA', draft_identity: 'draft-final',
+        turn_id: 'turn-final', scope_kind: 'ROOT', payload: { text_delta: { delta: text } },
+      }] } }, live_control_snapshot: { snapshot: {} },
+    };
+    else if (String(url).endsWith('/observe')) value = { observation: {
+      through_event_sequence: '3', live_owner_epoch: '1', through_live_revision: '2',
+      committed: [{ projection_kind: 'IMMUTABLE_ENTRY', entry },
+        { projection_kind: 'CURRENT_CONTROL', current_control: { active_turns: [] } }],
+      settlements: [{ kind: 'LIVE_GENERATION_COMMITTED', draft_identity: 'draft-final', committed_entry_id: 'final-entry' }],
+    } };
+    else if (String(url).endsWith('/history/context')) {
+      const ids = JSON.parse(String(init?.body)).entry_ids as string[];
+      if (ids.includes('final-entry')) await contextGate;
+      value = { session_id: 'session-one', cut_sequence: '3', event_sequence_cut: '3', entry_ids: ids,
+        groups: [{ owner_kind: 'EXECUTED_TURN', owner_id: 'turn-final', initial_entry_id: 'request-before-final' }],
+        entry_contexts: ids.map(id => ({ entry_id: id, owner_kind: 'EXECUTED_TURN', owner_id: 'turn-final',
+          root_owner_id: 'turn-final', segment_id: 'turn-final', segment_start_entry_id: 'request-before-final' })),
+        tasks: [], batches: [], interruption_notices: [], compactions: [], };
+    } else if (String(url).endsWith('/read-content')) {
+      await bodyGate;
+      value = { content: { digest, complete_size: String(bytes.length), offset_bytes: '0', content: bytes.toString('base64'), complete: true } };
+    } else throw new Error(`Unexpected request: ${url}`);
+    return new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-one');
+  await waitFor(() => expect(connection.current().messages[0].historyContextState).toBe('ready'));
+  const display = () => <WorkbenchView {...props({ ...connection.current(),
+    onHydrateEntries: async (ids, reasoning) => { await connection.hydrateEntries!(ids, undefined, reasoning); },
+  })} />;
+  const view = render(display());
+  const unsubscribe = connection.subscribe(() => view.rerender(display()));
+  try {
+    expect(screen.getByText(text)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '展开工具详情：mcp__demo__read' })).toBeTruthy();
+    await act(async () => { await connection.observe(); view.rerender(display()); });
+    expect(connection.current().isRunning).toBe(false);
+    expect(screen.getAllByText(text)).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '展开工具详情：mcp__demo__read' })).toBeNull();
+    expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
+    await act(async () => { releaseContext(); await contextGate; });
+    await waitFor(() => expect(connection.current().messages.find(message => message.id === 'final-entry')?.historyContextState).toBe('ready'));
+    expect(screen.getAllByText(text)).toHaveLength(1);
+    await act(async () => { releaseBody(); await bodyGate; });
+    await waitFor(() => expect(screen.getByRole('button', { name: '复制回复' })).toBeTruthy());
+    expect(screen.getAllByText(text)).toHaveLength(1);
+    expect(connection.current().messages.find(message => message.id === 'final-entry')).not.toHaveProperty('pendingAssistant');
+  } finally { releaseContext(); releaseBody(); unsubscribe(); }
+});
+
+it('keeps tail-follow aligned while queue animations resize the viewport between stream updates', () => {
+  const observations = new Map<Element, () => void>();
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: () => void) {}
+    observe(node: Element) { observations.set(node, this.callback); }
+    disconnect() {} unobserve() {}
+  });
+  const view = render(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [{
+    id: 'prompt', turnId: 'turn-one', role: 'user', time: '', body: '开始处理',
+  }] })} />);
+  const thread = view.container.querySelector('.thread-scroll')! as HTMLElement;
+  let viewportHeight = 500, top = 1500;
+  Object.defineProperties(thread, {
+    scrollHeight: { value: 2000, configurable: true },
+    clientHeight: { get: () => viewportHeight },
+    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(2000 - viewportHeight, value)); } },
+  });
+  const resizeViewport = () => observations.get(thread)?.();
+  // Queue admission animates the composer without changing the message column.
+  viewportHeight = 380;
+  act(resizeViewport);
+  expect(top).toBe(1620);
+  expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
+  // The first thinking delta arrives while the same queue animation is active.
+  view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [
+    { id: 'prompt', turnId: 'turn-one', role: 'user', time: '', body: '开始处理' },
+    { id: 'live', turnId: 'turn-one', role: 'assistant', assistantKind: 'live',
+      time: '', body: '', status: 'running', reasoning: [{ id: 'reason', kind: 'full', body: '先检查', active: true }] },
+  ] })} />);
+  viewportHeight = 320;
+  act(resizeViewport);
+  expect(top).toBe(1680);
+  // A reader who scrolls away keeps that intent through later viewport changes.
+  fireEvent.wheel(thread, { deltaY: -100 });
+  top = 900;
+  fireEvent.scroll(thread);
+  viewportHeight = 500;
+  act(resizeViewport);
+  expect(top).toBe(900);
+  expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
 });
 
 it('keeps manual process and tool expansion at the clicked position, then resumes explicit tail-follow', () => {

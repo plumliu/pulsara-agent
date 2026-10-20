@@ -1174,6 +1174,7 @@ interface ProtocolLiveEvent {
 
 interface ProtocolSettlement {
   kind: string;
+  committed_entry_id?: string;
   draft_identity?: string;
   generation_id?: string;
   channel_kind?: string;
@@ -1337,6 +1338,7 @@ interface ObservationPayload {
 
 interface LiveDraft {
   id: string;
+  committedEntryId?: string;
   turnId: string;
   scopeKind: string;
   taskId: string;
@@ -1351,6 +1353,7 @@ interface LiveTaskProgress {
 }
 
 interface LiveToolResult {
+  committedEntryId?: string;
   id: string;
   turnId: string;
   scopeKind: string;
@@ -2563,6 +2566,12 @@ abstract class CanonicalHistoryReader {
       const states = sourceIds.map(id => this.entryContentState(id));
       message.contentState = states.includes('error') ? 'error' : states.includes('loading') ? 'loading' : states.includes('unloaded') ? 'unloaded' : 'ready';
       message.contentError = sourceIds.map(id => this.contentErrors.get(id)).find(Boolean);
+      // An attached tool result can still be loading while the request/card
+      // itself is fully known. Do not replace that visible card with a loader.
+      if (message.role === 'assistant' && message.traces?.length
+        && this.entryContentState(message.id) === 'ready' && message.contentState !== 'ready') {
+        message.pendingAssistant = { body: message.body, reasoning: message.reasoning, traces: message.traces };
+      }
       if (message.inputSource) {
         const key = `${message.inputSource.commandId}:${message.inputSource.queueItemId}`;
         if (message.contentState === 'ready') this.knownQueuedContent.delete(key);
@@ -3912,10 +3921,18 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       const identity = settlement.draft_identity || settlement.generation_id;
       if (settlement.channel_kind?.includes('TOOL_RESULT')) {
         for (const [key, result] of this.liveResults) {
-          if (this.liveResultMatches(result, settlement)) this.liveResults.delete(key);
+          if (!this.liveResultMatches(result, settlement)) continue;
+          if (result.scopeKind === 'ROOT' && settlement.kind === 'LIVE_GENERATION_COMMITTED' && settlement.committed_entry_id) {
+            result.committedEntryId = settlement.committed_entry_id;
+          } else this.liveResults.delete(key);
         }
       } else if (identity) {
-        this.drafts.delete(identity);
+        const draft = this.drafts.get(identity);
+        if (draft?.scopeKind === 'ROOT' && settlement.kind === 'LIVE_GENERATION_COMMITTED' && settlement.committed_entry_id) {
+          // Keep already displayed bytes through the asynchronous history read.
+          // The exact SDK settlement supplies the binding; this is no live run.
+          draft.committedEntryId = settlement.committed_entry_id;
+        } else this.drafts.delete(identity);
       }
     }
   }
@@ -4035,6 +4052,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       (this.control.active_turns ?? []).map((turn) => turn.turn_id),
     );
     const visibleDrafts = [...this.drafts.values()].filter((draft) => {
+      if (draft.committedEntryId) return false;
       if (draft.scopeKind === 'SUBAGENT_TASK' || draft.taskId) {
         // The draft is a process-local active observation.  Inventory pages
         // are sparse and their absence cannot establish task termination.
@@ -4072,6 +4090,21 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.decorateSubagentRuns(subagentRuns);
     attachSubagentRuns(messages, subagentRuns, this.taskCreators());
     this.decorateHistory(messages);
+    for (const [identity, draft] of this.drafts) {
+      if (!draft.committedEntryId) continue;
+      const message = messages.find(item => item.id === draft.committedEntryId || item.sourceEntryIds?.includes(draft.committedEntryId!));
+      if (!message) continue;
+      if (message.turnId !== draft.turnId) { this.drafts.delete(identity); continue; }
+      if (message.historyContextState === 'ready' && message.contentState === 'ready') {
+        this.drafts.delete(identity);
+      } else {
+        message.pendingAssistant = {
+          body: message.contentState === 'ready' ? message.body : draft.body,
+          reasoning: draft.reasoning,
+          traces: message.traces?.length ? message.traces : draft.traces,
+        };
+      }
+    }
     this.applyProjectedLiveResults(messages, subagentRuns, activeTurnIds);
     const hasActiveDraft = visibleDrafts.length > 0;
     const activeTurn = (this.control.active_turns ?? []).find(
@@ -4144,10 +4177,25 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         for (const trace of activity.traces ?? []) traceTargets.set(`${run.id}:${activity.id}:${trace.id}`, trace);
       }
     }
-    for (const result of this.liveResults.values()) {
+    for (const [key, result] of this.liveResults) {
       const trace = result.assistantEntryId && result.toolCallId
         ? traceTargets.get(`${result.taskId ? `${result.taskId}:` : ''}${result.assistantEntryId}:${result.toolCallId}`)
         : undefined;
+      if (result.committedEntryId) {
+        if (this.entryContentState(result.committedEntryId) === 'ready' && this.entries.has(result.committedEntryId)) {
+          this.liveResults.delete(key);
+        } else if (result.hasText && trace?.resultEntryId === result.committedEntryId) {
+          const owner = messages.find(message => message.id === result.assistantEntryId && message.turnId === result.turnId);
+          if (owner) owner.pendingAssistant = {
+            body: owner.pendingAssistant?.body ?? owner.body,
+            reasoning: owner.pendingAssistant?.reasoning ?? owner.reasoning,
+            traces: (owner.pendingAssistant?.traces ?? owner.traces)?.map(item => item.id === trace.id
+              ? { ...item, resultText: result.text } : item),
+          };
+        }
+        // A settled preview must not become detached activity or live authority.
+        continue;
+      }
       if (trace && !trace.resultEntryId) {
         if (result.hasText) trace.resultText = result.text;
         trace.resultState = result.resultState;

@@ -183,8 +183,11 @@ function canonicalInputMatches(
     && (!submission.queueItemId || message.inputSource.queueItemId === submission.queueItemId);
 }
 
-function canonicalBodyReady(message: RuntimeProjection['messages'][number]): boolean {
-  return message.contentState === undefined || message.contentState === 'ready';
+function canonicalPromptReady(message: RuntimeProjection['messages'][number]): boolean {
+  // The history host cannot display the canonical bubble until its grouping is
+  // ready too. Keep the exact submitted content through that handoff.
+  return (message.contentState === undefined || message.contentState === 'ready')
+    && message.historyContextState !== 'loading' && message.historyContextState !== 'error';
 }
 
 function promptWasAccepted(receipt: CommandReceipt): boolean {
@@ -469,7 +472,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       const projected: LocalPromptSubmission[] = current.flatMap((item) => {
         if (item.sessionId !== (owner?.sessionId ?? activeSessionIdRef.current)) return [item];
         const canonical = next.messages.find(message => canonicalInputMatches(message, item));
-        if (canonical && canonicalBodyReady(canonical)) return [];
+        if (canonical && canonicalPromptReady(canonical)) return [];
         if (canonical) return [{ ...item, status: 'consumed' as const, consumedEntryId: canonical.id }];
         // A history/body publication can precede the committed queue suffix.
         // It cannot downgrade an exact terminal receipt to older pending state.
@@ -3028,7 +3031,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
             && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
             && (item.displayAsMessage || !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId))
-            && !projection.messages.some(message => canonicalInputMatches(message, item) && canonicalBodyReady(message))
+            && !projection.messages.some(message => canonicalInputMatches(message, item) && canonicalPromptReady(message))
           ))}
           runtimeStatus={runtimeStatus}
           runtimeError={runtimeError}

@@ -1634,9 +1634,10 @@ describe('PulsaraApp', () => {
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const bodies = [
-      container.querySelector<HTMLElement>('.user-message > p'),
-      container.querySelector<HTMLElement>('.user-steer__content > p'),
+      container.querySelector<HTMLElement>('.user-turn:not(.user-steer) .user-message > p'),
+      container.querySelector<HTMLElement>('.user-steer .user-message > p'),
     ];
+    expect(bodies[0]).not.toBe(bodies[1]);
 
     for (const body of bodies) {
       expect(body).toBeTruthy();
@@ -3121,7 +3122,8 @@ describe('PulsaraApp', () => {
       expect(within(queue).queryByRole('button', { name })).toBeNull();
     }
     expect(within(queue).getByRole('button', { name: '展开' })).toBeTruthy();
-    expect(container.querySelectorAll('.user-turn')).toHaveLength(0);
+    expect(container.querySelectorAll('.user-turn:not(.user-steer)')).toHaveLength(0);
+    expect(container.querySelectorAll('.user-turn.user-steer')).toHaveLength(1);
   });
 
   it('keeps an observed queue item visible when it reaches a terminal state', async () => {
@@ -4418,7 +4420,7 @@ it('publishes asynchronous reader readiness while observe is waiting and preserv
   expect(await screen.findByText('后续实时进展')).toBeTruthy();
 });
 
-it('keeps known submitted text through canonical metadata and releases it only after ready body', async () => {
+it.each(['loading', 'ready'] as const)('keeps known submitted text while grouping loads with a %s canonical body', async contentState => {
   const adapter = new FakeAdapter();
   adapter.connectionValue = { ...projection(''), messages: [], isRunning: false, activeTurnId: undefined };
   renderWorkbench(<PulsaraApp adapter={adapter} />);
@@ -4434,7 +4436,7 @@ it('keeps known submitted text through canonical metadata and releases it only a
   await waitFor(() => expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe(''));
   await typeComposer('下一条尚未发送');
   const metadata: RuntimeProjection = { ...projection(''), eventSequence: 3, messages: [{
-    id: 'entry-body', role: 'user', userKind: 'prompt', time: '现在', body: '', contentState: 'loading', historyContextState:'loading',
+    id: 'entry-body', role: 'user', userKind: 'prompt', time: '现在', body: contentState === 'ready' ? '校验后的正式正文' : '', contentState, historyContextState:'loading',
     inputSource: { commandId, queueItemId: 'queue-body', deliveryMode: 'new-turn' },
   }] };
   act(() => active.emit(metadata));

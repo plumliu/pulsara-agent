@@ -425,6 +425,9 @@ export interface Message {
   body: string;
   promptContent?: CanonicalPromptContent;
   pendingContent?: CanonicalPromptContent;
+  // Known card content while grouping/body reads finish; streamed bytes require
+  // the exact settlement entry binding. Never establishes canonical readiness.
+  pendingAssistant?: Pick<Message, 'body' | 'reasoning' | 'traces'>;
   reasoning?: ReasoningBlock[];
   model?: string;
   status?: SessionStatus;

@@ -441,6 +441,14 @@ function TraceCard({
     artifactRequestRevision.current += 1;
     return () => { artifactRequestRevision.current += 1; };
   }, []);
+  useLayoutEffect(() => {
+    artifactOwnerKeyRef.current = artifactOwnerKey;
+    artifactResultEntryIdRef.current = trace.resultEntryId;
+    artifactRequestRevision.current += 1;
+    setArtifactPage(undefined);
+    setArtifactBusy(false);
+    setArtifactError('');
+  }, [artifactOwnerKey, trace.resultEntryId]);
   const Icon = traceIcons[trace.kind];
   const skill = traceSkill(trace, skills);
   const mcpDetail = mcpTraceDetail(trace, mcpToolRefs);
@@ -933,7 +941,7 @@ function SubagentRunCard({
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
                 </div>
               ) : <div className="assistant-markdown"><MarkdownBody assistantChat visualization={activity.visualizations ? {entryId: activity.id, items: activity.visualizations, onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail} : undefined} body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
-              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
+              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
             </section>
             </HistoryMessageHost>
           ))}
@@ -1178,12 +1186,12 @@ function AssistantMessage({
       {hasNaturalLanguage && (
         <>
           <div className="assistant-copy">
-            <div className={`assistant-markdown${isStreaming ? '' : ' assistant-markdown--pretty'}`}>
+            <div className="assistant-markdown">
               <AnnotationBody entryId={message.assistantKind !== 'live' && !isStreaming ? message.id : undefined} body={message.body}>
                 <MarkdownBody assistantChat visualization={message.visualizations ? { entryId: message.id, items: message.visualizations ?? [], onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail } : undefined} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
               </AnnotationBody>
             </div>
-            {(canCopyResponse || message.forkEligible) && (
+            {(canCopyResponse || message.forkEligible) ? (
               <div className="response-actions">
                 <button
                   onClick={() => {
@@ -1206,7 +1214,7 @@ function AssistantMessage({
                 )}
                 <time className="response-time">{message.time}</time>
               </div>
-            )}
+            ) : isStreaming || message.assistantKind === 'live' ? <div className="response-actions" aria-hidden="true" /> : null}
           </div>
         </>
       )}
@@ -1215,7 +1223,7 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
       {message.subagentRuns?.length ? (
         <SubagentGroup onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
       ) : null}
@@ -1264,7 +1272,8 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   const summarized = contextLoadingSummarized && message.historyContextState === 'loading';
   if (summarized && !knownContent) return null;
   return <div ref={ref} data-source-entry={message.id} data-content-state={contextPending ? 'loading' : contentState} data-source-entries={message.sourceEntryIds?.join(' ')}>
-    {summarized ? knownContent : contextPending ? <div role="status">{knownContent}{message.historyContextState === 'error' ? '记录分组读取失败，请重试此页。' : '正在读取记录分组…'}</div>
+    {message.pendingAssistant && knownContent && message.historyContextState !== 'error' && contentState !== 'error'
+      ? knownContent : summarized ? knownContent : contextPending ? <div role="status">{knownContent}{message.historyContextState === 'error' ? '记录分组读取失败，请重试此页。' : '正在读取记录分组…'}</div>
       : pending ? <div role="status" className="history-content-status">
         {knownContent}
         {contentState === 'error' ? message.contentError ?? message.reasoningContentError ?? '正文读取失败。' : '已保存，正文读取中…'}
@@ -1297,7 +1306,8 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const process = messages.flatMap((message) => {
     if (message !== answer) return [message];
     return message.reasoning?.length || (message.reasoningContentState && message.reasoningContentState !== 'ready') || message.traces?.length || message.subagentRuns?.length
-      ? [{ ...message, id: `${message.id}:process`, sourceEntryIds: message.sourceEntryIds ?? [message.id], body: '', forkEligible: false, visualizations: undefined }] : [];
+      ? [{ ...message, id: `${message.id}:process`, sourceEntryIds: message.sourceEntryIds ?? [message.id], body: '', forkEligible: false, visualizations: undefined,
+          pendingAssistant: message.pendingAssistant ? { ...message.pendingAssistant, body: '' } : undefined }] : [];
   });
   const hasProcess = process.some((message) => message.role === 'assistant' || message.userKind === 'subagent-completion');
   if (!hasProcess) return renderMessage(answer!, true);
@@ -1318,7 +1328,8 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
         <div className="conversation-run__step">{renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded || hidden }, false, !hidden)}</div>
       </AnimatedDisclosure>;
     })}
-    {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined }, false)}
+    {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined,
+      pendingAssistant: answer.pendingAssistant ? { body: answer.pendingAssistant.body } : undefined }, false)}
   </section>;
 }
 
@@ -1411,21 +1422,27 @@ export function ConversationMessages({
       ? localSubmissions.find(item => item.commandId === message.inputSource?.commandId
         && (!item.queueItemId || item.queueItemId === message.inputSource?.queueItemId))?.content ?? message.pendingContent
       : undefined;
+    const assistant = (value: Message, preview = false) => <AssistantMessage message={value}
+      responseActionEligible={!preview && isCompleteAnswer(value, taskFinalAnswerId)} startsAssistantRun={startsRun}
+      joinsPreviousToolChain={toolChainConnections.before.has(value.id)}
+      joinsNextToolChain={toolChainConnections.after.has(value.id)}
+      focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
+      focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs}
+      onNotify={onNotify} onFork={onFork} canFork={!preview && canFork} artifactOwnerKey={artifactOwnerKey}
+      onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
+      onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
+      assistantLabel={assistantLabel} />;
+    const fallback = message.pendingAssistant;
+    const knownAssistant = fallback && assistant({ ...message, ...fallback,
+      assistantKind: 'live', status: 'completed', forkEligible: false, visualizations: undefined,
+      reasoning: fallback.body ? undefined : fallback.reasoning,
+    }, true);
     return <HistoryMessageHost key={message.id} message={message}
       contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
-      ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : undefined}>
+      ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
       {message.role === 'user'
         ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} visible={visible} />
-        : <AssistantMessage message={message} responseActionEligible={isCompleteAnswer(message, taskFinalAnswerId)} startsAssistantRun={startsRun}
-            joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
-            joinsNextToolChain={toolChainConnections.after.has(message.id)}
-            focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
-            focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs}
-            onNotify={onNotify} onFork={onFork} canFork={canFork} artifactOwnerKey={artifactOwnerKey}
-            onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
-            onReadVisualization={onReadVisualization}
-            onReadVisualizationThumbnail={onReadVisualizationThumbnail}
-            assistantLabel={assistantLabel} />}
+        : assistant(message)}
     </HistoryMessageHost>;
   };
   const completedTurns = new Set(messages.filter(message => isCompleteAnswer(message, taskFinalAnswerId)).map(message => message.turnId).filter(Boolean));
@@ -1504,7 +1521,7 @@ export function ConversationMessages({
       for (const marker of history?.compactions ?? []) if (marker.displayBeforeEntryId === message.id) {
         flush(); content.push(<ContextCompactionDivider key={marker.eventId} />); segmentBoundary = marker.eventId;
       }
-      if (message.historyContextState === 'loading' || message.historyContextState === 'error') {
+      if ((message.historyContextState === 'loading' && !message.pendingAssistant) || message.historyContextState === 'error') {
         flush(); content.push(renderMessage(message, false));
       } else {
         const newInput = message.role === 'user'
@@ -1517,7 +1534,12 @@ export function ConversationMessages({
           && message.turnId === activeTurnId && Boolean(activeTurnId)
           && !message.historyGroupId && !message.historyWindowId
           && run[0]?.turnId === message.turnId && run[0]?.entryOwnerKind !== 'IMPORTED_HISTORY';
-        if (newInput || (run.length && !continuesLiveRun && (run[0].historyGroupId !== message.historyGroupId || run[0].historyWindowId !== message.historyWindowId || run[0].turnId !== message.turnId))) flush();
+        // The exact committed successor can keep the same visible run while its
+        // group read finishes, including after execution has already stopped.
+        const continuesHandoff = message.historyContextState === 'loading' && Boolean(message.pendingAssistant)
+          && Boolean(message.turnId) && run[0]?.turnId === message.turnId && run[0]?.entryOwnerKind !== 'IMPORTED_HISTORY'
+          && (!run[0]?.historyWindowId || run[0].historyWindowId === message.historyWindowId);
+        if (newInput || (run.length && !continuesLiveRun && !continuesHandoff && (run[0].historyGroupId !== message.historyGroupId || run[0].historyWindowId !== message.historyWindowId || run[0].turnId !== message.turnId))) flush();
         if (message.role === 'user' && message.userKind !== 'subagent-completion' && !run.length) content.push(renderMessage(message, false));
         else run.push(message);
         if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
@@ -2380,6 +2402,9 @@ export function WorkbenchView({
     if (!thread || !column || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(restoreReadingPosition);
     observer.observe(column);
+    // Queue/composer animations resize the viewport without resizing messages.
+    // Settle the same reading intent before paint, rather than on the next delta.
+    observer.observe(thread);
     return () => observer.disconnect();
   }, [session.id, restoreReadingPosition]);
 
