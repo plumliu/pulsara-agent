@@ -21,3 +21,8 @@ temp
 .vscode
 .playwright-cli
 *.log
+desktop/build
+desktop/resources
+desktop/release
+experiments
+logs

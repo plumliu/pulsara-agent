@@ -11,16 +11,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@v10.2.0
-      - uses: actions/setup-node@v7
+      - uses: jdx/mise-action@v5.2.1
         with:
-          node-version: '22'
-          package-manager-cache: false
+          version: '2026.10.15'
       - name: Verify committed release versions
         shell: bash
         run: |
-          uv python install 3.12
-          uv sync --locked --dev --no-install-project
+          mise run desktop:bootstrap
           args=()
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             args+=(--tag "$GITHUB_REF_NAME")
@@ -60,16 +57,14 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@v10.2.0
-      - uses: actions/setup-node@v7
+      - uses: jdx/mise-action@v5.2.1
         with:
-          node-version: '22'
-          package-manager-cache: false
+          version: '2026.10.15'
       - name: Native build tools (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bison flex pkg-config binutils patchelf libopenblas0
+          sudo apt-get install -y build-essential bison flex pkg-config binutils patchelf libopenblas0 xz-utils
       - name: Native build tools (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -78,25 +73,21 @@ jobs:
           echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
       - name: Prepare Python and application dependencies
         run: |
-          uv python install 3.12
-          uv run --no-project --python 3.12 python tools/prepare_ripgrep.py
-          uv sync --locked --dev
+          mise run desktop:bootstrap
       - name: Chromium OS dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: uv run --no-sync python -m playwright install-deps chromium
       - name: Build the desktop renderer and shell
         run: |
-          npm --prefix frontend ci
-          npm --prefix frontend run build:desktop
-          npm --prefix desktop ci
+          mise run --jobs 1 desktop:resources
           npm --prefix desktop test
           node --test desktop/scripts/linux-hooks.test.cjs
+          .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py
       - name: Verify native Linux dependency collection
         if: runner.os == 'Linux'
         run: uv run --no-sync python desktop/scripts/test_linux_dependencies.py
       - name: Build pinned native resources and verify relocation
         run: |
-          uv run --no-sync python desktop/scripts/prepare_resources.py
           uv run --no-sync python desktop/scripts/smoke_resources.py
           uv run --no-sync python desktop/scripts/release_artifacts.py check --resources desktop/resources
       - name: Package native installer
@@ -132,7 +123,9 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: jdx/mise-action@v5.2.1
+        with:
+          version: '2026.10.15'
       - uses: actions/download-artifact@v8
         with:
           pattern: pulsara-desktop-*
@@ -141,6 +134,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          uv python install 3.12
-          uv sync --locked --dev --no-install-project
+          mise run desktop:bootstrap
           uv run --no-sync python desktop/scripts/release_artifacts.py draft --tag "$GITHUB_REF_NAME" --artifacts release-input --output release-assets --repository "$GITHUB_REPOSITORY"

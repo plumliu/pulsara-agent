@@ -1,0 +1,4 @@
+brew "bison"
+brew "flex"
+brew "pkg-config"
+brew "dylibbundler"

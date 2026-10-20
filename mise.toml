@@ -1,2 +1,85 @@
+min_version = "2026.7.18"
+
 [tools]
 protoc = "34.0"
+node = "22.23.3"
+uv = "0.13.4"
+
+[env]
+UV_DEFAULT_INDEX = "https://pypi.org/simple"
+
+[settings.task]
+source_freshness_hash_contents = true
+
+# mise owns the dependency graph and freshness state; uv owns .venv and installs.
+# These are disposable build outputs, never user settings or application state.
+[tasks."desktop:bootstrap"]
+run = "uv sync --locked --dev --no-install-project --default-index https://pypi.org/simple"
+
+[tasks."desktop:environment"]
+depends = ["desktop:bootstrap"]
+run = ".venv/bin/python desktop/scripts/build_environment.py"
+
+[tasks."desktop:requirements"]
+depends = ["desktop:environment"]
+run = ".venv/bin/python desktop/scripts/prepare_resources.py requirements"
+
+[tasks."desktop:postgres"]
+depends = ["desktop:environment"]
+sources = ["desktop/scripts/prepare_resources.py", "desktop/build/environment.json"]
+outputs = ["desktop/resources/postgres/bin/postgres", "desktop/resources/postgres/bin/pg_config", "desktop/resources/postgres/bin/initdb", "desktop/resources/postgres/bin/pg_ctl", "desktop/resources/postgres/bin/psql", "desktop/resources/postgres/bin/pg_isready", "desktop/resources/postgres/lib/pg_search.{% if os() == 'macos' %}dylib{% else %}so{% endif %}", "desktop/resources/postgres/lib/vector.{% if os() == 'macos' %}dylib{% else %}so{% endif %}", "desktop/resources/licenses/PostgreSQL-COPYRIGHT", "desktop/resources/licenses/ParadeDB-AGPL-3.0", "desktop/resources/licenses/pgvector-LICENSE", "desktop/resources/licenses/database-sources.txt"]
+run = ".venv/bin/python desktop/scripts/prepare_resources.py postgres"
+
+[tasks."desktop:python-dependencies"]
+depends = ["desktop:requirements"]
+sources = ["desktop/build/requirements.txt", ".python-version", "desktop/scripts/prepare_resources.py", "desktop/build/environment.json"]
+outputs = ["desktop/resources/python/bin/python3", "desktop/resources/python/lib/python3.12/site-packages/playwright/__init__.py", "desktop/resources/licenses/Python-LICENSE.txt"]
+run = ".venv/bin/python desktop/scripts/prepare_resources.py python-dependencies"
+
+[tasks."desktop:browsers"]
+depends = ["desktop:python-dependencies"]
+sources = ["desktop/build/requirements.txt", "desktop/scripts/prepare_resources.py", "desktop/build/environment.json"]
+outputs = ["desktop/resources/playwright"]
+run = ".venv/bin/python desktop/scripts/prepare_resources.py browsers"
+
+[tasks."desktop:ripgrep"]
+depends = ["desktop:environment"]
+sources = ["tools/prepare_ripgrep.py", "desktop/build/environment.json"]
+outputs = ["src/pulsara_agent/_vendor/ripgrep/rg", "src/pulsara_agent/_vendor/ripgrep/COPYING", "src/pulsara_agent/_vendor/ripgrep/LICENSE-MIT", "src/pulsara_agent/_vendor/ripgrep/LICENSE-PCRE2"]
+run = ".venv/bin/python tools/prepare_ripgrep.py"
+
+[tasks."desktop:frontend-dependencies"]
+depends = ["desktop:environment"]
+sources = ["frontend/package.json", "frontend/package-lock.json", "desktop/build/environment.json"]
+outputs = ["frontend/node_modules/.package-lock.json", "frontend/node_modules/.bin/vite"]
+run = "npm --prefix frontend ci --no-audit --no-fund"
+
+[tasks."desktop:shell-dependencies"]
+depends = ["desktop:environment"]
+sources = ["desktop/package.json", "desktop/package-lock.json", "desktop/build/environment.json"]
+outputs = ["desktop/node_modules/.package-lock.json", "desktop/node_modules/.bin/electron-builder"]
+run = "npm --prefix desktop ci --no-audit --no-fund"
+
+[tasks."desktop:project"]
+depends = ["desktop:ripgrep"]
+run = "uv sync --locked --dev --default-index https://pypi.org/simple"
+
+[tasks."desktop:renderer"]
+depends = ["desktop:frontend-dependencies"]
+run = "npm --prefix frontend run build:desktop"
+
+[tasks."desktop:application"]
+depends = ["desktop:python-dependencies", "desktop:ripgrep", "desktop:renderer"]
+run = ".venv/bin/python desktop/scripts/prepare_resources.py application"
+
+[tasks."desktop:resources"]
+depends = ["desktop:postgres", "desktop:browsers", "desktop:application", "desktop:shell-dependencies", "desktop:project"]
+run = ".venv/bin/python desktop/scripts/prepare_resources.py validate"
+
+[tasks."desktop:verify"]
+depends = ["desktop:resources"]
+run = ["npm --prefix desktop test", ".venv/bin/python desktop/scripts/smoke_resources.py", ".venv/bin/python desktop/scripts/release_artifacts.py check --resources desktop/resources"]
+
+[tasks."desktop:package"]
+depends = ["desktop:verify"]
+run = "npm --prefix desktop run package -- --publish never"

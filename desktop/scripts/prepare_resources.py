@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -488,88 +489,94 @@ def prepare_postgres(
         install_extension(name, version, lib, share, lib, share)
 
 
-def prepare_python():
+def export_requirements():
+    """uv owns resolution; only runtime requirements become a native-cache input."""
+    requirements = ROOT / "build" / "requirements.txt"
+    requirements.parent.mkdir(parents=True, exist_ok=True)
+    text = output(
+        ["uv", "export", "--locked", "--default-index", "https://pypi.org/simple", "--no-dev", "--no-emit-project",
+         "--no-header", "--no-annotate"], cwd=REPO,
+    ) + "\n"
+    if not requirements.exists() or requirements.read_text() != text:
+        requirements.write_text(text)
+
+
+def prepare_python_dependencies():
     target = RESOURCES / "python"
     managed = output(
-        ["uv", "python", "find", "--managed-python", "--no-project", "3.12"]
+        ["uv", "python", "find", "--managed-python", "--no-project",
+         (REPO / ".python-version").read_text().strip()]
     )
     base = Path(output([managed, "-c", "import sys; print(sys.base_prefix)"]))
-    if not target.exists():
-        shutil.copytree(base, target, symlinks=True)
+    # Rebuild a dependency layer from pristine SDK files. Re-patching already
+    # relocated Linux wheels can corrupt their ELF version metadata.
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(base, target, symlinks=True)
     python = target / "bin" / "python3"
-    if output([python, "--version"]) != output([managed, "--version"]):
-        raise RuntimeError(
-            "Existing desktop Python differs from the uv-managed build interpreter; remove desktop/resources/python and rebuild"
-        )
     validate_architecture(python.resolve())
     notices = RESOURCES / "licenses"
     notices.mkdir(exist_ok=True)
     shutil.copy2(
         target / "lib" / "python3.12" / "LICENSE.txt", notices / "Python-LICENSE.txt"
     )
-    requirements = ROOT / "build" / "requirements.txt"
-    requirements.parent.mkdir(exist_ok=True)
-    run(
-        [
-            "uv",
-            "export",
-            "--frozen",
-            "--no-dev",
-            "--no-emit-project",
-            "--output-file",
-            requirements,
-        ],
-        cwd=REPO,
-        stdout=subprocess.DEVNULL,
-    )
     run(
         [
             "uv",
             "pip",
-            "install",
+            "sync",
             "--python",
             python,
             "--system",
             "--break-system-packages",
-            "-r",
-            requirements,
+            "--link-mode=copy",
+            "--require-hashes",
+            ROOT / "build" / "requirements.txt",
         ],
         cwd=REPO,
     )
-    wheels = ROOT / "build" / "wheels"
-    wheels.mkdir(exist_ok=True)
-    run(["uv", "build", "--wheel", "--out-dir", wheels], cwd=REPO)
-    wheel = max(wheels.glob("pulsara_agent-*.whl"), key=lambda p: p.stat().st_mtime)
+    if sys.platform == "linux":
+        bundle_linux_dependencies(target)
+
+
+def prepare_application():
+    # Always rebuild local application code, including prompts, bundled Skills
+    # and the renderer. Dependency cache hits never authorize an old app wheel.
+    with tempfile.TemporaryDirectory(prefix="pulsara-wheel-") as temporary:
+        wheels = Path(temporary)
+        run(["uv", "build", "--wheel", "--no-build-isolation", "--python",
+             REPO / ".venv/bin/python", "--out-dir", wheels], cwd=REPO)
+        wheel, = wheels.glob("pulsara_agent-*.whl")
+        run(
+            ["uv", "pip", "install", "--python", RESOURCES / "python/bin/python3",
+             "--system", "--break-system-packages", "--link-mode=copy",
+             "--no-deps", "--reinstall", wheel], cwd=REPO,
+        )
+
+
+def prepare_browsers():
+    # Playwright owns revision selection and download caching. Relocate a copy;
+    # never patchelf the SDK's cached browser binaries.
+    downloads = ROOT / "build" / "playwright-downloads"
     run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            python,
-            "--system",
-            "--break-system-packages",
-            "--no-deps",
-            "--reinstall",
-            wheel,
-        ],
-        cwd=REPO,
+        [RESOURCES / "python/bin/python3", "-m", "playwright", "install", "chromium"],
+        env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(downloads)},
     )
     browsers = RESOURCES / "playwright"
-    browsers.mkdir(exist_ok=True)
-    run(
-        [python, "-m", "playwright", "install", "chromium"],
-        env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(browsers)},
-    )
-    for payload in (target, browsers):
-        for binary in native_files(payload):
-            validate_architecture(binary)
-        if sys.platform == "linux":
-            bundle_linux_dependencies(payload)
+    if browsers.exists():
+        shutil.rmtree(browsers)
+    shutil.copytree(downloads, browsers, symlinks=True)
+    if sys.platform == "linux":
+        bundle_linux_dependencies(browsers)
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "component", nargs="?",
+        choices=("requirements", "postgres", "python-dependencies", "browsers", "application", "validate"),
+        help="Internal resource task; omit to run the mise dependency graph",
+    )
     parser.add_argument(
         "--extension-lib",
         type=Path,
@@ -580,30 +587,38 @@ def main():
         type=Path,
         help="Matching extension controls and SQL; required with --extension-lib",
     )
-    parser.add_argument(
-        "--skip-postgres",
-        action="store_true",
-        help="Reuse already prepared native database payload",
-    )
-    parser.add_argument(
-        "--skip-python",
-        action="store_true",
-        help="Reuse already prepared Python payload",
-    )
     options = parser.parse_args()
+    if options.component is None:
+        if options.extension_lib or options.extension_share:
+            parser.error("Custom extensions require the explicit postgres component")
+        run(["mise", "run", "desktop:resources"], cwd=REPO)
+        return
     target_platform()
     if sys.platform == "darwin":
         os.environ["MACOSX_DEPLOYMENT_TARGET"] = "15.0"
     if bool(options.extension_lib) != bool(options.extension_share):
         parser.error("--extension-lib and --extension-share must be supplied together")
+    if options.extension_lib and options.component != "postgres":
+        parser.error("Custom extensions belong to the postgres component")
     RESOURCES.mkdir(exist_ok=True)
-    if not options.skip_postgres:
+    if options.component == "requirements":
+        export_requirements()
+    elif options.component == "postgres":
         prepare_postgres(
             options.extension_lib.resolve() if options.extension_lib else None,
             options.extension_share.resolve() if options.extension_share else None,
         )
-    if not options.skip_python:
-        prepare_python()
+    elif options.component == "python-dependencies":
+        prepare_python_dependencies()
+    elif options.component == "browsers":
+        prepare_browsers()
+    elif options.component == "application":
+        prepare_application()
+    else:
+        validate_resources()
+
+
+def validate_resources():
     target = RESOURCES / "postgres"
     lib, share = pg_layout(target)
     for name, version in (("pg_search", SEARCH_VERSION), ("vector", VECTOR_VERSION)):
@@ -616,6 +631,9 @@ def main():
     python_version = output(
         [python, "-c", "import platform; print(platform.python_version())"]
     )
+    expected_python = (REPO / ".python-version").read_text().strip()
+    if python_version != expected_python:
+        raise RuntimeError(f"Bundled Python must be {expected_python}, got {python_version}")
     (RESOURCES / "desktop-launch.json").write_text(
         json.dumps(
             {

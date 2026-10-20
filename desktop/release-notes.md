@@ -34,7 +34,7 @@ macOS 首次启动会注册 `~/.local/bin/pulsara`；Ubuntu 由 deb 管理 `/usr
 ## 验证范围与已知限制
 
 - 本次重新发布在本地构建和验证，不触发 GitHub Actions。启动遮罩回归使用真实 Electron、生产 preload 与 IPC，覆盖隐藏、最小化、替换和销毁时的启动结算。
-- 三个平台复用此前对应架构的固定版本原生依赖，更新应用代码并重新生成安装包。下载后的 Gatekeeper 首次打开与完整图形桌面验收仍需在目标机器进行。
+- 三个平台复用此前对应架构的固定版本原生依赖，更新应用代码并重新生成安装包。下载后的 Gatekeeper 首次打开与完整图形桌面闭环仍待人工验收。
 - 当前仅提供手动更新，不包含 AppImage、Windows 或 macOS Intel 安装包，不宣称兼容所有 Linux 发行版，也不承诺跨版本数据库迁移。
 
 问题反馈：[GitHub Issues](https://github.com/plumliu/pulsara-agent/issues)。请注明版本、系统、架构和复现步骤，不要附带 API Key 或 OAuth 令牌。
