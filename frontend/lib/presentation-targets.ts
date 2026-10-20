@@ -2,6 +2,7 @@
 export type PresentationTarget =
   | { type: 'file'; path: string }
   | { type: 'browser'; url: string }
+  | { type: 'task'; task_id: string }
   | { type: 'terminal'; process_id: string; host_session_id: string }
   | { type: 'mcp'; runtime_server_id: string; host_session_id: string }
   | { type: 'panel'; name: 'capabilities' | 'tasks' | 'background' | 'browser' };
@@ -17,7 +18,7 @@ export function parsePresentationResult(text: string): PresentationResult | unde
     if (!result || !Array.isArray(result.targets) || Object.keys(result).some(key => !['targets', 'errors'].includes(key))) return;
     for (const target of result.targets) {
       if (!target || typeof target !== 'object') return;
-      const fields: Record<string, string[]> = { file: ['path'], browser: ['url'], terminal: ['process_id', 'host_session_id'], mcp: ['runtime_server_id', 'host_session_id'], panel: ['name'] };
+      const fields: Record<string, string[]> = { file: ['path'], browser: ['url'], task: ['task_id'], terminal: ['process_id', 'host_session_id'], mcp: ['runtime_server_id', 'host_session_id'], panel: ['name'] };
       const required = fields[target.type];
       if (!required || Object.keys(target).length !== required.length + 1 || required.some(key => typeof target[key] !== 'string' || !target[key].trim())) return;
       if (target.type === 'file' && !target.path.startsWith('/')) return;
@@ -31,6 +32,7 @@ export function parsePresentationResult(text: string): PresentationResult | unde
 export function presentationLabel(target: PresentationTarget) {
   if (target.type === 'file') return target.path.split('/').pop() || target.path;
   if (target.type === 'browser') return target.url;
+  if (target.type === 'task') return target.task_id;
   if (target.type === 'terminal') return target.process_id;
   if (target.type === 'mcp') return target.runtime_server_id;
   return { capabilities: '会话能力', tasks: '任务', background: '后台进程', browser: '新建网页' }[target.name];

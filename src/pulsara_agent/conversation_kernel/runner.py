@@ -1726,10 +1726,14 @@ class ConversationKernelRunner:
                     # ordinary preparation boundary instead of replanning it.
                     await self._before_provider_preparation()
                 if (
-                    intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
+                    successor_dispatch is None
+                    and intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
                     and intent.scope_subagent_task_id is not None
                     and self._subagent_runtime is not None
                 ):
+                    # A compaction successor already owns its frozen request.
+                    # Leave later guidance queued so its first answer cannot
+                    # complete the child before an ordinary preparation reads it.
                     await self._subagent_runtime.consume_mailbox_safe_point(
                         intent.scope_subagent_task_id
                     )

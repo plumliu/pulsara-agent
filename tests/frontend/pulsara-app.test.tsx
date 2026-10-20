@@ -3466,7 +3466,7 @@ describe('PulsaraApp', () => {
     expect(adapter.connectCalls).toHaveLength(2);
   });
 
-  it('shows real child execution inline and expands its details', async () => {
+  it('opens a single worker group from the compact transcript without expanding child details', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection('正在并行检查。'),
@@ -3482,7 +3482,7 @@ describe('PulsaraApp', () => {
       }],
       taskCreators: { 'task-readme': 'assistant-subagents' },
       subagentRuns: [{
-          id: 'task-readme',
+          id: 'task-readme', parentId: 'turn-1', batchId: 'batch-1',
           label: '检查 README',
           role: '研究',
           objective: '读取 README.md 并报告一级标题。',
@@ -3506,15 +3506,19 @@ describe('PulsaraApp', () => {
     adapter.taskInventory = [{id:'task-readme',label:'检查 README',role:'研究',objective:'读取 README.md 并报告一级标题。',status:'completed',color:'blue',parentId:'turn-1',batchId:'batch-1',dependencyIds:[],completionAccepted:true}];
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
-    fireEvent.click(await screen.findByRole('button', {name: '任务'}));
-    fireEvent.click(await screen.findByRole('button', {name: /检查 README/}));
-
-    fireEvent.click(within(screen.getByRole('main', {hidden: true})).getByRole('button', { name: '展开中间过程', hidden: true }));
-    expect(await screen.findByText('任务执行')).toBeTruthy();
-    const task = within(screen.getByLabelText('任务执行')).getByRole('button', { name: /检查 README/, hidden: true });
-    expect(task).toBeTruthy();
-    fireEvent.click(task);
-    expect(within(screen.getByLabelText('任务执行')).getByText('读取 README.md 并报告一级标题。')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    const summary = await screen.findByLabelText('任务执行');
+    expect(summary.textContent).not.toContain('读取 README.md 并报告一级标题。');
+    expect(summary.querySelector('.subagent-run__body')).toBeNull();
+    fireEvent.click(within(summary).getByRole('button', { name: '查看任务：检查 README' }));
+    const tab = await screen.findByRole('tab', {name: '检查 README'});
+    expect(tab.getAttribute('aria-selected')).toBe('true');
+    expect(adapter.readSessionTask).toHaveBeenCalledWith(initialSession.id, 'task-readme');
+    await waitFor(() => expect(adapter.listSessionTasks).toHaveBeenCalledWith(initialSession.id, undefined, 'batch-1'));
+    expect(await screen.findByRole('heading', {name:'任务对话'})).toBeTruthy();
+    fireEvent.click(within(summary).getByRole('button', { name: '查看任务：检查 README' }));
+    await waitFor(() => expect(adapter.readSessionTask).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByRole('tab', {name: '检查 README'})).toHaveLength(1);
   });
 
   it('keeps the complete durable child-task history inside its session', async () => {

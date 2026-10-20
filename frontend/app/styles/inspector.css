@@ -66,8 +66,8 @@
 .task-node strong { font-size: var(--type-small); }
 .task-node small { margin-top: 2px; color: var(--faint); font-size: var(--type-caption); }
 .task-node em { color: var(--muted); font-size: var(--type-micro); font-style: normal; white-space: nowrap; }
-.task-node-detail {min-width:0;flex:1;width:auto;overflow:visible;border-top:1px solid var(--line);background:var(--paper-solid); }
-.task-node-detail > header { position: sticky; top: 0; z-index: 2; background: var(--paper-solid); display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px; border-bottom: 1px solid var(--line); }
+.task-node-detail {isolation:isolate;min-width:0;flex:1;width:auto;overflow:visible;border-top:1px solid var(--line);background:var(--paper-solid); }
+.task-node-detail > header { position: sticky; top: 0; z-index: 3; background: var(--paper-solid); display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px; border-bottom: 1px solid var(--line); }
 .task-node-detail > header span { display: inline-flex; min-width: 0; align-items: center; gap: 6px; }
 .task-node-detail > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--type-small); }
 .task-node-detail > header small { flex: none; color: var(--faint); font-size: var(--type-micro); white-space: nowrap; }
@@ -91,18 +91,6 @@
 .task-node-detail > section > ul > li > small, .task-node-detail > section > ol > li > small { flex: none; color: var(--faint); }
 .task-node-detail__activities p.is-attention { padding: 7px; border-radius: 7px; background: var(--red-soft); color: var(--red); }
 .task-conversation { min-width: 0; padding: 8px 2px 1px; font-family: var(--serif); }
-.task-conversation .user-turn { width: min(390px,92%); margin-bottom: 20px; }
-.task-conversation .user-heading { margin-bottom: 6px; }
-.task-conversation .user-heading strong, .task-conversation .assistant-identity > strong { font-size: var(--type-title-small); }
-.task-conversation .user-message { padding: 11px 12px; }
-.task-conversation .user-message p { font-size: var(--type-small); }
-.task-conversation .assistant-turn { margin: 22px 0 28px; }
-.task-conversation .assistant-turn--operational { margin: 8px 0 14px; }
-.task-conversation .assistant-copy { margin: 8px 0 14px 38px; }
-.task-conversation .assistant-markdown { font-size: var(--type-small); line-height: 1.68; }
-.task-conversation .execution-rail { margin: 8px 0 8px 15px; }
-.task-conversation .reasoning-disclosure { margin-left: 38px; }
-.task-conversation .trace-card__summary { grid-template-columns: 28px minmax(0,1fr) auto 13px; }
 
 .background-terminal-panel { display: grid; gap: 8px; padding: 13px; container-type: inline-size; }
 .background-process { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-solid); box-shadow: var(--shadow-sm); }

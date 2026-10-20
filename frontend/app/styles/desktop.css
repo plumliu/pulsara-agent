@@ -144,38 +144,7 @@
   .desktop-shell .desktop-workspace.is-open { top: 0; }
 }
 
-/* Compact conversation reading scale; document previews retain their own typography. */
-.desktop-shell .thread-column {
-  padding-bottom: 30px;
-  --type-body: 13.5px;
-  --type-title-small: 15px;
-  --type-title: 16px;
-  --type-title-large: 17px;
-  --type-heading: 20px;
-}
-.desktop-shell .thread-column > .conversation-run:last-child { margin-bottom: 0; }
-.desktop-shell .thread-column .assistant-copy {
-  --type-body: 16px;
-  --type-title-small: 17px;
-  --type-title: 18px;
-  --type-title-large: 19px;
-  --type-heading: 22px;
-}
-.desktop-shell .thread-column .assistant-markdown { line-height: 1.52; }
-.desktop-shell .thread-column .assistant-markdown p { margin-bottom: 5px; }
-.desktop-shell .thread-column .assistant-markdown :is(h1, h2, h3) { margin-block: 12px 5px; }
-.desktop-shell .thread-column .user-message { --type-body: 16px; padding: 12px 14px; }
-.desktop-shell .thread-column .user-message :is(.prompt-content-body, p) { line-height: 1.7; }
-.desktop-shell .thread-column .user-message p + p { margin-top: 10px; }
-.desktop-shell .thread-column .trace-node { margin-bottom: 6px; }
-.desktop-shell .thread-column .trace-node__dot { top: 16px; }
-.desktop-shell .thread-column .trace-card { border-radius: 8px; }
-.desktop-shell .thread-column .trace-card__summary { grid-template-columns: 22px minmax(0, 1fr) auto auto; min-height: 34px; gap: 7px; padding: 6px 8px; }
-.desktop-shell .thread-column .trace-icon { width: 22px; height: 22px; border-radius: 5px; }
-.desktop-shell .thread-column .trace-icon svg { width: 12px; height: 12px; }
-.desktop-shell .thread-column .trace-summary-copy strong { color: var(--ink-soft); font-size: 11.5px; font-weight: 600; line-height: 1.35; }
-.desktop-shell .thread-column .trace-summary-copy small { margin-top: 1px; font-size: 10.5px; line-height: 1.35; }
-.desktop-shell .thread-column .trace-purpose { font-size: 10.5px; }
+.desktop-shell .thread-column { padding-bottom: 30px; }
 
 @media (prefers-reduced-motion: reduce) {
   .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector, .desktop-shell .desktop-workspace, .desktop-navigation > .session-sidebar { transition: none; }

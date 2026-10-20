@@ -355,6 +355,7 @@ export interface ToolTrace {
 }
 
 export interface SubagentActivity {
+  turnId?: string;
   sourceEntryIds?: string[];
   historyContextState?: 'loading' | 'ready' | 'error';
   historyContextError?: string;
@@ -381,6 +382,7 @@ export interface ReasoningBlock {
 
 export interface SubagentRun {
   id: string;
+  batchId?: string;
   label: string;
   role: string;
   objective: string;

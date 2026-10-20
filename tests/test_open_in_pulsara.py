@@ -84,3 +84,27 @@ def test_clean_import_order():
     import subprocess
     import sys
     subprocess.run([sys.executable, "-c", "from pulsara_agent.tools.builtins.presentation import OpenInPulsaraTool"], check=True)
+
+
+def test_real_tool_opens_exact_task_without_model_supplied_session_or_host(tmp_path):
+    async def run():
+        task_id = 'task:6d7i5mg4ymfcckogzrqiser5km'
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:test', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        ids = dict(session_id='session:test', tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
+        borrow, context = direct_tool_invocation_context(port, **ids)
+        arguments = {'targets': [
+            {'type': 'task', 'task_id': task_id},
+            {'type': 'task', 'task_id': task_id, 'session_id': 'other'},
+            {'type': 'task', 'task_id': 'invented'},
+            {'type': 'panel', 'name': 'tasks'},
+        ]}
+        try:
+            assert not isinstance(port.prepare_resolved_invocation(tool_name='open_in_pulsara', arguments=arguments, surface_borrow=borrow), PreparedToolPreparationRejection)
+            result = await port.invoke(**{k: v for k, v in ids.items() if k != 'session_id'}, arguments=arguments, invocation_context=context)
+            value = json.loads(result.content)
+            assert value['targets'] == [{'type': 'task', 'task_id': task_id}, {'type': 'panel', 'name': 'tasks'}]
+            assert [error['index'] for error in value['errors']] == [1, 2]
+        finally:
+            borrow.close()
+            await port.aclose(timeout_seconds=2)
+    asyncio.run(run())

@@ -1346,7 +1346,7 @@ describe('exact prompt projection', () => {
       .rejects.toMatchObject({code:'CONTENT_INTEGRITY_INVALID'});
   });
 
-  it('joins retained worker activities only after an exact task page and settles only canonical terminal facts', async () => {
+  it('keeps observed task navigation before an exact task page and joins details only for loaded canonical rows', async () => {
     historyOwnerFixture = {tasks:Array.from({length:144},(_,i)=>({task_id:`worker-${i}`,parent_turn_id:'root',parent_initial_entry_id:'create',batch_id:'workers'})),batches:[{batch_id:'workers',parent_turn_id:'root',creator_entry_id:'create',creator_tool_call_id:'spawn',task_count:144}]};
     const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
     const payload = connectPayload([
@@ -1366,15 +1366,20 @@ describe('exact prompt projection', () => {
     const task = inventoryTask('worker-143','visible worker','running','root','work');
     const loaded = mergeRuntimeTaskInventory(raw,[task]);
     const runs = loaded.messages.find(m=>m.id==='create')?.subagentRuns;
-    expect(runs).toHaveLength(1);
-    expect(runs?.[0].activities.some(a=>a.body==='still working')).toBe(true);
-    expect(runs?.[0].activities[0].traces?.[0].status).toBe('running');
+    expect(runs).toHaveLength(144);
+    const selected = runs?.find(run => run.id === task.id);
+    expect(selected?.activities.some(a=>a.body==='still working')).toBe(true);
+    expect(selected?.activities[0].traces?.[0].status).toBe('running');
+    expect(runs?.filter(run => run.id !== task.id).every(run => run.activities.length === 0)).toBe(true);
     const terminal = mergeRuntimeTaskInventory(raw,[{...task,status:'completed'}]);
     const done = terminal.messages.find(m=>m.id==='create')?.subagentRuns?.[0];
     expect(done?.activities.some(a=>a.id.startsWith('live:'))).toBe(false);
     expect(done?.activities[0].traces?.[0].status).toBe('cancelled');
     expect(raw.subagentRuns?.[143].activities[0].traces?.[0].status).toBe('running');
-    expect(mergeRuntimeTaskInventory(raw,[]).messages.find(m=>m.id==='create')?.subagentRuns).toBeUndefined();
+    const summaries = mergeRuntimeTaskInventory(raw, []).messages.find(m => m.id === 'create')?.subagentRuns;
+    expect(summaries).toHaveLength(144);
+    expect(summaries?.every(run => run.batchId === 'workers' && run.activities.length === 0 && run.status === raw.subagentRuns?.find(source => source.id === run.id)?.status)).toBe(true);
+    expect(mergeRuntimeTaskInventory(raw, []).agentTasks).toEqual([]);
   });
 
   it.each(['start', 'delta', 'end'])('keeps the 144th worker result %s and progress outside bounded control', async phase => {
@@ -2726,9 +2731,36 @@ describe('source text fidelity hard cut', () => {
     });
     expect(liveTask?.progress).toBe(SOURCE_FIDELITY_TEXT);
     expect(run?.activities).toMatchObject([
-      {id: 'child-guidance', body: SOURCE_FIDELITY_TEXT},
-      {id: 'child-answer', body: SOURCE_FIDELITY_TEXT, reasoning: [{body: SOURCE_FIDELITY_TEXT}]},
+      {id: 'child-guidance', turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT},
+      {id: 'child-answer', turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT, reasoning: [{body: SOURCE_FIDELITY_TEXT}]},
     ]);
+    expect(projectAgentTaskConversation([], run?.activities).find(message => message.id === 'child-answer'))
+      .toMatchObject({ turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT });
+    expect(projectAgentTaskConversation([], run?.activities).find(message => message.id === 'child-guidance'))
+      .toMatchObject({ role: 'user', userKind: 'steer', turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT });
+  });
+
+  it('uses task API public content when root history still holds an unloaded blob', async () => {
+    const full = '任务接口已读出的完整最终回复。';
+    const entry = { entry_id: 'blob-child-answer', turn_id: 'turn-child', entry_sequence: '2',
+      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: 'task-1',
+      content: blobContent(full), accepted_at: '2026-10-21T00:00:00Z' };
+    const connect = connectPayload([entry], { subagent_tasks: [{ task_id: 'task-1', parent_turn_id: 'turn-root',
+      status: 'COMPLETED', label: '审阅', objective: '检查输出', profile: 'research_worker' }] });
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
+      String(input).includes('/activities?')
+        ? { activities: [{ ...entry, content: { ...blobContent(full), ...inlineContent(full), kind: 'CANONICAL_BLOB' }, turn_status: 'COMPLETED' }] }
+        : connect,
+    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const adapter = new LocalHttpRuntimeAdapter();
+    const connection = await adapter.connect('session-1');
+    await vi.waitFor(() => expect(connection.current().history?.windows.every(window => window.contextState === 'ready')).toBe(true));
+    const activities = connection.current().subagentRuns?.find(run => run.id === 'task-1')?.activities;
+    expect(activities?.find(activity => activity.id === entry.entry_id)).toMatchObject({ body: '', contentState: 'unloaded' });
+    const page = await adapter.listSessionTaskActivities('session-1', 'task-1');
+    expect(page.activities[0].body).toBe(full);
+    expect(projectAgentTaskConversation(page.activities, activities).find(message => message.id === entry.entry_id))
+      .toMatchObject({ body: full, role: 'assistant', assistantKind: 'terminal' });
   });
 
   it('preserves plain and JSON message tool text while keeping typed tool labels', async () => {

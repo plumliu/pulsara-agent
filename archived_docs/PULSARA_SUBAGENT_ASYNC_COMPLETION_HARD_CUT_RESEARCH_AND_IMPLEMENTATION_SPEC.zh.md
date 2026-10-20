@@ -927,6 +927,13 @@ bounded result summary。它不改变 delivery state，也不成为“必须先 
 继续只允许 ROOT -> exact ACTIVE worker，在 child safe point canonicalize。terminal task 不复活；
 不增加 child -> ROOT mid-flight API。
 
+Child 已持有冻结的 compaction successor 请求时，不消费后来到达的 mailbox；先原样执行该
+successor，待下一次 ordinary provider preparation 再按序接纳消息。未消费的消息继续参与既有
+completion permit 检查，使旧请求的首个 final 不能跳过指导而结束任务；不得重建冻结请求或
+改写已安装 prefix，也不增加 delivery receipt。
+已安装的 child epoch 继续使用现有 append planning；`SubagentInitialSeed` 只在首次 cold epoch
+构造，压缩后的普通追加不得再次要求已被 snapshot 概括的初始 objective entry。
+
 ### 10.7 `stop_agent`
 
 继续覆盖 queued/waiting/active worker。它的 ToolResult 只返回 stop action/status acknowledgement，

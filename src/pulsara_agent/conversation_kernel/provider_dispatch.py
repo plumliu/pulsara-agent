@@ -2758,6 +2758,12 @@ class ProviderDispatchCoordinator:
                 )
             else:
                 turn_binding = prospective_root_candidate.model_call_binding
+            scope = ProviderInputContinuityScope(
+                session_id=identity.session_id,
+                scope_kind=identity.conversation_scope_kind,
+                scope_subagent_task_id=identity.scope_subagent_task_id,
+            )
+            current_epoch = self._continuity.current_view(scope)
             subagent_seed: SubagentInitialSeed | None = None
             subagent_profile_kind: SubagentProfileKind | None = None
             subagent_source_replacements: tuple[
@@ -2776,7 +2782,9 @@ class ProviderDispatchCoordinator:
                     subagent_source_replacements = (
                         self._subagent_runtime.initial_context_sources(task_id=task_id)
                     )
-                    if cold_seed_override is None:
+                    # Installed child epochs append to their existing input;
+                    # compaction may already have summarized the initial objective.
+                    if cold_seed_override is None and current_epoch is None:
                         subagent_seed = self._subagent_runtime.build_initial_seed(
                             task_id=task_id,
                             dispatch_read=base_read,
@@ -2785,13 +2793,7 @@ class ProviderDispatchCoordinator:
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                     ) from exc
-            scope = ProviderInputContinuityScope(
-                session_id=identity.session_id,
-                scope_kind=identity.conversation_scope_kind,
-                scope_subagent_task_id=identity.scope_subagent_task_id,
-            )
             base_frontier = canonical_frontier(base_input, base_facts)
-            current_epoch = self._continuity.current_view(scope)
             context_base_changed = (
                 current_epoch is not None
                 and current_epoch.canonical_frontier.context_base_semantic_identity

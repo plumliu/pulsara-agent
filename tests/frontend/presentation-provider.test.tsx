@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
 import { FilePreviewProvider } from '../../frontend/components/file-browser';
 import { PresentationContext, PresentationProvider } from '../../frontend/components/presentation-provider';
+import type { AgentTask } from '../../frontend/lib/pulsara-types';
 import type { RuntimeConnection } from '../../frontend/lib/runtime-adapter';
 import type { PresentationRequest, PresentationTarget } from '../../frontend/lib/presentation-targets';
 import type { FilePreviewApi, FilePreview } from '../../frontend/lib/file-preview';
@@ -21,11 +22,13 @@ function fixture() {
   const command=vi.fn(async()=>{});
   window.pulsaraDesktop={browser:{create,command,close:vi.fn(async()=>{}),clear:vi.fn(async()=>{}),onEvent:()=>()=>{}}} as unknown as PulsaraDesktop;
   const show=vi.fn();
-  function Probe(){const w=useDesktopWorkspace()!;const manual=useContext(PresentationContext);const files=useContext(FileLinkContext);return <><button onClick={event=>files?.open("/project/user.md",event.currentTarget)}>user file</button><pre data-testid="tabs">{JSON.stringify(w.tabs.map(tab=>({id:tab.id,kind:tab.kind,entity:tab.entityId,host:tab.hostSessionId})))}</pre><output data-testid="active">{w.activeId}</output><button onClick={()=>w.tabs[0]&&w.activate(w.tabs[0].id)}>select first</button><button onClick={()=>w.tabs[0]&&w.close(w.tabs[0].id)}>close first</button><button onClick={()=>manual?.([{type:'terminal',process_id:'old',host_session_id:'host:old'}])}>history</button></>;}
-  function Harness({visible=true,open=false,session='one'}:{visible?:boolean;open?:boolean;session?:string}){return <DesktopWorkspaceProvider sessionId={session} visible={visible} onShow={show}><FilePreviewProvider api={api} ownerKey={session} sessionId={session} onNotify={()=>{}}><PresentationProvider connection={connection} visible={visible} isOpen={open}><Probe/></PresentationProvider></FilePreviewProvider></DesktopWorkspaceProvider>;}
+  const readTask=vi.fn(async (id: string): Promise<AgentTask> => ({id, batchId:'group-one', label:'分析组', role:'研究', objective:'',status:'running',parentId:'turn-one',dependencyIds:[],completionAccepted:false,color:'blue'}));
+  const closeGroup=vi.fn();
+  function Probe(){const w=useDesktopWorkspace()!;const manual=useContext(PresentationContext);const files=useContext(FileLinkContext);return <><button onClick={event=>files?.open("/project/user.md",event.currentTarget)}>user file</button><pre data-testid="tabs">{JSON.stringify(w.tabs.map(tab=>({id:tab.id,kind:tab.kind,entity:tab.entityId,host:tab.hostSessionId,task:tab.view?.taskId,error:!!tab.render})))}</pre><output data-testid="active">{w.activeId}</output><button onClick={()=>w.tabs[0]&&w.activate(w.tabs[0].id)}>select first</button><button onClick={()=>w.tabs[0]&&w.close(w.tabs[0].id)}>close first</button><button onClick={()=>manual?.([{type:'terminal',process_id:'old',host_session_id:'host:old'}])}>history</button></>;}
+  function Harness({visible=true,open=false,session='one'}:{visible?:boolean;open?:boolean;session?:string}){return <DesktopWorkspaceProvider sessionId={session} visible={visible} onShow={show}><FilePreviewProvider api={api} ownerKey={session} sessionId={session} onNotify={()=>{}}><PresentationProvider readTask={readTask} onCloseTaskGroup={closeGroup} connection={connection} visible={visible} isOpen={open}><Probe/></PresentationProvider></FilePreviewProvider></DesktopWorkspaceProvider>;}
   const view=render(<Harness/>);
   const send=(targets:PresentationTarget[],sequence='1')=>act(()=>listener?.({sequence,signal:new AbortController().signal,read:async()=>({targets})}));
-  return {api,file,create,command,show,view,Harness,send,tabs:()=>JSON.parse(screen.getByTestId('tabs').textContent!)};
+  return {api,file,create,command,show,readTask,closeGroup,view,Harness,send,tabs:()=>JSON.parse(screen.getByTestId('tabs').textContent!)};
 }
 it('publishes mixed targets once, skips tool errors, deduplicates and selects the last accepted target',async()=>{
   const f=fixture();
@@ -107,5 +110,36 @@ it('creates one blank webpage per batch without navigation, and a fresh one on l
   await f.send([{ type: 'panel', name: 'browser' }], '2');
   await waitFor(() => expect(f.create).toHaveBeenCalledTimes(2));
   expect(f.tabs()).toHaveLength(2);
+  expect(screen.getByTestId('active').textContent).toBe(f.tabs()[1].id);
+});
+
+it('opens exact tasks in their canonical group, selects the last task, and reuses the group tab', async () => {
+  const f = fixture();
+  await f.send([{type:'task',task_id:'task-a'},{type:'task',task_id:'task-b'}]);
+  await waitFor(() => expect(f.tabs()).toHaveLength(1));
+  expect(f.tabs()[0]).toMatchObject({kind:'group',entity:'group-one',task:'task-b'});
+  await f.send([{type:'task',task_id:'task-a'}], '2');
+  await waitFor(() => expect(f.tabs()[0].task).toBe('task-a'));
+  expect(f.tabs()).toHaveLength(1);
+  fireEvent.click(screen.getByText('close first'));
+  expect(f.closeGroup).toHaveBeenCalledWith('group-one');
+});
+it('discards a task read after leaving and returning to the same session', async () => {
+  const f = fixture();
+  const pending = deferred<AgentTask>();
+  f.readTask.mockReturnValueOnce(pending.promise);
+  await f.send([{type:'task',task_id:'task-a'}]);
+  f.view.rerender(<f.Harness session="two"/>);
+  f.view.rerender(<f.Harness/>);
+  await act(async () => pending.resolve({id:'task-a',batchId:'group-one',label:'分析',role:'研究',objective:'',status:'running',parentId:'turn-one',dependencyIds:[],completionAccepted:false,color:'blue'}));
+  expect(f.tabs()).toHaveLength(0);
+  expect(f.show).not.toHaveBeenCalled();
+});
+it('keeps valid sibling targets when an exact task cannot be read', async () => {
+  const f = fixture();
+  f.readTask.mockRejectedValueOnce(new Error('任务不存在'));
+  await f.send([{type:'task',task_id:'task-a'},{type:'panel',name:'tasks'}]);
+  await waitFor(() => expect(f.tabs()).toHaveLength(2));
+  expect(f.tabs()[0]).toMatchObject({kind:'task',entity:'task-a',error:true});
   expect(screen.getByTestId('active').textContent).toBe(f.tabs()[1].id);
 });

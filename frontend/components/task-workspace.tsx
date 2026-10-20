@@ -21,6 +21,7 @@ import type {
   BackgroundProcess,
   BackgroundProcessPage,
   ToolArtifactPage,
+  CanonicalPromptImagePart,
   ModelConfigurationSummary,
 } from '../lib/runtime-adapter';
 import { projectAgentTaskConversation, projectTaskActivities } from '../lib/runtime-adapter';
@@ -260,6 +261,7 @@ export function TaskGraphDetail({
   skills,
   artifactOwnerKey,
   onReadToolArtifact,
+  onReadPromptImage,
   onReadVisualization,
   onReadVisualizationThumbnail,
   initialTaskId,
@@ -282,9 +284,11 @@ export function TaskGraphDetail({
   artifactOwnerKey: string;
   onReadVisualization?: import("./inline-visualization").ReadVisualization;
   onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
+  onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
 }) {
   const [selectedId, setSelectedId] = useState(initialTaskId ?? viewState?.taskId ?? (tasks.length === 1 ? tasks[0]?.id : undefined));
+  useEffect(() => { if (initialTaskId) setSelectedId(initialTaskId); }, [initialTaskId]);
   useEffect(() => { if (viewState) viewState.taskId = selectedId; }, [selectedId, viewState]);
   const [externalRead, setExternalRead] = useState<{ id: string; task?: AgentTask; error?: string }>();
   const [externalRetry, setExternalRetry] = useState(0);
@@ -343,8 +347,14 @@ export function TaskGraphDetail({
     ? activityRead?.error
     : undefined;
   const projectedTaskActivities = selected ? projectTaskActivities(selected, activities.get(selected.id) ?? []) : [];
+  const ownActivities = canonicalActivities.filter(record => !record.inherited);
+  const taskTurnIds = new Set([
+    ...ownActivities.map(record => record.turnId),
+    ...projectedTaskActivities.map(activity => activity.turnId),
+  ].filter((id): id is string => Boolean(id)));
+  const taskTurnId = taskTurnIds.size === 1 ? [...taskTurnIds][0] : undefined;
   const conversationMessages = projectAgentTaskConversation(
-    canonicalActivities.filter(record => !record.inherited),
+    ownActivities,
     projectedTaskActivities,
   );
   if (
@@ -365,16 +375,24 @@ export function TaskGraphDetail({
   const resultBody = selected?.result
     ? (selected.result.summary || selected.result.outputPreview || '')
     : '';
+  // The accepted result points to its exact producer, not an earlier message
+  // that happens to repeat the same text. Inferred summaries may be truncated.
+  const resultEntryId = selected?.result?.entryId;
+  const canonicalAnswer = resultEntryId
+    ? conversationMessages.find(message => message.id === resultEntryId
+      && message.role === 'assistant' && message.assistantKind === 'terminal' && Boolean(message.body.trim()))
+    : undefined;
+  const taskFinalAnswerId = canonicalAnswer?.id
+    ?? (selected?.result && resultBody ? `task-result:${selected.result.id}` : undefined);
   if (
     selected?.result
     && resultBody
-    && !conversationMessages.some((message) => (
-      message.role === 'assistant' && message.body === resultBody
-    ))
+    && !canonicalAnswer
   ) {
     const terminal = selected.terminalAt ? new Date(selected.terminalAt) : undefined;
     conversationMessages.push({
       id: `task-result:${selected.result.id}`,
+      turnId: ownActivities.find(record => record.entryId === resultEntryId)?.turnId ?? taskTurnId,
       role: 'assistant',
       assistantKind: 'terminal',
       sourceSubagentTaskId: selected.id,
@@ -626,11 +644,11 @@ export function TaskGraphDetail({
                   {inheritedContext.materials.map((material, index) => <div key={index} className="task-inherited-context__material">
                     <h4>{material.label}</h4><MarkdownBody body={material.body} onNotify={onNotify} />
                   </div>)}
-                  {inheritedGroups.map(group => <div className="task-conversation" key={group.turnId}>
+                  {inheritedGroups.map(group => <div className="task-conversation conversation-transcript" key={group.turnId}>
                     <ConversationMessages messages={projectAgentTaskConversation(group.records)} isRunning={false}
                       taskFinalAnswerId={[...group.records].reverse().find(record => record.entryKind === 'ASSISTANT_MESSAGE' && record.turnStatus === 'COMPLETED')?.entryId}
                       skills={skills} artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
-                      onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} onNotify={onNotify}
+                      onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} onNotify={onNotify}
                       userLabel="主 Agent" userSenderKind="agent" assistantLabel={group.label} />
                   </div>)}
                   {!inheritedGroups.length && !inheritedContext.materials.length && <p>继承的上下文没有可显示的对话。</p>}
@@ -640,16 +658,15 @@ export function TaskGraphDetail({
                 <h4>任务对话</h4>
                 {activityError && <p className="is-attention">{activityError}</p>}
                 {conversationMessages.length ? (
-                  <div className="task-conversation">
+                  <div className="task-conversation conversation-transcript">
                     <ConversationMessages
                       messages={conversationMessages}
                       isRunning={active(selected.status)}
-                      taskFinalAnswerId={selected.result ? conversationMessages.find(message => (
-                        message.role === 'assistant' && message.body === resultBody
-                      ))?.id : undefined}
+                      activeTurnId={taskTurnId}
+                      taskFinalAnswerId={taskFinalAnswerId}
                       skills={skills}
                       artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
-                      onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
+                      onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
                       onNotify={onNotify}
                       userLabel="主 Agent"
                       userSenderKind="agent"

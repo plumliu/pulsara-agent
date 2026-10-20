@@ -2,17 +2,17 @@ import { ToolResultDisplayContext } from '../../frontend/lib/tool-result-display
 import { useState, type ComponentProps, type ReactElement, type PropsWithChildren } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentTask } from '../../frontend/lib/pulsara-types';
+import type { AgentTask, SubagentActivity } from '../../frontend/lib/pulsara-types';
 import { TaskGraphDetail, TaskWorkspace as TaskList } from '../../frontend/components/task-workspace';
 
 // The list opens a desktop detail surface; detail contracts stay independent of modal behavior.
 type WorkspaceProps = Omit<ComponentProps<typeof TaskList>, 'onOpenGroup'> &
-  Omit<ComponentProps<typeof TaskGraphDetail>, 'modelConfigurations' | 'skills' | 'artifactOwnerKey' | 'onReadToolArtifact'> &
-  Partial<Pick<ComponentProps<typeof TaskGraphDetail>, 'modelConfigurations' | 'skills' | 'artifactOwnerKey' | 'onReadToolArtifact'>>;
+  Omit<ComponentProps<typeof TaskGraphDetail>, 'modelConfigurations' | 'skills' | 'artifactOwnerKey' | 'onReadToolArtifact' | 'onReadPromptImage'> &
+  Partial<Pick<ComponentProps<typeof TaskGraphDetail>, 'modelConfigurations' | 'skills' | 'artifactOwnerKey' | 'onReadToolArtifact' | 'onReadPromptImage'>>;
 function TaskWorkspace(props: WorkspaceProps) {
   const [groupId, setGroupId] = useState<string>();
   if (!groupId) return <TaskList {...props} onOpenGroup={setGroupId} />;
-  return <TaskGraphDetail modelConfigurations={[]} skills={[]} artifactOwnerKey="task-activity"
+  return <TaskGraphDetail onReadPromptImage={vi.fn()} modelConfigurations={[]} skills={[]} artifactOwnerKey="task-activity"
     onReadToolArtifact={async () => { throw new Error('完整工具输出暂时无法读取。'); }} {...props}
     tasks={props.tasks.filter(task => task.batchId === groupId)} />;
 }
@@ -47,6 +47,18 @@ const task = (overrides: Partial<AgentTask> = {}): AgentTask => ({
 });
 
 describe('TaskWorkspace PR03 hard cut', () => {
+  it('selects another requested task without replacing its existing group view', async () => {
+    const props = { tasks:[task({id:'a',label:'甲'}),task({id:'b',label:'乙'})], canControl:false,
+      onCancel:vi.fn(),onNotify:vi.fn(),activities:new Map(),skills:[],modelConfigurations:[],artifactOwnerKey:'group',
+      onReadToolArtifact:vi.fn(),loadActivities:vi.fn(async () => ({activities:[]})),
+      loadBackgroundProcesses:vi.fn(async () => ({processes:[]})) };
+    const view = render(<TaskGraphDetail onReadPromptImage={vi.fn()} {...props} initialTaskId="a" />);
+    await screen.findByRole('complementary', {name:'甲 详情'});
+    const graph = screen.getByRole('region', {name:'任务组'});
+    view.rerender(<TaskGraphDetail onReadPromptImage={vi.fn()} {...props} initialTaskId="b" />);
+    await screen.findByRole('complementary', {name:'乙 详情'});
+    expect(screen.getByRole('region', {name:'任务组'})).toBe(graph);
+  });
   it('shows structured task diagnostics even when they have no message field', () => {
     const diagnostic = { check: 'read_file', result: 'SUCCESS', evidence: 'total_lines=2' };
     render(<TaskWorkspace tasks={[task({ status: 'completed', result: {
@@ -267,6 +279,119 @@ describe('TaskWorkspace PR03 hard cut', () => {
     expect(within(detail).getByRole('button', { name: '复制回复' })).toBeTruthy();
   });
 
+  it('keeps live tools and explicit completion in one run across paginated history', async () => {
+    const record = { turnId: 'child-turn', acceptedAt: '2026-10-21T00:00:00Z', objective: '检查 exact owner。',
+      contentKind: 'INLINE' as const, contentDigest: 'sha256:fixture', contentSize: 4, blocks: [], toolResults: [] };
+    const page = [{ ...record, entryId: 'commentary', entrySequence: 1, entryKind: 'ASSISTANT_MESSAGE', body: '检查完成' },
+      { ...record, entryId: 'complete-request', entrySequence: 2, entryKind: 'ASSISTANT_TOOL_REQUEST', body: '',
+        blocks: [{ blockId: 'complete-block', ordinal: 0, kind: 'TOOL_CALL', toolCallId: 'complete-call', toolName: 'report_agent_result' }] }];
+    const loadActivities = vi.fn(async (_taskId: string, cursor?: string) => cursor
+      ? { activities: [{ ...record, entryId: 'complete-result', entrySequence: 3, entryKind: 'TOOL_RESULT', body: 'accepted',
+          toolResults: [{ assistantEntryId: 'complete-request', toolCallId: 'complete-call', resultEntryId: 'complete-result', resultState: 'SUCCESS' }] }] }
+      : { activities: page, nextCursor: 'next' });
+    const props = { tasks: [task()], initialTaskId: 'task-a', canControl: false,
+      onCancel: vi.fn(), onNotify: vi.fn(), activities: new Map(), loadActivities,
+      loadBackgroundProcesses: vi.fn(async () => ({ processes: [] })) };
+    const view = render(<TaskGraphDetail onReadPromptImage={vi.fn()} {...props} skills={[]} modelConfigurations={[]} artifactOwnerKey="task"
+      onReadToolArtifact={vi.fn()} />);
+    const transcript = view.container.querySelector('.task-conversation')!;
+    await waitFor(() => expect(transcript.querySelectorAll('.trace-card')).toHaveLength(1));
+    const heading = transcript.querySelector('.assistant-heading');
+    const run = transcript.querySelector('.conversation-run');
+    expect(run?.getAttribute('data-process-expanded')).toBe('true');
+    view.rerender(<TaskGraphDetail onReadPromptImage={vi.fn()} {...props} tasks={[task({ status: 'completed', result: {
+      id: 'accepted', entryId: 'complete-result', summary: '检查完成', diagnostics: [],
+    } })]} activities={new Map([['task-a', [{ id: 'complete-result', turnId: 'child-turn', time: '现在',
+      body: '', status: 'completed', traces: [{ id: 'receipt', kind: 'artifact', title: '操作结果', subtitle: '已记录', status: 'completed' }],
+    }]]])} skills={[]} modelConfigurations={[]} artifactOwnerKey="task" onReadToolArtifact={vi.fn()} />);
+    expect(transcript.querySelectorAll('.conversation-run')).toHaveLength(1);
+    expect(transcript.querySelectorAll('.assistant-heading')).toHaveLength(1);
+    expect(transcript.querySelector('.assistant-heading')).toBe(heading);
+    expect(run?.getAttribute('data-process-expanded')).toBe('false');
+    const final = transcript.querySelector('.assistant-turn--response')!;
+    expect(final.textContent).toContain('检查完成');
+    expect(final.querySelector('.assistant-heading')).toBeNull();
+    expect(final.closest('.conversation-run')).toBe(run);
+    fireEvent.click(screen.getByRole('button', { name: '加载更多任务活动' }));
+    await waitFor(() => expect(loadActivities).toHaveBeenCalledWith('task-a', 'next'));
+    expect(transcript.querySelectorAll('.assistant-heading')).toHaveLength(1);
+    expect(transcript.querySelector('.assistant-heading')).toBe(heading);
+    expect(transcript.querySelectorAll('.assistant-turn--response')).toHaveLength(1);
+  });
+
+  it.each(['unloaded', 'loading', 'error', 'loaded'] as const)('shows the full task API answer despite %s root-history content', async (contentState) => {
+    const full = '这是完整的最终回复，不应被摘要截断。';
+    render(<TaskGraphDetail onReadPromptImage={vi.fn()} tasks={[task({ status: 'completed', result: {
+      id: 'result', entryId: 'final-entry', summary: '这是完整的', diagnostics: [],
+    } })]} initialTaskId="task-a" canControl={false} onCancel={vi.fn()} onNotify={vi.fn()}
+      activities={new Map([['task-a', [{ id: 'final-entry', turnId: 'child-turn', time: '现在',
+        body: contentState === 'loaded' ? '过时的正文片段' : '', contentState }]]])}
+      skills={[]} modelConfigurations={[]} artifactOwnerKey="task" onReadToolArtifact={vi.fn()}
+      loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
+      loadActivities={vi.fn(async () => ({ activities: ['ASSISTANT_TOOL_REQUEST', 'ASSISTANT_MESSAGE'].map((entryKind, index) => ({
+        entryId: index ? 'final-entry' : 'request', turnId: 'child-turn', entrySequence: index + 1, entryKind,
+        acceptedAt: '2026-10-21T00:00:00Z', objective: '', body: index ? full : '',
+        contentKind: 'INLINE' as const, contentDigest: 'sha256:fixture', contentSize: 4,
+        blocks: index ? [] : [{ blockId: 'read', ordinal: 0, kind: 'TOOL_CALL', toolName: 'read_file' }], toolResults: [],
+      })) }))} />);
+    await screen.findByText(full);
+    const transcript = screen.getByText(full).closest('.task-conversation')!;
+    expect(transcript.querySelectorAll('.assistant-heading')).toHaveLength(1);
+    expect(transcript.querySelectorAll('.assistant-turn--response')).toHaveLength(1);
+    expect(within(transcript as HTMLElement).queryByText('这是完整的')).toBeNull();
+    expect(within(transcript as HTMLElement).getByRole('button', { name: '复制回复' })).toBeTruthy();
+    expect(transcript.textContent).not.toContain('过时的正文片段');
+  });
+
+  it('keeps new guidance visible as steer before and after loading its canonical page', async () => {
+    const record = { turnId: 'child-turn', acceptedAt: '2026-10-21T00:00:00Z', objective: '',
+      contentKind: 'INLINE' as const, contentDigest: 'sha256:fixture', contentSize: 4, blocks: [], toolResults: [] };
+    const guidance: SubagentActivity = { id: 'guidance', turnId: 'child-turn', kind: 'guidance', time: '现在', body: '先检查边界条件' };
+    const loadActivities = vi.fn(async (_id: string, cursor?: string) => cursor
+      ? { activities: [{ ...record, entryId: guidance.id, entrySequence: 2, entryKind: 'INTER_AGENT_MESSAGE', body: guidance.body }] }
+      : { activities: [{ ...record, entryId: 'request', entrySequence: 1, entryKind: 'ASSISTANT_TOOL_REQUEST', body: '',
+          blocks: [{ blockId: 'read', ordinal: 0, kind: 'TOOL_CALL', toolName: 'read_file' }] }], nextCursor: 'next' });
+    const view = render(<TaskGraphDetail onReadPromptImage={vi.fn()} tasks={[task()]} initialTaskId="task-a" canControl={false}
+      onCancel={vi.fn()} onNotify={vi.fn()} activities={new Map([['task-a', [guidance]]])}
+      loadActivities={loadActivities} skills={[]} modelConfigurations={[]} artifactOwnerKey="task" onReadToolArtifact={vi.fn()}
+      loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
+    await screen.findByRole('button', { name: '收起中间过程' });
+    fireEvent.click(screen.getByRole('button', { name: '收起中间过程' }));
+    const transcript = view.container.querySelector('.task-conversation')!;
+    const assertGuidance = () => {
+      expect(within(transcript as HTMLElement).getAllByText(guidance.body)).toHaveLength(1);
+      const steer = transcript.querySelector('.user-steer')!;
+      expect(steer.textContent).toContain(guidance.body);
+      expect(steer.querySelector('time, .user-avatar, .assistant-heading')).toBeNull();
+      expect(steer.closest('[hidden]')).toBeNull();
+    };
+    assertGuidance();
+    fireEvent.click(screen.getByRole('button', { name: '加载更多任务活动' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '加载更多任务活动' })).toBeNull());
+    expect(loadActivities).toHaveBeenCalledWith('task-a', 'next');
+    assertGuidance();
+  });
+
+  it('renders the full child visualization from its canonical task entry only in the sidebar', async () => {
+    vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    const body = '```pulsara-visualization\nchart.html\n```';
+    const read = vi.fn(async () => '<h1>worker chart</h1>');
+    const view = render(<TaskGraphDetail onReadPromptImage={vi.fn()} tasks={[task({status:'completed', result:{id:'result',entryId:'child-answer',summary:'完成分析',diagnostics:[]}})]}
+      initialTaskId="task-a" canControl={false} onCancel={vi.fn()} onNotify={vi.fn()}
+      activities={new Map()} skills={[]} modelConfigurations={[]} artifactOwnerKey="task" onReadToolArtifact={vi.fn()}
+      onReadVisualization={read} loadBackgroundProcesses={vi.fn(async () => ({processes:[]}))}
+      loadActivities={vi.fn(async () => ({activities:[{
+        entryId:'child-answer',turnId:'child-turn',entrySequence:1,entryKind:'ASSISTANT_MESSAGE',
+        acceptedAt:'2026-10-21T00:00:00Z',objective:'',body,contentKind:'INLINE' as const,contentDigest:'sha256:fixture',contentSize:body.length,
+        blocks:[],toolResults:[],visualizations:[{ordinal:0,state:'READY' as const,contentDigest:'sha256:'+'a'.repeat(64),contentSize:21,mediaType:'text/html',codec:'utf-8'}],
+      }]}))} />);
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    expect(read.mock.calls[0][0]).toBe('child-answer');
+    expect(view.container.querySelectorAll('.inline-visualization')).toHaveLength(1);
+    expect(screen.queryByText('完成分析')).toBeNull();
+  });
+
   it('projects canonical task rows into the same conversational bubbles and tool cards as the root transcript', async () => {
     const loadActivities = vi.fn(async () => ({
       activities: [
@@ -316,7 +441,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     const detail = screen.getByLabelText('精确任务 详情');
     await waitFor(() => expect(loadActivities).toHaveBeenCalled());
     expect(detail.querySelectorAll('.task-conversation .user-turn')).toHaveLength(1);
-    fireEvent.click(within(detail).getByRole('button', { name: '展开中间过程' }));
+    expect(within(detail).getByRole('button', { name: '收起中间过程' }).getAttribute('aria-expanded')).toBe('true');
     expect(detail.querySelectorAll('.task-conversation .assistant-turn')).toHaveLength(1);
     expect(within(detail).getByText('主 Agent')).toBeTruthy();
     expect(within(detail).getAllByText('精确任务')).toHaveLength(2);
@@ -471,7 +596,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     expect(dialog.querySelectorAll('.task-graph-edges > path')).toHaveLength(1);
     fireEvent.click(within(dialog).getByRole('button', { name: /后续节点/ }));
     await waitFor(() => expect(loadActivities).toHaveBeenCalledWith('task-b'));
-    fireEvent.click(within(dialog).getByRole('button', { name: '展开中间过程' }));
+    expect(within(dialog).getByRole('button', { name: '收起中间过程' }).getAttribute('aria-expanded')).toBe('true');
     expect(within(dialog).getByText('第一页活动')).toBeTruthy();
     expect(loadActivities).not.toHaveBeenCalledWith('task-b', 'activity:next');
     fireEvent.click(within(dialog).getByRole('button', { name: '加载更多任务活动' }));
@@ -533,11 +658,11 @@ it('restores the task reader position when a desktop tab remounts', () => {
   const common = { tasks:[task()], viewState, modelConfigurations:[], skills:[], artifactOwnerKey:"task-activity", onReadToolArtifact:vi.fn(), canControl:false,
     onCancel:vi.fn(), onNotify:vi.fn(), activities:new Map(),
     loadActivities:vi.fn(async()=>({activities:[]})), loadBackgroundProcesses:vi.fn(async()=>({processes:[]})) };
-  const view = render(<TaskGraphDetail {...common} />);
+  const view = render(<TaskGraphDetail onReadPromptImage={vi.fn()} {...common} />);
   const reader = view.container.querySelector('.task-graph-dialog__body')!;
   fireEvent.scroll(reader, {target:{scrollTop:420,scrollLeft:3}});
   view.rerender(<div />);
-  view.rerender(<TaskGraphDetail {...common} />);
+  view.rerender(<TaskGraphDetail onReadPromptImage={vi.fn()} {...common} />);
   expect(view.container.querySelector('.task-graph-dialog__body')?.scrollTop).toBe(420);
   expect(common.onCancel).not.toHaveBeenCalled();
 });

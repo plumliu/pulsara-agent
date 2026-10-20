@@ -813,7 +813,8 @@ export function projectAgentTaskConversation(
         assistantKind: record.entryKind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
         visualizations: record.visualizations ?? projected?.visualizations,
         time: formatTime(record.acceptedAt),
-        body: projected?.body ?? (record.blocks.filter(block => block.kind === 'TEXT').sort((a, b) => a.ordinal - b.ordinal).map(block => block.text ?? '').filter(Boolean).join('\n\n') || taskAssistantBody(record.entryKind, body)),
+        // Task activity reads already contain public content; root history may still be unhydrated.
+        body: record.blocks.filter(block => block.kind === 'TEXT').sort((a, b) => a.ordinal - b.ordinal).map(block => block.text ?? '').filter(Boolean).join('\n\n') || taskAssistantBody(record.entryKind, body),
         reasoning: projected?.reasoning?.map((block) => ({ ...block })),
         traces: traces.length ? traces : undefined,
         status: projected?.status === 'running' ? 'running' : 'completed',
@@ -891,8 +892,20 @@ export function projectAgentTaskConversation(
 
   for (const activity of projectedActivities) {
     if (representedProjectedIds.has(activity.id) || messages.some((message) => message.id === activity.id)) continue;
+    if (activity.kind === 'guidance') {
+      messages.push({
+        id: activity.id,
+        turnId: activity.turnId,
+        role: 'user',
+        userKind: 'steer',
+        time: activity.time,
+        body: activity.body,
+      });
+      continue;
+    }
     messages.push({
       id: activity.id,
+      turnId: activity.turnId,
       role: 'assistant',
       assistantKind: activity.status === 'running' ? 'live' : 'terminal',
       time: activity.time,
@@ -2529,7 +2542,12 @@ abstract class CanonicalHistoryReader {
     const originalActivities = runs.flatMap(run => run.activities);
     const activities: Message[] = originalActivities.map(activity => ({...activity, role: 'assistant', status: undefined}));
     this.decorateHistory(activities);
-    for (const run of runs) run.parentId ??= tasks.find(task => task.task_id === run.id)?.parent_turn_id;
+    const byId = new Map(tasks.map(task => [task.task_id, task]));
+    for (const run of runs) {
+      const task = byId.get(run.id);
+      run.parentId ??= task?.parent_turn_id;
+      run.batchId ??= task?.batch_id;
+    }
     activities.forEach((activity, index) => Object.assign(originalActivities[index], {
         sourceEntryIds: activity.sourceEntryIds, historyContextState: activity.historyContextState, historyContextError: activity.historyContextError,
         contentState: activity.contentState, contentError: activity.contentError, reasoningContentState: activity.reasoningContentState, reasoningContentError: activity.reasoningContentError,
@@ -4224,7 +4242,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
           subagentRuns.push(run);
         }
         run.activities.push({
-          id: `live:${result.id}`, time: '现在', body: '', status: 'running', traces: [detachedTrace],
+          id: `live:${result.id}`, turnId: result.turnId, time: '现在', body: '', status: 'running', traces: [detachedTrace],
         });
       } else {
         messages.push({
@@ -4870,6 +4888,7 @@ function projectSubagentRuns(
     const index = task ? Math.max(0, tasks.indexOf(task)) : fallbackIndex++;
     const run: SubagentRun = {
       id: taskId,
+      batchId: task?.batchId,
       label: task?.label || `任务 ${index + 1}`,
       role: task?.role || '任务',
       objective: task?.objective || '',
@@ -4907,6 +4926,7 @@ function projectSubagentRuns(
     if (entry.entry_kind === 'INTER_AGENT_MESSAGE') {
       run.activities.push({
         id: entry.entry_id,
+        turnId: entry.turn_id,
         time: formatTime(entry.accepted_at_utc),
         body: content,
         kind: 'guidance',
@@ -4929,6 +4949,7 @@ function projectSubagentRuns(
       const reasoning = projectReasoningBlocks(entry);
       run.activities.push({
         id: entry.entry_id,
+        turnId: entry.turn_id,
         time: formatTime(entry.accepted_at_utc),
         body,
         reasoning: reasoning.length ? reasoning : undefined,
@@ -4966,7 +4987,7 @@ function projectSubagentRuns(
         // The request can be outside a paginated history window. Keep this
         // result visible without assigning it to a different tool call.
         run.activities.push({
-          id: entry.entry_id, time: formatTime(entry.accepted_at_utc), body: '', status: 'completed',
+          id: entry.entry_id, turnId: entry.turn_id, time: formatTime(entry.accepted_at_utc), body: '', status: 'completed',
           traces: [{
             id: entry.entry_id, kind: 'artifact', title: '操作结果', subtitle: '已记录',
             status: toolResultStatus(resultRef?.result_state),
@@ -4991,6 +5012,7 @@ function projectSubagentRuns(
       };
       run.activities.push({
         id: entry.entry_id,
+        turnId: entry.turn_id,
         time: formatTime(entry.accepted_at_utc),
         body: '',
         status: 'completed',
@@ -5011,6 +5033,7 @@ function projectSubagentRuns(
     run.status = 'running';
     run.activities.push({
       id: `live:${draft.id}`,
+      turnId: draft.turnId,
       time: '现在',
       body: draft.body || '正在处理…',
       reasoning: draft.reasoning.filter((block) => block.body).length
@@ -5544,19 +5567,25 @@ export function mergeRuntimeTaskInventory(
     messages,
     merged,
   );
-  // Only join rows that the user actually loaded. Derived activity remains
-  // available for the next open without making its absence execution truth.
-  const runById = new Map((projection.subagentRuns ?? []).map(run => [run.id, run]));
+  // Inventory enriches known task summaries; opening a group is not a prerequisite
+  // for navigating to it from a task already observed in the conversation.
+  const runById = new Map([
+    ...projection.messages.flatMap(message => message.subagentRuns ?? []),
+    ...projection.subagentRuns ?? [],
+  ].map(run => [run.id, run]));
   const attached: SubagentRun[] = [];
   for (const task of merged) {
     const source = runById.get(task.id);
     const activities = projectTaskActivities(task, source?.activities ?? []);
     attached.push({
       id: task.id, label: task.label, role: task.role, objective: task.objective,
+      batchId: task.batchId,
       status: task.status, parentId: task.parentId, summary: task.summary ?? source?.summary,
       color: task.color, activities,
     });
+    runById.delete(task.id);
   }
+  attached.push(...[...runById.values()].map(run => ({ ...run, activities: [] })));
   for (const message of messages) message.subagentRuns = undefined;
   const creators = {...projection.taskCreators};
   for (const task of merged) if (task.batchId && projection.taskBatchCreators?.[task.batchId]) creators[task.id] = projection.taskBatchCreators[task.batchId];

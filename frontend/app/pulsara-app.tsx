@@ -2949,7 +2949,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     <McpAuthorizationContext.Provider value={mcpAuthorizationStatuses}>
     <DesktopWorkspaceProvider visible={activeView === 'workbench' && !databaseBlocked && !loadingSession} onBrowserShortcut={command => flushSync(() => { if (command === 'search') setSearchOpen(value => !value); else if (canCreateSession) setNewSessionOpen(true); })} controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
     <FilePreviewProvider sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
-    <PresentationProvider connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen}>
+    <PresentationProvider readTask={loadTask} onCloseTaskGroup={unloadTaskGroup} connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>
       <DesktopTitlebar workbench={activeView === "workbench"} title={activeView === "workbench" ? activeSession.title : "Pulsara"} onToggleSidebar={() => setSidebarOpen(value => !value)} onToggleWorkspace={() => setInspectorOpen(value => !value)} />
@@ -3120,6 +3120,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           taskActivities={taskActivities}
           taskArtifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
           onReadToolArtifact={readToolArtifact}
+          onReadPromptImage={readPromptImage}
           onReadVisualization={readVisualization} onReadVisualizationThumbnail={readVisualizationThumbnail}
           onLoadTaskActivities={loadTaskActivities}
           loading={taskInventoryLoading}

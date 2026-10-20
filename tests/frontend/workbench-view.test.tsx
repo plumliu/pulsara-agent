@@ -1,3 +1,4 @@
+import { PresentationContext } from '../../frontend/components/presentation-provider';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { createHash, webcrypto } from 'node:crypto';
 import { LocalHttpRuntimeAdapter } from '../../frontend/lib/runtime-adapter';
@@ -1465,22 +1466,50 @@ describe('ROOT context compaction progress', () => {
 });
 
 
-it('binds only real worker messages to visualizations, never the repeated result summary', async () => {
-  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
-  vi.stubGlobal('matchMedia', () => ({matches:false,addEventListener(){},removeEventListener(){}}));
+it('keeps child details and visualization reads in the sidebar, with compact navigation in the parent', () => {
   const body = '```pulsara-visualization\nchart.html\n```';
-  const read = vi.fn(async () => '<h1>worker</h1>');
-  const view = render(<ConversationMessages messages={[{id:'parent-call',role:'assistant',status:'completed',time:'now',body:'',subagentRuns:[{
-    id:'task-1',label:'worker',role:'worker',color:'sage',status:'running',summary:'结果\n'+body,
-    activities:[{id:'worker-real-entry',kind:'assistant',status:'completed',body,visualizations:[{ordinal:0,state:'READY',contentDigest:'sha256:'+'a'.repeat(64),contentSize:15,mediaType:'text/html',codec:'utf-8'}]}],
-  }]}]} artifactOwnerKey="session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read}/>);
-  expect(read).not.toHaveBeenCalled();
+  const read = vi.fn();
+  const present = vi.fn();
+  const view = render(<PresentationContext.Provider value={present}><ConversationMessages messages={[{
+    id: 'parent-call', role: 'assistant', status: 'completed', time: 'now', body: '', subagentRuns: [{
+      id: 'task-1', batchId: 'batch-1', label: 'worker', role: '研究', objective: '只在任务详情显示的目标', color: 'blue', status: 'running', summary: '结果' + body,
+      activities: [{ id: 'worker-entry', time: '', status: 'running', body, reasoning: [{id:'thinking', kind:'full', body:'任务内部思考'}],
+        visualizations: [{ordinal:0,state:'READY',contentDigest:'sha256:'+'a'.repeat(64),contentSize:15,mediaType:'text/html',codec:'utf-8'}] }],
+    }],
+  }]} artifactOwnerKey="session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read}/></PresentationContext.Provider>);
   fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
-  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
-  expect(read.mock.calls[0][0]).toBe('worker-real-entry');
-  expect(view.container.querySelectorAll('.inline-visualization')).toHaveLength(1);
-  expect(view.container.querySelector('.subagent-summary .inline-visualization')).toBeNull();
+  const group = screen.getByLabelText('任务执行');
+  const node = within(group).getByRole('button', { name: '查看任务：worker' });
+  expect(node.classList.contains('trace-card__summary')).toBe(true);
+  expect(group.textContent).toContain('0 / 1 已结束');
+  expect(group.textContent).not.toMatch(/只在任务详情|任务内部思考|chart.html/);
+  expect(node.hasAttribute('aria-expanded')).toBe(false);
+  fireEvent.click(node);
+  expect(present).toHaveBeenLastCalledWith([{ type: 'task', task_id: 'task-1' }]);
+  fireEvent.click(within(group).getByRole('button', { name: '打开任务组' }));
+  expect(present).toHaveBeenCalledTimes(2);
+  expect(read).not.toHaveBeenCalled();
+  expect(view.container.querySelector('.subagent-run__body, .subagent-guidance, .inline-visualization')).toBeNull();
+});
+
+it('keeps distinct canonical task groups separate and updates their compact progress', () => {
+  const present = vi.fn();
+  const runs = [{ id: 'a', batchId: 'group-one', label: '甲', role: '研究', status: 'running' as const, color: 'blue' as const, objective: '', activities: [] },
+    { id: 'b', batchId: 'group-one', label: '乙', role: '研究', status: 'completed' as const, color: 'blue' as const, objective: '', activities: [] },
+    { id: 'c', batchId: 'group-two', label: '丙', role: '研究', status: 'pending' as const, color: 'blue' as const, objective: '', activities: [] }];
+  const display = (completed = false) => <PresentationContext.Provider value={present}><ConversationMessages
+    messages={[{ id:'parent',role:'assistant',time:'',body:'',subagentRuns: runs.map(run => completed ? {...run,status:'completed' as const} : run) }]}
+    artifactOwnerKey="session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} /></PresentationContext.Provider>;
+  const view = render(display());
+  fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+  expect(screen.getAllByLabelText('任务执行')).toHaveLength(2);
+  expect(screen.getByText('1 / 2 已结束')).toBeTruthy();
+  const node = screen.getByRole('button', { name: '查看任务：乙' });
+  fireEvent.click(node);
+  expect(present).toHaveBeenCalledWith([{type:'task',task_id:'b'}]);
+  view.rerender(display(true));
+  expect(screen.getByRole('button', { name: '查看任务：乙' })).toBe(node);
+  expect(screen.getByText('2 / 2 已结束')).toBeTruthy();
 });
 
 describe('bounded history reading and DOM locations', () => {
@@ -1719,28 +1748,22 @@ describe('independent interruption timeline rows', () => {
 });
 
 describe('activity and pending-input body demands', () => {
-  it('reads inline subagent activity only when its task is expanded and near the viewport', async () => {
-    const observed: Array<{ node: Element; notify: IntersectionObserverCallback }> = [];
-    vi.stubGlobal('IntersectionObserver', class {
-      notify: IntersectionObserverCallback;
-      constructor(callback: IntersectionObserverCallback) { this.notify = callback; }
-      observe(node: Element) { observed.push({ node, notify: this.notify }); }
-      disconnect() {}
-    });
+  it('does not hydrate child history from the parent task summary', () => {
+    const observed: Element[] = [];
+    vi.stubGlobal('IntersectionObserver', class { observe(node: Element) { observed.push(node); } disconnect() {} });
     const read = vi.fn(async () => {});
-    render(<WorkbenchView {...props({ isRunning: false, onHydrateEntries: read, messages: [{
+    const present = vi.fn();
+    render(<PresentationContext.Provider value={present}><WorkbenchView {...props({ isRunning: false, onHydrateEntries: read, messages: [{
       id: 'final-task', role: 'assistant', assistantKind: 'terminal', time: '', body: '任务完成', rootFinal: true, contentState: 'ready',
       subagentRuns: [{ id: 'worker', label: '审查worker', role: 'builder', color: 'blue', status: 'completed', objective: '核对', activities: [{
         id: 'worker-entry', time: '', body: '', contentState: 'unloaded', sourceEntryIds: ['worker-entry'], reasoningContentState: 'unloaded',
       }] }],
-    }] })} />);
-    expect(read).not.toHaveBeenCalled();
+    }] })} /></PresentationContext.Provider>);
     fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
-    expect(read).not.toHaveBeenCalled(); expect(observed).toHaveLength(0);
-    fireEvent.click(screen.getByRole('button', { name: /审查worker/ }));
-    expect(observed).toHaveLength(1);
-    act(() => observed[0].notify([{ target: observed[0].node, isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver));
-    await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith(['worker-entry'], true));
+    fireEvent.click(screen.getByRole('button', { name: '查看任务：审查worker' }));
+    expect(present).toHaveBeenCalledWith([{type:'task',task_id:'worker'}]);
+    expect(observed).toHaveLength(0);
+    expect(read).not.toHaveBeenCalled();
   });
 
   it('retains reader-held known queue text during canonical and context hydration with no local submission', () => {

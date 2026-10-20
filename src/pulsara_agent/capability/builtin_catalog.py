@@ -473,7 +473,7 @@ def _wait_agent_schema() -> dict[str, Any]:
 
 
 OPEN_IN_PULSARA_DESCRIPTION = (
-    "Show files, HTTP(S) webpages, existing background processes, MCP connections, or overview panels "
+    "Show files, HTTP(S) webpages, a subagent task's group, existing background processes, MCP connections, or overview panels "
     "in this conversation's right-side tabs when the user asks to open them or active presentation helps. "
     "Use ordinary reply links for sources and optional reading; do not open every cited page or repeat "
     "a URL solely because you opened it. Group related targets in one call; the last accepted target is selected. "
@@ -482,6 +482,7 @@ OPEN_IN_PULSARA_DESCRIPTION = (
     "without waiting for your final answer; later display failures are not returned to you. "
     "Webpages load normally but you receive no page contents or rendering verification. "
     "The tasks panel displays subagent tasks only, not the TODO checklist or Plan Mode. "
+    "Use a task target with an actual task_id to open its group and select that task directly. "
     "This does not start servers, run commands, reconnect MCP, or publish inline visualizations. ROOT only."
 )
 OPEN_IN_PULSARA_SCHEMA = {
@@ -491,11 +492,13 @@ OPEN_IN_PULSARA_SCHEMA = {
         "description": (
             'Ordered targets, each exactly one of: {"type":"file","path":"..."}, '
             '{"type":"browser","url":"https://..."}, {"type":"terminal","process_id":"..."}, '
+            '{"type":"task","task_id":"task:..."}, '
             '{"type":"mcp","runtime_server_id":"..."}, or {"type":"panel","name":"capabilities|tasks|background|browser"}. '
             'Panel browser creates a blank webpage with no URL; duplicates within a batch share one blank tab, later calls create a new one. '
             'No extra fields. File paths are relative to this conversation workspace; absolute paths, ~ and '
             '${PULSARA_HOME} are supported. Browser URLs must include HTTP(S), without credentials. '
             'Copy process_id from terminal results/listings and runtime_server_id from capability inspection. '
+            'Copy task_id from spawn_agent, spawn_agent_group, or list_agent_tasks; it opens the task\'s group in this conversation. '
             'Do not provide host, session or tab IDs.'
         ),
     }},

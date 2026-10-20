@@ -53,6 +53,7 @@ import type {
   ModelConfigurationSummary,
   CommandReceipt,
   ToolArtifactPage,
+  CanonicalPromptImagePart,
   UserControlCommandRef,
   UserControlQueryResult,
 } from '../lib/runtime-adapter';
@@ -84,6 +85,7 @@ interface InspectorPanelProps {
   taskArtifactOwnerKey: string;
   onReadVisualization?: import("./inline-visualization").ReadVisualization;
   onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
+  onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onCancelTask: (task: AgentTask) => Promise<void>;
   backgroundOwnerKey: string;
@@ -517,6 +519,7 @@ export function InspectorPanel({
   onLoadTaskActivities,
   taskArtifactOwnerKey,
   onReadToolArtifact,
+  onReadPromptImage,
   onReadVisualization,
   onReadVisualizationThumbnail,
   onCancelTask,
@@ -561,7 +564,7 @@ export function InspectorPanel({
       modelConfigurations={modelConfigurations ?? []} canControl={canControl} onCancel={onCancelTask} onNotify={onNotify}
       activities={taskActivities} loadActivities={onLoadTaskActivities} loadBackgroundProcesses={onLoadBackgroundProcesses}
       skills={(capabilities?.skills.items ?? []).filter(skill => skill.enabled && skill.effective)} artifactOwnerKey={taskArtifactOwnerKey}
-      onReadToolArtifact={onReadToolArtifact} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
+      onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
       onOpenTask={task => open('task', task.label, task.id)} />;
     if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} command={tab.title !== tab.entityId ? tab.title : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
             ownerKey={backgroundOwnerKey}
@@ -629,5 +632,5 @@ function WorkspaceTaskDetail({ tab, tasks, loadedGroupIds, onLoadGroup, ...props
   if (error) return <div className="task-inventory-notice"><p role="alert">{error}</p><button onClick={() => setRetry(value => value + 1)}>重试</button></div>;
   if (!selected.length && tab.kind === 'group' && groupLoaded) return <div className="inspector-empty" role="status">这个任务组已没有可读取的任务。</div>;
   if (!selected.length) return <div className="inspector-empty"><LoaderCircle className="is-spinning" size={18} />正在读取任务…</div>;
-  return <TaskGraphDetail {...props} viewState={tab.view} tasks={selected} initialTaskId={tab.kind === 'task' ? tab.entityId : undefined} />;
+  return <TaskGraphDetail {...props} viewState={tab.view} tasks={selected} initialTaskId={tab.kind === 'task' ? tab.entityId : tab.view?.taskId} />;
 }

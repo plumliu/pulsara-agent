@@ -407,6 +407,21 @@ function McpTraceDetails({ detail }: { detail: McpTraceDetail }) {
   );
 }
 
+function TraceSummary({ icon, title, purpose, subtitle, state, status, action }: {
+  icon: ReactNode; title: string; purpose?: string; subtitle: string;
+  state?: ReactNode; status: string; action?: ReactNode;
+}) {
+  return <>
+    {icon}
+    <span className="trace-summary-copy">
+      <span className="trace-summary-title"><strong>{title}</strong>{purpose && <span className="trace-purpose">{purpose}</span>}</span>
+      <small>{subtitle}</small>
+    </span>
+    <span className={`trace-state trace-state--${status}`}>{state}</span>
+    {action}
+  </>;
+}
+
 function TraceCard({
   trace,
   skills,
@@ -532,24 +547,13 @@ function TraceCard({
       ) setArtifactBusy(false);
     });
   };
-  const summary = (
-    <>
-      <span className={`trace-icon trace-icon--${trace.kind}`}><Icon size={14} /></span>
-      <span className="trace-summary-copy">
-        <span className="trace-summary-title">
-          <strong>{builtinSummary ? purpose : trace.toolName ?? trace.title}</strong>
-          {!builtinSummary && trace.toolName && purpose !== trace.toolName
-            ? <span className="trace-purpose">{purpose}</span>
-            : null}
-        </span>
-        <small>{subtitle}</small>
-      </span>
-      <span className={`trace-state trace-state--${trace.status}`}>
-        {trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? (builtinSummary ? undefined : trace.meta)}
-      </span>
-      {expandable && <ChevronRight className="trace-chevron" size={13} />}
-    </>
-  );
+  const summary = <TraceSummary
+    icon={<span className={`trace-icon trace-icon--${trace.kind}`}><Icon size={14} /></span>}
+    title={builtinSummary ? purpose : trace.toolName ?? trace.title}
+    purpose={!builtinSummary && trace.toolName && purpose !== trace.toolName ? purpose : undefined}
+    subtitle={subtitle} status={trace.status}
+    state={trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? (builtinSummary ? undefined : trace.meta)}
+    action={expandable && <ChevronRight className="trace-chevron" size={13} />} />;
 
   return (
     <div className={`trace-node trace-node--${trace.status}`}>
@@ -879,131 +883,39 @@ const subagentStatusLabels: Record<SubagentRun['status'], string> = {
   unknown: '状态待读取',
 };
 
-function SubagentRunCard({
-  run,
-  focused,
-  skills,
-  mcpToolRefs,
-  artifactOwnerKey,
-  onReadToolArtifact,
-  onReadPromptImage,
-  onReadVisualization,
-  onReadVisualizationThumbnail,
-  onNotify,
-}: {
-  run: SubagentRun;
-  focused: boolean;
-  skills: SkillCapability[];
-  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
-  artifactOwnerKey: string;
-  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
-  onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
-  onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
-  onReadVisualizationThumbnail: WorkbenchViewProps['onReadVisualizationThumbnail'];
-  onNotify: MarkdownNotify;
-}) {
-  const [expanded, setExpanded] = useState(
-    focused || run.status === 'running' || run.status === 'waiting' || run.status === 'pending',
-  );
-  const lastBody = [...run.activities].reverse().find((activity) => activity.body)?.body.trim();
-  const showSummary = Boolean(run.summary?.trim() && run.summary.trim() !== lastBody);
-
-  return (
-    <article
-      className={`subagent-run subagent-run--${run.status}${expanded ? ' is-expanded' : ''}${focused ? ' is-focused' : ''}`}
-      data-task-id={run.id}
-    >
-      <button data-thread-disclosure="" className="subagent-run__header" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        <span className={`agent-mini-icon color-${run.color}`}><Bot size={13} /></span>
-        <span className="subagent-run__identity"><strong>{run.label}</strong><small>{run.role}</small></span>
-        <span className={`subagent-run__status subagent-run__status--${run.status}`}>
-          {run.status === 'running' ? <LoaderCircle size={11} /> : run.status === 'completed' ? <Check size={11} /> : null}
-          {subagentStatusLabels[run.status]}
-        </span>
-        <ChevronDown size={13} />
-      </button>
-      <AnimatedDisclosure unmountOnClose open={expanded}>
-        <div className="subagent-run__body">
-          {run.objective && <div className="subagent-objective"><span>目标</span><p>{run.objective}</p></div>}
-          {run.activities.map((activity) => (
-            <HistoryMessageHost key={activity.id} message={{ ...activity, status: undefined, role: 'assistant', historyIncludeReasoning: true }}>
-            <section className="subagent-activity">
-              {activity.reasoning?.length ? (
-                <ReasoningDisclosure
-                  blocks={activity.reasoning}
-                  onNotify={onNotify}
-                  nested
-                />
-              ) : null}
-              {activity.body && (activity.kind === 'guidance' ? (
-                <div className="subagent-guidance">
-                  <span><CornerDownRight size={11} /> 主 Agent 补充</span>
-                  <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
-                </div>
-              ) : <div className="assistant-markdown"><MarkdownBody assistantChat visualization={activity.visualizations ? {entryId: activity.id, items: activity.visualizations, onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail} : undefined} body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
-              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
-            </section>
-            </HistoryMessageHost>
-          ))}
-          {showSummary && run.summary && (
-            <section className="subagent-summary"><span>结果</span><div className="assistant-markdown"><MarkdownBody body={run.summary} onNotify={onNotify} /></div></section>
-          )}
-        </div>
-      </AnimatedDisclosure>
-    </article>
-  );
-}
-
-function SubagentGroup({
-  runs,
-  focusTaskId,
-  focusTaskRevision,
-  focusTaskHighlighted,
-  skills,
-  mcpToolRefs,
-  artifactOwnerKey,
-  onReadToolArtifact,
-  onReadPromptImage,
-  onReadVisualization,
-  onReadVisualizationThumbnail,
-  onNotify,
-}: {
+function SubagentGroup({ runs, focusTaskId, focusTaskHighlighted }: {
   runs: SubagentRun[];
   focusTaskId?: string;
-  focusTaskRevision: number;
   focusTaskHighlighted: boolean;
-  skills: SkillCapability[];
-  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
-  artifactOwnerKey: string;
-  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
-  onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
-  onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
-  onReadVisualizationThumbnail: WorkbenchViewProps['onReadVisualizationThumbnail'];
-  onNotify: MarkdownNotify;
 }) {
-  const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
-  return (
-    <section className="subagent-group" aria-label="任务执行">
-      <header className="subagent-group__header">
+  const present = useContext(PresentationContext);
+  const groups = new Map<string, SubagentRun[]>();
+  for (const run of runs) {
+    const key = run.batchId ?? run.id;
+    const group = groups.get(key) ?? [];
+    group.push(run);
+    groups.set(key, group);
+  }
+  return <>{[...groups].map(([key, group]) => {
+    const settled = group.filter(run => !['pending', 'running', 'waiting', 'unknown'].includes(run.status)).length;
+    return <section className="subagent-group" aria-label="任务执行" key={key}>
+      <button type="button" className="subagent-group__header" disabled={!present}
+        aria-label="打开任务组"
+        onClick={() => present?.([{ type: 'task', task_id: group[0].id }])}>
         <span><GitFork size={13} /><strong>任务执行</strong></span>
-        <small>{settled} / {runs.length} 已结束</small>
-      </header>
-      <div className="subagent-group__runs">{runs.map((run) => (
-        <SubagentRunCard
-          key={`${run.id}:${focusTaskId === run.id ? focusTaskRevision : 0}`}
-          run={run}
-          focused={focusTaskHighlighted && focusTaskId === run.id}
-          skills={skills}
-          mcpToolRefs={mcpToolRefs}
-          artifactOwnerKey={artifactOwnerKey}
-          onReadToolArtifact={onReadToolArtifact}
-          onReadPromptImage={onReadPromptImage}
-          onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
-          onNotify={onNotify}
-        />
-      ))}</div>
-    </section>
-  );
+        <small>{settled} / {group.length} 已结束</small>
+      </button>
+      <div className="subagent-group__runs">{group.map(run => <article key={run.id} data-task-id={run.id}
+        className={`trace-card subagent-run${focusTaskHighlighted && focusTaskId === run.id ? ' is-focused' : ''}`}>
+        <button type="button" className="trace-card__summary subagent-run__header" disabled={!present}
+          aria-label={`查看任务：${run.label}`} onClick={() => present?.([{ type: 'task', task_id: run.id }])}>
+          <TraceSummary icon={<span className="trace-icon trace-icon--artifact"><Bot size={14} /></span>}
+            title={run.label} subtitle={run.role} status={run.status} state={subagentStatusLabels[run.status]}
+            action={<ChevronRight className="trace-chevron" size={13} />} />
+        </button>
+      </article>)}</div>
+    </section>;
+  })}</>;
 }
 
 const unavailablePromptImage = async (): Promise<Uint8Array> => {
@@ -1123,7 +1035,6 @@ function AssistantMessage({
   joinsPreviousToolChain,
   joinsNextToolChain,
   focusTaskId,
-  focusTaskRevision,
   focusTaskHighlighted,
   skills,
   mcpToolRefs,
@@ -1143,7 +1054,6 @@ function AssistantMessage({
   joinsPreviousToolChain: boolean;
   joinsNextToolChain: boolean;
   focusTaskId?: string;
-  focusTaskRevision: number;
   focusTaskHighlighted: boolean;
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
@@ -1225,7 +1135,7 @@ function AssistantMessage({
 
       {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
       {message.subagentRuns?.length ? (
-        <SubagentGroup onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail} runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
+        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskHighlighted={focusTaskHighlighted} />
       ) : null}
 
     </article>
@@ -1432,7 +1342,7 @@ export function ConversationMessages({
       responseActionEligible={!preview && isCompleteAnswer(value, taskFinalAnswerId)} startsAssistantRun={startsRun}
       joinsPreviousToolChain={toolChainConnections.before.has(value.id)}
       joinsNextToolChain={toolChainConnections.after.has(value.id)}
-      focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
+      focusTaskId={focusTaskId}
       focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs}
       onNotify={onNotify} onFork={onFork} canFork={!preview && canFork} artifactOwnerKey={artifactOwnerKey}
       onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
@@ -2541,7 +2451,7 @@ export function WorkbenchView({
           }
         }}
       >
-        <div className="thread-column">
+        <div className="thread-column conversation-transcript">
           {runtimeStatus !== 'online' && (
             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
               <span>{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在重新连接…' : runtimeError ?? '本地服务未连接。'}</span>

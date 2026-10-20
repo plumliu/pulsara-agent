@@ -141,6 +141,7 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
     onLoadTaskActivities: vi.fn(async () => ({ activities: [] })),
     taskArtifactOwnerKey: 'session-one:generation-one',
     onReadToolArtifact: vi.fn(),
+    onReadPromptImage: vi.fn(),
     onCancelTask: vi.fn(async () => undefined),
     backgroundOwnerKey: 'session-one:host-one',
     backgroundHostSessionId: 'host-one',
