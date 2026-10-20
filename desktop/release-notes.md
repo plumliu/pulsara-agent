@@ -1,6 +1,13 @@
 # Pulsara {{version}}
 
-这是 Pulsara 首个桌面预览版。可以在本机配置模型，使用会话、工具、Skills、MCP 和插件完成任务，并在工作台查看文件和交付结果。
+这是 Pulsara 桌面预览版。可以在本机配置模型，使用会话、工具、Skills、MCP 和插件完成任务，并在工作台查看文件和交付结果。
+
+## 本次更新
+
+- 改善流式回复、思考与工具调用之间的显示衔接，减少内容闪烁和空白。
+- 修复中文路径文件的侧边栏预览、SVG 图片检查和空闲时的 TODO 清单收尾。
+- 调整可视化内容的滚动条与布局，更新桌面图标和默认头像，头像可直接进入设置。
+- 更新中英文项目介绍，加入可直接播放的演示视频和截图。
 
 ## 下载
 
@@ -26,6 +33,6 @@ macOS 首次启动会注册 `~/.local/bin/pulsara`；Ubuntu 由 deb 管理 `/usr
 
 - CI 覆盖 macOS ARM64、Ubuntu 24.04 amd64 和 arm64 的原生打包及资源搬移；Ubuntu 另有完整后端测试、wheel 隔离安装和 deb 安装/卸载检查，前端回归、类型和 lint 单独检查。
 - 下载后的 macOS Gatekeeper 首次打开及 Ubuntu 图形桌面闭环仍待人工验收。草稿中的 CI 通过不代表这些步骤已经完成。
-- 首版仅提供手动更新，不包含 AppImage、Windows 或 macOS Intel 安装包，不宣称兼容所有 Linux 发行版，也不承诺跨版本数据库迁移。
+- 当前仅提供手动更新，不包含 AppImage、Windows 或 macOS Intel 安装包，不宣称兼容所有 Linux 发行版，也不承诺跨版本数据库迁移。
 
 问题反馈：[GitHub Issues](https://github.com/plumliu/pulsara-agent/issues)。请注明版本、系统、架构和复现步骤，不要附带 API Key 或 OAuth 令牌。

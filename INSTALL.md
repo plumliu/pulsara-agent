@@ -6,9 +6,9 @@ Choose a preview installer from [GitHub Releases](https://github.com/plumliu/pul
 
 | 系统 / System | 安装包 / Installer |
 | --- | --- |
-| macOS 15+，Apple Silicon | `Pulsara-0.1.0-alpha.1-macos-arm64.dmg` |
-| Ubuntu 24.04，amd64 | `Pulsara-0.1.0-alpha.1-linux-amd64.deb` |
-| Ubuntu 24.04，arm64 | `Pulsara-0.1.0-alpha.1-linux-arm64.deb` |
+| macOS 15+，Apple Silicon | `Pulsara-0.1.0-alpha.2-macos-arm64.dmg` |
+| Ubuntu 24.04，amd64 | `Pulsara-0.1.0-alpha.2-linux-amd64.deb` |
+| Ubuntu 24.04，arm64 | `Pulsara-0.1.0-alpha.2-linux-arm64.deb` |
 
 ## macOS
 
@@ -25,10 +25,10 @@ Open the DMG, drag Pulsara into Applications, eject the DMG, then launch the ins
 Open the matching deb in your software installer, or run this in the download directory:
 
 ```sh
-sudo apt install ./Pulsara-0.1.0-alpha.1-linux-amd64.deb
+sudo apt install ./Pulsara-0.1.0-alpha.2-linux-amd64.deb
 ```
 
-ARM64 用户将文件名换成 `Pulsara-0.1.0-alpha.1-linux-arm64.deb`。安装后从应用菜单启动。Use the arm64 filename on ARM64, then launch Pulsara from the application menu.
+ARM64 用户将文件名换成 `Pulsara-0.1.0-alpha.2-linux-arm64.deb`。安装后从应用菜单启动。Use the arm64 filename on ARM64, then launch Pulsara from the application menu.
 
 ## 开始使用 / Getting started
 

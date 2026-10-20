@@ -24,51 +24,51 @@ def release_root(tmp_path):
 
 
 def test_versions_match_real_committed_metadata_and_tag(release_root):
-    assert release.check_versions(release_root, "v0.1.0-alpha.1") == "0.1.0-alpha.1"
+    assert release.check_versions(release_root, "v0.1.0-alpha.2") == "0.1.0-alpha.2"
     with pytest.raises(ValueError, match="Tag"):
-        release.check_versions(release_root, "v0.1.0-alpha.2")
+        release.check_versions(release_root, "v0.1.0-alpha.3")
     path = release_root / "src/pulsara_agent/__init__.py"
-    path.write_text('__version__ = "0.1.0a2"\n')
+    path.write_text('__version__ = "0.1.0a3"\n')
     with pytest.raises(ValueError, match="CLI/runtime"):
         release.check_versions(release_root)
 
 
 def test_assembly_requires_and_copies_exactly_three_installers(release_root, tmp_path):
     source, output = tmp_path / "artifacts", tmp_path / "output"
-    names = release.installer_names("0.1.0-alpha.1")
+    names = release.installer_names("0.1.0-alpha.2")
     for index, name in enumerate(names):
         path = source / f"runner-{index}" / name
         path.parent.mkdir(parents=True)
         path.write_bytes(f"installer {index}".encode())
-    files = release.assemble(release_root, source, output, "v0.1.0-alpha.1", "plumliu/pulsara-agent")
+    files = release.assemble(release_root, source, output, "v0.1.0-alpha.2", "plumliu/pulsara-agent")
     assert [path.name for path in files] == list(names)
     assert sorted(path.name for path in output.iterdir()) == sorted([*names, "release-notes.md"])
     for index, name in enumerate(names):
         assert (output / name).read_bytes() == f"installer {index}".encode()
     notes = (output / "release-notes.md").read_text()
     assert "{{" not in notes
-    assert all(f"/releases/download/v0.1.0-alpha.1/{name}" in notes for name in names)
+    assert all(f"/releases/download/v0.1.0-alpha.2/{name}" in notes for name in names)
     assert "仍待人工验收" in notes
     extra = source / "unsupported.AppImage"
     extra.write_bytes(b"unexpected")
     with pytest.raises(ValueError, match="exactly"):
-        release.assemble(release_root, source, output, "v0.1.0-alpha.1", "plumliu/pulsara-agent")
+        release.assemble(release_root, source, output, "v0.1.0-alpha.2", "plumliu/pulsara-agent")
     extra.unlink()
     (source / "runner-2" / names[2]).unlink()
     with pytest.raises(ValueError, match="exactly"):
-        release.assemble(release_root, source, output, "v0.1.0-alpha.1", "plumliu/pulsara-agent")
+        release.assemble(release_root, source, output, "v0.1.0-alpha.2", "plumliu/pulsara-agent")
 
 
 @pytest.mark.parametrize("existing", [None, True, False])
 def test_github_draft_create_retry_and_published_refusal(tmp_path, monkeypatch, existing):
-    tag = "v0.1.0-alpha.1"
+    tag = "v0.1.0-alpha.2"
     remote = None if existing is None else {
         "tag_name": tag, "draft": existing, "prerelease": True,
         "assets": [], "html_url": "https://github.com/plumliu/pulsara-agent/releases/tag/test",
     }
     calls = []
     files = []
-    for name in release.installer_names("0.1.0-alpha.1"):
+    for name in release.installer_names("0.1.0-alpha.2"):
         path = tmp_path / name
         path.write_bytes(name.encode())
         files.append(path)

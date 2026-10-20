@@ -58,9 +58,9 @@ Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持
 
 | 系统 | 安装包 |
 | --- | --- |
-| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.1/Pulsara-0.1.0-alpha.1-macos-arm64.dmg) |
-| Ubuntu 24.04，amd64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.1/Pulsara-0.1.0-alpha.1-linux-amd64.deb) |
-| Ubuntu 24.04，arm64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.1/Pulsara-0.1.0-alpha.1-linux-arm64.deb) |
+| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-macos-arm64.dmg) |
+| Ubuntu 24.04，amd64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-amd64.deb) |
+| Ubuntu 24.04，arm64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-arm64.deb) |
 
 1. 安装并打开 Pulsara。macOS 把应用拖进“应用程序”，Ubuntu 安装对应的 deb。
 2. 在设置中添加模型连接，选择提供方、模型和 API 协议，按界面提示填写认证信息或自定义配置。
