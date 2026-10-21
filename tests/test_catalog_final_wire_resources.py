@@ -163,7 +163,7 @@ def _mcp_source():
     catalog = build_catalog_snapshot(owner_epoch=1, catalog_revision=1, entries=servers)
     return _candidate(
         ContextSourceKind.MCP_CATALOG,
-        _render_mcp_catalog(catalog, SimpleNamespace(routes=())),
+        _render_mcp_catalog(catalog, SimpleNamespace(routes=()), ()),
     )
 
 

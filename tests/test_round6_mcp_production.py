@@ -2092,17 +2092,22 @@ def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
             },
         ),
     )
-    full, compact, reference = _render_mcp_catalog(catalog, routes)
+    from tests.test_round9_unified_capability_semantics import _source_snapshot
+    from pulsara_agent.capability.contracts import CapabilitySourceKind
+
+    full, compact, reference = _render_mcp_catalog(catalog, routes, (
+        _source_snapshot(source_kind=CapabilitySourceKind.MCP_SERVER, source_id="fixture", facts=()),
+    ))
     full_payload = json.loads(full)
 
     assert len(reference.encode("utf-8")) <= len(compact.encode("utf-8"))
     assert len(compact.encode("utf-8")) <= len(full.encode("utf-8"))
     assert "read_more" not in reference
     assert "bounded fixture instructions" not in full
-    assert full_payload["servers"][0]["new_tool_names"] == [
+    assert full_payload["servers"][0]["meta_tool_names"] == [
         "mcp__fixture__fixture_echo"
     ]
-    assert "mcp__late__bulk_00" in full_payload["new_tool_usage"]
+    assert "next_offset" in full_payload["meta_tool_usage"]
 
 
 def test_reload_capabilities_name_is_one_complete_hard_cut() -> None:
@@ -4656,6 +4661,9 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
         "description",
         "parameters",
         "descriptor_fingerprint",
+        # The epoch must retain the original output contract to classify later
+        # MCP updates; it is never added to the provider's function definition.
+        "output_schema",
     }
     assert {item.value for item in McpEffectKind} == {
         "READ_ONLY",

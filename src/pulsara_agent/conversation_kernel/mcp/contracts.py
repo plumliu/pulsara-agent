@@ -72,6 +72,7 @@ class McpToolSemanticFact:
             description=self.description,
             parameters=self.input_schema,
             descriptor_fingerprint=self.descriptor_fingerprint,
+            output_schema=self.output_schema,
         )
 
 

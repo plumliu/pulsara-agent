@@ -184,6 +184,13 @@ def _empty_skill_inspection() -> CompleteEffectiveSkillCatalogInspection:
     )
 
 
+def _directory_plan(routes, snapshots=()):
+    return SimpleNamespace(
+        mcp_catalog_route_projection=routes,
+        dispatch_view=SimpleNamespace(planning_input=SimpleNamespace(mcp=SimpleNamespace(source_snapshots=snapshots))),
+    )
+
+
 def _planning_view(
     *,
     builtin_facts: tuple,
@@ -642,7 +649,7 @@ def test_round9_provider_contract_reset_reprojects_only_installed_cohort() -> No
     assert late_route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
 
 
-def test_round9_installed_schema_replacement_cannot_bypass_native_via_meta() -> None:
+def test_round9_installed_schema_replacement_uses_meta_without_rewriting_native() -> None:
     old = _fact(
         source_kind=CapabilitySourceKind.MCP_SERVER,
         source_id="fixture",
@@ -676,8 +683,9 @@ def test_round9_installed_schema_replacement_cannot_bypass_native_via_meta() -> 
     assert plan.direct_projection_set == cold.direct_projection_set
     assert len(plan.mcp_catalog_route_projection.routes) == 1
     route = plan.mcp_catalog_route_projection.routes[0]
-    assert route.route is ToolCapabilityRouteKind.UNAVAILABLE
-    assert route.public_reason_code is CapabilityRouteReasonCode.SCHEMA_REPLACED
+    assert route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+    assert route.public_reason_code is CapabilityRouteReasonCode.NATIVE_INPUT_CHANGED
+    assert route.native_spec == old.canonical_tool_spec
 
 
 def test_round9_cold_mcp_native_aggregate_is_all_direct_or_all_meta() -> None:
@@ -865,7 +873,7 @@ def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
         ),
     )
     runtime = SimpleNamespace(catalog_for_scope=lambda scope: catalog.for_scope(scope), candidates={})
-    plan = SimpleNamespace(mcp_catalog_route_projection=routes)
+    plan = _directory_plan(routes)
     rows, _, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
     assert diagnostics == []
     first = render_page(rows, {"limit": 1})
@@ -875,7 +883,7 @@ def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
     assert render_page(rows, {"offset": 99})["next_offset"] is None
     with pytest.raises(CapabilityQueryError):
         parse_query({"cursor": "old-shape"})
-    child_plan = SimpleNamespace(mcp_catalog_route_projection=replace(routes, joined_catalog_semantic_fingerprint=catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint, projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint})))
+    child_plan = _directory_plan(replace(routes, joined_catalog_semantic_fingerprint=catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint, projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint})))
     child_rows, _, diagnostics = runtime_rows(runtime, child_plan, ModelInputScopeKind.SUBAGENT_TASK)
     assert diagnostics == [] and len(child_rows) == 3
     drifted_routes = replace(routes, joined_catalog_semantic_fingerprint="sha256:foreign-catalog", projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": "sha256:foreign-catalog"}))
@@ -977,8 +985,9 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
         )
     }
     runtime = SimpleNamespace(catalog_for_scope=lambda scope: catalog.for_scope(scope), candidates=candidates)
-    plan = SimpleNamespace(mcp_catalog_route_projection=SimpleNamespace(
-        joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint, routes=()))
+    plan = _directory_plan(SimpleNamespace(
+        joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint, routes=()),
+        (_source_snapshot(source_kind=CapabilitySourceKind.MCP_SERVER, source_id="server", facts=()),))
     rows, details, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
     assert diagnostics == []
     resources = [item for item in rows if item["kind"] == "MCP_RESOURCE"]

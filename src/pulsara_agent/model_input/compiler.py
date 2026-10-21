@@ -174,7 +174,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v3-round9-routes",
+        "pulsara.mcp-catalog.v4-tool-evolution",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -345,6 +345,7 @@ _SOURCE_ABSENCE_POLICY = {
     ),
     ContextSourceKind.MCP_CATALOG: frozenset(
         {
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceAbsenceKind.UNAVAILABLE,
         }
@@ -679,6 +680,15 @@ class _AppendSourceEmission:
                 raise ValueError("minimal unavailable emission lacks identity")
             return self.unavailable_semantic_fingerprint
         return self.semantic_fingerprint
+
+
+def _catalog_render_identity(candidate, text):
+    if candidate.source_kind is ContextSourceKind.MCP_CATALOG:
+        # The selected visible summary, not hidden schema versions or an unused
+        # FULL variant, defines this snapshot's installed prefix occurrence.
+        return context_fingerprint("pulsara:mcp-catalog-render:v1",
+            {"contract": candidate.source_contract_version, "text": text})
+    return candidate.domain_semantic_fingerprint
 
 
 class StructuredModelInputCompiler:
@@ -1440,7 +1450,7 @@ class StructuredModelInputCompiler:
                     presence = SourceObservationPresence.VALUE
                     lifecycle = _observation_lifecycle(candidate.lifecycle)
                     body = selected.text
-                    semantic_domain = candidate.domain_semantic_fingerprint
+                    semantic_domain = _catalog_render_identity(candidate, body)
                 contract_version = candidate.source_contract_version
                 trust = candidate.trust_class
                 placement = candidate.placement_ordinal
@@ -1757,7 +1767,7 @@ class StructuredModelInputCompiler:
             }:
                 raise StructuredModelInputCompileError(ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID)
             semantic = _source_occurrence_fingerprint(
-                candidate.domain_semantic_fingerprint,
+                _catalog_render_identity(candidate, state.text()),
                 lifecycle=candidate.lifecycle,
                 turn_id=request.canonical_input.identity.turn_id,
                 model_call_index=request.model_call_index,

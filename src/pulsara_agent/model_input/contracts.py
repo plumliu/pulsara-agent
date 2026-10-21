@@ -288,12 +288,15 @@ class FrozenToolSpec:
     description: str
     parameters: FrozenJsonObjectFact = field(repr=False)
     descriptor_fingerprint: str
+    output_schema: FrozenJsonObjectFact | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.name or not self.descriptor_fingerprint:
             raise ValueError("frozen tool specification identity is incomplete")
         if not isinstance(self.parameters, FrozenJsonObjectFact):
             raise TypeError("tool parameters must be a frozen JSON object")
+        if self.output_schema is not None and not isinstance(self.output_schema, FrozenJsonObjectFact):
+            raise TypeError("tool output schema must be a frozen JSON object")
 
     @property
     def canonical_bytes(self) -> bytes:

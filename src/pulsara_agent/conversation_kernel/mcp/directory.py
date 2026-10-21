@@ -1,6 +1,10 @@
 """Local scoped MCP query projections. Pagination belongs to the unified query."""
 
-from pulsara_agent.capability.contracts import ToolCapabilityRouteKind
+from pulsara_agent.capability.contracts import (
+    CapabilitySourceKind,
+    CapabilitySourceSnapshotDisposition,
+    ToolCapabilityRouteKind,
+)
 from pulsara_agent.capability.source_query import minimal_row
 from .contracts import (
     scope_mcp_discovery_snapshot,
@@ -38,12 +42,18 @@ def runtime_rows(runtime, plan, scope):
             ],
         )
     rows, details = [], {}
+    complete_sources = {
+        snapshot.registration.source.stable_source_id
+        for snapshot in plan.dispatch_view.planning_input.mcp.source_snapshots
+        if snapshot.registration.source.kind is CapabilitySourceKind.MCP_SERVER
+        and snapshot.disposition is CapabilitySourceSnapshotDisposition.COMPLETE
+    }
     for server in catalog.servers:
         target = {"kind": "MCP_SERVER", "runtime_server_id": server.server_id}
         status = f"连接状态：{server.status.value}。"
         if server.stable_failure_category:
             status += f" {server.stable_failure_category}。"
-        candidate = runtime.candidates.get(server.server_id)
+        candidate = runtime.candidates.get(server.server_id) if server.server_id in complete_sources else None
         if candidate is None:
             status += "远端目录尚未发现。"
         rows.append(
@@ -55,6 +65,11 @@ def runtime_rows(runtime, plan, scope):
             "source": None,
             "connection_status": server.status.value,
             "catalog_discovered": candidate is not None,
+            "tool_count": server.exposed_tool_count if candidate is not None else None,
+            "resource_count": server.resource_count if candidate is not None else None,
+            "resource_template_count": server.resource_template_count if candidate is not None else None,
+            "prompt_count": server.prompt_count if candidate is not None else None,
+            "tool_listing": {"kind": "MCP_TOOL", "parent": target},
             "diagnostics": [],
         }
         if server.stable_failure_category:
@@ -86,9 +101,9 @@ def runtime_rows(runtime, plan, scope):
                 "tool_name": route.version.provider_name,
             }
             if route.route is ToolCapabilityRouteKind.DIRECT:
-                status = "当前直接调用面中的工具；详情提供该调用面的参数定义。"
+                status = "可直接调用；参数见工具定义。"
             elif route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY:
-                status = "需先查看详情，再用返回的 tool_ref 调用。"
+                status = "先用 inspect_capability 查看参数，再用返回的 tool_ref 调用。"
             else:
                 status = f"当前不可调用：{route.public_reason_code.value}。"
             rows.append(
@@ -98,7 +113,8 @@ def runtime_rows(runtime, plan, scope):
                     target,
                     None,
                     status,
-                    None if tool is None else tool.description,
+                    route.native_spec.description if route.route is ToolCapabilityRouteKind.DIRECT and route.native_spec is not None
+                    else None if tool is None else tool.description,
                 )
             )
         if snapshot is None:
@@ -135,6 +151,13 @@ def runtime_rows(runtime, plan, scope):
                     "source": None,
                     **public(server.server_id, item),
                 }
+    current_servers = {server.server_id for server in catalog.servers}
+    for route in plan.mcp_catalog_route_projection.routes:
+        if route.target.server_id not in current_servers and route.native_spec is not None:
+            rows.append(minimal_row("MCP_TOOL", route.version.provider_name,
+                {"kind": "MCP_TOOL", "server_id": route.target.server_id,
+                 "tool_name": route.version.provider_name}, None,
+                f"原生入口不可用：{route.public_reason_code.value}。"))
     return rows, details, []
 
 

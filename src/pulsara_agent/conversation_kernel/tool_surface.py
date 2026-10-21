@@ -17,6 +17,7 @@ from pulsara_agent.capability.contracts import (
 )
 from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
+    FrozenToolSpec,
     ModelInputScopeKind,
 )
 from pulsara_agent.primitives.context import context_fingerprint
@@ -124,6 +125,7 @@ class PreparedToolExecutionBinding:
     descriptor_fingerprint: str
     executor_binding_fingerprint: str
     execution_policy: ToolExecutionPolicy
+    current_mcp_spec: FrozenToolSpec | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not all(
@@ -135,13 +137,17 @@ class PreparedToolExecutionBinding:
         ):
             raise ValueError("prepared tool execution binding is incomplete")
         if isinstance(self.execution_policy, BuiltinExecutionPolicyRef):
+            if self.current_mcp_spec is not None:
+                raise ValueError("builtin binding cannot carry an MCP contract")
             if self.execution_policy.tool_name != self.tool_name:
                 raise ValueError("builtin policy does not join tool binding")
         elif isinstance(self.execution_policy, McpToolExecutionPolicyFact):
             if (
                 self.execution_policy.provider_tool_name != self.tool_name
+                or (self.current_mcp_spec is not None and self.current_mcp_spec.name != self.tool_name)
                 or self.execution_policy.tool_semantic_fingerprint
-                != self.descriptor_fingerprint
+                != (self.current_mcp_spec.descriptor_fingerprint
+                    if self.current_mcp_spec is not None else self.descriptor_fingerprint)
             ):
                 raise ValueError("MCP policy does not join tool binding")
         else:

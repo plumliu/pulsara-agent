@@ -476,7 +476,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v3-round9-routes",
+        "pulsara.mcp-catalog.v4-tool-evolution",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -3821,15 +3821,15 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:9cea8289efa485c2d4c38399f5213b209ee31f6970f16bbae0340656d66b0a53"
+        "sha256:627d0d399cd66183cea2a3bace68f551ce0c84af1f281b783aeaeead602e5e94"
     )
     assert compiled.compile_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # CAPABILITY_CHANGE adds an explicit absent source to the closed registry.
-        # Collection/semantic identity changes; actual budget decisions stay the same.
-        "sha256:d670d63a5726e92545e0c141f43e19e8273734e11e1c4005d48e4aacf2c77986"
+        # MCP_CATALOG v4 updates the closed source contract.
+        # Source/compiled identity changes; actual budget decisions stay the same.
+        "sha256:dc53e72bc426b662274a8111620e7606edf070cde1f9d0ddfc429a8cc6ec8788"
     )
     assert not hasattr(compiled, "final_estimate")
 

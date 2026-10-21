@@ -816,7 +816,9 @@ class CapabilityRouteReasonCode(StrEnum):
     SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
     SCOPE_INVISIBLE = "SCOPE_INVISIBLE"
     DIRTY_FENCED = "DIRTY_FENCED"
-    SCHEMA_REPLACED = "SCHEMA_REPLACED"
+    NATIVE_INPUT_CHANGED = "NATIVE_INPUT_CHANGED"
+    NATIVE_OUTPUT_CHANGED = "NATIVE_OUTPUT_CHANGED"
+    NATIVE_COMPATIBILITY_UNCONFIRMED = "NATIVE_COMPATIBILITY_UNCONFIRMED"
     REMOVED = "REMOVED"
     UNKNOWN_TARGET = "UNKNOWN_TARGET"
     AMBIGUOUS_LEGACY_TARGET = "AMBIGUOUS_LEGACY_TARGET"
@@ -846,6 +848,7 @@ class FrozenMcpToolExposure:
     route: ToolCapabilityRouteKind
     public_reason_code: CapabilityRouteReasonCode
     route_fingerprint: str
+    native_spec: FrozenToolSpec | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.route, ToolCapabilityRouteKind) or not isinstance(
@@ -871,8 +874,13 @@ class FrozenMcpRouteProjection:
     routes: tuple[FrozenMcpToolExposure, ...]
     joined_catalog_semantic_fingerprint: str
     projection_fingerprint: str
+    # Epoch-local choice, retained even while a tool/server is absent. This is
+    # not another public catalog/version identity or a durable change log.
+    native_meta_identities: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.native_meta_identities, frozenset):
+            raise TypeError("native meta choices must be frozen")
         keys = tuple(
             (item.target.server_id, item.target.remote_tool_name)
             for item in self.routes
@@ -1220,6 +1228,10 @@ class FrozenToolCapabilityExposureSelection:
 
     def __post_init__(self) -> None:
         native = self.dispatch_view.planning_input.native_wire
+        if not self.mcp_catalog_route_projection.native_meta_identities <= {
+            item.identity_fingerprint for item in self.direct_tool_versions
+        }:
+            raise ValueError("native meta choices escaped the installed cohort")
         _validate_scope(native.conversation_scope_kind, native.scope_subagent_task_id)
         if (
             self.direct_tool_surface.conversation_scope_kind
@@ -1270,15 +1282,13 @@ class FrozenToolCapabilityExposurePlan:
             is not self.direct_projection_set.conversation_scope_kind
         ):
             raise ValueError("capability exposure plan scopes conflict")
+        native_by_name = {item.name: item for item in self.direct_tool_surface.tool_specs}
         direct_versions = set(self.direct_projection_set.tool_versions)
         if any(
             (
                 route.route is ToolCapabilityRouteKind.DIRECT
                 and route.version not in direct_versions
-            )
-            or (
-                route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-                and route.version in direct_versions
+                and (route.native_spec is None or route.native_spec != native_by_name.get(route.version.provider_name))
             )
             for route in self.selection.mcp_catalog_route_projection.routes
         ):
@@ -1303,6 +1313,7 @@ class PreparedUnavailableDirectMcpGate:
     tool_semantic_fingerprint: str
     provider_tool_name: str
     unavailable_reason_code: str
+    target: McpToolCapabilityRef
     supervisor_authority_identity: object = field(repr=False, compare=False)
 
     @property

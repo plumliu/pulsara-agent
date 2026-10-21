@@ -79,7 +79,7 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                 gate = borrow.execution_binding(name)
                 assert isinstance(gate, PreparedUnavailableDirectMcpGate)
                 assert gate.unavailable_reason_code == (
-                    "SCHEMA_REPLACED_PENDING_COLD_ADOPTION"
+                    "NATIVE_CONTRACT_REQUIRES_META"
                     if change == "schema" else "MCP_DIRECT_CURRENTLY_UNAVAILABLE"
                 )
                 assert current.model_surface is cold.model_surface
@@ -109,24 +109,36 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                 assert authorization.kind is production.KernelToolAuthorizationKind.TOOL_UNAVAILABLE
                 message = authorization.public_message
                 assert prepared.authorization.public_message == message
-                assert "Do not route" in message and "use_new_mcp_tool" in message
+                assert "not dispatched" in message
                 if change == "schema":
-                    assert "different schema" in message
-                    assert "Reconnecting or reloading capabilities cannot adopt" in message
-                    assert "new cold context" in message
-                    assert "explicitly adopted compaction successor" in message
+                    assert "direct tool entry has been replaced" in message
+                    assert "inspect_capability" in message and "use_new_mcp_tool" in message
+                    assert "input_schema" in message and "invocation.mode" in message
+                    assert "tool_ref" in message
+                    assert "cold context" not in message
                     assert "same-schema reconnect" not in message
                     assert "server connection is currently unavailable" not in message
                 else:
-                    assert "same-schema connection is available" in message
-                    assert "list_capabilities" in message
+                    assert "tool is not currently available" in message
+                    assert "inspect_capability" in message
                     assert "new cold context" not in message
+                inspect_target = json.JSONDecoder().raw_decode(message.split("target=", 1)[1])[0]
+                assert inspect_target == {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name}
 
                 inspected = port._inspect_mcp_tool_result(
                     target={"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name},
                     invocation_context=SimpleNamespace(surface_borrow=borrow),
                 )
-                assert json.loads(inspected.content)["diagnostics"][0]["message"] == message
+                inspection = json.loads(inspected.content)
+                assert inspection["invocation"]["mode"] == "UNAVAILABLE"
+                assert inspection["diagnostics"][0]["code"] == gate.unavailable_reason_code
+                diagnostic = inspection["diagnostics"][0]["message"]
+                server_target = json.JSONDecoder().raw_decode(diagnostic.split("target=", 1)[1])[0]
+                assert server_target == {"kind": "MCP_SERVER", "runtime_server_id": "catalog"}
+                assert "not dispatched" not in diagnostic
+                assert "MCP_TOOL" not in diagnostic
+                if change == "schema":
+                    assert "previous entry can no longer be used" in diagnostic
 
                 if change == "removed":
                     revision = 1

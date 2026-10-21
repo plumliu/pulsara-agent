@@ -39,6 +39,7 @@ from pulsara_agent.capability.pulsara_home import (
     resolve_pulsara_home,
     resolve_user_home,
 )
+from pulsara_agent.capability.mcp_compatibility import NativeMcpCompatibility, native_mcp_compatibility
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     FrozenCapabilityDispatchCut,
@@ -1273,7 +1274,7 @@ class DirectKernelToolPort:
             return reject(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 f"mcp-direct:{binding.unavailable_reason_code}",
-                _mcp_unavailable_direct_message(binding.unavailable_reason_code),
+                _mcp_unavailable_direct_message(binding.unavailable_reason_code, binding.target, binding.tool_name),
             )
         entry = (
             builtin_tool_catalog_entry(tool_name) if tool_name in self._tools else None
@@ -1312,7 +1313,7 @@ class DirectKernelToolPort:
                 return reject(
                     KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                     "mcp-meta:ref-unavailable",
-                    str(exc),
+                    f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and tool_ref. Do not repeat earlier actions whose outcome is uncertain.",
                 )
             resolved_name = executor.semantic.provider_tool_name
             frozen_inner = freeze_json(dict(inner))
@@ -1331,11 +1332,11 @@ class DirectKernelToolPort:
                     post_name=resolved_name,
                     post_arguments=frozen_inner,
                 )
-            except ValidationError:
+            except ValidationError as exc:
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                     f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
-                    "invalid MCP tool arguments",
+                    f"invalid MCP tool arguments: {exc.message}",
                     post_name=resolved_name,
                     post_arguments=frozen_inner,
                 )
@@ -1355,17 +1356,19 @@ class DirectKernelToolPort:
                 raise RuntimeError("MCP schema did not thaw to an object")
             try:
                 validate_mcp_arguments(schema, dict(arguments))
+                if binding.current_mcp_spec is not None:
+                    validate_mcp_arguments(thaw_json(binding.current_mcp_spec.parameters), dict(arguments))
             except McpSchemaEvaluationFailure as exc:
                 return reject(
                     KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                     f"mcp-descriptor:{binding.descriptor_fingerprint}",
                     str(exc),
                 )
-            except ValidationError:
+            except ValidationError as exc:
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                     f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                    "invalid MCP tool arguments",
+                    f"invalid MCP tool arguments: {exc.message}",
                 )
         return PreparedResolvedToolInvocation(
             requested_tool_name=tool_name,
@@ -1480,6 +1483,7 @@ class DirectKernelToolPort:
                 else {item.tool_name: item for item in current_mcp.execution_bindings}
             )
             mcp_executor_by_name = {} if current_mcp is None else current_mcp.executors
+            route_by_name = {item.version.provider_name: item for item in plan.mcp_catalog_route_projection.routes}
             version_by_name = {
                 item.provider_name: item
                 for item in plan.direct_projection_set.tool_versions
@@ -1511,30 +1515,37 @@ class DirectKernelToolPort:
                 version = version_by_name.get(spec.name)
                 mcp_binding = mcp_binding_by_name.get(spec.name)
                 mcp_executor = mcp_executor_by_name.get(spec.name)
+                route = route_by_name.get(spec.name)
                 if (
                     version is not None
                     and mcp_binding is not None
                     and mcp_executor is not None
-                    and mcp_binding.descriptor_fingerprint
-                    == spec.descriptor_fingerprint
-                    and _mcp_executor_capability_version(mcp_executor) == version
+                    and route is not None
+                    and route.route is ToolCapabilityRouteKind.DIRECT
+                    and route.version == _mcp_executor_capability_version(mcp_executor)
+                    and mcp_binding.descriptor_fingerprint == mcp_executor.semantic.descriptor_fingerprint
+                    and native_mcp_compatibility(spec, mcp_executor.semantic.provider_spec()) is NativeMcpCompatibility.COMPATIBLE
                     and mcp_executor.policy is mcp_binding.execution_policy
                 ):
-                    leaves.append(mcp_binding)
+                    leaves.append(replace(mcp_binding,
+                        descriptor_fingerprint=spec.descriptor_fingerprint,
+                        current_mcp_spec=mcp_executor.semantic.provider_spec()))
                     continue
                 if version is None:
                     raise RuntimeError("planned MCP version is absent")
-                reason = (
-                    "SCHEMA_REPLACED_PENDING_COLD_ADOPTION"
-                    if mcp_binding is not None
-                    else "MCP_DIRECT_CURRENTLY_UNAVAILABLE"
-                )
+                if route is None:
+                    raise RuntimeError("planned native MCP route is absent")
+                reason = (route.public_reason_code.value
+                          if route.route is ToolCapabilityRouteKind.UNAVAILABLE else
+                          "NATIVE_CONTRACT_REQUIRES_META" if mcp_binding is not None
+                          else "MCP_DIRECT_CURRENTLY_UNAVAILABLE")
                 leaves.append(
                     PreparedUnavailableDirectMcpGate(
                         capability_identity_fingerprint=(version.identity_fingerprint),
                         tool_semantic_fingerprint=spec.descriptor_fingerprint,
                         provider_tool_name=spec.name,
                         unavailable_reason_code=reason,
+                        target=route.target,
                         supervisor_authority_identity=self._mcp_supervisor,
                     )
                 )
@@ -1721,6 +1732,21 @@ class DirectKernelToolPort:
             scope_subagent_task_id=epoch.scope_subagent_task_id,
             continuity_epoch_nonce=epoch.epoch_nonce,
         )
+        plan = surface_borrow.prepared.capability_exposure_plan
+        runtime = self._mcp_runtime_by_surface_generation.get(access.surface_generation)
+        allowed = set()
+        if plan is not None and runtime is not None:
+            for route in plan.mcp_catalog_route_projection.routes:
+                executor = runtime.executors.get(route.version.provider_name)
+                if (route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+                        and executor is not None
+                        and _mcp_executor_capability_version(executor) == route.version):
+                    allowed.add((route.version.identity_fingerprint, route.version.semantic_fingerprint,
+                                 execution_policy_fingerprint(executor.policy), route.route_fingerprint))
+        self._mcp_meta_refs.retire_unroutable(
+            conversation_scope_kind=epoch.conversation_scope_kind,
+            scope_subagent_task_id=epoch.scope_subagent_task_id,
+            continuity_epoch_nonce=epoch.epoch_nonce, allowed=allowed)
         for entry_id in full_inspect_entry_ids:
             self._mcp_meta_refs.install_full_result(
                 result_entry_id=entry_id,
@@ -1810,7 +1836,7 @@ class DirectKernelToolPort:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 f"mcp-direct:{binding.unavailable_reason_code}",
-                _mcp_unavailable_direct_message(binding.unavailable_reason_code),
+                _mcp_unavailable_direct_message(binding.unavailable_reason_code, binding.target, binding.tool_name),
             )
         if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
             return self._authorize_mcp(
@@ -2180,7 +2206,7 @@ class DirectKernelToolPort:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "mcp-meta:ref-unavailable",
-                str(exc),
+                f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and tool_ref. Do not repeat earlier actions whose outcome is uncertain.",
             )
         schema = thaw_json(executor.semantic.input_schema)
         if not isinstance(schema, dict):
@@ -2193,11 +2219,11 @@ class DirectKernelToolPort:
                 f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
                 str(exc),
             )
-        except ValidationError:
+        except ValidationError as exc:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                 f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
-                "invalid MCP tool arguments",
+                f"invalid MCP tool arguments: {exc.message}",
             )
         mode = permission_snapshot.effective_mode
         if (
@@ -2291,17 +2317,19 @@ class DirectKernelToolPort:
             raise RuntimeError("MCP schema did not thaw to an object")
         try:
             validate_mcp_arguments(schema, dict(arguments))
+            if binding.current_mcp_spec is not None:
+                validate_mcp_arguments(thaw_json(binding.current_mcp_spec.parameters), dict(arguments))
         except McpSchemaEvaluationFailure as exc:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 f"mcp-descriptor:{binding.descriptor_fingerprint}",
                 str(exc),
             )
-        except ValidationError:
+        except ValidationError as exc:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                 f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                "invalid MCP tool arguments",
+                f"invalid MCP tool arguments: {exc.message}",
             )
         generation = surface_borrow.prepared.access.surface_generation
         runtime = self._mcp_runtime_by_surface_generation.get(generation)
@@ -2318,6 +2346,10 @@ class DirectKernelToolPort:
                 "mcp-runtime:binding-missing",
                 "MCP tool binding is unavailable",
             )
+        if (executor.policy is not policy or (binding.current_mcp_spec is not None
+                and executor.semantic.provider_spec() != binding.current_mcp_spec)):
+            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "mcp-runtime:binding-stale", "MCP_SNAPSHOT_STALE: inspect the current tool before retrying")
         mode = permission_snapshot.effective_mode
         if (
             policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT
@@ -2770,8 +2802,8 @@ class DirectKernelToolPort:
                             "diagnostics": [
                                 {
                                     "code": direct_binding.unavailable_reason_code,
-                                    "message": _mcp_unavailable_direct_message(
-                                        direct_binding.unavailable_reason_code
+                                    "message": _mcp_unavailable_inspection_message(
+                                        direct_binding.unavailable_reason_code, direct_binding.target.server_id
                                     ),
                                 }
                             ],
@@ -2812,7 +2844,9 @@ class DirectKernelToolPort:
                         "diagnostics": [
                             {
                                 "code": route.public_reason_code.value,
-                                "message": "The current route does not allow this tool to be called.",
+                                "message": _mcp_unavailable_inspection_message(
+                                    route.public_reason_code.value, server_id
+                                ),
                             }
                         ],
                     }
@@ -4587,22 +4621,36 @@ def _mcp_inspection_values(
     )
 
 
-def _mcp_unavailable_direct_message(reason: str) -> str:
-    if reason == "SCHEMA_REPLACED_PENDING_COLD_ADOPTION":
+def _mcp_unavailable_reason(reason: str) -> str:
+    return {
+        "REMOVED": "The server no longer lists this tool.",
+        "SOURCE_UNAVAILABLE": "The server's current tool list is unavailable.",
+        "DIRTY_FENCED": "The server's tool list is being refreshed.",
+        "SCOPE_INVISIBLE": "This tool is not available to this agent.",
+        "NATIVE_CONTRACT_REQUIRES_META": "This tool's previous entry can no longer be used.",
+        "DESCRIPTOR_OVERBOUND": "The tool definition is too large to inspect, so this tool cannot be called.",
+    }.get(reason, "The tool is not currently available.")
+
+
+def _mcp_unavailable_inspection_message(reason: str, server_id: str) -> str:
+    target = json.dumps({"kind": "MCP_SERVER", "runtime_server_id": server_id}, ensure_ascii=False)
+    return _mcp_unavailable_reason(reason) + (
+        f" If this blocks the task, check the server with inspect_capability target={target}."
+    )
+
+
+def _mcp_unavailable_direct_message(reason: str, target, provider_tool_name: str) -> str:
+    inspect_target = json.dumps({"kind": "MCP_TOOL", "server_id": target.server_id,
+        "tool_name": provider_tool_name}, ensure_ascii=False)
+    if reason == "NATIVE_CONTRACT_REQUIRES_META":
         return (
-            "The MCP server now advertises a different schema for this tool. "
-            "The current context keeps its original native tool definition. "
-            "Reconnecting or reloading capabilities cannot adopt the new schema "
-            "in this context. Adoption requires a new cold context or an explicitly "
-            "adopted compaction successor. Do not route this tool through "
-            "use_new_mcp_tool or rebuild the current provider input. "
-            "Continue independent work meanwhile."
+            "This direct tool entry has been replaced; this call was not dispatched. "
+            f"Use inspect_capability with target={inspect_target} and follow invocation.mode. "
+            "For META, use the returned input_schema and tool_ref with use_new_mcp_tool."
         )
     return (
-        "The current MCP connection or configuration does not provide this frozen "
-        "tool. Check list_capabilities; direct use can resume when a same-schema "
-        "connection is available. The native tool definition remains frozen to "
-        "preserve context continuity. Do not route it through use_new_mcp_tool."
+        "This call was not dispatched. " + _mcp_unavailable_reason(reason)
+        + f" Use inspect_capability with target={inspect_target} for its current availability."
     )
 
 

@@ -66,6 +66,7 @@ class PreparedNewMcpToolRefSettlement:
     settlement_token_id: str
     result_entry_id: str
     ref: NewMcpToolRef
+    record: "_RefRecord" = field(repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -130,11 +131,6 @@ class ProcessLocalNewMcpToolRefOwner:
             settlement_id = random_id("settlement")
             while settlement_id in self._prepared:
                 settlement_id = random_id("settlement")
-            prepared = PreparedNewMcpToolRefSettlement(
-                settlement_token_id=settlement_id,
-                result_entry_id=result_entry_id,
-                ref=ref,
-            )
             record = self._refs.get(token)
             if record is None:
                 epoch_count = sum(
@@ -147,13 +143,17 @@ class ProcessLocalNewMcpToolRefOwner:
                     raise McpToolRefCapacityExceeded(
                         "MCP_REF_CAPACITY_EXCEEDED"
                     )
-                self._refs[token] = _RefRecord(
+                record = self._refs[token] = _RefRecord(
                     ref=ref,
                     state=NewMcpToolRefState.PREPARED,
                     committed_result_entry_ids=set(),
                 )
             elif record.ref != ref:
                 raise RuntimeError("new MCP ref token collision")
+            prepared = PreparedNewMcpToolRefSettlement(
+                settlement_token_id=settlement_id, result_entry_id=result_entry_id,
+                ref=record.ref, record=record,
+            )
             self._prepared[settlement_id] = prepared
         return prepared
 
@@ -166,14 +166,16 @@ class ProcessLocalNewMcpToolRefOwner:
         with self._lock:
             retained = self._prepared.pop(prepared.settlement_token_id, None)
             if retained is None:
+                if self._refs.get(prepared.ref.opaque_token) is not prepared.record:
+                    return  # Retired occurrence, including a delayed ABA settlement.
                 if committed:
                     raise RuntimeError("committed MCP ref settlement is absent")
                 return
             if retained is not prepared:
                 raise RuntimeError("MCP ref settlement token conflicts")
             record = self._refs.get(prepared.ref.opaque_token)
-            if record is None or record.ref != prepared.ref:
-                raise RuntimeError("MCP ref record is absent")
+            if record is not prepared.record:
+                return  # A newer inspect with the same deterministic token owns its own result IDs.
             if committed:
                 record.committed_result_entry_ids.add(prepared.result_entry_id)
                 if record.state is NewMcpToolRefState.PREPARED:
@@ -232,6 +234,33 @@ class ProcessLocalNewMcpToolRefOwner:
             ):
                 raise LookupError("MCP_TOOL_REF_STALE_OR_DORMANT")
             return ref
+
+    def retire_unroutable(
+        self, *, conversation_scope_kind, scope_subagent_task_id,
+        continuity_epoch_nonce, allowed,
+    ) -> None:
+        """Retire obsolete records, not their already admitted physical operations.
+
+        Callers hold exact executor/permit objects for in-flight settlement.
+        Existing settlement/result IDs isolate delayed FULL delivery from an ABA
+        re-inspection; no token tombstones, TTLs, or another generation owner.
+        """
+        with self._lock:
+            stale = set()
+            for token, record in self._refs.items():
+                ref = record.ref
+                key = (ref.capability_identity_fingerprint, ref.tool_semantic_fingerprint,
+                       ref.mcp_execution_policy_fingerprint, ref.tool_route_fingerprint)
+                if (ref.conversation_scope_kind is conversation_scope_kind
+                        and ref.scope_subagent_task_id == scope_subagent_task_id
+                        and ref.continuity_epoch_nonce == continuity_epoch_nonce
+                        and key not in allowed):
+                    stale.add(token)
+            for token in stale:
+                self._refs.pop(token)
+            for key, prepared in tuple(self._prepared.items()):
+                if prepared.ref.opaque_token in stale:
+                    self._prepared.pop(key)
 
     def retire_scope_except_epoch(
         self,

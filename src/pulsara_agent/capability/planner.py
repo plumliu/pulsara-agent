@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pulsara_agent.capability.contracts import (
     CapabilityRouteReasonCode,
     EmptyCapabilityEpochPredecessor,
@@ -28,8 +30,13 @@ from pulsara_agent.capability.contracts import (
     tool_capability_version_identity_digest,
     tool_capability_version_ref,
 )
+from pulsara_agent.capability.mcp_compatibility import (
+    NativeMcpCompatibility,
+    native_mcp_compatibility,
+)
 from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
+    FrozenToolSpec,
     model_tool_surface_fingerprint,
 )
 from pulsara_agent.primitives.context import context_fingerprint
@@ -44,12 +51,23 @@ def _route(
     fact: FrozenToolCapabilityFact,
     kind: ToolCapabilityRouteKind,
     reason: CapabilityRouteReasonCode,
+    native_spec: FrozenToolSpec | None = None,
 ) -> FrozenMcpToolExposure:
     target = McpToolCapabilityRef(
         server_id=fact.identity.source.stable_source_id,
         remote_tool_name=fact.identity.stable_name,
     )
     version = tool_capability_version_ref(fact)
+    return _version_route(target, version, kind, reason, native_spec)
+
+
+def _version_route(
+    target: McpToolCapabilityRef,
+    version: ToolCapabilityVersionRef,
+    kind: ToolCapabilityRouteKind,
+    reason: CapabilityRouteReasonCode,
+    native_spec: FrozenToolSpec | None,
+) -> FrozenMcpToolExposure:
     fingerprint = context_fingerprint(
         "mcp-tool-exposure-route:v1",
         {
@@ -66,6 +84,7 @@ def _route(
         route=kind,
         public_reason_code=reason,
         route_fingerprint=fingerprint,
+        native_spec=native_spec,
     )
 
 
@@ -74,9 +93,7 @@ def _direct_surface(
     view: FrozenToolCapabilityDispatchView,
     selected: tuple[FrozenToolCapabilityFact, ...],
 ) -> tuple[FrozenModelToolSurface, tuple[ToolCapabilityVersionRef, ...]]:
-    ordered = tuple(
-        sorted(selected, key=lambda item: item.canonical_tool_spec.name)
-    )
+    ordered = tuple(sorted(selected, key=lambda item: item.canonical_tool_spec.name))
     specs = tuple(item.canonical_tool_spec for item in ordered)
     return (
         FrozenModelToolSurface(
@@ -132,15 +149,10 @@ class KernelToolCapabilityPlanner:
 
         if (
             len(builtin) > MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT
-            or sum(
-                len(item.canonical_tool_spec.canonical_bytes)
-                for item in builtin
-            )
+            or sum(len(item.canonical_tool_spec.canonical_bytes) for item in builtin)
             > MAXIMUM_NATIVE_TOOL_BYTES
             or sum(
-                eligibility[
-                    tool_capability_version_ref(item)
-                ].wire_utf8_bytes
+                eligibility[tool_capability_version_ref(item)].wire_utf8_bytes
                 for item in builtin
             )
             > MAXIMUM_NATIVE_TOOL_BYTES
@@ -154,6 +166,7 @@ class KernelToolCapabilityPlanner:
 
         predecessor = view.planning_input.predecessor
         routes: list[FrozenMcpToolExposure] = []
+        native_meta_identities = set()
         reusable_direct_projection_set: FrozenNativeToolProjectionSet | None = None
         if isinstance(predecessor, EmptyCapabilityEpochPredecessor):
             candidate = (*builtin, *mcp_eligible)
@@ -162,16 +175,14 @@ class KernelToolCapabilityPlanner:
                 and sum(
                     eligibility[tool_capability_version_ref(item)].wire_estimated_tokens
                     for item in mcp_eligible
-                ) < MCP_NATIVE_TOOL_TOKEN_THRESHOLD
+                )
+                < MCP_NATIVE_TOOL_TOKEN_THRESHOLD
                 and sum(
-                    len(item.canonical_tool_spec.canonical_bytes)
-                    for item in candidate
+                    len(item.canonical_tool_spec.canonical_bytes) for item in candidate
                 )
                 <= MAXIMUM_NATIVE_TOOL_BYTES
                 and sum(
-                    eligibility[
-                        tool_capability_version_ref(item)
-                    ].wire_utf8_bytes
+                    eligibility[tool_capability_version_ref(item)].wire_utf8_bytes
                     for item in candidate
                 )
                 <= MAXIMUM_NATIVE_TOOL_BYTES
@@ -189,6 +200,7 @@ class KernelToolCapabilityPlanner:
                             fact=fact,
                             kind=ToolCapabilityRouteKind.DIRECT,
                             reason=CapabilityRouteReasonCode.DIRECT_NATIVE_SURFACE,
+                            native_spec=fact.canonical_tool_spec,
                         )
                     )
                 else:
@@ -227,91 +239,141 @@ class KernelToolCapabilityPlanner:
                 for fact in facts
                 if fact.origin is ToolCapabilityOrigin.MCP
             }
+            previous_by_identity = {
+                route.version.identity_fingerprint: route
+                for route in predecessor.mcp_route_projection.routes
+            }
+            native_meta_identities.update(
+                predecessor.mcp_route_projection.native_meta_identities
+            )
+            frozen_by_name = {
+                item.name: item for item in predecessor.tool_surface.tool_specs
+            }
+            sources = {
+                item.registration.source.stable_source_id: item
+                for item in view.planning_input.mcp.source_snapshots
+            }
             for version in direct_tool_versions:
+                previous = previous_by_identity.get(version.identity_fingerprint)
+                if previous is None:
+                    continue  # Builtins have no MCP route.
+                baseline = frozen_by_name[version.provider_name]
                 current = current_by_identity.get(version.identity_fingerprint)
                 if current is None:
-                    # A retained direct version remains provider-visible but
-                    # has no current clean executor fact.
+                    source = sources.get(previous.target.server_id)
+                    reason = (
+                        CapabilityRouteReasonCode.SOURCE_UNAVAILABLE
+                        if source is not None and source.disposition.value != "COMPLETE"
+                        else CapabilityRouteReasonCode.REMOVED
+                    )
+                    routes.append(
+                        _version_route(
+                            previous.target,
+                            previous.version,
+                            ToolCapabilityRouteKind.UNAVAILABLE,
+                            reason,
+                            baseline,
+                        )
+                    )
                     continue
-                if current.fact_semantic_fingerprint == version.semantic_fingerprint:
+                compatibility = native_mcp_compatibility(
+                    baseline, current.canonical_tool_spec
+                )
+                wire_compatible = isinstance(
+                    eligibility[tool_capability_version_ref(current)],
+                    FrozenNativeToolWireEligibilityQuote,
+                )
+                if (
+                    version.identity_fingerprint not in native_meta_identities
+                    and compatibility is NativeMcpCompatibility.COMPATIBLE
+                    and wire_compatible
+                ):
                     routes.append(
                         _route(
                             fact=current,
                             kind=ToolCapabilityRouteKind.DIRECT,
                             reason=CapabilityRouteReasonCode.DIRECT_NATIVE_SURFACE,
+                            native_spec=baseline,
                         )
                     )
                 else:
-                    routes.append(
-                        _route(
-                            fact=current,
-                            kind=ToolCapabilityRouteKind.UNAVAILABLE,
-                            reason=CapabilityRouteReasonCode.SCHEMA_REPLACED,
-                        )
+                    native_meta_identities.add(version.identity_fingerprint)
+                    reason = {
+                        NativeMcpCompatibility.INPUT_CHANGED: CapabilityRouteReasonCode.NATIVE_INPUT_CHANGED,
+                        NativeMcpCompatibility.OUTPUT_CHANGED: CapabilityRouteReasonCode.NATIVE_OUTPUT_CHANGED,
+                    }.get(
+                        compatibility,
+                        CapabilityRouteReasonCode.NATIVE_COMPATIBILITY_UNCONFIRMED,
                     )
+                    if not wire_compatible:
+                        reason = CapabilityRouteReasonCode.NATIVE_WIRE_INCOMPATIBLE
+                    if previous.public_reason_code in {
+                        CapabilityRouteReasonCode.NATIVE_INPUT_CHANGED,
+                        CapabilityRouteReasonCode.NATIVE_OUTPUT_CHANGED,
+                        CapabilityRouteReasonCode.NATIVE_COMPATIBILITY_UNCONFIRMED,
+                        CapabilityRouteReasonCode.NATIVE_WIRE_INCOMPATIBLE,
+                    }:
+                        reason = previous.public_reason_code
+                    routed = self._meta_or_unavailable(
+                        current,
+                        inspectability[
+                            (
+                                current.identity.source.stable_source_id,
+                                current.identity.stable_name,
+                            )
+                        ],
+                        reason,
+                    )
+                    routes.append(replace(routed, native_spec=baseline))
             direct_identities = {
-                item.identity_fingerprint
-                for item in direct_tool_versions
-            }
-            previous_meta_routes = {
-                (item.target.server_id, item.target.remote_tool_name): item
-                for item in predecessor.mcp_route_projection.routes
-                if item.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+                item.identity_fingerprint for item in direct_tool_versions
             }
             for fact in mcp_eligible:
-                if fact.identity.identity_fingerprint not in direct_identities:
-                    key = (
-                        fact.identity.source.stable_source_id,
-                        fact.identity.stable_name,
-                    )
-                    previous = previous_meta_routes.get(key)
-                    if (
-                        previous is not None
-                        and previous.version == tool_capability_version_ref(fact)
-                    ):
-                        # A policy-bound ref issued from the previous call must
-                        # retain its exact route identity throughout the same
-                        # process-local continuity epoch.  Reclassifying an
-                        # unchanged cold-fallback leaf as merely "late" would
-                        # invalidate the ref before the model can use it.
-                        routes.append(previous)
-                    else:
-                        routes.append(
-                            self._meta_or_unavailable(
-                                fact,
-                                inspectability[key],
-                                CapabilityRouteReasonCode.NEW_NOT_IN_NATIVE_SURFACE,
-                            )
+                if fact.identity.identity_fingerprint in direct_identities:
+                    continue
+                previous = previous_by_identity.get(fact.identity.identity_fingerprint)
+                if (
+                    previous is not None
+                    and previous.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+                    and previous.version == tool_capability_version_ref(fact)
+                ):
+                    routes.append(previous)
+                else:
+                    routes.append(
+                        self._meta_or_unavailable(
+                            fact,
+                            inspectability[
+                                (
+                                    fact.identity.source.stable_source_id,
+                                    fact.identity.stable_name,
+                                )
+                            ],
+                            CapabilityRouteReasonCode.NEW_NOT_IN_NATIVE_SURFACE,
                         )
+                    )
         else:  # pragma: no cover - closed union
             raise TypeError("capability epoch predecessor union is open")
 
         installed_direct_identities = (
-            {
-                item.identity_fingerprint
-                for item in direct_tool_versions
-            }
+            {item.identity_fingerprint for item in direct_tool_versions}
             if isinstance(predecessor, InstalledCapabilityEpochPredecessor)
             else set()
         )
         for fact in mcp_incompatible:
             if fact.identity.identity_fingerprint in installed_direct_identities:
-                # An installed direct identity that changed its descriptor is
-                # already represented by SCHEMA_REPLACED above.  Its new
-                # version must never bypass the old native contract via meta.
+                # Installed native identities were classified against their frozen baseline above.
                 continue
             key = (
                 fact.identity.source.stable_source_id,
                 fact.identity.stable_name,
             )
             previous = (
-                previous_meta_routes.get(key)
+                previous_by_identity.get(fact.identity.identity_fingerprint)
                 if isinstance(predecessor, InstalledCapabilityEpochPredecessor)
                 else None
             )
-            if (
-                previous is not None
-                and previous.version == tool_capability_version_ref(fact)
+            if previous is not None and previous.version == tool_capability_version_ref(
+                fact
             ):
                 routes.append(previous)
             else:
@@ -324,10 +386,14 @@ class KernelToolCapabilityPlanner:
                 )
 
         ordered_routes = tuple(
-            sorted(routes, key=lambda item: (item.target.server_id, item.target.remote_tool_name))
+            sorted(
+                routes,
+                key=lambda item: (item.target.server_id, item.target.remote_tool_name),
+            )
         )
         mcp_projection = FrozenMcpRouteProjection(
             routes=ordered_routes,
+            native_meta_identities=frozenset(native_meta_identities),
             joined_catalog_semantic_fingerprint=(
                 view.planning_input.mcp.catalog_semantic_fingerprint
             ),
@@ -360,8 +426,7 @@ class KernelToolCapabilityPlanner:
             != selection.scope_subagent_task_id
             or direct_projection_set.native_function_tool_wire_contract_fingerprint
             != selection.native_function_tool_wire_contract_fingerprint
-            or direct_projection_set.tool_versions
-            != selection.direct_tool_versions
+            or direct_projection_set.tool_versions != selection.direct_tool_versions
         ):
             raise CapabilityPlanningError(
                 "materialized native projection set does not join selection"
@@ -378,19 +443,14 @@ class KernelToolCapabilityPlanner:
         meta_reason: CapabilityRouteReasonCode,
     ) -> FrozenMcpToolExposure:
         if (
-            inspectability.target.server_id
-            != fact.identity.source.stable_source_id
-            or inspectability.target.remote_tool_name
-            != fact.identity.stable_name
+            inspectability.target.server_id != fact.identity.source.stable_source_id
+            or inspectability.target.remote_tool_name != fact.identity.stable_name
             or inspectability.version != tool_capability_version_ref(fact)
         ):
             raise CapabilityPlanningError(
                 "MCP inspectability proof does not exact-join Tool fact"
             )
-        if (
-            inspectability.disposition
-            is McpInspectDeliveryDisposition.FULL_ELIGIBLE
-        ):
+        if inspectability.disposition is McpInspectDeliveryDisposition.FULL_ELIGIBLE:
             return _route(
                 fact=fact,
                 kind=ToolCapabilityRouteKind.NEW_MCP_META_ONLY,

@@ -1360,6 +1360,7 @@ def prepare_test_direct_tool_surface(
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
     wire_api: str = "openai_chat_completions",
+    predecessor=None,
 ) -> PreparedKernelToolSurface:
     """Plan a real port through the Round 9 authority path for component tests."""
 
@@ -1440,10 +1441,12 @@ def prepare_test_direct_tool_surface(
         scope_subagent_task_id=scope_subagent_task_id,
         wire_api=wire_api,
         tool_facts=registry.tool_facts,
+        retained_direct_inputs=() if predecessor is None else tuple(zip(
+            predecessor.direct_projection_set.tool_versions, predecessor.tool_surface.tool_specs, strict=True)),
     )
     mcp_input = port.freeze_mcp_capability_projection_input(mcp)
     tool_input = freeze_tool_planning_input(
-        predecessor=EmptyCapabilityEpochPredecessor(0),
+        predecessor=predecessor or EmptyCapabilityEpochPredecessor(0),
         native_wire=native,
         mcp=mcp_input,
     )
