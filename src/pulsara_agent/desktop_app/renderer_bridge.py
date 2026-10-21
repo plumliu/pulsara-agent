@@ -5,7 +5,7 @@ from __future__ import annotations
 from pulsara_agent.identity import random_id
 
 from pulsara_agent.llm.input import annotation_from_value
-from pulsara_agent.workspace_identity import WorkspaceUnavailable, require_workspace
+from pulsara_agent.workspace_identity import WorkspaceUnavailable, observe_workspace, require_workspace
 
 import asyncio
 import base64
@@ -288,7 +288,14 @@ class RendererBridge:
                         self._controller_by_session[session_id] = (
                             connection.connection_id
                         )
-                return self._connection_payload(connection)
+                return {
+                    **self._connection_payload(connection),
+                    # The restored owner supplies the exact root. Observe it
+                    # after attachment setup without a second canonical read.
+                    "workspace_availability": observe_workspace(
+                        handle.session.workspace.workspace_root
+                    ).to_dict(),
+                }
             except BaseException:
                 await connection.aclose()
                 raise

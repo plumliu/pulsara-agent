@@ -232,12 +232,9 @@ def apply_connection_deadline(
         connection.autocommit = True
     try:
         connection.execute(
-            "SELECT pg_catalog.set_config('statement_timeout', %s, false)",
-            (timeout_setting,),
-        )
-        connection.execute(
-            "SELECT pg_catalog.set_config('lock_timeout', %s, false)",
-            (timeout_setting,),
+            "SELECT pg_catalog.set_config('statement_timeout', %s, false), "
+            "pg_catalog.set_config('lock_timeout', %s, false)",
+            (timeout_setting, timeout_setting),
         )
     finally:
         if restore_transactional_mode and not connection.closed:

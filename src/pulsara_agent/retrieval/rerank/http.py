@@ -3,11 +3,11 @@
 import asyncio
 import json
 import math
-import openai
 
 from pulsara_agent.llm.adapters.openai.client import (
     admit_provider_request,
     openai_auth_request_options,
+    prepare_openai_sdk,
 )
 from pulsara_agent.retrieval.config import RerankBackendConfig
 from pulsara_agent.retrieval.errors import RerankServiceError
@@ -99,6 +99,9 @@ class HttpRerankProvider:
         if len(json.dumps(payload, ensure_ascii=False).encode()) > 192 * 1024:
             raise RerankServiceError("rerank request exceeds its byte bound")
         async with self._semaphore:
+            await prepare_openai_sdk()
+            import openai
+
             client, boundary = sdk_client(
                 self.connection,
                 timeout_seconds=self.config.timeout_seconds,

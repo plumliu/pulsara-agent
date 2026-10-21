@@ -3,13 +3,12 @@
 import asyncio
 from collections.abc import Sequence
 import json
-import openai
-from openai.types import CreateEmbeddingResponse
 
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.llm.adapters.openai.client import (
     admit_provider_request,
     openai_auth_request_options,
+    prepare_openai_sdk,
 )
 from pulsara_agent.retrieval.config import RetrievalConnection, EmbeddingBackendConfig
 from pulsara_agent.retrieval.http import sdk_client
@@ -64,6 +63,10 @@ class HttpEmbeddingProvider:
         ):
             raise EmbeddingServiceError("embedding request exceeds its byte bound")
         async with self._semaphore:
+            await prepare_openai_sdk()
+            import openai
+            from openai.types import CreateEmbeddingResponse
+
             client, boundary = sdk_client(
                 self.connection,
                 timeout_seconds=self.config.timeout_seconds,

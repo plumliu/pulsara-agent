@@ -376,7 +376,7 @@ async def test_plugin_oauth_uses_shared_login_runtime_and_removal_owner(tmp_path
 
     service, connections, edit, _ = await fixture(tmp_path)
     async with oauth_server(tmp_path / "oauth") as (manager, _, local_config, *rest):
-        connections.oauth = manager
+        connections._oauth = manager
         connections.settings = manager.settings
         connections.lane = manager.lane
         await service.replace_plugin_mcp_connection_overlay(
@@ -410,7 +410,7 @@ async def test_plugin_oauth_uses_shared_login_runtime_and_removal_owner(tmp_path
             state,
             local_server_id="docs",
             current_state=lambda identity: store.read_state(store.layout(identity)),
-            oauth_manager=manager,
+            oauth_bind=manager.bind,
         )
         assert await config.authorization_provider() == (
             "Bearer initial-private-token",

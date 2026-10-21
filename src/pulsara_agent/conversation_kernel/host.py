@@ -281,7 +281,6 @@ from pulsara_agent.ports.user_control_feedback import (
 from pulsara_agent.terminal_process.models import TerminalProcessInfo
 from pulsara_agent.mcp_config import McpServerConfig
 from pulsara_agent.capability.mcp_management import LocalMcpManagementService
-from pulsara_agent.conversation_kernel.mcp import McpHostSupervisor
 from pulsara_agent.conversation_kernel.mcp.contracts import (
     McpCatalogSnapshot,
     McpConfiguredServerInspection,
@@ -347,7 +346,7 @@ from pulsara_agent.plugins.view import (
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 
-async def _shielded_plugin_filesystem_call(operation, /, **kwargs):
+async def _shielded_plugin_filesystem_call(operation, /, *, close_result=None, **kwargs):
     """Join a started Plugin filesystem worker before cancellation escapes."""
 
     task = asyncio.create_task(
@@ -365,9 +364,12 @@ async def _shielded_plugin_filesystem_call(operation, /, **kwargs):
         # A settled physical cause intentionally wins here; otherwise close
         # the successfully returned RAII value before propagating cancellation.
         result = task.result()
-        close = getattr(result, "close", None)
-        if close is not None:
-            close()
+        if close_result is not None:
+            close_result(result)
+        else:
+            close = getattr(result, "close", None)
+            if close is not None:
+                close()
         raise
 
 
@@ -835,6 +837,8 @@ class KernelHostSession:
         )
         self._memory_tools.bind_embedding_maintainer(self._memory_embedding_maintainer)
         self._tools.bind_memory_port(self._memory_tools)
+        from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor
+
         self._mcp_supervisor = McpHostSupervisor(
             session_id=session_id,
             workspace_root=workspace.workspace_root,
@@ -1362,11 +1366,13 @@ class KernelHostSession:
                 plugin_view=replacement,
                 trust_store=self._hook_source_provider.trust_store,
             ).source_snapshots
-            mcp = normalize_plugin_mcp_configs(
+            mcp = await _shielded_plugin_filesystem_call(
+                normalize_plugin_mcp_configs,
+                close_result=lambda value: value.close_plugin_anchors(),
                 existing_configs=self._local_mcp_configs,
                 view=replacement,
                 secret_resolver=self.mcp_management.settings.read().mcp_secret,
-                oauth_manager=self.mcp_management.oauth,
+                oauth_bind=self.mcp_management.bind_authorization,
                 current_state=self._plugin_view_owner.current_state,
             )
             _raise_if_deadline_expired(
@@ -7949,6 +7955,10 @@ class KernelHostCore:
             credential_boundary=credential_boundary,
         )
 
+    async def prepare_resources(self) -> None:
+        """Verify and acquire cold database resources without reading a UI list."""
+        await self._ensure_resources()
+
     async def _ensure_resources(self) -> ConversationKernelRepository:
         if self._repository is None:
             try:
@@ -8274,11 +8284,13 @@ class KernelHostCore:
                     workspace_mcp_server_approvals(workspace.workspace_root)
                 ),
             )
-            mcp_normalization = normalize_plugin_mcp_configs(
+            mcp_normalization = await _shielded_plugin_filesystem_call(
+                normalize_plugin_mcp_configs,
+                close_result=lambda value: value.close_plugin_anchors(),
                 existing_configs=local_mcp_configs,
                 view=initial_plugin_view,
                 secret_resolver=self.mcp_management.settings.read().mcp_secret,
-                oauth_manager=self.mcp_management.oauth,
+                oauth_bind=self.mcp_management.bind_authorization,
                 current_state=plugin_view_owner.current_state,
             )
             mcp_configs = mcp_normalization.configs

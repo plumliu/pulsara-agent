@@ -227,6 +227,9 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # admission and lock-acquisition tasks. Provider/retrieval callers no
         # longer create parallel sink tasks of their own.
         "src/pulsara_agent/process_credential_boundary.py",
+        # SDK initialization is import-only work. First use joins its thread
+        # on cancellation without blocking independent desktop HTTP requests.
+        "src/pulsara_agent/llm/adapters/openai/client.py",
         # The local-settings owner shields the single-document settlement so
         # cancellation cannot report an unknown publication as settled.
         "src/pulsara_agent/settings.py",

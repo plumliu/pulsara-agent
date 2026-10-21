@@ -48,6 +48,19 @@ describe('CJK emphasis and strikethrough', () => {
 });
 
 describe('MarkdownBody math rendering', () => {
+  it('applies new source and notification props even when the body is unchanged', async () => {
+    const first = vi.fn(), latest = vi.fn(), writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, 'pulsaraDesktop', {value:{writeClipboardText:writeText}, configurable:true});
+    const view = render(<MarkdownBody body="内容 $x$" annotationSource onNotify={first}/>);
+    expect(view.container.querySelector('[data-source-text]')).toBeTruthy();
+    view.rerender(<MarkdownBody body="内容 $x$" onNotify={latest}/>);
+    expect(view.container.querySelector('[data-source-text]')).toBeNull();
+    fireEvent.click(view.container.querySelector('.math-copy-target')!);
+    await waitFor(() => expect(latest).toHaveBeenCalledWith('公式已复制', undefined, 'success'));
+    expect(first).not.toHaveBeenCalled();
+    expect(writeText).toHaveBeenCalledWith('x');
+  });
+
   it('shows fenced code with a language toolbar, line numbers, safe highlighting and source-only copy', async () => {
     const body = '```python\ndef fibonacci(n):\n    return "<unsafe>"\n```';
     const writeText = vi.fn().mockResolvedValue(undefined);

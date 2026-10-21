@@ -11,6 +11,7 @@ import {
   createContext,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -297,7 +298,8 @@ export function FilePreviewProvider({
     [],
   );
   useEffect(() => {
-    for (const tab of tabs.current.values()) {
+    const ownedTabs = tabs.current;
+    for (const tab of ownedTabs.values()) {
       tab.request = undefined;
       release(tab);
       if (tab.sessionId === sessionId && tab.history.length)
@@ -307,7 +309,7 @@ export function FilePreviewProvider({
         });
     }
     return () => {
-      for (const tab of tabs.current.values()) {
+      for (const tab of ownedTabs.values()) {
         tab.request = undefined;
         release(tab);
       }
@@ -759,9 +761,7 @@ function FileReader({
       });
     return () => controller.abort();
   }, [api, cursor, file.read_token, mode]);
-  useEffect(() => {
-    const element = scroller.current;
-    if (!element || !page) return;
+  const restoreVisit = useEffectEvent((element: HTMLDivElement) => {
     element.scrollTop = visit?.position.top ?? 0;
     element.scrollLeft = visit?.position.left ?? 0;
     if (visit?.anchor) {
@@ -780,6 +780,11 @@ function FileReader({
         }
       }
     }
+  });
+  useEffect(() => {
+    const element = scroller.current;
+    if (element && page) restoreVisit(element);
+    // Position is a live visit observation, not a reason to restore on scroll.
   }, [page, visit?.anchor]);
   const move = (next: number) => {
     onVisitChange?.({ cursor: next, position: { top: 0, left: 0 } });
@@ -872,6 +877,7 @@ function PreviewTable({
   onVisitChange?: (patch: Partial<Visit>) => void;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
+  const initialPosition = useRef(visit?.position);
   // Segment horizontal scrolling to stay within browser layout-coordinate limits.
   // Every column remains reachable; this is a display window, never a data cap.
   const columnWindow = 1024;
@@ -885,8 +891,8 @@ function PreviewTable({
   useEffect(() => {
     const element = viewport.current;
     if (!element) return;
-    element.scrollTop = visit?.position.top ?? 0;
-    element.scrollLeft = visit?.position.left ?? 0;
+    element.scrollTop = initialPosition.current?.top ?? 0;
+    element.scrollLeft = initialPosition.current?.left ?? 0;
     const resize = new ResizeObserver(() =>
       setPosition((value) => ({
         ...value,

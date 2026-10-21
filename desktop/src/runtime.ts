@@ -6,6 +6,7 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 export type RuntimeEvent = {type: string; origin?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string};
+type RuntimePostgres = {runtime_dsn: string; admin_dsn: string};
 export class PythonRuntime {
   private child?: ChildProcessWithoutNullStreams;
   private preparing = false;
@@ -18,7 +19,7 @@ export class PythonRuntime {
   async waitForPreviousOwner(): Promise<void> {
     await promisify(execFile)(path.join(this.resources, 'python', 'bin', 'python3'), ['-m', 'pulsara_agent.desktop_runtime', '--wait-owner'], {env:{...process.env,PULSARA_HOME:this.home}});
   }
-  async start(postgres: {runtime_dsn: string; admin_dsn: string}, initialize: boolean): Promise<string> {
+  async start(preparePostgres: () => Promise<RuntimePostgres>, initialize: boolean): Promise<string> {
     if (this.child || this.preparing) throw new Error('内核进程尚未退出，不能启动第二个内核。');
     this.preparing = true;
     let prepared!: () => void;
@@ -70,6 +71,20 @@ export class PythonRuntime {
           this.onEvent(event);
         });
       });
+      // The child can import the kernel while PostgreSQL starts. Its original
+      // stdin start frame still gates every database operation. Observe early
+      // child failures while the database owner finishes physical preparation.
+      void ready.catch(() => {});
+      let postgres: RuntimePostgres;
+      try {
+        postgres = await preparePostgres();
+      } catch (error) {
+        // No start frame was sent. EOF lets the original child owner exit
+        // without acquiring a writer or touching an unready database.
+        if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+        await this.exit;
+        throw error;
+      }
       this.send(child, {type: 'start', postgres, initialize});
       return ready;
     } finally {
@@ -86,7 +101,9 @@ export class PythonRuntime {
   }
   get running() { return this.child !== undefined || this.preparing; }
   async inspectQuit(): Promise<RuntimeEvent> {
-    if (!this.child) return {type: 'inspect-quit', activeTasks: 0, scheduledTasks: 0};
+    // Before the start frame there can be no accepted work. Do not put an
+    // inspection ahead of that frame while PostgreSQL is still preparing.
+    if (this.preparing || !this.child) return {type: 'inspect-quit', activeTasks: 0, scheduledTasks: 0};
     const requestId = String(++this.request);
     return new Promise(resolve => {
       // This bounds only a UI status query. Unknown status asks the user; it never kills work.

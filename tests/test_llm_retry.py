@@ -75,13 +75,15 @@ def test_removed_retry_environment_cannot_change_runtime_defaults(monkeypatch) -
 
 
 def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
+    import openai
+
     calls = []
 
     class FakeAsyncOpenAI:
         def __init__(self, **kwargs):
             calls.append(kwargs)
 
-    monkeypatch.setattr(openai_client, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
 
     openai_client.build_async_openai_client(
         api_key="sk-test",
@@ -103,6 +105,8 @@ def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
 
 
 def test_openai_client_no_auth_does_not_consult_environment_key(monkeypatch) -> None:
+    import openai
+
     calls = []
 
     class FakeAsyncOpenAI:
@@ -110,7 +114,7 @@ def test_openai_client_no_auth_does_not_consult_environment_key(monkeypatch) -> 
             calls.append(kwargs)
 
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-inherited")
-    monkeypatch.setattr(openai_client, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
 
     openai_client.build_async_openai_client(
         api_key=None,

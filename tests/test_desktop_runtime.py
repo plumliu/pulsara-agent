@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 
@@ -65,6 +67,19 @@ def test_kernel_lock_prevents_second_owner_until_existing_close(desktop_home):
     finally:
         os.close(owner)
     os.close(module.acquire_kernel_lock())
+
+
+def test_wait_owner_does_not_initialize_settings_or_application(desktop_home):
+    # A fresh process exercises the actual CLI branch. The OS lock needs no
+    # settings, schema or provider owners, even when an application is installed.
+    code = """
+import runpy, sys
+sys.argv = ["pulsara_agent.desktop_runtime", "--wait-owner"]
+runpy.run_module("pulsara_agent.desktop_runtime", run_name="__main__")
+assert "pulsara_agent.settings" not in sys.modules
+assert "pulsara_agent.desktop_app.application" not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 @pytest.mark.parametrize("termination", ["shutdown", "eof"])

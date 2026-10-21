@@ -319,22 +319,34 @@ class BrowserRuntimeConnection:
                 role=wire.ATTACHMENT_ROLE_OBSERVER,
                 client_instance_id=f"{connection_id}:observer",
             )
-            snapshot = await controller.require(
-                "snapshot",
-                wire.SnapshotRequest(
-                    maximum_entries=256,
-                    maximum_control_items=MAXIMUM_CONTROL_ITEMS,
-                ),
-                "snapshot",
-            )
             # Live-control subscriptions are attachment-local.  The same
             # observer that owns long-poll observation must establish this
             # baseline, otherwise every observation correctly reports a gap.
-            live_control = await observer.require(
-                "live_control_snapshot",
-                wire.LiveControlSnapshotRequest(),
-                "live_control_snapshot",
+            # These reads have independent attachment owners; neither requires
+            # the other's result. Keep HELLO admission ordered, then overlap
+            # the process-local baseline with the canonical database read.
+            live_control_task = asyncio.create_task(
+                observer.require(
+                    "live_control_snapshot",
+                    wire.LiveControlSnapshotRequest(),
+                    "live_control_snapshot",
+                ),
+                name=f"browser-live-control-open:{connection_id}",
             )
+            try:
+                snapshot = await controller.require(
+                    "snapshot",
+                    wire.SnapshotRequest(
+                        maximum_entries=256,
+                        maximum_control_items=MAXIMUM_CONTROL_ITEMS,
+                    ),
+                    "snapshot",
+                )
+                live_control = await live_control_task
+            except BaseException:
+                live_control_task.cancel()
+                await asyncio.gather(live_control_task, return_exceptions=True)
+                raise
             return cls(
                 connection_id=connection_id,
                 generation=generation,

@@ -210,7 +210,9 @@ def test_round5_foreground_openai_timeout_is_typed_and_has_no_total(
         def __init__(self, **kwargs: object) -> None:
             calls.append(dict(kwargs))
 
-    monkeypatch.setattr(openai_client, "AsyncOpenAI", FakeAsyncOpenAI)
+    import openai
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
     policy = KernelExecutionWatchdogPolicy().foreground_transport
     openai_client.build_async_openai_client(
         api_key="sk-fixture-secret",

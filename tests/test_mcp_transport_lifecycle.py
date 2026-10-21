@@ -162,6 +162,7 @@ def test_sse_receive_failure_keeps_network_and_protocol_classification(tmp_path,
             )
             try:
                 await supervisor.start()
+                await asyncio.wait_for(supervisor._tasks["failure"], 3)
                 original = supervisor._slots["failure"]
                 if failure == "network_reset":
                     connections[0].abort()
@@ -232,7 +233,6 @@ def test_shutdown_joins_replaced_connect_attempt_cleanup(tmp_path, replacement):
             supervisor = McpHostSupervisor(
                 session_id="session:replacement", workspace_root=tmp_path,
                 configs=(config,), credential_boundary=ProcessCredentialBoundary(),
-                optional_fast_start_seconds=0.01,
             )
             close = None
             try:

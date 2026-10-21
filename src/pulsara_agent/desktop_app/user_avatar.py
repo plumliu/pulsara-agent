@@ -7,12 +7,13 @@ from pathlib import Path
 import tempfile
 
 from aiohttp import web
-from PIL import Image, ImageOps, UnidentifiedImageError
 
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 
 
 def normalize_avatar(payload: bytes) -> bytes:
+    from PIL import Image, ImageOps
+
     with Image.open(BytesIO(payload), formats=("PNG", "JPEG", "WEBP", "GIF")) as image:
         # Keep Pillow's default decompression boundary, including its warning tier.
         if image.width * image.height > Image.MAX_IMAGE_PIXELS:
@@ -29,6 +30,17 @@ def normalize_avatar(payload: bytes) -> bytes:
         output = BytesIO()
         clean.save(output, format="WEBP", quality=90)
         return output.getvalue()
+
+
+def _normalize_avatar_upload(payload: bytes) -> bytes | None:
+    # Image decoding is only needed for an upload. Keep both Pillow's import
+    # and its existing HTTP error classification on the upload worker.
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        return normalize_avatar(payload)
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+        return None
 
 
 class UserAvatarHttp:
@@ -62,14 +74,8 @@ class UserAvatarHttp:
         # request.read retains the local HTTP surface's existing 8 MiB boundary.
         payload = await request.read()
         async with self._write_lock:
-            try:
-                normalized = await asyncio.to_thread(normalize_avatar, payload)
-            except (
-                UnidentifiedImageError,
-                OSError,
-                ValueError,
-                Image.DecompressionBombError,
-            ):
+            normalized = await asyncio.to_thread(_normalize_avatar_upload, payload)
+            if normalized is None:
                 return web.json_response(
                     {
                         "error": {

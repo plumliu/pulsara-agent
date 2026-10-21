@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
 from types import MappingProxyType
-from typing import Mapping, TYPE_CHECKING
+from typing import Mapping, Sequence, TYPE_CHECKING
 
 from psycopg import Connection, IsolationLevel
 
@@ -119,9 +119,14 @@ def _deadline(deadline: float) -> None:
 
 
 def read_fork_anchor(
-    connection: Connection, session_id: str, entry_id: str
+    connection: Connection, session_id: str, entry_id: str,
+    *, candidate_blocks: Sequence[Mapping[str, object]] | None = None,
 ) -> FrozenForkAnchor | None:
-    """The one eligibility predicate shared by creation and UI projection."""
+    """The one eligibility predicate shared by creation and UI projection.
+
+    candidate_blocks, when supplied, are the complete block rows already read
+    for this entry by the caller's current canonical read transaction.
+    """
     row = connection.execute(
         """SELECT e.*, t.status AS executed_status, t.final_entry_id AS executed_final,
                   t.model_call_binding AS executed_model,
@@ -161,16 +166,30 @@ def read_fork_anchor(
         return None
     if row[prefix + "_base"] not in {"FULL_HISTORY", "SNAPSHOT"}:
         return None
-    blocks = connection.execute(
-        """SELECT b.block_ordinal, b.content_digest, b.content_size,
+    inline_blocks = (
+        tuple(sorted((block for block in candidate_blocks
+                      if block["block_kind"] == "TEXT" and block["content_codec"] == "utf-8"),
+                     key=lambda block: block["block_ordinal"]))
+        if candidate_blocks is not None else None
+    )
+    # The protocol already loaded this candidate's complete block rows. Reuse
+    # only a wholly inline TEXT set; a mixed/blob set keeps the original whole
+    # query and its adaptation point. Eligibility and validation stay here.
+    if inline_blocks is not None and all(block["inline_content"] is not None for block in inline_blocks):
+        blocks = tuple({"block_ordinal": block["block_ordinal"], "content_digest": block["content_digest"],
+                        "content_size": block["content_size"], "body": block["inline_content"]}
+                       for block in inline_blocks)
+    else:
+        blocks = connection.execute(
+            """SELECT b.block_ordinal, b.content_digest, b.content_size,
                   COALESCE(b.inline_content, blob.body) AS body
            FROM pulsara_v3.assistant_message_blocks AS b
            LEFT JOIN pulsara_v3.blobs AS blob ON blob.id = b.blob_id AND blob.workspace_id = b.workspace_id
            WHERE b.session_id = %s AND b.assistant_entry_id = %s
              AND b.block_kind = 'TEXT' AND b.content_codec = 'utf-8'
            ORDER BY b.block_ordinal""",
-        (session_id, entry_id),
-    ).fetchall()
+            (session_id, entry_id),
+        ).fetchall()
     from hashlib import sha256
 
     for block in blocks:

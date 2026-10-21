@@ -88,7 +88,6 @@ def _supervisor(tmp_path, configs, *, attempt_timeout=120):
     return McpHostSupervisor(
         session_id="session:scheduling", workspace_root=tmp_path, configs=configs,
         credential_boundary=ProcessCredentialBoundary(),
-        optional_fast_start_seconds=0.01,
         connect_attempt_timeout_seconds=attempt_timeout,
     )
 

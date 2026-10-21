@@ -34,7 +34,9 @@ mise owns task ordering and content-based freshness; uv owns locked Python depen
 - Native recipes, configured tool versions, compiler/SDK or Ubuntu system packages changing invalidate the affected resource tasks. Missing declared outputs and failed tasks cannot count as successful cache hits.
 - `mise run --force desktop:postgres` or `mise run --force desktop:python-dependencies` explicitly rebuilds that resource. The old manual `--skip-*` switches are removed. Cache hits still pass architecture/version checks, and packaging always runs the relocation smoke in a disposable database.
 
-uv installs with copy mode and browser binaries are copied from Playwright's own cache before relocation. Native rewriting must never modify SDK cache files. Keep `desktop/build`, `desktop/resources` and mise's local cache between builds; clearing them deliberately makes the next build cold.
+uv installs with copy mode and compiles dependency and application bytecode using the target bundled Python during packaging. Its `PYC_INVALIDATION_MODE=CHECKED_HASH` compiler setting lets CPython validate source content after resource copying changes file timestamps. CPython adjusts loaded source filenames to the relocated path; caches remain disposable build output. Browser binaries are copied from Playwright's own cache before relocation. Native rewriting must never modify SDK cache files. Keep `desktop/build`, `desktop/resources` and mise's local cache between builds; clearing them deliberately makes the next build cold.
+
+The same dependency preparation runs the bundled CPython's `compileall` with forced checked-hash invalidation for the standard library. This replaces upstream timestamp caches that would otherwise become stale when electron-builder copies resources. `site-packages` remains uv's compilation responsibility. Source files and content validation remain intact; no runtime loader or Python entry point is replaced.
 
 ### Ubuntu 24.04 native build
 
@@ -117,7 +119,9 @@ mise 管理任务依赖和内容变化判断，uv 管理锁定的 Python 依赖�
 - 原生构建脚本、配置的工具版本、编译器/SDK 或 Ubuntu 系统包变化时，对应资源失效重建。缺少声明的输出、任务构建失败，都不能算缓存命中。
 - 可用 `mise run --force desktop:postgres` 或 `mise run --force desktop:python-dependencies` 强制重建某项资源，旧的手动 `--skip-*` 参数已移除。缓存命中仍需校验架构和版本；打包前始终在临时数据库中执行搬移检查。
 
-uv 使用复制模式安装，浏览器也先从 Playwright 缓存复制到产物目录，再做原生库搬移；不能修改 SDK 缓存里的二进制文件。两次构建之间保留 `desktop/build`、`desktop/resources` 和 mise 本地缓存。主动清理它们后，下次将重新构建。
+uv 使用复制模式安装，并在打包时用目标随包 Python 预编译依赖和应用字节码。其 `PYC_INVALIDATION_MODE=CHECKED_HASH` 编译设置让 CPython 在资源复制改变文件时间戳后仍按源内容校验缓存；载入代码中的源文件名会调整为搬移后的位置，缓存仍只是可删除的构建产物。浏览器也先从 Playwright 缓存复制到产物目录，再做原生库搬移；不能修改 SDK 缓存里的二进制文件。两次构建之间保留 `desktop/build`、`desktop/resources` 和 mise 本地缓存。主动清理它们后，下次将重新构建。
+
+同一依赖准备步骤还使用随包 CPython 的 `compileall`，以 force 和 checked-hash 模式预编译标准库，替换会在 electron-builder 资源复制后失效的上游时间戳缓存。`site-packages` 继续由 uv 编译。源码及内容校验保留，不替换运行时 loader 或 Python 启动入口。
 
 ### Ubuntu 24.04 本机构建
 

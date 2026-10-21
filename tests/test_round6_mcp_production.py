@@ -61,12 +61,14 @@ from pulsara_agent.conversation_kernel.mcp.naming import mangle_mcp_tool_names
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     BoundedMcpSdkClient,
     MCPError,
-    McpAdvertisedCapabilities,
-    McpProtocolConformanceError,
-    McpTransportOperationError,
     _enforce_http_network_policy,
     _has_legacy_discovery_fallback_evidence,
     _normalize_legacy_discovery_http_error,
+)
+from pulsara_agent.conversation_kernel.mcp.contracts import (
+    McpAdvertisedCapabilities,
+    McpProtocolConformanceError,
+    McpTransportOperationError,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import _BoundedTransport
@@ -125,6 +127,7 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
 )
 from pulsara_agent.llm.input import MessageRole, join_text_content
 from pulsara_agent.mcp_config import (
+    _parse_server,
     LocalConfiguredMcpRuntimeSource,
     McpConfiguredEffect,
     McpHttpNetworkPolicy,
@@ -1933,7 +1936,6 @@ def test_round9_optional_mcp_failure_publishes_catalog_only_successor(
             workspace_root=tmp_path,
             configs=(_config(tmp_path, required=False),),
             client_factory=_DelayedTerminalFailureFakeMcpClient,  # type: ignore[arg-type]
-            optional_fast_start_seconds=0.005,
         )
         await supervisor.start()
         first = supervisor.install_pending_at_safe_point()
@@ -1970,6 +1972,132 @@ def test_round9_optional_mcp_failure_publishes_catalog_only_successor(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("complete_discovery", [False, True])
+def test_optional_mcp_start_returns_before_discovery_and_keeps_cleanup_owned(
+    tmp_path: Path, complete_discovery: bool,
+) -> None:
+    async def exercise() -> None:
+        opening = asyncio.Event()
+        release_open = asyncio.Event()
+        closing = asyncio.Event()
+        release_close = asyncio.Event()
+
+        class ControlledClient(_FakeMcpClient):
+            async def open(self) -> None:
+                opening.set()
+                await release_open.wait()
+
+            async def aclose(self) -> None:
+                closing.set()
+                await release_close.wait()
+                await super().aclose()
+
+        supervisor = McpHostSupervisor(
+            session_id='session:optional-start',
+            workspace_root=tmp_path,
+            configs=(_config(tmp_path, required=False),),
+            client_factory=ControlledClient,
+        )
+        first = successor = None
+        close = None
+        try:
+            # The timeout detects a test hang; the gate proves startup does not
+            # depend on optional network/discovery completion.
+            await asyncio.wait_for(supervisor.start(), 1)
+            await asyncio.wait_for(opening.wait(), 1)
+            connection = supervisor._tasks["fixture"]  # noqa: SLF001
+            assert not connection.done()
+            first = supervisor.install_pending_at_safe_point()
+            assert first is not None
+            assert first.root_tool_specs == ()
+            assert first.catalog_snapshot.servers[0].status is McpServerState.CONNECTING
+
+            if complete_discovery:
+                release_open.set()
+                await asyncio.wait_for(connection, 1)
+                inspection = supervisor.inspect_discovery_catalog()
+                assert inspection.catalog_snapshot.servers[0].status is McpServerState.READY
+                assert inspection.catalog_snapshot.servers[0].discovered_tool_count == 1
+                assert first.root_tool_specs == ()
+                successor = supervisor.install_pending_at_safe_point()
+                assert successor is not None
+                assert tuple(spec.remote_tool_name for spec in successor.root_tool_specs) == ("fake_echo",)
+                successor.release()
+                successor = None
+
+            first.release()
+            first = None
+            close = asyncio.create_task(supervisor.aclose())
+            await asyncio.wait_for(closing.wait(), 1)
+            assert not close.done()
+            if not complete_discovery:
+                assert not connection.done()
+            release_close.set()
+            await asyncio.wait_for(close, 1)
+            assert connection.done()
+            assert not supervisor._connection_tasks  # noqa: SLF001
+        finally:
+            release_open.set()
+            release_close.set()
+            if successor is not None:
+                successor.release()
+            if first is not None:
+                first.release()
+            if close is not None:
+                await close
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_required_mcp_discovery_is_admitted_before_blocked_optional_peer(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        order = []
+        optional_opening = asyncio.Event()
+        release_optional = asyncio.Event()
+
+        class ControlledClient(_FakeMcpClient):
+            async def open(self) -> None:
+                order.append(self.config.server_id)
+                if not self.config.required:
+                    optional_opening.set()
+                    await release_optional.wait()
+
+        optional = _config(tmp_path, required=False)
+        required = _parse_server("z_required", {
+            "required": True,
+            "transport": {"type": "stdio", "command": sys.executable},
+        })
+        supervisor = McpHostSupervisor(
+            session_id='session:required-priority',
+            workspace_root=tmp_path,
+            configs=(optional, required),
+            client_factory=ControlledClient,
+        )
+        runtime = None
+        try:
+            await asyncio.wait_for(supervisor.start(), 1)
+            await asyncio.wait_for(optional_opening.wait(), 1)
+            assert order == ["z_required", "fixture"]
+            assert not supervisor._tasks["fixture"].done()  # noqa: SLF001
+            runtime = supervisor.install_pending_at_safe_point()
+            assert runtime is not None
+            assert tuple(spec.server_id for spec in runtime.root_tool_specs) == ("z_required",)
+            assert {server.server_id: server.status for server in runtime.catalog_snapshot.servers} == {
+                "fixture": McpServerState.CONNECTING,
+                "z_required": McpServerState.READY,
+            }
+        finally:
+            release_optional.set()
+            if runtime is not None:
+                runtime.release()
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
+
+
 def test_round9_late_optional_mcp_discovery_is_visible_without_surface_publication(
     tmp_path: Path,
 ) -> None:
@@ -1979,7 +2107,6 @@ def test_round9_late_optional_mcp_discovery_is_visible_without_surface_publicati
             workspace_root=tmp_path,
             configs=(_config(tmp_path, required=False),),
             client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
-            optional_fast_start_seconds=0.005,
         )
         await supervisor.start()
         first = supervisor.install_pending_at_safe_point()

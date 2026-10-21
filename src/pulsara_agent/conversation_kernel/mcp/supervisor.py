@@ -9,11 +9,12 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
+from importlib import import_module
 from pathlib import Path
 import random
 import re
 from threading import RLock
-from typing import Callable, Mapping
+from typing import TYPE_CHECKING, Callable, Mapping
 from uuid import uuid4
 
 from pulsara_agent.capability.contracts import (
@@ -71,6 +72,9 @@ from ..tool_surface import (
     execution_policy_fingerprint,
 )
 from .contracts import (
+    McpAdvertisedCapabilities,
+    McpProtocolConformanceError,
+    McpTransportOperationError,
     MAXIMUM_CONFIGURED_MCP_SERVERS,
     MAXIMUM_DISCOVERED_TOOLS_PER_SERVER,
     MAXIMUM_DISCOVERY_ITEMS_PER_SERVER,
@@ -104,14 +108,8 @@ from .input_required import (
     McpInputRequiredRoundOwner,
     McpInputRequiredUnsupported,
 )
-from .sdk_facade import (
-    BoundedMcpSdkClient,
-    MCPError,
-    McpAdvertisedCapabilities,
-    McpProtocolConformanceError,
-    McpTransportOperationError,
-    types,
-)
+if TYPE_CHECKING:
+    from .sdk_facade import BoundedMcpSdkClient, MCPError, types
 from .wire import DEFAULT_MCP_WIRE_BOUNDS, validate_schema
 
 
@@ -134,6 +132,26 @@ class McpSnapshotStale(RuntimeError):
 
 class _McpDispatchCancelledBeforeStart(RuntimeError):
     pass
+
+
+async def _prepare_sdk_client_factory() -> type[BoundedMcpSdkClient]:
+    # A background import may hold Python's module lock. Keep it off the HTTP
+    # loop, and join the physical worker even if this connection is cancelled.
+    work = asyncio.create_task(asyncio.to_thread(import_module, __package__ + ".sdk_facade"))
+    try:
+        module = await asyncio.shield(work)
+    except asyncio.CancelledError:
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        with suppress(BaseException):
+            work.result()
+        raise
+    return module.BoundedMcpSdkClient
 
 
 async def _acquire_dispatch_lane(lane: asyncio.Semaphore, steer_event: asyncio.Event | None) -> None:
@@ -659,6 +677,8 @@ class McpBoundToolExecutor:
         arguments: Mapping[str, object],
         *, steer_event: asyncio.Event | None = None,
     ) -> McpKnownToolResult:
+        from .sdk_facade import MCPError, types
+
         if (
             permit.runtime_generation_id != self.runtime_generation_id
             or permit.descriptor_fingerprint != self.semantic.descriptor_fingerprint
@@ -1056,6 +1076,8 @@ class McpInstalledRuntimeGeneration:
         scope_kind: ModelInputScopeKind,
         steer_event: asyncio.Event | None = None,
     ) -> McpKnownToolResult:
+        from .sdk_facade import MCPError
+
         if permit is None:
             raise RuntimeError("MCP remote read lost its dispatch permit")
         if permit.scope_kind is not scope_kind:
@@ -1209,6 +1231,8 @@ async def _invoke_standard_remote_result(
     arguments: Mapping[str, object],
     input_owner: McpInputRequiredRoundOwner,
 ) -> types.ReadResourceResult | types.GetPromptResult:
+    from .sdk_facade import types
+
     request_state: str | None = None
     if tool_name == "read_mcp_resource":
         uri = str(arguments["uri"])
@@ -1333,9 +1357,8 @@ class McpHostSupervisor:
         workspace_root: Path,
         configs: tuple[McpServerConfig, ...],
         credential_boundary: ProcessCredentialBoundary,
-        client_factory: type[BoundedMcpSdkClient] = BoundedMcpSdkClient,
+        client_factory: type[BoundedMcpSdkClient] | None = None,
         required_startup_timeout_seconds: float = 120.0,
-        optional_fast_start_seconds: float = 3.0,
         connect_attempt_timeout_seconds: float = DEFAULT_MCP_CONNECT_ATTEMPT_TIMEOUT_SECONDS,
     ) -> None:
         if len(configs) > MAXIMUM_CONFIGURED_MCP_SERVERS:
@@ -1348,12 +1371,10 @@ class McpHostSupervisor:
         self._credential_boundary = credential_boundary
         if min(
             required_startup_timeout_seconds,
-            optional_fast_start_seconds,
             connect_attempt_timeout_seconds,
         ) <= 0:
             raise ValueError("MCP startup watchdogs must be positive")
         self._required_startup_timeout_seconds = required_startup_timeout_seconds
-        self._optional_fast_start_seconds = optional_fast_start_seconds
         self._connect_attempt_timeout_seconds = connect_attempt_timeout_seconds
         self._epoch = int.from_bytes(uuid4().bytes[:8], "big")
         self._lock = RLock()
@@ -1399,7 +1420,19 @@ class McpHostSupervisor:
         return self._epoch
 
     async def start(self) -> None:
-        enabled = tuple(item for item in self.configs if item.enabled)
+        """Start every enabled peer; only required peers gate Host publication.
+
+        Optional discovery stays owned by the supervisor and joins the ordinary
+        tool-surface safe point when ready. A slow optional peer must not delay
+        opening the conversation.
+        """
+        # Discovery retains one Host-wide memory reservation. Admit required
+        # peers first so an optional handshake cannot occupy that reservation
+        # ahead of the peers that gate opening the conversation.
+        enabled = tuple(sorted(
+            (item for item in self.configs if item.enabled),
+            key=lambda item: not item.required,
+        ))
         for config in enabled:
             self._start_connect(config.server_id)
             if config.catalog_refresh_interval_ms is not None:
@@ -1412,14 +1445,6 @@ class McpHostSupervisor:
             await self._wait_for_required_startup(
                 tuple(item.server_id for item in enabled if item.required)
             )
-        optional = tuple(self._tasks[item.server_id] for item in enabled if not item.required)
-        if optional:
-            done, _ = await asyncio.wait(
-                optional, timeout=self._optional_fast_start_seconds
-            )
-            for task in done:
-                with suppress(Exception):
-                    task.result()
 
     async def _wait_for_required_startup(
         self, server_ids: tuple[str, ...]
@@ -1743,36 +1768,42 @@ class McpHostSupervisor:
         slot: McpConnectionSlot | None = None
         candidate_lease: McpSlotLease | None = None
         try:
-            client = self._client_factory(
-                config,
-                workspace_root=self.workspace_root,
-                notification_callback=notification,
-                credential_boundary=self._credential_boundary,
-            )
-            # Start serial while the handshake determines whether an HTTP peer
-            # installed session state.  Only an operator assertion *and* a
-            # session-id-free negotiated transport can open the bounded lane.
-            mode = McpPhysicalConcurrencyKind.SERIAL_SESSION
-            maximum = 1
-            slot = McpConnectionSlot(
-                server_id=server_id,
-                supervisor_epoch=self._epoch,
-                connection_generation=attempt_generation,
-                runtime_config_fingerprint=config.runtime_config_fingerprint,
-                client=client,
-                concurrency_kind=mode,
-                maximum_in_flight=maximum,
-                host_lane=self._host_operation_lane,
-                failure_reporter=self._report_slot_failure,
-                physical_lifetime_anchor=attempt_anchor,
-            )
-            attempt_anchor = None
-            box["slot"] = slot
             superseded_pending: McpInstallationCandidate | None = None
             # Waiting for the shared memory reservation is scheduling, not a
             # remote connection attempt. Start its budget only after admission;
             # keep the reservation through parsing and candidate publication.
             async with self._discovery_reservations:
+                # First-use import may await a physical worker. Reserve in the
+                # original required-first task order before that await, so a
+                # faster optional import cannot overtake a required handshake.
+                factory = self._client_factory
+                if factory is None:
+                    factory = await _prepare_sdk_client_factory()
+                client = factory(
+                    config,
+                    workspace_root=self.workspace_root,
+                    notification_callback=notification,
+                    credential_boundary=self._credential_boundary,
+                )
+                # Start serial while the handshake determines whether an HTTP
+                # peer installed session state. Only an operator assertion and
+                # a session-id-free transport open the bounded parallel lane.
+                mode = McpPhysicalConcurrencyKind.SERIAL_SESSION
+                maximum = 1
+                slot = McpConnectionSlot(
+                    server_id=server_id,
+                    supervisor_epoch=self._epoch,
+                    connection_generation=attempt_generation,
+                    runtime_config_fingerprint=config.runtime_config_fingerprint,
+                    client=client,
+                    concurrency_kind=mode,
+                    maximum_in_flight=maximum,
+                    host_lane=self._host_operation_lane,
+                    failure_reporter=self._report_slot_failure,
+                    physical_lifetime_anchor=attempt_anchor,
+                )
+                attempt_anchor = None
+                box["slot"] = slot
                 async with asyncio.timeout(self._connect_attempt_timeout_seconds):
                     await client.open()
                     with self._lock:
@@ -2298,8 +2329,8 @@ class McpHostSupervisor:
     ) -> McpDiscoveryCatalogInspection:
         """Freeze the latest bounded discovery for management/UI inspection.
 
-        A completed connection may produce a normalized candidate after the
-        Host's optional fast-start window.  Provider publication still belongs
+        An optional connection may produce a normalized candidate after Host
+        publication.  Provider publication still belongs
         exclusively to ``install_pending_at_safe_point``; this read-only view
         lets management surfaces report what the peer actually exposed without
         mutating the current provider/tool generation.
@@ -3095,6 +3126,8 @@ async def _list_pages(
     *,
     budget: _DiscoveryBudget,
 ) -> tuple[object, ...]:
+    from .sdk_facade import types
+
     cursor: str | None = None
     items: list[object] = []
     seen: set[str] = set()
@@ -3127,6 +3160,8 @@ async def _list_legacy_optional_resource_templates(
     *,
     budget: _DiscoveryBudget,
 ) -> tuple[object, ...]:
+    from .sdk_facade import MCPError
+
     try:
         return await _list_pages(
             client,
@@ -3660,6 +3695,8 @@ def _mcp_invocation_failure(
 
 
 def _mcp_error_is_transport_failure(error: MCPError) -> bool:
+    from .sdk_facade import types
+
     # SDK 2.1.0 uses these same public codes for local dispatcher close/timeout
     # and peer replies. Keep those ambiguous codes conservative; its other
     # request errors represent a received JSON-RPC ErrorData, not dead I/O.

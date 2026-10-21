@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import py_compile
 import shlex
 import shutil
 import subprocess
@@ -196,12 +198,117 @@ packages = ["src/probe"]
     subprocess.run(["uv", "venv", "--python", sys.executable, str(target / "python")], check=True, capture_output=True)
     monkeypatch.setattr(resources, "REPO", repo)
     monkeypatch.setattr(resources, "RESOURCES", target)
-    (package / "__init__.py").write_text('VALUE = "first"\n')
+    (package / "__init__.py").write_text('VALUE = "first"\ndef location(): pass\n')
     obsolete = package / "obsolete.py"
     obsolete.write_text("obsolete = True\n")
     resources.prepare_application()
-    (package / "__init__.py").write_text('VALUE = "second"\n')
+    # The wheel is already compiled before the first runtime import. uv owns
+    # both compilation and replacement of caches for the same package version.
+    cache, = (target / "python/lib").glob("python*/site-packages/probe/__pycache__/__init__.*.pyc")
+    first_bytecode = cache.read_bytes()
+    (package / "__init__.py").write_text('VALUE = "second"\ndef location(): pass\n')
     obsolete.unlink()
     resources.prepare_application()
-    code = 'import importlib.util,probe; assert probe.VALUE == "second"; assert importlib.util.find_spec("probe.obsolete") is None'
-    subprocess.run([str(target / "python/bin/python3"), "-I", "-c", code], check=True)
+    assert cache.read_bytes() != first_bytecode
+    relocated = tmp_path / "relocated resources"
+    # electron-builder copies extraResources without preserving source mtimes.
+    shutil.copytree(target, relocated, symlinks=True, copy_function=shutil.copyfile)
+    relocated_cache = relocated / cache.relative_to(target)
+    relocated_source = relocated_cache.parent.parent / "__init__.py"
+    os.utime(relocated_source, (1, 1))
+    bytecode = relocated_cache.read_bytes()
+    cache_mtime = relocated_cache.stat().st_mtime_ns
+    code = '''
+import importlib.util, pathlib, sys
+def reject_source_compilation(event, args):
+    if event == "compile" and str(args[1]).endswith("/probe/__init__.py"):
+        raise AssertionError("the packaged cache must survive source timestamp changes")
+sys.addaudithook(reject_source_compilation)
+import probe
+assert probe.VALUE == "second"
+assert importlib.util.find_spec("probe.obsolete") is None
+assert pathlib.Path(probe.location.__code__.co_filename) == pathlib.Path(probe.__file__)
+'''
+    # CPython checks source content and relocates the loaded code filename to
+    # its current path. The first runtime import needs neither compile nor write.
+    subprocess.run([str(relocated / "python/bin/python3"), "-I", "-B", "-c", code], check=True)
+    assert relocated_cache.read_bytes() == bytecode
+    assert relocated_cache.stat().st_mtime_ns == cache_mtime
+
+
+def test_stdlib_checked_hash_survives_builder_copy_and_checks_changed_source(tmp_path):
+    # A checkout may itself live under a directory called site-packages. Only
+    # this stdlib's own uv subtree belongs to the exclusion owner.
+    stdlib = tmp_path / "site-packages" / "prepared" / "lib" / "python3.12"
+    stdlib.mkdir(parents=True)
+    source = stdlib / "pulsara_stdlib_cache_probe.py"
+    source.write_text('VALUE = "first"\ndef location(): pass\n')
+    cache = Path(py_compile.compile(
+        str(source), doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+    ))
+    assert int.from_bytes(cache.read_bytes()[4:8], "little") == 0
+    assert int.from_bytes(cache.read_bytes()[8:12], "little") == int(source.stat().st_mtime)
+
+    # A valid timestamp cache must be replaced, not accepted by compileall's
+    # timestamp freshness shortcut. This runs the real target CPython compiler.
+    resources.compile_python_stdlib(Path(sys.executable), stdlib)
+    assert int.from_bytes(cache.read_bytes()[4:8], "little") == 3
+    packaged = tmp_path / "packaged" / "lib" / "python3.12"
+    shutil.copytree(stdlib, packaged, copy_function=shutil.copyfile)
+    copied_source = packaged / source.name
+    copied_cache = packaged / cache.relative_to(stdlib)
+    os.utime(copied_source, (1, 1))
+    before = copied_cache.read_bytes()
+    before_mtime = copied_cache.stat().st_mtime_ns
+    code = '''
+import os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+source = root / "pulsara_stdlib_cache_probe.py"
+sys.path.insert(0, str(root))
+def observe(event, args):
+    if event == "compile" and args[1] == str(source):
+        raise AssertionError("the copied checked-hash cache must avoid source compilation")
+    if event == "open" and isinstance(args[0], str) and args[0].startswith(str(root)):
+        if args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
+            raise AssertionError("the copied checked-hash cache must avoid writes")
+sys.addaudithook(observe)
+import pulsara_stdlib_cache_probe as probe
+assert probe.VALUE == "first"
+assert pathlib.Path(probe.location.__code__.co_filename) == source
+'''
+    # No -B: correctness must prevent compilation/writes rather than suppressing
+    # writes. Isolated mode only prevents external Python environment injection.
+    subprocess.run([sys.executable, "-I", "-c", code, str(packaged)], check=True)
+    assert copied_cache.read_bytes() == before
+    assert copied_cache.stat().st_mtime_ns == before_mtime
+
+    copied_source.write_text('VALUE = "other"\ndef location(): pass\n')
+    os.utime(copied_source, (1, 1))
+    assert copied_source.stat().st_size == source.stat().st_size
+    code = '''
+import sys
+sys.path.insert(0, sys.argv[1])
+import pulsara_stdlib_cache_probe as probe
+assert probe.VALUE == "other"
+'''
+    subprocess.run([sys.executable, "-I", "-c", code, str(packaged)], check=True)
+    assert copied_cache.read_bytes() != before
+    assert int.from_bytes(copied_cache.read_bytes()[4:8], "little") == 3
+
+
+def test_stdlib_compilation_leaves_uv_site_packages_caches_alone(tmp_path):
+    stdlib = tmp_path / "stdlib"
+    site = stdlib / "site-packages"
+    site.mkdir(parents=True)
+    source = site / "uv_cache_probe.py"
+    source.write_text("VALUE = 1\n")
+    cache = Path(py_compile.compile(str(source), doraise=True))
+    before = cache.read_bytes()
+    before_mtime = cache.stat().st_mtime_ns
+    # Recompiling this unrelated owner would fail. The entire site-packages
+    # subtree remains uv's responsibility, including existing cache metadata.
+    source.write_text("invalid syntax (\n")
+    resources.compile_python_stdlib(Path(sys.executable), stdlib)
+    assert cache.read_bytes() == before
+    assert cache.stat().st_mtime_ns == before_mtime

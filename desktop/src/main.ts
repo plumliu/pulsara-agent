@@ -54,14 +54,24 @@ async function boot(fromReset = false) {
   if (starting) return starting;
   starting = (async () => {
     if (runtime.running) throw new Error('之前的内核仍在收尾，请等待它退出后重试。');
-    await showStartup();
-    await runtime.waitForPreviousOwner();
+    // Loading the cover and waiting for the old owner need not delay Python
+    // imports. The old owner still gates PostgreSQL, and both preparations gate
+    // the start frame. Join every owner before navigation or displaying failure.
+    const showing = showStartup();
+    const preparing = runtime.start(async () => {
+      await runtime.waitForPreviousOwner();
+      if (quitting) throw new Error('Pulsara 正在退出。');
+      const [cover, database] = await Promise.allSettled([showing, postgres.start()]);
+      if (cover.status === 'rejected') throw cover.reason;
+      if (database.status === 'rejected') throw database.reason;
+      databaseReady = true;
+      return postgres.settings();
+    }, true);
+    const [cover, kernel] = await Promise.allSettled([showing, preparing]);
     if (quitting) return;
-    await postgres.start();
-    databaseReady = true;
-    if (quitting) return;
-    const url = await runtime.start(postgres.settings(), true);
-    if (quitting) return;
+    if (cover.status === 'rejected') throw cover.reason;
+    if (kernel.status === 'rejected') throw kernel.reason;
+    const url = kernel.value;
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || parsed.username || parsed.password || parsed.pathname !== '/') throw new Error('内核返回了无效的本地工作台地址。');
     origin = parsed.origin;

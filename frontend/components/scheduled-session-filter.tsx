@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronRight, ListFilter, MessageSquare, Search } from 'lucide-react';
 import { LocalScheduledTasksApi, type ScheduledSession } from '../lib/scheduled-tasks-api';
 
@@ -16,6 +16,7 @@ export function ScheduledSessionFilter({ api, selected, onSelect, disabled, refr
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
   const revision = useRef(0);
+  const invalidateRequests = useCallback(() => { revision.current++; }, []);
 
   useEffect(() => {
     const captured = ++revision.current;
@@ -29,8 +30,8 @@ export function ScheduledSessionFilter({ api, selected, onSelect, disabled, refr
         if (!controller.signal.aborted && revision.current === captured) setError((e as Error).message);
       }).finally(() => { if (revision.current === captured) setLoading(false); });
     }, query ? 180 : 0);
-    return () => { clearTimeout(timer); controller.abort(); revision.current++; };
-  }, [api, query, refresh, retry]);
+    return () => { clearTimeout(timer); controller.abort(); invalidateRequests(); };
+  }, [api, query, refresh, retry, invalidateRequests]);
 
   const more = async () => {
     if (!cursor || loading) return;

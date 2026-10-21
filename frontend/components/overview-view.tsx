@@ -32,6 +32,7 @@ interface OverviewViewProps {
   databaseState?: DatabaseDataPlaneState;
   localSettings?: LocalSettingsSummary;
   modelConfigurations: ModelConfigurationSummary[];
+  modelCatalogLoading?: boolean;
   onNavigate: (view: AppView) => void;
   onOpenSession: (id: string) => void;
   onNewSession: () => void;
@@ -52,6 +53,7 @@ export function OverviewView({
   databaseState,
   localSettings,
   modelConfigurations,
+  modelCatalogLoading = false,
   onNavigate,
   onOpenSession,
   onNewSession,
@@ -126,7 +128,7 @@ export function OverviewView({
           <section className="overview-card system-card">
             <header className="overview-card__header"><div><span className="page-kicker">本机设置</span><h2>当前配置</h2></div></header>
             <div className="system-map">
-              <div className="system-node"><Bot size={14} /><span><strong>模型配置</strong><small>{readyModelConfigurations} 组可用{unavailableModelConfigurations > 0 ? ` · ${unavailableModelConfigurations} 组不可用` : ''}</small></span><b className={modelConfigurations.length === 0 ? 'is-inactive' : undefined}>{modelConfigurations.length} 组</b></div>
+              <div className="system-node"><Bot size={14} /><span><strong>模型配置</strong><small>{modelCatalogLoading ? '模型目录正在载入' : <>{readyModelConfigurations} 组可用{unavailableModelConfigurations > 0 ? ` · ${unavailableModelConfigurations} 组不可用` : ''}</>}</small></span><b className={modelConfigurations.length === 0 ? 'is-inactive' : undefined}>{modelConfigurations.length} 组</b></div>
               <div className="system-line" />
               <div className="system-node"><Search size={14} /><span><strong>记忆检索</strong><small>{localSettings?.memory_retrieval.embedding?.model_id ?? 'Embedding'}</small></span><b className={embeddingConfigured ? undefined : 'is-inactive'}>{embeddingConfigured ? '已开启' : '已关闭'}</b></div>
               <div className="system-line" />

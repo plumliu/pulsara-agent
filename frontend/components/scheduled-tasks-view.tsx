@@ -33,12 +33,13 @@ const statusFilters = { ACTIVE: '已启用', PAUSED: '已暂停' };
 function runState(task: ScheduledTask) { return task.last_turn_status === 'RUNNING' ? '运行中' : task.pending_queue_item_id ? '已排队' : null; }
 function dateTime(value: string | null, zone: string, withOffset = true) { return value ? new Intl.DateTimeFormat('zh-CN', { timeZone: zone, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', ...(withOffset ? {timeZoneName:'longOffset' as const} : {}) }).format(new Date(value)) : '—'; }
 function localInput(value: string, zone: string) { const parts = new Intl.DateTimeFormat('sv-SE', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(value)); const get = (name: string) => parts.find(p => p.type === name)?.value; return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`; }
-interface Props { onNotify: (title: string, detail?: string, tone?: ToastMessage['tone']) => void; focusTaskId?: string; modelConfigurations: ModelConfigurationSummary[]; onCreateSession: (binding: ModelCallBindingPayload) => Promise<string>; api: LocalScheduledTasksApi; sessions: SessionSummary[]; ready: boolean; onOpenSession: (id: string, entryId?: string) => void; onOpenSettings: () => void }
-export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations, onCreateSession, api, sessions, ready, onOpenSession, onOpenSettings }: Props) {
+interface Props { onNotify: (title: string, detail?: string, tone?: ToastMessage['tone']) => void; focusTaskId?: string; modelConfigurations: ModelConfigurationSummary[]; modelCatalogLoading?: boolean; onCreateSession: (binding: ModelCallBindingPayload) => Promise<string>; api: LocalScheduledTasksApi; sessions: SessionSummary[]; ready: boolean; onOpenSession: (id: string, entryId?: string) => void; onOpenSettings: () => void }
+export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations, modelCatalogLoading = false, onCreateSession, api, sessions, ready, onOpenSession, onOpenSettings }: Props) {
   const [items, setItems] = useState<ScheduledTask[]>([]); const [status, setStatus] = useState(''); const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const [editor, setEditor] = useState<{task?: ScheduledTask} | null>(null); const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
   const [selectedSession, setSelectedSession] = useState<ScheduledSession | null>(null);
+  const selectedSessionId = selectedSession?.id;
   const [sessionRefresh, setSessionRefresh] = useState(0);
   const [uncertainRun, setUncertainRun] = useState<ScheduledTask | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -63,10 +64,10 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
     const captured = ++revision.current;
     setLoading(true); setItems([]); setCursor(null); setError('');
     const controller = new AbortController();
-    if (ready) void api.list(status, undefined, controller.signal, selectedSession?.id).then(async page => {
+    if (ready) void api.list(status, undefined, controller.signal, selectedSessionId).then(async page => {
       // A direct target can be beyond the first page. Fetch that row by ID;
       // keep the page cursor, and ordinary pagination deduplicates it later.
-      const target = !status && !selectedSession && focusTaskId && locatedTaskId.current !== focusTaskId;
+      const target = !status && selectedSessionId === undefined && focusTaskId && locatedTaskId.current !== focusTaskId;
       if (target && !page.tasks.some(task => task.id === focusTaskId)) {
         try {
           const task = await api.get(focusTaskId, controller.signal);
@@ -80,7 +81,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
       if (target && page.tasks.some(task => task.id === focusTaskId)) setHighlightedTaskId(focusTaskId);
     }).catch(e => { if (!controller.signal.aborted && revision.current === captured) { setError((e as Error).message); setLoading(false); } });
     return () => { controller.abort(); invalidateListRequests(); };
-  }, [api, ready, status, selectedSession?.id, focusTaskId, invalidateListRequests]);
+  }, [api, ready, status, selectedSessionId, focusTaskId, invalidateListRequests]);
   useEffect(() => {
     if (!highlightedTaskId || !focusedRow.current) return;
     locatedTaskId.current = highlightedTaskId;
@@ -222,7 +223,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
         {cursor && <div className="scheduled-pagination"><button className="secondary-action" disabled={loading || busy} onClick={() => void reload(true)}>加载更多任务</button></div>}
       </div>}
     </div>
-    {editor && <TaskEditor modelConfigurations={modelConfigurations} onCreateSession={onCreateSession} onOpenSettings={onOpenSettings} key={editor.task?.id ?? 'new'} task={editor.task} api={api} onClose={() => setEditor(null)} onSaved={() => { setEditor(null); void reload(); }} />}
+    {editor && <TaskEditor modelCatalogLoading={modelCatalogLoading} modelConfigurations={modelConfigurations} onCreateSession={onCreateSession} onOpenSettings={onOpenSettings} key={editor.task?.id ?? 'new'} task={editor.task} api={api} onClose={() => setEditor(null)} onSaved={() => { setEditor(null); void reload(); }} />}
     {confirmDelete && <ScheduledDialog label="删除定时任务" busy={busy} onClose={()=>setConfirmDelete(null)}>
       <header><div><h2>删除「{confirmDelete.name}」？</h2></div><button className="scheduled-icon-button" disabled={busy} aria-label="关闭删除确认" onClick={() => setConfirmDelete(null)}><X size={18} aria-hidden="true" /></button></header>
       <div className="scheduled-confirm-body"><p>待运行输入会取消，会话和历史仍然保留。正在执行的回复会继续。</p></div>
@@ -230,7 +231,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
     </ScheduledDialog>}
   </section>;
 }
-function TaskEditor({modelConfigurations, onCreateSession, onOpenSettings, task, api, onClose, onSaved}: {modelConfigurations: ModelConfigurationSummary[]; onCreateSession: (binding: ModelCallBindingPayload) => Promise<string>; onOpenSettings: () => void; task?: ScheduledTask; api: LocalScheduledTasksApi; onClose: () => void; onSaved: () => void}) {
+function TaskEditor({modelConfigurations, modelCatalogLoading, onCreateSession, onOpenSettings, task, api, onClose, onSaved}: {modelConfigurations: ModelConfigurationSummary[]; modelCatalogLoading?: boolean; onCreateSession: (binding: ModelCallBindingPayload) => Promise<string>; onOpenSettings: () => void; task?: ScheduledTask; api: LocalScheduledTasksApi; onClose: () => void; onSaved: () => void}) {
   const [createdSessionId, setCreatedSessionId] = useState('');
   const [modelId, setModelId] = useState('');
   const [reasoning, setReasoning] = useState<ReasoningSelectionPayload | null>(null);
@@ -296,7 +297,7 @@ function TaskEditor({modelConfigurations, onCreateSession, onOpenSettings, task,
       <label>供应商 / 模型<select required disabled={busy || Boolean(createdSessionId)} value={modelId} onChange={e=>{const next=modelConfigurations.find(item=>item.id===e.target.value);setModelId(e.target.value);setReasoning(next?.default_reasoning ?? null);}}><option value="">选择供应商和模型</option>{modelConfigurations.map(item=><option key={item.id} value={item.id} disabled={item.status!=='ready'}>{item.route_name ?? item.route_id} · {item.display_name ?? item.model_id}</option>)}</select></label>
       {model?.reasoning.kind === 'selectable' && <label>推理强度<select disabled={busy || Boolean(createdSessionId)} value={reasoning?.kind==='budget_tokens' ? 'budget' : JSON.stringify(reasoning)} onChange={e=>setReasoning(e.target.value==='budget' ? {kind:'budget_tokens',tokens:Math.ceil(((model.reasoning.budget_tokens?.minimum ?? 0)+(model.reasoning.budget_tokens?.maximum ?? 0))/2)} : JSON.parse(e.target.value) as ReasoningSelectionPayload | null)}>{reasoningOptions.map(item=><option key={JSON.stringify(item.value)} value={JSON.stringify(item.value)}>{item.label}</option>)}{model.reasoning.budget_tokens?.minimum!=null && model.reasoning.budget_tokens.maximum!=null && <option value="budget">自定义推理预算</option>}</select></label>}
       {reasoning?.kind==='budget_tokens' && <label>推理预算<input type="number" required step="1" disabled={busy || Boolean(createdSessionId)} min={model?.reasoning.budget_tokens?.minimum ?? undefined} max={model?.reasoning.budget_tokens?.maximum ?? undefined} value={reasoning.tokens} onChange={e=>setReasoning({kind:'budget_tokens',tokens:Number(e.target.value)})}/></label>}
-      {!modelConfigurations.some(item=>item.status==='ready') && <p className="scheduled-muted">还没有可用的模型。<button type="button" className="scheduled-settings-link" onClick={()=>{onClose();onOpenSettings();}}>配置模型</button></p>}
+      {!modelConfigurations.some(item=>item.status==='ready') && <p className="scheduled-muted">{modelCatalogLoading ? '模型目录正在载入，请稍候。' : <>还没有可用的模型。<button type="button" className="scheduled-settings-link" onClick={()=>{onClose();onOpenSettings();}}>配置模型</button></>}</p>}
     </>}
     <label>名称<input required disabled={busy} value={name} onChange={e => setName(e.target.value)} /></label><label>提示词<textarea required disabled={busy} rows={5} value={prompt} onChange={e => setPrompt(e.target.value)} /></label>
     <label>时间规则<select disabled={busy} value={kind} onChange={e => setKind(e.target.value as ScheduleRule['kind'])}><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="interval">固定间隔</option><option value="once">只运行一次</option></select></label>

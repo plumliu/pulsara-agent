@@ -3,6 +3,7 @@ from pulsara_agent.identity import derive_id
 
 import asyncio
 import base64
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -53,6 +54,7 @@ class _Sessions:
         return SimpleNamespace(
             session_id=session_id,
             host_session_id=derive_id("host", "test-fixture", f"host:{session_id}"),
+            session=SimpleNamespace(workspace=SimpleNamespace(workspace_root=Path.cwd())),
         )
 
 
@@ -145,6 +147,52 @@ def test_browser_connections_share_one_controller_without_reconnect_ping_pong(
     monkeypatch,
 ) -> None:
     asyncio.run(_exercise_browser_connection_roles(monkeypatch))
+
+
+@pytest.mark.parametrize("removed_during_attachment", [False, True])
+def test_connect_observes_the_restored_root_after_attachment_setup(
+    monkeypatch, tmp_path, removed_during_attachment,
+) -> None:
+    async def exercise():
+        root = tmp_path / "workspace"
+        root.mkdir()
+
+        class Sessions(_Sessions):
+            async def resume_session(self, session_id):
+                handle = await super().resume_session(session_id)
+                handle.session.workspace.workspace_root = root
+                return handle
+
+        class Connection(_RuntimeConnection):
+            @classmethod
+            async def open(cls, **kwargs):
+                connection = await super().open(**kwargs)
+                if removed_during_attachment:
+                    root.rmdir()
+                return connection
+
+        monkeypatch.setattr(renderer_bridge_module, "BrowserRuntimeConnection", Connection)
+        monkeypatch.setattr(RendererBridge, "_connection_payload", staticmethod(
+            lambda connection: {"connection_id": connection.connection_id}
+        ))
+        bridge = RendererBridge(
+            sessions=cast(LocalSessionController, Sessions()),
+            protocol_server=cast(TerminalKernelProtocolServer, object()),
+        )
+        try:
+            payload = await bridge.connect(
+                'session:5dyf7lfzp7z22pphjtostkgsjm', browser_instance_id=BROWSER_ONE,
+            )
+            assert payload["workspace_availability"] == {
+                "path": str(root),
+                "outcome": "MISSING" if removed_during_attachment else "AVAILABLE",
+                "reason": None,
+            }
+            assert str(payload["connection_id"]) in bridge._connections
+        finally:
+            await bridge.aclose()
+
+    asyncio.run(exercise())
 
 
 async def _exercise_browser_connection_roles(monkeypatch) -> None:

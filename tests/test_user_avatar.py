@@ -112,6 +112,12 @@ def test_avatar_http_custom_home_replacement_reset_and_security(tmp_path, monkey
                     assert response.status == 400
                     assert (await response.json())["error"]["code"] == "INVALID_AVATAR"
                 assert path.read_bytes() == first
+                with monkeypatch.context() as limits:
+                    limits.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+                    async with client.put(url, data=picture()) as response:
+                        assert response.status == 400
+                        assert (await response.json())["error"]["code"] == "INVALID_AVATAR"
+                    assert path.read_bytes() == first
                 # Reuse the existing HTTP per-request 8 MiB body boundary.
                 async with client.put(url, data=b"x" * ((8 << 20) + 1)) as response:
                     assert response.status == 413

@@ -82,7 +82,7 @@ def normalize_plugin_mcp_configs(
     existing_configs: tuple[McpServerConfig, ...],
     view: FrozenEnabledPluginView,
     secret_resolver=None,
-    oauth_manager=None,
+    oauth_bind=None,
     current_state=None,
 ) -> PluginMcpNormalizationResult:
     """Build the one deterministic local+Plugin native config tuple.
@@ -121,7 +121,7 @@ def normalize_plugin_mcp_configs(
                     instance.state,
                     local_server_id=server.local_server_id,
                     current_state=current_state,
-                    oauth_manager=oauth_manager,
+                    oauth_bind=oauth_bind,
                 )
             except BaseException:
                 _close_anchor(config.physical_lifetime_anchor)
@@ -194,11 +194,11 @@ def framed_plugin_mcp_server_id(plugin_id: str, local_server_id: str) -> str:
 
 
 def bind_plugin_authorization(
-    config, identity, state, *, local_server_id, current_state, oauth_manager
+    config, identity, state, *, local_server_id, current_state, oauth_bind
 ):
     if not isinstance(config.auth, OAuthAuthorization):
         return config
-    if oauth_manager is None or current_state is None:
+    if oauth_bind is None or current_state is None:
         raise ValueError("Plugin OAuth requires the shared authorization owner")
     # The selected definition is already frozen. Only the existing instance state
     # is reread before grant publication; no package/config registry is introduced.
@@ -209,7 +209,7 @@ def bind_plugin_authorization(
 
     return replace(
         config,
-        authorization_provider=oauth_manager.bind(owner, config, current_target),
+        authorization_provider=oauth_bind(owner, config, current_target),
     )
 
 

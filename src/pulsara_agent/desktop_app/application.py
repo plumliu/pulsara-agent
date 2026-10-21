@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from enum import StrEnum
+from importlib import import_module
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -105,10 +107,17 @@ class DesktopApplication:
         self._start_lock = asyncio.Lock()
         self._database_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+        self._initial_catalog_task: asyncio.Task[None] | None = None
+        self._initial_catalog_settled = False
+        self._sdk_warmup_task: asyncio.Task[None] | None = None
 
     @property
     def ready(self) -> bool:
         return self.state is DesktopApplicationState.READY
+
+    @property
+    def model_catalog_loading(self) -> bool:
+        return not self._initial_catalog_settled
 
     @property
     def draining(self) -> bool:
@@ -162,19 +171,87 @@ class DesktopApplication:
                     database_state=lambda: self.database_state.value,
                     refresh_database_state=self.refresh_database_state,
                     reset_postgres=self.reset_postgres,
+                    model_catalog_loading=lambda: self.model_catalog_loading,
                 )
                 await http.start()
                 self.http = http
-                self.state = DesktopApplicationState.READY
-                try:
-                    await self.catalog.refresh()
-                except Exception:
-                    pass
+                self._initial_catalog_task = asyncio.create_task(
+                    self._refresh_initial_catalog(), name="desktop-initial-model-catalog",
+                )
+                self._initial_catalog_task.add_done_callback(self._observe_initial_catalog_completion)
                 await self.refresh_database_state()
+                self.state = DesktopApplicationState.READY
+                self._sdk_warmup_task = asyncio.create_task(
+                    self._warm_sdk_imports(), name="desktop-sdk-warmup",
+                )
             except BaseException:
                 self.state = DesktopApplicationState.FAILED
                 await self.aclose()
                 raise
+
+    @staticmethod
+    def _import_mcp_sdk() -> None:
+        import_module("pulsara_agent.conversation_kernel.mcp.sdk_facade")
+        import_module("pulsara_agent.conversation_kernel.mcp.oauth")
+        import_module("pulsara_agent.conversation_kernel.mcp.supervisor")
+
+    async def _warm_sdk_imports(self) -> None:
+        # Only normal dependency imports: no clients, connections or model
+        # calls. Real operations retain their ordinary imports and errors.
+        def warm() -> None:
+            for label, load in (("OpenAI", lambda: import_module("openai")), ("MCP", self._import_mcp_sdk)):
+                try:
+                    load()
+                except BaseException as error:
+                    logging.getLogger(__name__).warning(
+                        "%s SDK background import failed", label, exc_info=error,
+                    )
+
+        await asyncio.to_thread(warm)
+
+    async def _close_sdk_warmup(self) -> None:
+        # Cancelling a to_thread wrapper would leave its physical import
+        # running. The existing shielded application-close owner joins the
+        # worker without cancellation before releasing application resources.
+        if self._sdk_warmup_task is not None:
+            await self._sdk_warmup_task
+
+    async def _refresh_initial_catalog(self) -> None:
+        # ModelCatalogOwner and its client retain parsing, network and snapshot
+        # ownership. Opening the local shell only observes this initial attempt.
+        try:
+            await self.catalog.refresh()
+        except Exception:
+            pass  # A failed initial attempt settles; manual refresh remains available.
+        finally:
+            self._initial_catalog_settled = True
+        async with self._database_lock:
+            await self._start_scheduler_if_prepared()
+
+    @staticmethod
+    def _observe_initial_catalog_completion(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logging.getLogger(__name__).error(
+                "Initial model catalog startup continuation failed", exc_info=error,
+            )
+
+    async def _start_scheduler_if_prepared(self) -> None:
+        # Initial models.dev resolution must settle before due tasks can be
+        # prepared. Failure still starts scheduling, as the previous path did.
+        if (
+            self._initial_catalog_settled
+            and self.database_state is DatabaseDataPlaneState.READY
+            and not self.draining
+        ):
+            await self.scheduled_tasks.start()
+
+    async def _close_initial_catalog(self) -> None:
+        task = self._initial_catalog_task
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     async def refresh_database_state(self) -> DatabaseDataPlaneState:
         async with self._database_lock:
@@ -213,7 +290,7 @@ class DesktopApplication:
             self.database_state = DatabaseDataPlaneState.UNAVAILABLE
         else:
             self.database_state = DatabaseDataPlaneState.READY
-            await self.scheduled_tasks.start()
+            await self._start_scheduler_if_prepared()
         return self.database_state
 
     async def reset_postgres(self, postgres: LocalPostgresConfig) -> dict[str, object]:
@@ -306,6 +383,10 @@ class DesktopApplication:
             except BaseException as exc:
                 close_error = close_error or exc
 
+        # Join the remote attempt before closing owners it may wake. Cancel
+        # outside the database lock: its completion also uses that lock.
+        await close(self._close_initial_catalog)
+        await close(self._close_sdk_warmup)
         # HTTP stays bound but its admission middleware now sees DRAINING.
         async with self._database_lock:
             if self.bridge is not None:

@@ -735,11 +735,13 @@ class CapabilityManagementCall:
                 return service._connection(plugin, server)
 
         if prepared.intent.action is Action.CLEAR_MCP_AUTHORIZATION:
-            await service.mcp.oauth.logout(owner, require_current=current)
+            manager = await service.mcp.prepare_oauth()
+            await manager.logout(owner, require_current=current)
         else:
             if steer_event is not None and steer_event.is_set():
                 return {"status": "CANCELLED", "message": "等待登录被用户取消", "adoption": "NOT_APPLICABLE"}
-            flow = await service.mcp.oauth.begin(owner, current)
+            manager = await service.mcp.prepare_oauth()
+            flow = await manager.begin(owner, current)
             assert flow.task is not None
             if steer_event is None:
                 await asyncio.shield(flow.task)

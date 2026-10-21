@@ -30,6 +30,27 @@ beforeEach(() => {
 });
 
 describe('visualization occurrence layout', () => {
+  it('uses a replaced visualization reader for unchanged response markup', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+    vi.stubGlobal('matchMedia', () => ({matches:false,addEventListener() {},removeEventListener() {}}));
+    const first = vi.fn().mockRejectedValue(Error('offline'));
+    const latest = vi.fn(async () => '<p>restored</p>');
+    const messages = [{id:'chart-answer',role:'assistant' as const,assistantKind:'terminal' as const,
+      status:'completed' as const,time:'13:04',body:'```pulsara-visualization\nchart.html\n```',
+      visualizations:[{ordinal:0,state:'READY' as const,contentDigest:`sha256:${'a'.repeat(64)}`,contentSize:15}]}];
+    const notify = vi.fn(), readTool = vi.fn();
+    const view = render(<ConversationMessages messages={messages} artifactOwnerKey="session-one"
+      onReadToolArtifact={readTool} onNotify={notify} onReadVisualization={first}/>);
+    await screen.findByText('已保存的可视化暂时无法读取。');
+    view.rerender(<ConversationMessages messages={messages} artifactOwnerKey="session-one"
+      onReadToolArtifact={readTool} onNotify={notify} onReadVisualization={latest}/>);
+    // The existing gallery owner restarts its read when its reader changes.
+    await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(latest).toHaveBeenCalledTimes(1);
+  });
+
   it('renders bound occurrences at the body marker, reads only selected HTML, and reuses resident frames', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
@@ -280,6 +301,65 @@ describe('PR04 composer queue hard cut', () => {
     expect(newEditor).not.toBe(oldEditor);
     expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
     await waitFor(() => expect(document.activeElement).toBe(movedFocus ? otherControl : newEditor));
+  });
+
+  it('settles accepted layout when clear and queued restore leave hasContent true in one batch', async () => {
+    const originalClear = promptDraftStore.clearIfSnapshot.bind(promptDraftStore);
+    vi.spyOn(promptDraftStore, 'clearIfSnapshot').mockImplementation((sessionId, snapshot) => {
+      const cleared = originalClear(sessionId, snapshot);
+      if (cleared) expect(promptDraftStore.restoreIfEmpty(sessionId, textPrompt('下一条恢复的输入'))).toBe(true);
+      return cleared;
+    });
+    const view = render(<WorkbenchView {...props({ onSend: vi.fn(async () => true) })} />);
+    act(() => promptDraftStore.restoreIfEmpty('session-one', textPrompt('原来的多行输入')));
+    const editor = view.container.querySelector('.composer-editor') as HTMLElement;
+    editor.getBoundingClientRect = () => new DOMRect(0, 0, 720,
+      promptDraftStore.summary('session-one').text === '原来的多行输入' ? 140 : 52);
+    const animate = vi.fn(() => ({cancel:vi.fn()}) as unknown as Animation);
+    editor.animate = animate;
+    act(() => screen.getByLabelText('发送给 Pulsara').focus());
+    fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'), {key:'Enter'});
+    await waitFor(() => expect(animate).toHaveBeenCalledExactlyOnceWith([
+      {height:'140px',overflow:'hidden'}, {height:'52px',overflow:'hidden'},
+    ], {duration:240,easing:'cubic-bezier(.2, .7, .2, 1)'}));
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(true);
+    expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('下一条恢复的输入');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('发送给 Pulsara')));
+  });
+
+  it.each([false, true])('does not replay an accepted layout after switching away and back (late acceptance: %s)', async late => {
+    let accept!: (value: boolean) => void;
+    const shared = props({onSend:vi.fn(() => new Promise<boolean>(resolve => {accept=resolve;}))});
+    const second = {...shared,session:{...shared.session,id:'session-two',title:'另一个会话'}};
+    const view = render(<WorkbenchView {...shared} />);
+    act(() => promptDraftStore.restoreIfEmpty('session-one', textPrompt('原来的多行输入')));
+    const wrapper = view.container.querySelector('.composer-editor') as HTMLElement;
+    wrapper.getBoundingClientRect = () => new DOMRect(0,0,720,
+      promptDraftStore.summary('session-one').hasContent ? 140 : 52);
+    const animate = vi.fn(() => ({cancel:vi.fn()}) as unknown as Animation);
+    wrapper.animate = animate;
+    const focus = vi.spyOn(promptDraftStore,'focus');
+    act(() => screen.getByLabelText('发送给 Pulsara').focus());
+    fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'),{key:'Enter'});
+    await waitFor(() => expect(shared.onSend).toHaveBeenCalledOnce());
+    if (late) {
+      view.rerender(<WorkbenchView {...second} />);
+      act(() => screen.getByLabelText('发送给 Pulsara').focus());
+    }
+    await act(async () => accept(true));
+    if (late) {
+      expect(focus).not.toHaveBeenCalled();
+      expect(animate).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() => expect(focus).toHaveBeenCalledOnce());
+      expect(animate).toHaveBeenCalledOnce();
+      view.rerender(<WorkbenchView {...second} />);
+    }
+    focus.mockClear(); animate.mockClear();
+    view.rerender(<WorkbenchView {...shared} />);
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(animate).not.toHaveBeenCalled();
   });
 
   it('places exact duplicate inputs in composer with three accessible flat actions', () => {
@@ -2022,6 +2102,71 @@ it('keeps tail-follow aligned while queue animations resize the viewport between
   act(resizeViewport);
   expect(top).toBe(900);
   expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+});
+
+it('restores explicit process, tool and reasoning choices after their history page is reread', () => {
+ const messages: ComponentProps<typeof WorkbenchView>['messages']=[
+  {id:'process',historyGroupId:'segment:one',role:'assistant',assistantKind:'tool-request',turnId:'turn-one',time:'',body:'处理中',reasoning:[{id:'reason',kind:'full',body:'思考正文'}],traces:[{id:'tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'}]},
+  {id:'answer',historyGroupId:'segment:one',role:'assistant',assistantKind:'terminal',turnId:'turn-one',rootFinal:true,time:'',body:'最终正文'},
+ ];
+ const base=props({messages,isRunning:false});
+ const view=render(<WorkbenchView {...base}/>);
+ fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开思考'}));
+ view.rerender(<WorkbenchView {...base} messages={[]}/>);
+ expect(screen.queryByText('tool body')).toBeNull();
+ view.rerender(<WorkbenchView {...base} messages={messages.map(message=>({...message,historyWindowId:'reread-window'}))}/>);
+ expect(screen.getByRole('button',{name:'收起中间过程'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'收起工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'收起思考'})).toBeTruthy();
+ view.rerender(<WorkbenchView {...base} session={{...base.session,id:'other-session'}}/>);
+ expect(screen.getByRole('button',{name:'展开中间过程'})).toBeTruthy();
+});
+
+it('reports viewport working-set interests through the existing thread scroll owner', async () => {
+ const retain=vi.fn();
+ const view=render(<WorkbenchView {...props({onRetainHistory:retain,isRunning:false,messages:[{id:'visible',role:'user',body:'可见正文',time:''},{id:'far',role:'user',body:'远处正文',time:''}]})}/>);
+ const thread=view.container.querySelector<HTMLElement>('.thread-scroll')!;
+ vi.spyOn(thread,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,400));
+ for(const node of thread.querySelectorAll<HTMLElement>('[data-source-entry]')) vi.spyOn(node,'getBoundingClientRect').mockReturnValue(new DOMRect(0,node.dataset.sourceEntry==='visible'?20:4000,600,80));
+ fireEvent.scroll(thread);
+ await waitFor(()=>expect(retain).toHaveBeenCalledWith({visibleEntryIds:['visible'],pinnedEntryIds:[]}));
+ retain.mockClear();
+ view.rerender(<WorkbenchView {...props({onRetainHistory:retain,isRunning:false,messages:[
+  {id:'collapsed:one',turnId:'same',historyGroupId:'same',role:'assistant',body:'hidden one',time:''},
+  {id:'collapsed:two',turnId:'same',historyGroupId:'same',role:'assistant',body:'hidden two',time:''},
+ ]})}/>);
+ const header=thread.querySelector<HTMLElement>('[data-history-entry]')!;
+ expect(header.dataset.historyEntryAliases).toBe('collapsed:one collapsed:two');
+ expect(thread.querySelector('[data-source-entry="collapsed:one"]')).toBeNull();
+ vi.spyOn(header,'getBoundingClientRect').mockReturnValue(new DOMRect(0,20,600,30));
+ fireEvent.scroll(thread);
+ await waitFor(()=>expect(retain).toHaveBeenCalledWith({visibleEntryIds:['collapsed:one'],pinnedEntryIds:[]}));
+});
+
+it('keeps repeated tool-call and live reasoning IDs isolated by their canonical assistant owner on reread', () => {
+ const makeMessages=(owner:string):ComponentProps<typeof WorkbenchView>['messages']=>[
+  {id:`process:${owner}`,historyGroupId:`segment:${owner}`,role:'assistant',assistantKind:'tool-request',turnId:`turn:${owner}`,time:'',body:'处理中',reasoning:[{id:'reasoning:0',kind:'full',body:'思考正文'}],traces:[{id:'call_1',kind:'mcp',toolName:'mcp__demo__read',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'}]},
+  {id:`answer:${owner}`,historyGroupId:`segment:${owner}`,role:'assistant',assistantKind:'terminal',turnId:`turn:${owner}`,rootFinal:true,time:'',body:'最终正文'},
+ ];
+ const base=props({isRunning:false,messages:makeMessages('a')});
+ const view=render(<WorkbenchView {...base}/>);
+ fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开思考'}));
+ view.rerender(<WorkbenchView {...base} messages={makeMessages('b')}/>);
+ fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
+ expect(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'展开思考'})).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'}));
+ fireEvent.click(screen.getByRole('button',{name:'收起工具详情：mcp__demo__read'}));
+ view.rerender(<WorkbenchView {...base} messages={makeMessages('a')}/>);
+ expect(screen.getByRole('button',{name:'收起工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'收起思考'})).toBeTruthy();
+ view.rerender(<WorkbenchView {...base} messages={makeMessages('b')}/>);
+ expect(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'展开思考'})).toBeTruthy();
 });
 
 it('keeps manual process and tool expansion at the clicked position, then resumes explicit tail-follow', () => {

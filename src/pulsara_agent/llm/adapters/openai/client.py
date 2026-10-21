@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
+import importlib
 import json
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import httpx2
-from openai import AsyncOpenAI, Omit
+
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
 
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.process_credential_boundary import (
@@ -20,6 +25,26 @@ from pulsara_agent.process_credential_boundary import (
 
 OPENAI_RESPONSES_API = "openai_responses"
 OPENAI_CHAT_COMPLETIONS_API = "openai_chat_completions"
+
+
+async def prepare_openai_sdk() -> None:
+    """Keep an unfinished SDK import off the caller's event loop and join it."""
+    task = asyncio.create_task(
+        asyncio.to_thread(importlib.import_module, "openai"), name="openai-sdk-import",
+    )
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        with suppress(BaseException):
+            task.result()
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +109,10 @@ def build_async_openai_client(
 ) -> AsyncOpenAI:
     """Create an AsyncOpenAI client for a model profile."""
 
+    # Projection and timeout policy imports do not open a provider. Load the
+    # SDK at its actual client boundary rather than on desktop shell startup.
+    from openai import AsyncOpenAI
+
     timeout = httpx2.Timeout(
         timeout_policy.total_seconds,
         connect=timeout_policy.connect_seconds,
@@ -118,6 +147,7 @@ def openai_auth_request_options(*, requires_api_key: bool) -> dict[str, Any]:
 
     if requires_api_key:
         return {}
+    from openai import Omit
     # The SDK validates omissions against request-local headers, not client
     # defaults. This also prevents an ambient OPENAI_API_KEY from leaking onto
     # a connection whose declared authentication contract is NONE.
@@ -153,5 +183,6 @@ __all__ = [
     "OpenAITransportTimeoutPolicy",
     "admit_provider_request",
     "build_async_openai_client",
+    "prepare_openai_sdk",
     "openai_auth_request_options",
 ]

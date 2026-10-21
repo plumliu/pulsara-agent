@@ -73,13 +73,14 @@ def test_consecutive_replacements_and_immediate_cancellation_join_every_listener
             _change(state, 'scope', 2)
             third = await state.service.authorize(state.target)
             assert second is not original and third is not second
+            manager = state.service.oauth
             if finish == 'cancel':
-                await asyncio.wait_for(state.service.oauth.cancel(state.target.owner), 5)
+                await asyncio.wait_for(manager.cancel(state.target.owner), 5)
             else:
                 await asyncio.wait_for(state.service.aclose(), 5)
             assert all(flow.task.done() and flow.listener is None for flow in (original, second, third))
             assert all(flow.state == 'cancelled' for flow in (original, second, third))
-            assert state.target.owner not in state.service.oauth._logins
+            assert state.target.owner not in manager._logins
             assert state.browser_visits == 1 and state.issued == 0
             with socket.socket() as probe:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

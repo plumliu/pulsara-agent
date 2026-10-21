@@ -9,7 +9,7 @@ import { toText } from 'hast-util-to-text';
 import { Image as ImageIcon } from 'lucide-react';
 import rehypeKatex from 'rehype-katex';
 import rehypeSlug from 'rehype-slug';
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { createContext, memo, useCallback, useContext, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
@@ -323,7 +323,7 @@ function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob
 
 const VisualizationContext = createContext<InlineVisualizationContext | undefined>(undefined);
 
-export function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false, visualization, assistantChat = false }: MarkdownProps) {
+export const MarkdownBody = memo(function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false, visualization, assistantChat = false }: MarkdownProps) {
   const normalized = useMemo(() => normalizeMathWithSource(body), [body]);
   const sourceMapping = useMemo(() => () => annotationSource ? rehypeSourceMapping(normalized) : () => {}, [normalized, annotationSource]);
   const components = useMemo<Components>(() => ({
@@ -375,7 +375,7 @@ export function MarkdownBody({ body, onNotify, streaming = false, annotationSour
     </MarkdownCopySurface>
     </VisualizationContext.Provider></AssistantChatContext.Provider>
   );
-}
+});
 
 export function MarkdownInline({ body, onNotify }: MarkdownProps) {
   return (

@@ -62,6 +62,7 @@ export interface RuntimeBootstrap {
   runtime: { status: string; origin: string; database_state: DatabaseDataPlaneState };
   local_settings: LocalSettingsSummary;
   model_configurations: ModelConfigurationSummary[];
+  model_catalog_loading: boolean;
   database_state: DatabaseDataPlaneState;
 }
 
@@ -930,10 +931,12 @@ function taskAssistantBody(entryKind: string, body: string): string {
 }
 
 export interface RuntimeConnection {
+  readonly availability: WorkspaceAvailability;
   subscribeMcpAuthorization?: (listener: (request: McpAuthorizationRequest) => void) => () => void;
   subscribePresentation?: (listener: (request: PresentationRequest) => void) => () => void;
   readHistory?: (windowId?: string, direction?: 'older' | 'newer', signal?: AbortSignal) => Promise<RuntimeProjection>;
   hydrateEntries?: (ids: string[], signal?: AbortSignal, includeReasoning?: boolean) => Promise<RuntimeProjection>;
+  retainHistory?: (interest: HistoryResidence) => RuntimeProjection | undefined;
   locateEntry?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   subscribe?: (listener: () => void) => () => void;
   locateAnnotationSource?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
@@ -1262,6 +1265,11 @@ export interface BrowserHistoryState {
   windows: Array<{id: string; firstEntryId?: string; lastEntryId?: string; entryIds: string[]; hasOlder: boolean; hasNewer: boolean; loading: boolean; error?: string; contextState: 'loading' | 'ready' | 'error'; contextError?: string}>;
   compactions: Array<{eventId: string; adoptedAfterEntrySequence: number; turnId: string; displayAfterEntryId?: string}>;
 }
+/** The current browser consumers; canonical history remains re-readable. */
+export interface HistoryResidence {
+  visibleEntryIds: string[];
+  pinnedEntryIds: string[];
+}
 interface BrowserWindowCursor extends ProtocolHistoryCursor { direction: 'older' | 'newer' }
 interface BrowserWindow {
   session_id: string;
@@ -1307,6 +1315,7 @@ export function compareSequence(a: string | number | undefined, b: string | numb
 }
 
 interface ConnectPayload {
+  workspace_availability: WorkspaceAvailability;
   connection_id: string;
   connection_generation: number;
   session_id: string;
@@ -2259,12 +2268,104 @@ abstract class CanonicalHistoryReader {
   private contentReads = new Map<string, Promise<void>>();
   private contentErrors = new Map<string, string>();
   private immutableReads = new Map<string, Promise<string>>();
-  private immutableBodies = new Map<string, string>();
+  // Page-inline bytes already passed that page's byte admission. Only later
+  // exact-body reads (or bytes carried into a reference-only replacement) need
+  // a separate viewport lifetime. Weak keys retain neither bodies nor entries.
+  private supplementalBodies = new WeakSet<ProtocolContent>();
   protected readerClosed = false;
   protected controlReadSequence = '0';
   private pageCounter = 0;
   private initialContextReady = false;
   private knownQueuedContent = new Map<string, CanonicalPromptContent>();
+  private tailPage?: BrowserHistoryPage;
+  private pairedTailPage?: BrowserHistoryPage;
+  private locatingEntries = new Set<string>();
+
+  protected transientHistoryEntries(): string[] { return []; }
+  protected releaseSettledHistory(visible: ReadonlySet<string>): boolean { void visible; return false; }
+  protected hasCanonicalContext(entryId: string): boolean {
+    return this.entries.has(entryId) && this.pages.some(page => page.contextState === 'ready' && page.entryIds.includes(entryId));
+  }
+
+  retainHistory(interest: HistoryResidence): RuntimeProjection | undefined {
+    if (this.readerClosed || !this.initialContextReady) return;
+    // Hidden or not-yet-laid-out views supply no reading position.
+    if (!interest.visibleEntryIds.length && !interest.pinnedEntryIds.length) return;
+    // Observation has no paired history cut until its original context read
+    // succeeds. Keep the bridge and handoffs intact rather than mutating state
+    // without publishing it or inventing a cursor.
+    if (this.tailPage && !this.tailPage.cut) return;
+    const requested = new Set([...interest.visibleEntryIds, ...interest.pinnedEntryIds, ...this.locatingEntries]);
+    let changed = this.releaseSettledHistory(requested);
+    const bodies = new Set([...requested, ...this.transientHistoryEntries()]);
+    for (const key of this.contentReads.keys()) bodies.add(key.replace(/:reasoning$/, ''));
+    for (const entry of this.entries.values()) if (entry.input_source?.command_id && entry.input_source.queue_item_id) {
+      const key = `${entry.input_source.command_id}:${entry.input_source.queue_item_id}`;
+      // Until the current control owner also observes consumption, retain the
+      // accepted identity that suppresses its stale pending-queue projection.
+      if (this.control.prompt_queue?.some(item => item.command_id === entry.input_source!.command_id
+        && item.queue_item_id === entry.input_source!.queue_item_id && item.status === 'PENDING')) bodies.add(entry.entry_id);
+      if (!this.knownQueuedContent.has(key)) continue;
+      if (this.hasCanonicalContext(entry.entry_id) && (!requested.has(entry.entry_id) || this.entryContentState(entry.entry_id) === 'ready')) {
+        this.knownQueuedContent.delete(key); changed = true;
+      }
+      else bodies.add(entry.entry_id);
+    }
+    const ordered = [...this.pages].sort((a, b) => compareSequence(this.entries.get(a.entryIds[0])!.entry_sequence, this.entries.get(b.entryIds[0])!.entry_sequence));
+    const keep = new Set<BrowserHistoryPage>();
+    for (let index = 0; index < ordered.length; index++) {
+      const page = ordered[index];
+      if (!page.entryIds.some(id => bodies.has(id))) continue;
+      keep.add(page);
+      // One already-admitted neighbour each way buffers crossing the viewport
+      // edge. This is a physical reading window, never a total history cap.
+      if (interest.visibleEntryIds.some(id => page.entryIds.includes(id))) {
+        if (index) keep.add(ordered[index - 1]);
+        if (index + 1 < ordered.length) keep.add(ordered[index + 1]);
+      }
+    }
+    if (this.tailPage) keep.add(this.tailPage);
+    if (this.pairedTailPage) keep.add(this.pairedTailPage);
+    for (const page of this.pages) if (page.read || page.contextRead) keep.add(page);
+    const retained = ordered.filter(page => keep.has(page));
+    changed ||= retained.length !== this.pages.length;
+    const tailCut = this.pairedTailPage?.cut;
+    const sequence = (page: BrowserHistoryPage, last = false) => decimal(this.entries.get(last ? page.entryIds.at(-1)! : page.entryIds[0])!.entry_sequence);
+    for (let index = 0; index < retained.length; index++) {
+      const page = retained[index], position = ordered.indexOf(page);
+      const first = sequence(page), last = sequence(page, true);
+      if (!page.older && position > 0 && (!index || BigInt(sequence(retained[index - 1], true)) + BigInt(1) < BigInt(first)) && page.cut) {
+        page.older = {session_id: this.sessionId, ...page.cut, entry_sequence: first, direction: 'older'};
+        changed = true;
+      }
+      if (!page.read && position + 1 < ordered.length && (index + 1 === retained.length || BigInt(last) + BigInt(1) < BigInt(sequence(retained[index + 1])))) {
+        // A live tail can be newer than this old page's cut. Use a complete
+        // server-admitted pair, never observation counters or a mixed pair.
+        const cut = page.cut && compareSequence(page.cut.cut_sequence, sequence(ordered.at(-1)!, true)) >= 0 ? page.cut : tailCut;
+        if (cut && compareSequence(last, cut.cut_sequence) < 0 && (!page.newer
+          || page.newer.cut_sequence !== cut.cut_sequence || page.newer.event_sequence_cut !== cut.event_sequence_cut
+          || page.newer.entry_sequence !== last)) {
+          page.newer = {session_id: this.sessionId, ...cut, entry_sequence: last, direction: 'newer'};
+          changed = true;
+        }
+      }
+    }
+    const ids = new Set(retained.flatMap(page => page.entryIds));
+    this.pages = this.pages.filter(page => keep.has(page));
+    for (const [id, entry] of this.entries) {
+      if (!ids.has(id)) { this.entries.delete(id); changed = true; continue; }
+      if (bodies.has(id)) continue;
+      for (const ref of [entry.content, ...entry.blocks?.map(block => block.content) ?? [], ...entry.reasoning_blocks?.map(block => block.content) ?? []]) {
+        if (ref?.inline_content !== undefined && this.supplementalBodies.has(ref)) {
+          delete ref.inline_content; changed = true;
+        }
+      }
+    }
+    for (const key of this.contentErrors.keys()) if (!ids.has(key.replace(/:reasoning$/, ''))) this.contentErrors.delete(key);
+    const sequences = new Set([...this.entries.values()].map(entry => decimal(entry.entry_sequence)));
+    for (const [key, notice] of this.interruptionNotices) if (!sequences.has(decimal(notice.display_after_entry_sequence))) this.interruptionNotices.delete(key);
+    if (changed) return this.project();
+  }
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -2285,7 +2386,10 @@ abstract class CanonicalHistoryReader {
       // dynamic metadata already installed by the ordered observation owner.
       if (old) {
         const preserve = (next?: ProtocolContent, previous?: ProtocolContent) => {
-          if (next && previous?.inline_content !== undefined && next.digest === previous.digest && String(next.size ?? 0) === String(previous.size ?? 0)) next.inline_content = previous.inline_content;
+          if (next && previous?.inline_content !== undefined && next.digest === previous.digest && String(next.size ?? 0) === String(previous.size ?? 0)) {
+            if (next.inline_content === undefined) this.supplementalBodies.add(next);
+            next.inline_content = previous.inline_content;
+          }
         };
         preserve(entry.content, old.content);
         for (const block of [...entry.blocks ?? [], ...entry.reasoning_blocks ?? []]) {
@@ -2296,15 +2400,23 @@ abstract class CanonicalHistoryReader {
       this.entries.set(entry.entry_id, entry);
     }
   }
-  protected installPage(entries: ProtocolEntry[], cut?: {cut_sequence: string | number; event_sequence_cut?: string | number}, older?: ProtocolHistoryCursor | BrowserWindowCursor, newer?: BrowserWindowCursor): BrowserHistoryPage | undefined {
+  protected installPage(entries: ProtocolEntry[], cut?: {cut_sequence: string | number; event_sequence_cut?: string | number}, older?: ProtocolHistoryCursor | BrowserWindowCursor, newer?: BrowserWindowCursor, tail = false): BrowserHistoryPage | undefined {
     if (!entries.length) return;
+    // A refreshed snapshot can lead the ordered observation cursor. Replaying
+    // its older acceptance batches must not replace the actual retained tail.
+    tail = tail && (!this.tailPage || compareSequence(entries.at(-1)!.entry_sequence,
+      this.entries.get(this.tailPage.entryIds.at(-1)!)!.entry_sequence) >= 0);
     const ids = entries.map(entry => entry.entry_id);
     const same = this.pages.find(page => page.entryIds.length === ids.length && page.entryIds.every((id, index) => id === ids[index]));
-    if (same) return same;
+    if (same) {
+      if (tail) { this.tailPage = same; if (same.cut) this.pairedTailPage = same; }
+      return same;
+    }
     const page: BrowserHistoryPage = {id: `history:${++this.pageCounter}`, entryIds: ids,
       cut: cut && cut.event_sequence_cut !== undefined ? {cut_sequence: decimal(cut.cut_sequence), event_sequence_cut: decimal(cut.event_sequence_cut)} : undefined,
       older, newer, loading: false, contextState: 'loading'};
     this.pages.push(page);
+    if (tail) { this.tailPage = page; if (page.cut) this.pairedTailPage = page; }
     void this.loadPageContext(page);
     return page;
   }
@@ -2313,9 +2425,10 @@ abstract class CanonicalHistoryReader {
     if (!entries.length) this.initialContextReady = true;
     this.mergeEntries(entries, true);
     this.mergeInterruptionNotices(snapshot.interruption_notices ?? []);
-    this.installPage(entries, snapshot.entry_sequence_cut !== undefined ? {cut_sequence: snapshot.entry_sequence_cut, event_sequence_cut: snapshot.event_sequence_cut} : snapshot.older_history_cursor, snapshot.older_history_cursor);
+    this.installPage(entries, snapshot.entry_sequence_cut !== undefined ? {cut_sequence: snapshot.entry_sequence_cut, event_sequence_cut: snapshot.event_sequence_cut} : snapshot.older_history_cursor, snapshot.older_history_cursor, undefined, true);
   }
   protected async loadPageContext(page: BrowserHistoryPage, refresh = false, requiredEventCut?: string): Promise<void> {
+    if (this.readerClosed || !this.pages.includes(page)) return;
     if (refresh) page.needsFreshContext = true;
     if (requiredEventCut && (!page.requiredContextEventCut || compareSequence(requiredEventCut, page.requiredContextEventCut) > 0)) page.requiredContextEventCut = requiredEventCut;
     if (page.contextRead) {
@@ -2336,6 +2449,8 @@ abstract class CanonicalHistoryReader {
         if (value.session_id !== this.sessionId || value.entry_ids.length !== page.entryIds.length
           || !page.entryIds.every(id => value.entry_ids.includes(id))) throw new Error('历史展示上下文身份不一致。');
         decimal(value.cut_sequence); decimal(value.event_sequence_cut);
+        page.cut ??= {cut_sequence: decimal(value.cut_sequence), event_sequence_cut: decimal(value.event_sequence_cut)};
+        if (page === this.tailPage) this.pairedTailPage = page;
         if (fresh && page.requiredContextEventCut && compareSequence(value.event_sequence_cut, page.requiredContextEventCut) < 0) throw new Error('历史展示上下文早于已观察到的边界。');
         if (!page.context || compareSequence(value.event_sequence_cut, page.context.event_sequence_cut) >= 0) page.context = value;
         if (fresh && (!page.requiredContextEventCut || compareSequence(value.event_sequence_cut, page.requiredContextEventCut) >= 0)) page.needsFreshContext = false;
@@ -2343,7 +2458,7 @@ abstract class CanonicalHistoryReader {
         if (page === this.pages[0] && page.contextState === 'ready') this.initialContextReady = true;
         this.mergeInterruptionNotices(value.interruption_notices ?? []);
       } catch (error) {
-        if (this.readerClosed) return;
+        if (this.readerClosed || !this.pages.includes(page)) return;
         page.contextState = 'error'; page.contextError = error instanceof Error ? error.message : '历史分组暂时无法读取。';
       }
       this.changed();
@@ -2353,7 +2468,7 @@ abstract class CanonicalHistoryReader {
     // subscriber joins this request rather than advancing the history cursor.
     this.changed();
     try { await operation; } finally { if (page.contextRead === operation) page.contextRead = undefined; }
-    if (!this.readerClosed && page.contextState !== 'error' && page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) < 0) {
+    if (!this.readerClosed && this.pages.includes(page) && page.contextState !== 'error' && page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) < 0) {
       return this.loadPageContext(page, true, this.presentationBoundaryEventSequence);
     }
   }
@@ -2436,7 +2551,15 @@ abstract class CanonicalHistoryReader {
         let entries: ProtocolEntry[], older: ProtocolHistoryCursor | BrowserWindowCursor | undefined, newer: BrowserWindowCursor | undefined;
         if ('direction' in cursor) {
           const window = await this.historyPost<BrowserWindow>('window', {cursor, maximum_entries: 128, maximum_serialized_bytes: 2 << 20}, signal);
-          if (window.session_id !== this.sessionId) throw new Error('历史窗口身份不一致。');
+          if (window.session_id !== this.sessionId || compareSequence(window.cut_sequence, cursor.cut_sequence) !== 0
+            || compareSequence(window.event_sequence_cut, cursor.event_sequence_cut ?? '0') !== 0) throw new Error('历史窗口身份不一致。');
+          if (window.entries.some(entry => direction === 'older' ? compareSequence(entry.entry_sequence, cursor.entry_sequence) >= 0
+            : compareSequence(entry.entry_sequence, cursor.entry_sequence) <= 0)) throw new Error('历史窗口没有向请求方向推进。');
+          for (const next of [window.older_cursor, window.newer_cursor]) if (next && (next.session_id !== this.sessionId
+            || compareSequence(next.cut_sequence, cursor.cut_sequence) !== 0
+            || compareSequence(next.event_sequence_cut, cursor.event_sequence_cut ?? '0') !== 0
+            || (next.direction === direction && (direction === 'older'
+              ? compareSequence(next.entry_sequence, cursor.entry_sequence) >= 0 : compareSequence(next.entry_sequence, cursor.entry_sequence) <= 0)))) throw new Error('历史窗口游标没有向前推进。');
           entries = window.entries; older = window.older_cursor; newer = window.newer_cursor;
         } else {
           const frame = await this.historyPost<{history_page?: ProtocolHistoryPage; error?: ProtocolError}>('history', {cursor, maximum_entries: 128, maximum_serialized_bytes: 2 << 20}, signal);
@@ -2466,6 +2589,11 @@ abstract class CanonicalHistoryReader {
     return this.project();
   }
   async locateEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    this.locatingEntries.add(entryId);
+    try { return await this.readLocatedEntry(entryId, signal); }
+    finally { this.locatingEntries.delete(entryId); }
+  }
+  private async readLocatedEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
     signal.throwIfAborted();
     if (!this.entries.has(entryId)) {
       const window = await this.historyPost<BrowserWindow>('window', {anchor_entry_id: entryId, maximum_entries: 128, maximum_serialized_bytes: 2 << 20}, signal);
@@ -2514,7 +2642,7 @@ abstract class CanonicalHistoryReader {
         try {
           await this.hydrateContentReference(entry.content, {entry_id: entryId}, '这条会话内容暂时无法完整读取。');
           for (const block of [...entry.blocks ?? [], ...(includeReasoning ? entry.reasoning_blocks ?? [] : [])]) await this.hydrateContentReference(block.content, {entry_id: entryId, block_id: block.block_id}, '这段正文暂时无法完整读取。');
-        } catch (error) { if (!this.readerClosed) this.contentErrors.set(key, error instanceof Error ? error.message : '正文暂时无法读取。'); }
+        } catch (error) { if (!this.readerClosed && this.entries.has(entryId)) this.contentErrors.set(key, error instanceof Error ? error.message : '正文暂时无法读取。'); }
       })();
       this.contentReads.set(key, operation); this.changed();
       try { await operation; } finally { if (this.contentReads.get(key) === operation) this.contentReads.delete(key); this.changed(); }
@@ -2726,15 +2854,21 @@ abstract class CanonicalHistoryReader {
     if (!reference || reference.inline_content !== undefined || numeric(reference.size) === 0) return;
     const expectedSize = numeric(reference.size);
     const expectedDigest = reference.digest ?? '';
+    if ('entry_id' in target) {
+      const resident = this.entries.get(target.entry_id);
+      const ref = target.block_id ? [...resident?.blocks ?? [], ...resident?.reasoning_blocks ?? []].find(block => block.block_id === target.block_id)?.content : resident?.content;
+      if (ref?.inline_content !== undefined && ref.digest === expectedDigest && numeric(ref.size) === expectedSize) {
+        reference.inline_content = ref.inline_content;
+        this.supplementalBodies.add(reference);
+        return;
+      }
+    }
     const key = JSON.stringify([target, expectedDigest, expectedSize]);
-    const cached = this.immutableBodies.get(key);
-    if (cached !== undefined) { reference.inline_content = cached; return; }
     let pending = this.immutableReads.get(key);
     if (!pending) {
       pending = this.readExactContentBytes(target, expectedDigest, expectedSize, publicMessage, true)
         .then(bytes => {
           const encoded = encodeBase64Bytes(bytes);
-          if (!this.readerClosed) this.immutableBodies.set(key, encoded);
           return encoded;
         });
       this.immutableReads.set(key, pending);
@@ -2744,10 +2878,14 @@ abstract class CanonicalHistoryReader {
     signal?.throwIfAborted();
     if (this.readerClosed) return;
     reference.inline_content = body;
+    this.supplementalBodies.add(reference);
     if ('entry_id' in target) {
       const current = this.entries.get(target.entry_id);
       const currentRef = target.block_id ? [...current?.blocks ?? [], ...current?.reasoning_blocks ?? []].find(block => block.block_id === target.block_id)?.content : current?.content;
-      if (currentRef?.digest === expectedDigest && numeric(currentRef.size) === expectedSize) currentRef.inline_content = body;
+      if (currentRef?.digest === expectedDigest && numeric(currentRef.size) === expectedSize) {
+        currentRef.inline_content = body;
+        this.supplementalBodies.add(currentRef);
+      }
     }
   }
 
@@ -2895,12 +3033,33 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
 }
 
 class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeConnection {
+  readonly availability: WorkspaceAvailability;
   readonly sessionId: string;
   readonly role: 'observer' | 'controller';
   readonly generation: number;
   private readonly connectionId: string;
   private drafts = new Map<string, LiveDraft>();
   private liveResults = new Map<string, LiveToolResult>();
+  protected releaseSettledHistory(visible: ReadonlySet<string>): boolean {
+    let changed = false;
+    // Accepted, context-confirmed offscreen content can be reread canonically.
+    // Uncommitted drafts/results and current interactions keep their live bytes.
+    for (const [key, draft] of this.drafts) if (draft.committedEntryId && !visible.has(draft.committedEntryId) && this.hasCanonicalContext(draft.committedEntryId)) {
+      this.drafts.delete(key); changed = true;
+    }
+    for (const [key, result] of this.liveResults) if (result.committedEntryId && this.hasCanonicalContext(result.committedEntryId)
+      && ![result.committedEntryId, result.assistantEntryId, result.proposedEntryId].some(id => id && visible.has(id))) {
+      this.liveResults.delete(key); changed = true;
+    }
+    for (const entry of this.entries.values()) if (entry.input_source?.command_id && !visible.has(entry.entry_id) && this.hasCanonicalContext(entry.entry_id)) {
+      changed = this.promptTransitions.delete(entry.input_source.command_id) || changed;
+    }
+    return changed;
+  }
+  protected transientHistoryEntries(): string[] {
+    return [...this.drafts.values()].flatMap(value => value.committedEntryId ? [value.committedEntryId] : [])
+      .concat([...this.liveResults.values()].flatMap(value => [value.committedEntryId, value.proposedEntryId, value.assistantEntryId].filter((id): id is string => Boolean(id))));
+  }
   private promptTransitions = new Map<string, LocalPromptSubmission>();
   private taskProgress = new Map<string, LiveTaskProgress>();
   private taskInvalidations: string[] = [];
@@ -2997,6 +3156,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
 
   constructor(payload: ConnectPayload) {
     super();
+    this.availability = payload.workspace_availability;
     this.connectionId = payload.connection_id;
     this.generation = payload.connection_generation;
     this.sessionId = payload.session_id;
@@ -3133,7 +3293,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.eventSequenceCursor = decimal(observation.through_event_sequence ?? this.eventSequenceCursor);
     this.eventSequence = numeric(this.eventSequenceCursor);
     const appended = (observation.committed ?? []).flatMap(item => item.projection_kind === 'IMMUTABLE_ENTRY' && item.entry ? [item.entry] : []);
-    if (appended.length) this.installPage(appended);
+    if (appended.length) this.installPage(appended, undefined, undefined, undefined, true);
     const boundaryOccurrences = (observation.committed ?? []).filter(item => ['COMPACTION_ADOPTED', 'TURN_INTERRUPTED'].includes(item.event_type ?? '') && item.event_id);
     for (const occurrence of boundaryOccurrences) if (compareSequence(occurrence.event_sequence ?? this.eventSequenceCursor, this.presentationBoundaryEventSequence) > 0) this.presentationBoundaryEventSequence = decimal(occurrence.event_sequence ?? this.eventSequenceCursor);
     this.refreshBoundaryOccurrences(boundaryOccurrences.map(item => item.event_id!));

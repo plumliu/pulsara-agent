@@ -14,6 +14,7 @@ from pulsara_agent.llm.adapters.openai.client import (
     OpenAITransportTimeoutPolicy,
     admit_provider_request,
     build_async_openai_client,
+    prepare_openai_sdk,
     openai_auth_request_options,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
@@ -141,6 +142,7 @@ class OpenAIResponsesTransport:
         should_close_client = self._client is None
         api_key: str | None = None
         if self._client is None:
+            await prepare_openai_sdk()
             if call.target.connection.requires_api_key:
                 api_key = self.settings.read().require_model_api_key(
                     call.binding.connection_id

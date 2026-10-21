@@ -16,7 +16,11 @@ from pulsara_agent.capability.local_skills import (
     LooseSkillDefinitionProducer,
     LooseSkillDefinitionsDisposition,
 )
-from pulsara_agent.capability.render import SkillProjectionOverbound
+from pulsara_agent.capability.render import (
+    SkillProjectionOverbound,
+    render_active_skill_prompt,
+    render_catalog_prompt,
+)
 from pulsara_agent.capability.plugin_skill_contracts import (
     FrozenPluginSkillDefinitions,
     PluginSkillDefinitionsDisposition,
@@ -39,7 +43,6 @@ from pulsara_agent.capability.types import (
     SkillResolutionUnavailableReason,
     SkillSource,
 )
-from pulsara_agent.capability import render_active_skill_prompt, render_catalog_prompt
 
 
 def _producer(base: Path, **kwargs: object) -> LooseSkillDefinitionProducer:

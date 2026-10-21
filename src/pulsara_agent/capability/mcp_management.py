@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Mapping
+from threading import Lock
+from typing import TYPE_CHECKING, Mapping
+
+if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.mcp.oauth import McpOAuthManager
 
 from pulsara_agent.mcp_config import (
     default_user_mcp_config_path,
@@ -334,8 +339,6 @@ class LocalMcpManagementService:
         # Match the existing serial catalog-discovery reservation. Queue additional
         # local tests; do not multiply bounded discovery buffers per click.
         self._test_lane = asyncio.Lock()
-        from pulsara_agent.conversation_kernel.mcp.oauth import McpOAuthManager
-
         async def launch_browser(url):
             import webbrowser
 
@@ -343,12 +346,54 @@ class LocalMcpManagementService:
             if not opened:
                 raise ValueError("MCP authorization browser could not be opened")
 
-        self.oauth = McpOAuthManager(
-            settings,
-            lane=self.lane,
-            credential_boundary=self.credential_boundary,
-            open_browser=open_browser or launch_browser,
-        )
+        self._open_browser = open_browser or launch_browser
+        self._oauth: McpOAuthManager | None = None
+        self._oauth_lock = Lock()
+        self._oauth_closed = False
+
+    @property
+    def oauth(self) -> McpOAuthManager:
+        # Config parsing also runs on filesystem worker threads. Publish one
+        # real owner, and never create it after application shutdown.
+        with self._oauth_lock:
+            if self._oauth_closed:
+                raise RuntimeError("MCP management service is closed")
+            if self._oauth is None:
+                from pulsara_agent.conversation_kernel.mcp.oauth import McpOAuthManager
+
+                self._oauth = McpOAuthManager(
+                    self.settings, lane=self.lane,
+                    credential_boundary=self.credential_boundary,
+                    open_browser=self._open_browser,
+                )
+            return self._oauth
+
+    def bind_authorization(self, owner, config, current_target):
+        return self.oauth.bind(owner, config, current_target)
+
+    async def prepare_oauth(self) -> McpOAuthManager:
+        """Acquire the same real owner without blocking the HTTP module lock."""
+        if self._oauth is not None:
+            # Preserve the initialized owner's original no-yield admission;
+            # only first creation can be waiting on the SDK import lock.
+            return self.oauth
+        task = asyncio.create_task(asyncio.to_thread(lambda: self.oauth), name="mcp-oauth-owner")
+        try:
+            manager = await asyncio.shield(task)
+            if self._oauth_closed:
+                raise RuntimeError("MCP management service is closed")
+            return manager
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            with suppress(BaseException):
+                task.result()
+            raise
 
     def load_configs(
         self,
@@ -378,10 +423,15 @@ class LocalMcpManagementService:
         )
 
     async def authorize(self, target: LocalMcpTarget):
-        return await self.oauth.begin(target.owner, lambda: self.inspect(target))
+        oauth = await self.prepare_oauth()
+        return await oauth.begin(target.owner, lambda: self.inspect(target))
 
     async def aclose(self):
-        await self.oauth.aclose()
+        with self._oauth_lock:
+            self._oauth_closed = True
+            oauth = self._oauth
+        if oauth is not None:
+            await oauth.aclose()
 
     def path(self, target: LocalMcpTarget) -> Path:
         return (
@@ -623,6 +673,7 @@ class LocalMcpManagementService:
     async def _test(
         self, target, entry, *, workspace_root, secrets, retain_credentials_confirmed
     ):
+        await self.prepare_oauth()
         from pulsara_agent.conversation_kernel.mcp.oauth import McpOAuthNeedsLogin
         from pulsara_agent.conversation_kernel.mcp.sdk_facade import BoundedMcpSdkClient
         from pulsara_agent.conversation_kernel.mcp.wire import McpSchemaBoundExceeded
@@ -792,7 +843,7 @@ class LocalMcpManagementService:
             raw = await asyncio.to_thread(_load_raw, path)
             prior_entry = raw.get(target.server_id)
             current = (
-                self.parse(target, prior_entry) if prior_entry is not None else None
+                await asyncio.to_thread(self.parse, target, prior_entry) if prior_entry is not None else None
             )
             if create:
                 if current is not None:
@@ -816,7 +867,7 @@ class LocalMcpManagementService:
                 raise McpManagementConflict(
                     "MCP connection changed; refresh before editing"
                 )
-            candidate = self.parse(target, entry) if entry is not None else None
+            candidate = await asyncio.to_thread(self.parse, target, entry) if entry is not None else None
             _require_destination_confirmation(
                 current, candidate, secrets, retain_credentials_confirmed
             )
@@ -832,7 +883,10 @@ class LocalMcpManagementService:
                 or bool(secrets)
             )
             if auth_changed:
-                invalidated.extend(self.oauth.invalidate(target.owner))
+                with self._oauth_lock:
+                    oauth = self._oauth
+                if oauth is not None:
+                    invalidated.extend(oauth.invalidate(target.owner))
             changes = tuple((change.binding, change.value) for change in secrets)
             previous_private = self.settings.read()
             rollback = tuple(
@@ -874,7 +928,7 @@ class LocalMcpManagementService:
                     ):
                         await self.settings.remove_mcp_credentials(target.owner)
                 else:
-                    candidate = self.parse(target, raw[target.server_id])
+                    candidate = await asyncio.to_thread(self.parse, target, raw[target.server_id])
                     if target.workspace_root is not None:
                         if candidate.enabled:
                             await asyncio.to_thread(

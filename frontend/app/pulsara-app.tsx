@@ -43,6 +43,7 @@ import {
   type RuntimeInteractionResolution,
   type RuntimeInteractionSummary,
   type RuntimeProjection,
+  type HistoryResidence,
   type AgentTaskGroup,
   type LocalPromptSubmission,
   type QueuedPrompt,
@@ -314,6 +315,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [promptDraftStore]);
   const activeSessionIdRef = useRef('');
   const connectionAttempt = useRef(0);
+  const connectionInFlight = useRef<{
+    sessionId: string; reconnecting: boolean; takeover: boolean; attempt: number;
+    promise: Promise<RuntimeConnection | undefined>;
+  } | undefined>(undefined);
   const promptReconciliationInFlight = useRef(new Set<string>());
   // Global API readiness is independent of an individual conversation transport.
   const [userServiceStatus, setUserServiceStatus] = useState<RuntimeStatus>('starting');
@@ -1035,7 +1040,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     } finally { archivingSession.current = undefined; }
   };
 
-  const openRuntimeSession = useCallback(async (
+  const openRuntimeSessionAttempt = useCallback(async (
     sessionId: string,
     reconnecting = false,
     takeover = false,
@@ -1091,6 +1096,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       }
       if (next instanceof CanonicalHistoryView) {
         if (retainedHistory) await retainedHistory.close();
+        if (attempt !== connectionAttempt.current) { await next.close(); return undefined; }
         historyRef.current = next;
         activeSessionIdRef.current = sessionId;
         setActiveSessionId(sessionId);
@@ -1103,11 +1109,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         setCapabilityLoading(false);
         return undefined;
       }
-      const availability = await adapter.workspaceAvailability(sessionId);
-      if (attempt !== connectionAttempt.current) { await next.close(); return undefined; }
       if (retainedHistory) await retainedHistory.close();
+      if (attempt !== connectionAttempt.current) { await next.close(); return undefined; }
       historyRef.current = undefined;
-      setWorkspaceObservation({sessionId, value: availability});
+      setWorkspaceObservation({sessionId, value: next.availability});
       connectionRef.current = next;
       activeSessionIdRef.current = sessionId;
       setConnection(next);
@@ -1151,6 +1156,24 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       return undefined;
     }
   }, [adapter, publishProjection, forgetSession, invalidateSessionList, changeSessionList, readSessionList]);
+
+  const openRuntimeSession = useCallback((sessionId: string, reconnecting = false, takeover = false): Promise<RuntimeConnection | undefined> => {
+    if (deletingSession.current === sessionId || archivingSession.current === sessionId) return Promise.resolve(undefined);
+    const current = connectionInFlight.current;
+    if (current && current.attempt === connectionAttempt.current && current.sessionId === sessionId
+      && current.reconnecting === reconnecting && current.takeover === takeover) return current.promise;
+    // Share the complete original attempt, including publication and stale
+    // cleanup. Sharing only adapter.connect would let a second attempt close
+    // the same connection as its stale result. Different intents retain the
+    // original attempt counter and cancellation boundary.
+    const promise = openRuntimeSessionAttempt(sessionId, reconnecting, takeover);
+    const owner = {sessionId, reconnecting, takeover, attempt: connectionAttempt.current, promise};
+    connectionInFlight.current = owner;
+    void promise.finally(() => {
+      if (connectionInFlight.current === owner) connectionInFlight.current = undefined;
+    }).catch(() => {});
+    return promise;
+  }, [openRuntimeSessionAttempt]);
 
   const recheckWorkspace = useCallback(async () => {
     const sessionId = activeSessionIdRef.current;
@@ -1235,12 +1258,15 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     };
   }, [databaseState, readSessionList]);
 
-  const refreshConfiguration = useCallback(async () => {
-    const owner = { databaseReady: false };
-    globalReads.configuration = owner;
-    invalidateSessionList();
+  const refreshConfiguration = useCallback(async (options?: { background?: boolean }) => {
+    const background = options?.background === true;
+    const owner = background ? globalReads.configuration : { databaseReady: false };
+    if (!background) {
+      globalReads.configuration = owner;
+      invalidateSessionList();
+    }
     const ownsRead = () => globalReads.active && globalReads.configuration === owner;
-    setUserServiceStatus('reconnecting');
+    if (!background) setUserServiceStatus('reconnecting');
     try {
       const boot = await adapter.bootstrap();
       if (!ownsRead()) return;
@@ -1272,7 +1298,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         }
         return;
       }
-      await readSessionList(ownsRead);
+      if (!background) await readSessionList(ownsRead);
       if (!ownsRead()) return;
       setUserServiceStatus('online');
     } catch (error) {
@@ -1280,13 +1306,33 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       setUserServiceStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
       throw error;
     } finally {
-      if (ownsRead()) setStartupSettled(true);
+      if (ownsRead() && !background) setStartupSettled(true);
     }
   }, [adapter, globalReads, invalidateSessionList, changeSessionList, readSessionList]);
 
   const reconnectUserService = useCallback(() => {
     void refreshConfiguration().catch(() => { /* The global read published its failure. */ });
   }, [refreshConfiguration]);
+
+  useEffect(() => {
+    if (!startupSettled || !bootstrap?.model_catalog_loading || userServiceStatus !== 'online') return;
+    // The local shell is usable while its one initial remote catalog attempt
+    // runs. Observe through the ordinary configuration owner until it settles;
+    // a successful service reconnect resumes observation even if loading stayed
+    // true. Reconnecting itself owns configuration reads until it is online.
+    let disposed = false;
+    let timer: number;
+    const observe = async () => {
+      try {
+        await refreshConfiguration({ background: true });
+      } catch {
+        return; // The ordinary configuration owner published the read failure.
+      }
+      if (!disposed) timer = window.setTimeout(() => { void observe(); }, 250);
+    };
+    timer = window.setTimeout(() => { void observe(); }, 250);
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [bootstrap?.model_catalog_loading, startupSettled, refreshConfiguration, userServiceStatus]);
 
   useEffect(() => {
     let disposed = false;
@@ -2888,6 +2934,13 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
   }, [ownsHistoryReader, publishProjection]);
 
+  const retainHistory = useCallback((interest: HistoryResidence) => {
+    const active = connectionRef.current ?? historyRef.current;
+    if (!active || !ownsHistoryReader(active)) return;
+    const next = active.retainHistory?.(interest);
+    if (next) publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
+  }, [ownsHistoryReader, publishProjection]);
+
   const readPromptImage = useCallback(async (image: CanonicalPromptImagePart) => {
     const active = connectionRef.current ?? historyRef.current;
     if (!active) {
@@ -2986,6 +3039,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           databaseState={databaseState}
           localSettings={bootstrap?.local_settings}
           modelConfigurations={bootstrap?.model_configurations ?? []}
+          modelCatalogLoading={bootstrap?.model_catalog_loading}
           onNavigate={navigate}
           onOpenSession={openSession}
           onNewSession={openNewSession}
@@ -3010,6 +3064,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           history={projection.history}
           onLoadHistory={loadHistory}
           onHydrateEntries={hydrateEntries}
+          onRetainHistory={retainHistory}
           interruptionNotices={mergedProjection.interruptionNotices}
           contextCompaction={mergedProjection.contextCompaction}
           contextCompactionInProgress={mergedProjection.liveControl.root_compaction_in_progress === true}
@@ -3036,6 +3091,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           runtimeStatus={runtimeStatus}
           runtimeError={runtimeError}
           modelConfigurations={bootstrap?.model_configurations ?? []}
+          modelCatalogLoading={bootstrap?.model_catalog_loading}
           modelCallBinding={activeSession.modelCallBinding}
           onReadContextUsage={readContextUsage}
           contextUsageRevision={`${projection.hostSessionId ?? ''}:${projection.eventSequence}:${Boolean(projection.liveControl.compaction_in_progress)}:${JSON.stringify(bootstrap?.model_configurations)}`}
@@ -3244,7 +3300,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         />
       )}
 
-      {activeView === 'scheduled' && <ScheduledTasksView onNotify={notify} focusTaskId={focusScheduledTaskId} modelConfigurations={bootstrap?.model_configurations ?? []} onCreateSession={createScheduledSession} api={scheduledApi} sessions={sessionList} ready={databaseState === 'ready' && userServiceStatus === 'online'} onOpenSettings={() => navigate('settings')} onOpenSession={(id, entryId) => { if (entryId) setFocusSourceEntry({ sessionId: id, entryId }); openSession(id); }} />}
+      {activeView === 'scheduled' && <ScheduledTasksView onNotify={notify} focusTaskId={focusScheduledTaskId} modelCatalogLoading={bootstrap?.model_catalog_loading} modelConfigurations={bootstrap?.model_configurations ?? []} onCreateSession={createScheduledSession} api={scheduledApi} sessions={sessionList} ready={databaseState === 'ready' && userServiceStatus === 'online'} onOpenSettings={() => navigate('settings')} onOpenSession={(id, entryId) => { if (entryId) setFocusSourceEntry({ sessionId: id, entryId }); openSession(id); }} />}
       {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={userServiceStatus} onReconnect={reconnectUserService} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusSourceEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
 
       {searchOpen && <SessionSearchDialog adapter={adapter} available={databaseState === 'ready' && Boolean(bootstrap)}

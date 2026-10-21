@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pulsara_agent.primitives.context import canonical_json_bytes
 
-from .sdk_facade import types
+if TYPE_CHECKING:
+    from .sdk_facade import types
 
 
 MAXIMUM_MCP_INPUT_REQUEST_ITEMS = 16
@@ -49,6 +51,8 @@ class McpInputRequiredRoundOwner:
     def prepare_state_only_continuation(
         self, result: types.InputRequiredResult
     ) -> str:
+        from .sdk_facade import types
+
         if self._closed:
             raise RuntimeError("MCP input-required owner is closed")
         self._total_rounds += 1

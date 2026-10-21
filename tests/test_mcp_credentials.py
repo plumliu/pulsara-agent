@@ -26,6 +26,8 @@ from pulsara_agent.settings import (
 from pulsara_agent.mcp_config import _parse_server
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     _BoundedTransport,
+)
+from pulsara_agent.conversation_kernel.mcp.contracts import (
     McpProtocolConformanceError,
 )
 from pulsara_agent.conversation_kernel.mcp.wire import DEFAULT_MCP_WIRE_BOUNDS

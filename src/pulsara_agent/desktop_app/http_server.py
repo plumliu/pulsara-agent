@@ -37,6 +37,7 @@ from pulsara_agent.llm.model_catalog import (
     ReasoningProviderDefault,
     ReasoningSelectableControls,
     ReasoningUnavailable,
+    SelectableModelCatalog,
     WireApi,
 )
 from pulsara_agent.llm.model_connections import (
@@ -315,6 +316,7 @@ class LocalHttpServer:
         refresh_database_state: Callable[[], Awaitable[object]],
         reset_postgres: Callable[[LocalPostgresConfig], Awaitable[dict[str, object]]],
         scheduled_tasks=None,
+        model_catalog_loading: Callable[[], bool] = lambda: False,
     ) -> None:
         self.sessions = sessions
         self.scheduled_tasks = scheduled_tasks
@@ -326,6 +328,7 @@ class LocalHttpServer:
         self.settings = settings
         self.catalog = catalog
         self.model_runtime = model_runtime
+        self._model_catalog_loading = model_catalog_loading
         self._database_state = database_state
         self._refresh_database_state = refresh_database_state
         self._reset_postgres_data = reset_postgres
@@ -929,8 +932,10 @@ class LocalHttpServer:
         return web.FileResponse(target)
 
     async def _bootstrap(self, _request: web.Request) -> web.Response:
+        catalog_loading = self._model_catalog_loading()
         payload = self.sessions.bootstrap_payload()
         payload.update(await self._settings_read_model())
+        payload["model_catalog_loading"] = catalog_loading
         payload["runtime"] = {
             "status": "ready" if self._is_ready() else "starting",
             "origin": self.origin,
@@ -987,7 +992,7 @@ class LocalHttpServer:
                 continue
         return web.json_response(
             {
-                "model_configuration": await self._connection_summary(resolved.config),
+                "model_configuration": self._single_connection_summary(resolved.config),
                 "wire_shape_warning": _wire_shape_warning(
                     resolved.target.target_facts.wire_shape_hint,
                     resolved.config.target.wire_api,
@@ -1058,7 +1063,7 @@ class LocalHttpServer:
         except ValueError as exc:
             raise HttpPublicError("MODEL_CONFIGURATION_EDIT_INVALID", str(exc), status=400) from exc
         return web.json_response({
-            "model_configuration": await self._connection_summary(resolved.config),
+            "model_configuration": self._single_connection_summary(resolved.config),
             "wire_shape_warning": _wire_shape_warning(
                 resolved.target.target_facts.wire_shape_hint, resolved.config.target.wire_api,
             ),
@@ -1385,13 +1390,32 @@ class LocalHttpServer:
         self, settings: LocalSettings | None = None
     ) -> list[dict[str, object]]:
         settings = settings or self.settings.read()
+        if not settings.model_connections:
+            return []
+        try:
+            catalog = self.catalog.selectable()
+        except (KeyError, ValueError, ModelRuntimeUnavailable):
+            return [
+                self._unavailable_connection_summary(connection)
+                for connection in settings.model_connections
+            ]
         return [
-            await self._connection_summary(connection)
+            self._connection_summary(connection, catalog=catalog)
             for connection in settings.model_connections
         ]
 
-    async def _connection_summary(
+    def _single_connection_summary(
         self, connection: ModelConnectionConfig
+    ) -> dict[str, object]:
+        try:
+            catalog = self.catalog.selectable()
+        except (KeyError, ValueError, ModelRuntimeUnavailable):
+            return self._unavailable_connection_summary(connection)
+        return self._connection_summary(connection, catalog=catalog)
+
+    @staticmethod
+    def _connection_summary_payload(
+        connection: ModelConnectionConfig,
     ) -> dict[str, object]:
         payload = model_connection_to_dict(connection)
         payload.pop("user_declared", None)
@@ -1405,8 +1429,25 @@ class LocalHttpServer:
                 "authentication": connection.authentication.value,
             }
         )
+        return payload
+
+    def _unavailable_connection_summary(
+        self, connection: ModelConnectionConfig,
+    ) -> dict[str, object]:
+        payload = self._connection_summary_payload(connection)
+        payload.update(
+            status="unavailable",
+            credential_configured=connection.requires_api_key,
+            reasoning={"kind": "unavailable"},
+        )
+        return payload
+
+    def _connection_summary(
+        self, connection: ModelConnectionConfig,
+        *, catalog: SelectableModelCatalog | None,
+    ) -> dict[str, object]:
+        payload = self._connection_summary_payload(connection)
         try:
-            catalog = self.catalog.selectable()
             contract = resolve_model_target_contract(
                 catalog=catalog,
                 connection=connection,
@@ -1414,11 +1455,9 @@ class LocalHttpServer:
             )
         except (KeyError, ValueError, ModelRuntimeUnavailable):
             payload.update(
-                {
-                    "status": "unavailable",
-                    "credential_configured": connection.requires_api_key,
-                    "reasoning": {"kind": "unavailable"},
-                }
+                status="unavailable",
+                credential_configured=connection.requires_api_key,
+                reasoning={"kind": "unavailable"},
             )
             return payload
         catalog_entry = (
@@ -1763,7 +1802,8 @@ class LocalHttpServer:
         body = await self._json_body(request)
         if set(body) != {"owner", "config_identity"} or not isinstance(body["config_identity"], str):
             raise ValueError("invalid MCP authorization result target")
-        return web.json_response(self.sessions.core.mcp_management.oauth.completed_login_state(
+        manager = await self.sessions.core.mcp_management.prepare_oauth()
+        return web.json_response(manager.completed_login_state(
             owner_from_dict(body["owner"]), body["config_identity"]
         ))
 

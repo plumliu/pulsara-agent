@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { LocalScheduledTasksApi } from '../../frontend/lib/scheduled-tasks-api';
 import { promptContentTextProjection } from '../../frontend/lib/prompt-content';
 import { RuntimeApiError } from '../../frontend/lib/runtime-adapter';
-import type { CommandReceipt, LocalPromptSubmission, RuntimeAdapter, RuntimeBootstrap, RuntimeConnection, RuntimeProjection } from '../../frontend/lib/runtime-adapter';
+import type { CommandReceipt, LocalPromptSubmission, RuntimeAdapter, RuntimeBootstrap, RuntimeConnection, RuntimeProjection, WorkspaceAvailability } from '../../frontend/lib/runtime-adapter';
 import type { AgentTask, CapabilitySnapshot, ProjectCapabilityMutationResult, SessionSummary, UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
 
 import PulsaraApp from '../../frontend/app/pulsara-app';
@@ -271,6 +271,20 @@ describe('PulsaraApp', () => {
     await screen.findByRole('textbox', { name: '发送给 Pulsara' });
     expect(connectSpy.mock.calls.map(args => args[0])).toEqual(['session:hrluejkx3v2ajzf4ec6bb3ierm', 'session:hrluejkx3v2ajzf4ec6bb3ierm']);
     expect(screen.queryByText('暂时无法恢复会话')).toBeNull();
+  });
+
+  it('opens the actual connection while independent workspace refresh is still pending', async () => {
+    const adapter = new FakeAdapter();
+    const refresh = deferred<WorkspaceAvailability>();
+    adapter.workspaceAvailability.mockImplementation(() => refresh.promise);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+
+    await screen.findByLabelText('发送给 Pulsara');
+    expect(adapter.lastConnection?.closed).toBe(false);
+    expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
+    expect(screen.queryByText('工作目录已丢失')).toBeNull();
+    await act(async () => refresh.resolve({path: '/tmp/project', outcome: 'MISSING', reason: 'missing'}));
+    expect(await screen.findByText('工作目录已丢失')).toBeTruthy();
   });
 
   it.each(['success', 'error-after-read'] as const)('ignores late %s after selecting a different session', async outcome => {

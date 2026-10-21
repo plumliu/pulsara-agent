@@ -69,6 +69,7 @@ const bootstrap: RuntimeBootstrap = {
   protocol: { major: 3, minor: 0 },
   runtime: { status: 'ready', origin: 'http://localhost', database_state: 'ready' },
   database_state: 'ready',
+  model_catalog_loading: false,
   local_settings: { pulsara_home: '/Users/test/custom-pulsara-home',
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
@@ -291,6 +292,7 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
 }
 
 class FakeConnection implements RuntimeConnection {
+  readonly availability = {path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null};
   readSubagentCapacity = vi.fn(async () => ({ target: 4, occupied: 0 }));
   setSubagentCapacity = vi.fn(async (target: number) => ({ target, occupied: 0 }));
   readonly filePreview = {

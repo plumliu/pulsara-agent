@@ -12,6 +12,7 @@ import {
 } from '../../frontend/lib/runtime-adapter';
 import type { AgentTask } from '../../frontend/lib/pulsara-types';
 
+const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null};
 let historyOwnerFixture: Record<string, unknown> = {};
 afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOwnerFixture = {}; });
 
@@ -196,6 +197,7 @@ function connectPayload(
   liveControl: Record<string, unknown> = {},
 ) {
   return {
+    workspace_availability: connectedWorkspaceAvailability,
     connection_id: 'connection-fidelity', connection_generation: 1,
     session_id: 'session-1', role: 'controller',
     live_hello: {
@@ -209,6 +211,16 @@ function connectPayload(
     live_control_snapshot: { snapshot: liveControl },
   };
 }
+
+it('carries the connected workspace observation without another workspace request', async () => {
+  const payload = connectPayload();
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), {status: 201}));
+  stubRuntimeFetch(fetchMock);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.availability).toEqual(payload.workspace_availability);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][0]).toBe('/api/sessions/session-1/connections');
+});
 
 it('preserves PR03 exact control/query identities and typed query retirement states', async () => {
   vi.stubGlobal('crypto', { getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
@@ -510,7 +522,7 @@ describe('exact prompt projection', () => {
         : inlineContent('text'),
     });
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1, session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', event_sequence_cut: '8', entries: [
         entry('prompt-a', 'A', 1, 'USER_MESSAGE'),
@@ -546,7 +558,7 @@ describe('exact prompt projection', () => {
       tool_result: { assistant_entry_id: assistant, tool_call_id: call, result_state: state },
     });
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1, session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: { snapshot: {
         session_id: 'session-1', writer_generation: '1', event_sequence_cut: '7',
@@ -608,7 +620,7 @@ describe('exact prompt projection', () => {
       inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
     });
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: {
@@ -666,7 +678,7 @@ describe('exact prompt projection', () => {
     const responses = [
       {
         connection_id: 'connection-1',
-        connection_generation: 1,
+        workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
         session_id: 'session-1',
         role: 'controller',
         live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
@@ -745,7 +757,7 @@ describe('exact prompt projection', () => {
     const bodies: Array<Record<string, unknown>> = [];
     const responses = [
       {
-        connection_id: 'connection-1', connection_generation: 1,
+        connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
         session_id: 'session-1', role: 'controller',
         live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
         snapshot: {
@@ -782,7 +794,7 @@ describe('exact prompt projection', () => {
 
   it('projects an adopted context boundary from canonical control after observation', async () => {
     const responses = [{
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: {
@@ -834,7 +846,7 @@ describe('exact prompt projection', () => {
 
   it('projects process-local presentation notices from only the current observation', async () => {
     const responses = [{
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: {
@@ -867,7 +879,7 @@ describe('exact prompt projection', () => {
 
   it('projects provider reasoning and distinguishes full text from a summary', async () => {
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: {
@@ -910,7 +922,7 @@ describe('exact prompt projection', () => {
 
   it('keeps the provider presentation kind on a live reasoning stream', async () => {
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: {
         live_owner_epoch: '1', live_revision: '2',
@@ -951,7 +963,7 @@ describe('exact prompt projection', () => {
 
   it('projects the exact live tool name and terminal command when arguments close', async () => {
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: {
         live_owner_epoch: '1', live_revision: '2',
@@ -994,7 +1006,7 @@ describe('exact prompt projection', () => {
   it('projects the root TODO from owner snapshots after live invalidation without attaching it to a message', async () => {
     const responses = [
       {
-        connection_id: 'connection-1', connection_generation: 1,
+        connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
         session_id: 'session-1', role: 'controller',
         live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
         snapshot: {
@@ -1092,7 +1104,7 @@ describe('exact prompt projection', () => {
     const requests: Array<Record<string, unknown>> = [];
     const responses = [
       {
-        connection_id: 'connection-1', connection_generation: 1,
+        connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
         session_id: 'session-1', role: 'controller',
         live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
         snapshot: {
@@ -1521,7 +1533,7 @@ describe('exact prompt projection', () => {
     ];
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1',
-      connection_generation: 1,
+      workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1',
       role: 'controller',
       live_hello: {
@@ -1672,7 +1684,7 @@ describe('exact prompt projection', () => {
     });
     const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
       snapshot: {
@@ -1714,7 +1726,7 @@ describe('exact prompt projection', () => {
 
   it('keeps detached child result data without inferring active membership or showing unloaded tasks', async () => {
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1', connection_generation: 1,
+      connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
       live_hello: {
         live_owner_epoch: '1', live_revision: '1',
@@ -1994,7 +2006,7 @@ describe('LocalHttpRuntimeAdapter connection ownership', () => {
     stubRuntimeFetch(vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       requestBody = init?.body ? JSON.parse(String(init.body)) : undefined;
       return new Response(JSON.stringify({
-        connection_id: 'connection-takeover', connection_generation: 2,
+        connection_id: 'connection-takeover', workspace_availability: connectedWorkspaceAvailability, connection_generation: 2,
         session_id: 'session-1', role: 'controller',
         live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
         snapshot: {
@@ -2035,7 +2047,7 @@ describe('subagent completion continuation', () => {
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
       return new Response(JSON.stringify({
-        connection_id: 'connection-result', connection_generation: 3,
+        connection_id: 'connection-result', workspace_availability: connectedWorkspaceAvailability, connection_generation: 3,
         session_id: 'session-1', role: 'controller',
         live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
         snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', entries: [], control: {} } },
@@ -3149,7 +3161,7 @@ it('retains deduplicated interruption history across continued turns and an olde
   const notice={owner_kind:'EXECUTED_TURN',owner_id:'old-turn',reason:'USER_STOPPED',terminal_at_utc:'2026-10-05T00:00:00Z',display_after_entry_sequence:'1'};
   const oldEntry={entry_id:'old-input',turn_id:'old-turn',entry_sequence:'1',entry_kind:'USER_MESSAGE',content:inlinePrompt('stopped question')};
   const snapshot={session_id:'session-1',event_sequence_cut:'2',entries:[oldEntry],control:{}};
-  const responses=[{connection_id:'connection-1',connection_generation:1,session_id:'session-1',role:'observer',
+  const responses=[{connection_id:'connection-1',workspace_availability: connectedWorkspaceAvailability, connection_generation:1,session_id:'session-1',role:'observer',
     live_hello:{live_owner_epoch:'1',live_revision:'0',live_snapshot:{}},snapshot:{snapshot},live_control_snapshot:{snapshot:{}}},
     {observation:{through_event_sequence:'3',committed:[{projection_kind:'CURRENT_CONTROL',interruption_notice:notice},{projection_kind:'CURRENT_CONTROL',interruption_notice:notice}]}},
     {snapshot:{snapshot}}];

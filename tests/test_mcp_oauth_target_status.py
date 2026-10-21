@@ -97,7 +97,7 @@ def test_restarted_manager_checks_saved_grant_against_current_target(tmp_path):
                 credential_boundary=previous.credential_boundary,
                 open_browser=previous.open_browser,
             )
-            state.service.oauth = restarted
+            state.service._oauth = restarted
             try:
                 controller = _controller(state.service)
                 assert (await controller.mcp_authorization("revocable", action="status"))["state"] == "authorized"

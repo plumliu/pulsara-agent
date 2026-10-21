@@ -250,7 +250,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [adapter]);
+  }, [adapter, bootstrap?.model_catalog_loading]);
 
   const selectableRoutes = useMemo(() => [...(catalog?.routes ?? [])].sort((left, right) => (
     alphabeticalCollator.compare(left.display_name, right.display_name)
@@ -536,7 +536,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
                 <span className="model-config-card__icon"><Bot size={15} /></span>
                 <span><strong title={connectionTitle(connection)}>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_window_tokens ?? connection.context_tokens)} 上下文</small><code title={connection.model_id}>{connection.model_id}</code></span>
                 <div className="model-config-card__actions">
-                  <span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : '配置不可用'}</span>
+                  <span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : bootstrap?.model_catalog_loading && connection.source === 'models_dev' ? '模型目录正在载入' : '配置不可用'}</span>
                   {deleteCandidateId === connection.id ? <div className="model-delete-confirmation"><button disabled={deletingModelId === connection.id} onClick={() => setDeleteCandidateId(undefined)}>取消</button><button className="subtle-danger" disabled={deletingModelId === connection.id} onClick={() => void deleteModel(connection)}>{deletingModelId === connection.id ? <LoaderCircle size={13} /> : <Trash2 size={13} />}确认删除</button></div> : <div className="model-config-card__buttons"><button className="model-edit-trigger" aria-label={`修改模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => void editModel(connection)}>{loadingModelId === connection.id ? <LoaderCircle size={13} /> : <Pencil size={13} />}修改</button><button className="model-delete-trigger subtle-danger" aria-label={`删除模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => setDeleteCandidateId(connection.id)}><Trash2 size={13} />删除</button></div>}
                 </div>
               </article>)}</div>

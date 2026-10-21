@@ -22,6 +22,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const home = process.env.PULSARA_HOME;
 const mode = ${JSON.stringify(mode)};
+fs.writeFileSync(path.join(home, 'spawned'), 'child imports started');
+if (mode === 'early-exit') process.exit(3);
 const output = value => process.stdout.write(JSON.stringify(value) + '\\n');
 if (process.argv.includes('--wait-owner')) process.exit(0);
 const lines = require('node:readline').createInterface({input:process.stdin});
@@ -73,9 +75,9 @@ test('host uses one child, private startup frame and correlated quit inspection'
   const value = await fixture();
   try {
     await value.runtime.waitForPreviousOwner();
-    const first = value.runtime.start(settings, true);
+    const first = value.runtime.start(async () => settings, true);
     // Both calls enter before the filesystem preparation finishes.
-    await assert.rejects(value.runtime.start(settings, true), /不能启动第二个内核/);
+    await assert.rejects(value.runtime.start(async () => settings, true), /不能启动第二个内核/);
     assert.equal(await first, 'http://127.0.0.1:12345');
     const status = await value.runtime.inspectQuit();
     assert.equal(status.activeTasks, 1);
@@ -93,7 +95,7 @@ test('host uses one child, private startup frame and correlated quit inspection'
 test('stop waits for the child to finish settlement and permits concurrent stop callers', {timeout:10000}, async () => {
   const value = await fixture('drain');
   try {
-    await value.runtime.start(settings, true);
+    await value.runtime.start(async () => settings, true);
     const closing = waitForFile(path.join(value.home, 'closing'));
     let stopped = false;
     const first = value.runtime.stop().then(() => { stopped = true; });
@@ -111,7 +113,7 @@ test('stop waits for the child to finish settlement and permits concurrent stop 
 test('malformed status closes the control pipe and explicit stop does not write after end', {timeout:10000}, async () => {
   const value = await fixture('malformed');
   try {
-    await assert.rejects(value.runtime.start(settings, true), /无效的宿主消息/);
+    await assert.rejects(value.runtime.start(async () => settings, true), /无效的宿主消息/);
     await value.runtime.stop();
     assert.equal(value.runtime.running, false);
     assert.equal((await value.calls()).filter(value => value.type === 'shutdown').length, 1);
@@ -121,7 +123,7 @@ test('malformed status closes the control pipe and explicit stop does not write 
 test('quit during asynchronous launch preparation still stops the child once spawned', {timeout:10000}, async () => {
   const value = await fixture();
   try {
-    const started = value.runtime.start(settings, true);
+    const started = value.runtime.start(async () => settings, true);
     const stopped = value.runtime.stop();
     await started;
     await stopped;
@@ -133,8 +135,65 @@ test('quit during asynchronous launch preparation still stops the child once spa
 test('a ready child reporting close failure rejects shutdown completion', {timeout:10000}, async () => {
   const value = await fixture('close-failure');
   try {
-    await value.runtime.start(settings, true);
+    await value.runtime.start(async () => settings, true);
     await assert.rejects(value.runtime.stop(), /收尾失败/);
     assert.equal(value.runtime.running, false);
   } finally { await value.close(); }
+});
+
+test('child starts before PostgreSQL finishes, but start and inspection frames stay gated', {timeout:10000}, async () => {
+  const value = await fixture();
+  let release!: () => void;
+  const database = new Promise<void>(resolve => { release = resolve; });
+  const started = value.runtime.start(async () => { await database; return settings; }, true);
+  try {
+    await waitForFile(path.join(value.home, 'spawned'));
+    assert.equal(value.runtime.running, true);
+    assert.equal(existsSync(path.join(value.home, 'calls.jsonl')), false);
+    assert.deepEqual(await value.runtime.inspectQuit(), {type:'inspect-quit', activeTasks:0, scheduledTasks:0});
+    let stopped = false;
+    const stopping = value.runtime.stop().then(() => { stopped = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stopped, false);
+    release();
+    assert.equal(await started, 'http://127.0.0.1:12345');
+    await stopping;
+    assert.deepEqual((await value.calls()).map(call => call.type), ['start', 'shutdown']);
+    assert.equal(value.runtime.running, false);
+  } finally { release(); await value.close(); }
+});
+
+test('PostgreSQL failure sends no start frame and joins the unused child before rejection', {timeout:10000}, async () => {
+  const value = await fixture();
+  let release!: () => void;
+  const database = new Promise<void>(resolve => { release = resolve; });
+  const failure = new Error('database preparation failed');
+  const started = value.runtime.start(async () => { await database; throw failure; }, true);
+  const rejected = assert.rejects(started, error => error === failure);
+  try {
+    await waitForFile(path.join(value.home, 'spawned'));
+    release();
+    await rejected;
+    assert.equal(value.runtime.running, false);
+    assert.equal(existsSync(path.join(value.home, 'calls.jsonl')), false);
+    assert.equal(value.events.some(event => event.type === 'ready'), false);
+  } finally { release(); await value.close(); }
+});
+
+test('an early child exit is observed while PostgreSQL preparation is still settling', {timeout:10000}, async () => {
+  const value = await fixture('early-exit');
+  let release!: () => void;
+  const database = new Promise<void>(resolve => { release = resolve; });
+  const started = value.runtime.start(async () => { await database; return settings; }, true);
+  const rejected = assert.rejects(started, /内核在就绪前退出/);
+  try {
+    await waitForFile(path.join(value.home, 'spawned'));
+    assert.equal(value.runtime.running, true); // PG owner is still settling.
+    const stopping = value.runtime.stop();
+    release();
+    await rejected;
+    await stopping;
+    assert.equal(value.runtime.running, false);
+    assert.equal(existsSync(path.join(value.home, 'calls.jsonl')), false);
+  } finally { release(); await value.close(); }
 });

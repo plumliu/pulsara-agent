@@ -3,7 +3,7 @@ import { parsePresentationResult } from '../lib/presentation-targets';
 import { PresentationResult } from './presentation-result';
 import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 
-import { captureHistoryAnchor, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
+import { captureHistoryAnchor, collectHistoryResidence, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
 import { splitSkillReferences } from '../lib/skill-reference';
 
 import { createPortal } from 'react-dom';
@@ -127,6 +127,7 @@ interface WorkbenchViewProps {
   history?: WorkbenchHistory;
   onLoadHistory?: (windowId?: string, direction?: 'older' | 'newer') => Promise<void>;
   onHydrateEntries?: (entryIds: string[], includeReasoning?: boolean) => Promise<void>;
+  onRetainHistory?: (interest: {visibleEntryIds: string[]; pinnedEntryIds: string[]}) => void;
   onLocateEntry?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onCompletePaths?: import('../lib/file-reference').CompleteWorkspacePaths;
@@ -153,6 +154,7 @@ interface WorkbenchViewProps {
   runtimeStatus: RuntimeStatus;
   runtimeError?: string;
   modelConfigurations: ModelConfigurationSummary[];
+  modelCatalogLoading?: boolean;
   modelCallBinding?: ModelCallBindingPayload | null;
   onReadContextUsage?: (signal: AbortSignal) => Promise<ContextUsagePreview>;
   contextUsageRevision?: number | string;
@@ -424,6 +426,7 @@ function TraceSummary({ icon, title, purpose, subtitle, state, status, action }:
 
 function TraceCard({
   trace,
+  disclosureOwnerId,
   skills,
   mcpToolRefs,
   artifactOwnerKey,
@@ -432,6 +435,7 @@ function TraceCard({
   onNotify,
 }: {
   trace: ToolTrace;
+  disclosureOwnerId: string;
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   artifactOwnerKey: string;
@@ -443,7 +447,7 @@ function TraceCard({
     void writeClipboardText(text).catch(() => onNotify('无法复制输出', '系统剪贴板暂时不可用，请重试', 'warning'));
   };
   const { showBuiltinToolResults } = useContext(ToolResultDisplayContext);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useHistoryDisclosure(JSON.stringify(['trace', disclosureOwnerId, trace.id]));
   const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
   const [artifactBusy, setArtifactBusy] = useState(false);
   const [artifactError, setArtifactError] = useState('');
@@ -827,8 +831,8 @@ function reasoningPreview(body: string, running: boolean): string {
   return (running ? lines.at(-1) : lines[0]) ?? body.trim();
 }
 
-function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: MarkdownNotify }) {
-  const [expanded, setExpanded] = useState(false);
+function ReasoningRow({ block, ownerId, onNotify }: { block: ReasoningBlock; ownerId: string; onNotify: MarkdownNotify }) {
+  const [expanded, setExpanded] = useHistoryDisclosure(JSON.stringify(['reasoning', ownerId, block.id]));
   const title = block.kind === 'summary' ? '思考摘要' : '思考';
   const running = Boolean(block.active);
   return (
@@ -856,16 +860,18 @@ function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: Ma
 
 function ReasoningDisclosure({
   blocks,
+  ownerId,
   onNotify,
   nested = false,
 }: {
   blocks: ReasoningBlock[];
+  ownerId: string;
   onNotify: MarkdownNotify;
   nested?: boolean;
 }) {
   return (
     <div className={`reasoning-disclosure${nested ? ' reasoning-disclosure--nested' : ''}`}>
-      {blocks.map((block) => <ReasoningRow key={block.id} block={block} onNotify={onNotify} />)}
+      {blocks.map((block) => <ReasoningRow key={block.id} block={block} ownerId={ownerId} onNotify={onNotify} />)}
     </div>
   );
 }
@@ -1069,6 +1075,10 @@ function AssistantMessage({
 }) {
   const [forking, setForking] = useState(false);
   const forkInFlight = useRef(false);
+  const visualization = useMemo(() => message.visualizations ? {
+    entryId: message.id, items: message.visualizations,
+    onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail,
+  } : undefined, [message.id, message.visualizations, onReadVisualization, onReadVisualizationThumbnail]);
   const hasNaturalLanguage = Boolean(message.body.trim());
   const isStreaming = message.status === 'running';
   const canCopyResponse = hasNaturalLanguage && responseActionEligible;
@@ -1090,7 +1100,7 @@ function AssistantMessage({
       {startsAssistantRun && <AssistantHeading message={message} response={hasNaturalLanguage} label={assistantLabel} />}
 
       {message.reasoning?.length ? (
-        <ReasoningDisclosure blocks={message.reasoning} onNotify={onNotify} />
+        <ReasoningDisclosure blocks={message.reasoning} ownerId={message.sourceEntryIds?.[0] ?? message.id} onNotify={onNotify} />
       ) : null}
 
       {hasNaturalLanguage && (
@@ -1098,7 +1108,7 @@ function AssistantMessage({
           <div className="assistant-copy">
             <div className="assistant-markdown">
               <AnnotationBody entryId={message.assistantKind !== 'live' && !isStreaming ? message.id : undefined} body={message.body}>
-                <MarkdownBody assistantChat visualization={message.visualizations ? { entryId: message.id, items: message.visualizations ?? [], onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail } : undefined} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
+                <MarkdownBody assistantChat visualization={visualization} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
               </AnnotationBody>
             </div>
             {(canCopyResponse || message.forkEligible) ? (
@@ -1133,7 +1143,7 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} disclosureOwnerId={message.sourceEntryIds?.[0] ?? message.id} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
       {message.subagentRuns?.length ? (
         <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskHighlighted={focusTaskHighlighted} />
       ) : null}
@@ -1157,6 +1167,18 @@ function isCompleteAnswer(message: Message, taskFinalAnswerId?: string): boolean
 }
 
 const HistoryHydrationContext = createContext<WorkbenchViewProps['onHydrateEntries']>(undefined);
+// Only explicit choices live beyond a mounted page. No page/body or measured
+// height directory is retained by this UI owner.
+const HistoryDisclosureContext = createContext<Map<string, boolean> | undefined>(undefined);
+function useHistoryDisclosure(key: string): [boolean, (value: boolean | ((previous: boolean) => boolean)) => void] {
+  const choices = useContext(HistoryDisclosureContext);
+  const [expanded, update] = useState(() => choices?.get(key) ?? false);
+  return [expanded, value => update(previous => {
+    const next = typeof value === 'function' ? value(previous) : value;
+    choices?.set(key, next);
+    return next;
+  })];
+}
 
 function HistoryMessageHost({ message, children, knownContent, contextLoadingSummarized = false }: { message: Message; children: ReactNode; knownContent?: ReactNode; contextLoadingSummarized?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -1210,8 +1232,10 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
 }) {
   const answer = messages.find(message => isCompleteAnswer(message, taskFinalAnswerId));
   const complete = completed || Boolean(answer);
+  const choices = useContext(HistoryDisclosureContext);
+  const choiceKey = `process:${messages[0].historyGroupId ?? messages[0].turnId ?? messages[0].id}`;
   const [disclosure, setDisclosure] = useState({
-    complete, active, focusRequest, expanded: Boolean(focusRequest) || (active && !complete),
+    complete, active, focusRequest, expanded: Boolean(focusRequest) || (choices?.get(choiceKey) ?? (active && !complete)),
   });
   // A completed answer closes the live process once. Later rerenders preserve
   // the reader's choice; explicit navigation reveals its target again.
@@ -1231,9 +1255,11 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     {!historyLoading && messages.some(message => message.historyEarlierUnloaded) && <div role="status" className="history-boundary">本轮较早过程尚未加载</div>}
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
     <button type="button" className="conversation-run__toggle"
+      data-history-entry={messages[0].id}
+      data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
       data-thread-disclosure="" aria-expanded={disclosure.expanded}
       aria-label={disclosure.expanded ? '收起中间过程' : '展开中间过程'}
-      onClick={() => setDisclosure({ ...disclosure, expanded: !disclosure.expanded })}>
+      onClick={() => { choices?.set(choiceKey, !disclosure.expanded); setDisclosure({ ...disclosure, expanded: !disclosure.expanded }); }}>
       <span>{complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
     </button>
     {process.map((message) => {
@@ -1678,8 +1704,26 @@ function AnimatedQueueItem({ children }: { children: ReactNode }) {
   return <div className="composer-queue__item"><div className="composer-queue__item-content">{children}</div></div>;
 }
 
+function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
+  store: PromptDraftStore;
+  sessionId: string;
+  skills: SkillCapability[];
+  disabled: boolean;
+  onSelect: (name: string) => void;
+}) {
+  const text = useSyncExternalStore(store.subscribe,
+    () => store.summary(sessionId).text, () => store.summary(sessionId).text);
+  return <div className="skill-menu__list">{skills.map(skill => {
+    const selected = skill.configured || splitSkillReferences(text).some(reference => typeof reference !== 'string' && reference.name === skill.name);
+    return <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''}
+      onClick={() => onSelect(skill.name)} disabled={skill.configured || disabled}>
+      <span><strong>/{skill.name}</strong><small>{skill.description}</small></span>{selected && <Check size={13} />}
+    </button>;
+  })}</div>;
+}
+
 export function WorkbenchView({
-  history, onLoadHistory, onHydrateEntries, onLocateEntry,
+  history, onLoadHistory, onHydrateEntries, onRetainHistory, onLocateEntry,
   focusSourceEntry,
   workspace,
   session,
@@ -1703,6 +1747,7 @@ export function WorkbenchView({
   runtimeStatus,
   runtimeError,
   modelConfigurations,
+  modelCatalogLoading = false,
   modelCallBinding,
   onReadContextUsage,
   contextUsageRevision = 0,
@@ -1748,8 +1793,16 @@ export function WorkbenchView({
   onNotify,
   onPermissionChange,
 }: WorkbenchViewProps) {
-  useSyncExternalStore(draftStore.subscribe, draftStore.getVersion, draftStore.getVersion);
-  const draft = draftStore.summary(session.id);
+  // The editor and open skill menu own text updates. The surrounding history
+  // only needs these current-session admission/control primitives.
+  const draft = {
+    hasContent: useSyncExternalStore(draftStore.subscribe,
+      () => draftStore.summary(session.id).hasContent, () => draftStore.summary(session.id).hasContent),
+    pendingFiles: useSyncExternalStore(draftStore.subscribe,
+      () => draftStore.summary(session.id).pendingFiles, () => draftStore.summary(session.id).pendingFiles),
+    failedFiles: useSyncExternalStore(draftStore.subscribe,
+      () => draftStore.summary(session.id).failedFiles, () => draftStore.summary(session.id).failedFiles),
+  };
   const [planRequests, setPlanRequests] = useState<Record<string, boolean>>({});
   const requestPlan = planRequests[session.id] ?? false;
   const setRequestPlan = useCallback((value: boolean | ((current: boolean) => boolean)) => {
@@ -1806,7 +1859,10 @@ export function WorkbenchView({
   const threadRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerEditorRef = useRef<HTMLDivElement>(null);
-  const acceptedDraftLayout = useRef<{ sessionId: string; height: number; restoreFocus: boolean } | null>(null);
+  const [acceptedDraftLayout, setAcceptedDraftLayout] = useState<{ sessionId: string; height: number; restoreFocus: boolean } | null>(null);
+  if (acceptedDraftLayout && acceptedDraftLayout.sessionId !== session.id) {
+    setAcceptedDraftLayout(null);
+  }
   const budgetInputRef = useRef<HTMLInputElement>(null);
   const handledQueueActions = useRef(new Set<string>());
   const queueClicks = useRef(new Set<string>());
@@ -1953,6 +2009,7 @@ export function WorkbenchView({
   );
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
   const modelBindingMissing = Boolean(modelCallBinding && !selectedModel);
+  const modelPending = modelCatalogLoading && selectedModel?.source === 'models_dev' && selectedModel.status !== 'ready';
   const modelReady = Boolean(
     modelCallBinding
     && selectedModel?.status === 'ready'
@@ -2099,6 +2156,7 @@ export function WorkbenchView({
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) request.abort();
     const owner = session.id;
+    locatingEntry.current = entryId;
     resetReading(); readingAnchor.current = undefined;
     try {
       const read = annotation ? onLocateAnnotation : onLocateEntry;
@@ -2115,6 +2173,7 @@ export function WorkbenchView({
       readingAnchor.current = captureHistoryAnchor(thread);
       locatingTaskRef.current = false;
     } finally {
+      if (locateRequest.current === request) locatingEntry.current = undefined;
       signal.removeEventListener('abort', abort);
     }
   }, [onLocateAnnotation, onLocateEntry, resetReading, session.id]);
@@ -2151,15 +2210,54 @@ export function WorkbenchView({
   }, []);
   useLayoutEffect(restoreReadingPosition);
 
+  const disclosureChoices = useMemo(() => ({sessionId: session.id, choices: new Map<string, boolean>()}), [session.id]).choices;
+  const locatingEntry = useRef<string | undefined>(undefined);
+  const residenceFrame = useRef<number | undefined>(undefined);
+  const reportResidence = useCallback(() => {
+    if (!onRetainHistory || residenceFrame.current !== undefined) return;
+    residenceFrame.current = requestAnimationFrame(() => {
+      residenceFrame.current = undefined;
+      const thread = threadRef.current;
+      if (!thread) return;
+      const interest = collectHistoryResidence(thread);
+      if (!followLatestRef.current && !userScrollPending.current) readingAnchor.current = captureHistoryAnchor(thread) ?? readingAnchor.current;
+      if (readingAnchor.current) interest.pinnedEntryIds.push(readingAnchor.current.entryId);
+      if (locatingEntry.current) interest.pinnedEntryIds.push(locatingEntry.current);
+      onRetainHistory(interest);
+    });
+  }, [onRetainHistory]);
+  useLayoutEffect(reportResidence);
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(reportResidence);
+    observer?.observe(thread);
+    if (thread.firstElementChild) observer?.observe(thread.firstElementChild);
+    thread.addEventListener('scroll', reportResidence);
+    thread.addEventListener('focusin', reportResidence);
+    thread.addEventListener('focusout', reportResidence);
+    document.addEventListener('selectionchange', reportResidence);
+    return () => {
+      observer?.disconnect();
+      thread.removeEventListener('scroll', reportResidence);
+      thread.removeEventListener('focusin', reportResidence);
+      thread.removeEventListener('focusout', reportResidence);
+      document.removeEventListener('selectionchange', reportResidence);
+      if (residenceFrame.current !== undefined) cancelAnimationFrame(residenceFrame.current);
+      residenceFrame.current = undefined;
+      locatingEntry.current = undefined;
+    };
+  }, [reportResidence, session.id]);
+
   const insertSkill = useCallback((name: string) => {
     if (editingQueue || queueClicks.current.has('composer-edit')) return;
     const marker = `/${name}`;
-    if (splitSkillReferences(draft.text).some(reference => typeof reference !== 'string' && reference.name === name)) return;
+    if (splitSkillReferences(draftStore.summary(session.id).text).some(reference => typeof reference !== 'string' && reference.name === name)) return;
     draftStore.insertText(session.id, `${marker} `, true);
     setSkillOpen(false);
     setAddOpen(false);
     window.requestAnimationFrame(() => draftStore.focus(session.id));
-  }, [draft.text, draftStore, editingQueue, session.id]);
+  }, [draftStore, editingQueue, session.id]);
 
   const fileEntryBlocked = !canControl || isObserver || runtimeStatus !== 'online' || editingQueue || submitting;
   const fileDrop = useWorkbenchFileDrop({ sessionId: session.id, store: draftStore,
@@ -2207,8 +2305,7 @@ export function WorkbenchView({
   }, []);
 
   useLayoutEffect(() => {
-    const previous = acceptedDraftLayout.current;
-    acceptedDraftLayout.current = null;
+    const previous = acceptedDraftLayout;
     const editor = composerEditorRef.current;
     if (!previous || previous.sessionId !== session.id || !editor) return;
     if (previous.restoreFocus) draftStore.focus(session.id);
@@ -2221,7 +2318,7 @@ export function WorkbenchView({
       { height: `${height}px`, overflow: 'hidden' },
     ], { duration: 240, easing: 'cubic-bezier(.2, .7, .2, 1)' });
     return () => animation?.cancel();
-  }, [draft.hasContent, draft.revision, draftStore, session.id]);
+  }, [acceptedDraftLayout, draftStore, session.id]);
 
   const submit = useCallback(async () => {
     if (!canControl) return;
@@ -2260,12 +2357,14 @@ export function WorkbenchView({
     }
     if (!accepted) return;
     const editorHeight = composerEditorRef.current?.getBoundingClientRect().height;
-    acceptedDraftLayout.current = editorHeight === undefined ? null : {
+    const layout = editorHeight === undefined ? null : {
       sessionId: session.id,
       height: editorHeight,
       restoreFocus: composerEditorRef.current?.contains(document.activeElement) === true,
     };
-    if (!draftStore.clearIfSnapshot(session.id, snapshot)) acceptedDraftLayout.current = null;
+    // This layout slot guarantees a commit even when a batched queue restore
+    // leaves hasContent true. Text revisions need not subscribe the transcript.
+    if (draftStore.clearIfSnapshot(session.id, snapshot)) setAcceptedDraftLayout(layout);
     setRequestPlan(false);
     onPermissionChange('bypass-permissions');
   }, [canControl, activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
@@ -2345,6 +2444,7 @@ export function WorkbenchView({
   }, [focusTaskHighlighted, focusTaskId, focusTaskRevision, session.id, resetReading]);
 
   return (
+    <HistoryDisclosureContext.Provider value={disclosureChoices}>
     <HistoryHydrationContext.Provider value={onHydrateEntries}>
     <ResponseAnnotations sessionId={session.id} store={draftStore} onLocate={locateAnnotation} onNotify={onNotify}
       canAnnotate={canControl && !isObserver && runtimeStatus === 'online' && Boolean(session.id) && !editingQueue}>
@@ -2594,14 +2694,8 @@ export function WorkbenchView({
                 }}>
                   {skillOpen ? <>
                     <button type="button" className="mode-chip composer-skills-back" aria-label="返回添加菜单" onClick={() => setSkillOpen(false)}><ArrowLeft size={12} /><span>技能</span></button>
-                    <div className="skill-menu__list">
-                      {skills.map(skill => {
-                        const selected = skill.configured || splitSkillReferences(draft.text).some(reference => typeof reference !== 'string' && reference.name === skill.name);
-                        return <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured || editingQueue}>
-                          <span><strong>/{skill.name}</strong><small>{skill.description}</small></span>{selected && <Check size={13} />}
-                        </button>;
-                      })}
-                    </div>
+                    <DraftSkillOptions store={draftStore} sessionId={session.id} skills={skills}
+                      disabled={editingQueue} onSelect={insertSkill} />
                   </> : <>
                   <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(false)}><FileText size={12} /> 添加文件</button>
                   <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(true)}><FolderPlus size={12} /> 添加文件夹</button>
@@ -2699,7 +2793,7 @@ export function WorkbenchView({
           </div>
           </div>
         </div>
-        {!welcome && !modelReady && <p className="composer-note composer-note--attention">{modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置'}</p>}
+        {modelPending ? <p className="composer-note" role="status">模型目录正在载入，请稍候。</p> : !welcome && !modelReady && <p className="composer-note composer-note--attention">{modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置'}</p>}
       </div> : (
         <div className="observer-wrap composer-wrap" ref={composerWrapRef}>
           {composerQueue}
@@ -2710,5 +2804,6 @@ export function WorkbenchView({
     </section>
     </ResponseAnnotations>
     </HistoryHydrationContext.Provider>
+    </HistoryDisclosureContext.Provider>
   );
 }

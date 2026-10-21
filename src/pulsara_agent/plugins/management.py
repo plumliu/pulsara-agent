@@ -178,10 +178,11 @@ class PluginManagementService:
                 return config if store.read_state(layout) == state else None
 
             owner = plugin_connection_owner(identity, local_server_id)
+            manager = await connections.prepare_oauth()
             if action == "login":
-                return connections.oauth._begin(owner, current_target)
+                return manager._begin(owner, current_target)
             if action == "status":
-                return connections.oauth.login_state(owner, config)
+                return manager.login_state(owner, config)
 
         def require_current():
             if current_target() is None:
@@ -190,12 +191,12 @@ class PluginManagementService:
                 )
 
         if action == "logout":
-            await connections.oauth.logout(owner, require_current=require_current)
+            await manager.logout(owner, require_current=require_current)
         elif action == "cancel":
-            await connections.oauth.cancel(owner, require_current=require_current)
+            await manager.cancel(owner, require_current=require_current)
         else:
             raise ValueError("invalid Plugin authorization action")
-        return connections.oauth.login_state(owner, config)
+        return manager.login_state(owner, config)
 
     async def replace_plugin_mcp_connection_overlay(self, request, *, connections):
         from .connection_management import replace_plugin_connection

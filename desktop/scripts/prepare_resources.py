@@ -501,6 +501,17 @@ def export_requirements():
         requirements.write_text(text)
 
 
+def compile_python_stdlib(python: Path, stdlib: Path):
+    # Resource copies can change source mtimes. CPython's checked-hash importer
+    # keeps these caches valid while still checking source contents. Force is
+    # required to replace even valid timestamp caches; uv owns site-packages.
+    run([
+        python, "-m", "compileall", "-q", "-f",
+        "--invalidation-mode", "checked-hash",
+        "-x", "^" + re.escape(str(stdlib / "site-packages")) + r"([/\\]|$)", stdlib,
+    ])
+
+
 def prepare_python_dependencies():
     target = RESOURCES / "python"
     managed = output(
@@ -530,11 +541,16 @@ def prepare_python_dependencies():
             "--system",
             "--break-system-packages",
             "--link-mode=copy",
+            # uv owns compilation with the target interpreter. Hash validation
+            # survives electron-builder's resource copies, which change mtimes.
+            "--compile-bytecode",
             "--require-hashes",
             ROOT / "build" / "requirements.txt",
         ],
         cwd=REPO,
+        env={**os.environ, "PYC_INVALIDATION_MODE": "CHECKED_HASH"},
     )
+    compile_python_stdlib(python, target / "lib" / "python3.12")
     if sys.platform == "linux":
         bundle_linux_dependencies(target)
 
@@ -550,7 +566,8 @@ def prepare_application():
         run(
             ["uv", "pip", "install", "--python", RESOURCES / "python/bin/python3",
              "--system", "--break-system-packages", "--link-mode=copy",
-             "--no-deps", "--reinstall", wheel], cwd=REPO,
+             "--compile-bytecode", "--no-deps", "--reinstall", wheel], cwd=REPO,
+            env={**os.environ, "PYC_INVALIDATION_MODE": "CHECKED_HASH"},
         )
 
 

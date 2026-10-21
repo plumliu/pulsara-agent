@@ -54,7 +54,6 @@ def _supervisor(tmp_path, endpoint, *, required=True):
     return McpHostSupervisor(
         session_id="session:subscription-test", workspace_root=tmp_path,
         configs=(config,), credential_boundary=ProcessCredentialBoundary(),
-        optional_fast_start_seconds=0.01,
     )
 
 

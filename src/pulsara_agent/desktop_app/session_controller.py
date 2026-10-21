@@ -422,10 +422,10 @@ class LocalSessionController:
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
 
-    async def prepare(self) -> list[dict[str, object]]:
+    async def prepare(self) -> None:
         """Verify cold resources without activating a HostSession."""
 
-        return await self.list_sessions()
+        await self.core.prepare_resources()
 
     def bootstrap_payload(self) -> dict[str, object]:
         return {
@@ -1760,7 +1760,7 @@ class LocalSessionController:
                 workspace_root = handle.session.workspace.workspace_root
         target = LocalMcpTarget(server_id, workspace_root)
         owner = target.owner
-        manager = self.core.mcp_management.oauth
+        manager = await self.core.mcp_management.prepare_oauth()
         if action == "cancel":
             await manager.cancel(owner)
         elif action == "logout":

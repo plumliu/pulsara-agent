@@ -1,8 +1,38 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { captureHistoryAnchor, restoreHistoryAnchor, waitForHistoryEntry } from '../../frontend/lib/history-dom';
+import { captureHistoryAnchor, collectHistoryResidence, restoreHistoryAnchor, waitForHistoryEntry } from '../../frontend/lib/history-dom';
 import { registerAnnotationBody, waitForAnnotationBody } from '../../frontend/lib/response-selection';
 
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
+
+it('retains viewport preparation, selection aliases and focus without pinning every expanded disclosure', () => {
+ const root=document.createElement('div');document.body.append(root);
+ root.innerHTML='<div data-source-entry="near" data-source-entries="near result"><article data-result-entry="result">visible</article></div><div data-source-entry="selected">selected text</div><div data-source-entry="focused"><button>focus</button></div><div data-source-entry="expanded" data-process-expanded="true">far expanded</div><section inert><div data-source-entry="hidden">closed</div></section>';
+ vi.spyOn(root,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,500));
+ for(const node of root.querySelectorAll<HTMLElement>('[data-source-entry], [data-result-entry]')) vi.spyOn(node,'getBoundingClientRect').mockReturnValue(new DOMRect(0,node.dataset.sourceEntry==='near'||node.dataset.resultEntry?550:2000,600,40));
+ root.querySelector('button')!.focus();
+ const range=document.createRange();range.selectNodeContents(root.querySelector('[data-source-entry="selected"]')!);document.getSelection()!.removeAllRanges();document.getSelection()!.addRange(range);
+ expect(collectHistoryResidence(root)).toEqual({visibleEntryIds:['near','result'],pinnedEntryIds:['selected','focused']});
+ document.getSelection()!.removeAllRanges();
+ expect(collectHistoryResidence(root).pinnedEntryIds).toEqual(['focused']);
+ root.hidden=true;expect(collectHistoryResidence(root)).toEqual({visibleEntryIds:[],pinnedEntryIds:[]});
+});
+
+it('anchors a collapsed fragment through prepend without treating its header as a loaded body or pinning all aliases',async()=>{
+ const root=document.createElement('div');document.body.append(root);
+ root.innerHTML='<button data-history-entry="old" data-history-entry-aliases="old hidden:1 hidden:2">collapsed process</button><button data-history-entry="other" data-history-entry-aliases="other">other fragment</button>';
+ vi.spyOn(root,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,500));
+ const header=root.querySelector('button')!;
+ const rect=vi.spyOn(header,'getBoundingClientRect').mockReturnValue(new DOMRect(0,30,600,30));
+ expect(collectHistoryResidence(root).visibleEntryIds).toEqual(['old']);
+ const anchor=captureHistoryAnchor(root)!;expect(anchor).toMatchObject({entryId:'old',header:true,top:30});
+ let located=false;const abort=new AbortController();const location=waitForHistoryEntry(root,'old',abort.signal).then(()=>{located=true;},()=>{});
+ await Promise.resolve();expect(located).toBe(false);
+ header.dataset.historyEntry='prepended';header.dataset.historyEntryAliases='prepended old hidden:1 hidden:2';
+ rect.mockReturnValue(new DOMRect(0,180,600,30));
+ restoreHistoryAnchor(root,anchor);expect(root.scrollTop).toBe(150);
+ expect(collectHistoryResidence(root).visibleEntryIds).toEqual(['prepended']);
+ abort.abort();await location;
+});
 
 describe('canonical history DOM completion and anchors', () => {
   it('keeps source registration pending beyond DOM insertion until the verified body is registered', async () => {

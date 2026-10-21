@@ -61,6 +61,7 @@ from .wire import (
     bounded_json_loads,
     result_type_presence,
 )
+from . import contracts as mcp_contracts
 
 
 NotificationCallback = Callable[[str], Awaitable[None]]
@@ -92,37 +93,12 @@ class McpWireResultPresence:
 
 
 @dataclass(frozen=True, slots=True)
-class McpAdvertisedCapabilities:
-    """Closed listing surface frozen from the negotiated SDK result."""
-
-    tools: bool
-    resources: bool
-    prompts: bool
-
-
-@dataclass(frozen=True, slots=True)
 class _PinnedHttpEndpoint:
     """One validated DNS answer set with the logical authority preserved."""
 
     urls: tuple[str, ...]
     host_header: str
     sni_hostname: str | None
-
-
-class McpProtocolConformanceError(ValueError):
-    """A bounded peer response violated the negotiated closed MCP contract."""
-
-
-class McpTransportOperationError(RuntimeError):
-    """Secret-safe physical transport settlement for one request path."""
-
-    def __init__(self, *, may_have_reached_server: bool) -> None:
-        self.may_have_reached_server = may_have_reached_server
-        super().__init__(
-            "MCP_TRANSPORT_OUTCOME_UNKNOWN"
-            if may_have_reached_server
-            else "MCP_TRANSPORT_UNWRITTEN"
-        )
 
 
 def _has_legacy_discovery_fallback_evidence(message: str) -> bool:
@@ -236,20 +212,20 @@ class _BoundedTransport:
                 maximum_depth=self.bounds.maximum_wire_json_depth,
             )
             return self._scrub(parsed)
-        except McpProtocolConformanceError:
+        except mcp_contracts.McpProtocolConformanceError:
             raise
         except BaseException:
             # A peer frame is already physically present.  Malformed JSON,
             # shape overflow and SDK carrier validation are therefore exact
             # protocol failures, never evidence of an unknown remote effect.
-            raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from None
+            raise mcp_contracts.McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from None
 
     def _scrub(self, value: object, *, identity: bool = False) -> object:
         if isinstance(value, str):
             for secret in self._secret_values:
                 if secret in value:
                     if identity:
-                        raise McpProtocolConformanceError(
+                        raise mcp_contracts.McpProtocolConformanceError(
                             "MCP_RESPONSE_CONTAINS_CREDENTIAL_IN_IDENTITY"
                         )
                     value = value.replace(secret, "[credential removed]")
@@ -288,21 +264,21 @@ class _BoundedTransport:
             ):
                 if present:
                     if value not in {"complete", "input_required"}:
-                        raise McpProtocolConformanceError(
+                        raise mcp_contracts.McpProtocolConformanceError(
                             "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
                         )
                 elif not self.allow_legacy_implicit_complete:
-                    raise McpProtocolConformanceError(
+                    raise mcp_contracts.McpProtocolConformanceError(
                         "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
                     )
             message = types.jsonrpc_message_adapter.validate_python(raw)
             return SessionMessage(message)
-        except McpProtocolConformanceError:
+        except mcp_contracts.McpProtocolConformanceError:
             raise
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from exc
+            raise mcp_contracts.McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from exc
 
     def _encode(self, value: SessionMessage) -> bytes:
         data = value.message.model_dump_json(by_alias=True, exclude_none=True).encode(
@@ -427,13 +403,13 @@ class _BoundedStdioTransport(_BoundedTransport):
                         # wakes ClientSession and lets the supervisor fence and
                         # reconnect this slot generation.
                         await self._offer_failure(
-                            McpTransportOperationError(may_have_reached_server=True),
+                            mcp_contracts.McpTransportOperationError(may_have_reached_server=True),
                             "MCP stdio peer closed stdout",
                         )
                         await self.read_writer.aclose()
                     return
                 if len(frame) > self.bounds.maximum_stdio_frame_bytes:
-                    raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID")
+                    raise mcp_contracts.McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID")
                 await self.read_writer.send(
                     self._decode(
                         frame.rstrip(b"\r\n"),
@@ -451,7 +427,7 @@ class _BoundedStdioTransport(_BoundedTransport):
                     payload = self._encode(message) + b"\n"
                 except BaseException:
                     await self._offer_failure(
-                        McpTransportOperationError(may_have_reached_server=False),
+                        mcp_contracts.McpTransportOperationError(may_have_reached_server=False),
                         "MCP stdio encode failed",
                     )
                     return
@@ -460,7 +436,7 @@ class _BoundedStdioTransport(_BoundedTransport):
                     await self._process.stdin.drain()
                 except BaseException:
                     await self._offer_failure(
-                        McpTransportOperationError(may_have_reached_server=True),
+                        mcp_contracts.McpTransportOperationError(may_have_reached_server=True),
                         "MCP stdio write failed",
                     )
                     return
@@ -653,7 +629,7 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
                 )
         content = await request.aread()
         if len(content) > self.bounds.maximum_http_json_body_bytes:
-            raise McpTransportOperationError(may_have_reached_server=False)
+            raise mcp_contracts.McpTransportOperationError(may_have_reached_server=False)
         pinned = await self._pin_endpoint(request.url)
         headers = dict(request.headers)
         headers["host"] = pinned.host_header
@@ -823,7 +799,7 @@ class _SdkHttpTransport(_BoundedTransport):
                 self._ready.set_exception(exc)
             elif not self._closed:
                 await self._offer_failure(
-                    McpTransportOperationError(may_have_reached_server=True),
+                    mcp_contracts.McpTransportOperationError(may_have_reached_server=True),
                     "MCP SDK transport failed",
                 )
         finally:
@@ -840,14 +816,14 @@ class _SdkHttpTransport(_BoundedTransport):
                     anyio.BrokenResourceError, anyio.ClosedResourceError,
                 )):
                     await self._offer_failure(
-                        McpTransportOperationError(may_have_reached_server=True),
+                        mcp_contracts.McpTransportOperationError(may_have_reached_server=True),
                         "MCP SDK receive transport failed",
                     )
                     await self.read_writer.aclose()
                     self._stop.set()
                     return
                 await self._offer_failure(
-                    McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
+                    mcp_contracts.McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
                     "MCP SDK carrier invalid",
                 )
                 continue
@@ -863,7 +839,7 @@ class _SdkHttpTransport(_BoundedTransport):
                 await self.read_writer.send(self._decode_parsed(self._scrub(raw)))
             except (ValueError, TypeError):
                 await self._offer_failure(
-                    McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
+                    mcp_contracts.McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
                     "MCP SDK carrier invalid",
                 )
         if not self._closed:
@@ -871,7 +847,7 @@ class _SdkHttpTransport(_BoundedTransport):
             # remains alive. Propagate that lost receive channel to the public
             # session so pending requests settle and the exact slot reconnects.
             await self._offer_failure(
-                McpTransportOperationError(may_have_reached_server=True),
+                mcp_contracts.McpTransportOperationError(may_have_reached_server=True),
                 "MCP SDK receive stream ended",
             )
             await self.read_writer.aclose()
@@ -1111,7 +1087,7 @@ class BoundedMcpSdkClient:
         self.protocol_version = ""
         self.server_name = config.display_name
         self.server_instructions = ""
-        self.advertised_capabilities: McpAdvertisedCapabilities | None = None
+        self.advertised_capabilities: mcp_contracts.McpAdvertisedCapabilities | None = None
         self._allow_legacy_implicit_complete = False
         self._owner_task = None
         self._session_ready = None
@@ -1207,7 +1183,7 @@ class BoundedMcpSdkClient:
                             # Honoring a subset is legal, but leaves Pulsara's
                             # advertised dynamic catalog unobserved. Retry the
                             # observation instead of publishing it as ready.
-                            raise McpTransportOperationError(
+                            raise mcp_contracts.McpTransportOperationError(
                                 may_have_reached_server=True
                             )
                 self._session_ready.set_result(None)
@@ -1292,8 +1268,8 @@ class BoundedMcpSdkClient:
                 transport.enforce_closed_result_type = True
             capabilities = self._session.server_capabilities
             if capabilities is None:
-                raise McpProtocolConformanceError("MCP_SERVER_CAPABILITIES_MISSING")
-            self.advertised_capabilities = McpAdvertisedCapabilities(
+                raise mcp_contracts.McpProtocolConformanceError("MCP_SERVER_CAPABILITIES_MISSING")
+            self.advertised_capabilities = mcp_contracts.McpAdvertisedCapabilities(
                 tools=capabilities.tools is not None,
                 resources=capabilities.resources is not None,
                 prompts=capabilities.prompts is not None,
@@ -1305,7 +1281,7 @@ class BoundedMcpSdkClient:
         if isinstance(message, Exception):
             await self._notification_callback(
                 "pulsara/protocol_conformance_failure"
-                if isinstance(message, McpProtocolConformanceError)
+                if isinstance(message, mcp_contracts.McpProtocolConformanceError)
                 else "pulsara/transport_failure"
             )
             return
@@ -1337,7 +1313,7 @@ class BoundedMcpSdkClient:
                 None,
                 "complete",
             }:
-                raise McpProtocolConformanceError(
+                raise mcp_contracts.McpProtocolConformanceError(
                     "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
                 )
             effective_value = "complete"
@@ -1345,7 +1321,7 @@ class BoundedMcpSdkClient:
             "complete",
             "input_required",
         }:
-            raise McpProtocolConformanceError("MCP_RESULT_TYPE_CONFORMANCE_FAILED")
+            raise mcp_contracts.McpProtocolConformanceError("MCP_RESULT_TYPE_CONFORMANCE_FAILED")
         else:
             effective_value = presence.value
         result_value = getattr(result, "result_type", None)
@@ -1354,7 +1330,7 @@ class BoundedMcpSdkClient:
             and not implicit_complete
             and result_value != effective_value
         ):
-            raise McpProtocolConformanceError("MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION")
+            raise mcp_contracts.McpProtocolConformanceError("MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION")
         if (
             effective_value == "input_required"
             and result is not None
@@ -1363,7 +1339,7 @@ class BoundedMcpSdkClient:
             effective_value == "complete"
             and isinstance(result, types.InputRequiredResult)
         ):
-            raise McpProtocolConformanceError("MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION")
+            raise mcp_contracts.McpProtocolConformanceError("MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION")
         return effective_value
 
     async def aclose(self) -> None:
@@ -1395,9 +1371,6 @@ class BoundedMcpSdkClient:
 __all__ = [
     "BoundedMcpSdkClient",
     "MCPError",
-    "McpAdvertisedCapabilities",
-    "McpProtocolConformanceError",
-    "McpTransportOperationError",
     "McpWireResultPresence",
     "types",
 ]

@@ -3,7 +3,36 @@ export interface HistoryReadingAnchor {
   entryId: string;
   traceId?: string;
   sourceOffset?: number;
+  header?: boolean;
   top: number;
+}
+
+/** Same 200px preparation margin as immutable-body hydration. Selection and
+ * focus are browser-owned interactions and may temporarily span many pages. */
+export function collectHistoryResidence(root: HTMLElement): {visibleEntryIds: string[]; pinnedEntryIds: string[]} {
+  const visible = new Set<string>(), pinned = new Set<string>();
+  const viewport = root.getBoundingClientRect();
+  if (!viewport.height || root.closest('[hidden], [inert]')) return {visibleEntryIds: [], pinnedEntryIds: []};
+  const selection = root.ownerDocument.getSelection();
+  const ids = (node: HTMLElement) => [node.dataset.sourceEntry, ...node.dataset.sourceEntries?.split(' ') ?? [], node.dataset.resultEntry, node.dataset.historyEntry].filter((id): id is string => Boolean(id));
+  for (const node of root.querySelectorAll<HTMLElement>('[data-source-entry], [data-result-entry], [data-history-entry]')) {
+    if (node.closest('[hidden], [inert]')) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.height && rect.bottom >= viewport.top - 200 && rect.top <= viewport.bottom + 200) for (const id of ids(node)) visible.add(id);
+    if (node.contains(root.ownerDocument.activeElement)) for (const id of ids(node)) pinned.add(id);
+    if (selection && !selection.isCollapsed) for (let index = 0; index < selection.rangeCount; index++) {
+      if (selection.getRangeAt(index).intersectsNode(node)) for (const id of ids(node)) pinned.add(id);
+    }
+  }
+  const focused = root.ownerDocument.activeElement;
+  if (focused instanceof HTMLElement && root.contains(focused) && !focused.closest('[hidden], [inert]')) {
+    // The run's own disclosure precedes its message hosts. Keep its semantic
+    // first host while focused, rather than every entry in an expanded run.
+    const host = focused.closest<HTMLElement>('[data-source-entry]')
+      ?? focused.closest('.conversation-run')?.querySelector<HTMLElement>('[data-source-entry]');
+    if (host) for (const id of ids(host)) pinned.add(id);
+  }
+  return {visibleEntryIds: [...visible], pinnedEntryIds: [...pinned]};
 }
 
 function visibleHost(element: HTMLElement): HTMLElement {
@@ -39,22 +68,26 @@ export function waitForHistoryEntry(root: HTMLElement, entryId: string, signal: 
 export function captureHistoryAnchor(root: HTMLElement): HistoryReadingAnchor | undefined {
   const viewport = root.getBoundingClientRect();
   // Prefer a text/trace subanchor over the outer message whose height can change.
-  for (const selector of ['[data-source-text]', '[data-result-entry]', '[data-source-entry]']) {
+  for (const selector of ['[data-source-text]', '[data-result-entry]', '[data-source-entry]', '[data-history-entry]']) {
     for (const candidate of root.querySelectorAll<HTMLElement>(selector)) {
       if (candidate.closest('[inert], [hidden]')) continue;
       const node = visibleHost(candidate);
       const rect = node.getBoundingClientRect();
       if (rect.bottom <= viewport.top || rect.top >= viewport.bottom || !rect.height) continue;
-      const entryId = candidate.dataset.resultEntry ?? candidate.closest<HTMLElement>('[data-source-entry]')?.dataset.sourceEntry;
+      const entryId = candidate.dataset.historyEntry ?? candidate.dataset.resultEntry ?? candidate.closest<HTMLElement>('[data-source-entry]')?.dataset.sourceEntry;
       if (!entryId) continue;
       const mapping = candidate.dataset.sourceText && JSON.parse(candidate.dataset.sourceText) as number[][];
-      return { entryId, traceId: candidate.dataset.resultEntry, sourceOffset: mapping ? mapping[0]?.[0] : undefined, top: rect.top - viewport.top };
+      return { entryId, traceId: candidate.dataset.resultEntry, sourceOffset: mapping ? mapping[0]?.[0] : undefined,
+        ...(candidate.dataset.historyEntry ? {header: true} : {}), top: rect.top - viewport.top };
     }
   }
 }
 
 export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAnchor): number | undefined {
-  let node = findHistoryEntry(root, anchor.traceId ?? anchor.entryId);
+  const headers = anchor.header ? [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].filter(node => !node.closest('[hidden], [inert]')) : [];
+  let node = anchor.header ? headers.find(node => node.dataset.historyEntry === anchor.entryId)
+    ?? headers.find(node => node.dataset.historyEntryAliases?.split(' ').includes(anchor.entryId))
+    : findHistoryEntry(root, anchor.traceId ?? anchor.entryId);
   if (!node) return;
   if (anchor.sourceOffset !== undefined) {
     const offset = anchor.sourceOffset;

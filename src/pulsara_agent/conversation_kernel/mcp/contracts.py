@@ -26,6 +26,31 @@ MAXIMUM_MCP_CATALOG_RESULT_BYTES = 64 * 1024
 MAXIMUM_MCP_HOST_IN_FLIGHT = 16
 
 
+@dataclass(frozen=True, slots=True)
+class McpAdvertisedCapabilities:
+    """Closed listing surface frozen from the negotiated SDK result."""
+
+    tools: bool
+    resources: bool
+    prompts: bool
+
+
+class McpProtocolConformanceError(ValueError):
+    """A bounded peer response violated the negotiated closed MCP contract."""
+
+
+class McpTransportOperationError(RuntimeError):
+    """Secret-safe physical transport settlement for one request path."""
+
+    def __init__(self, *, may_have_reached_server: bool) -> None:
+        self.may_have_reached_server = may_have_reached_server
+        super().__init__(
+            "MCP_TRANSPORT_OUTCOME_UNKNOWN"
+            if may_have_reached_server
+            else "MCP_TRANSPORT_UNWRITTEN"
+        )
+
+
 class McpServerState(StrEnum):
     DISABLED = "DISABLED"
     CONNECTING = "CONNECTING"

@@ -86,7 +86,8 @@ async def install_plugin_package(store, connections, observation, request, scrub
                 }
                 if current is None or request.replace:
                     for owner in owners:
-                        invalidated.extend(connections.oauth.invalidate(owner))
+                        manager = await connections.prepare_oauth()
+                        invalidated.extend(manager.invalidate(owner))
                 result = await asyncio.to_thread(
                     store.install_locked,
                     observation,
@@ -139,7 +140,7 @@ async def install_plugin_package(store, connections, observation, request, scrub
                         grant = connections.settings.read().mcp_authorization(owner)
                         if grant is not None and (
                             config is None
-                            or not connections.oauth._matches(grant, config)
+                            or not (await connections.prepare_oauth())._matches(grant, config)
                         ):
                             await connections.settings.replace_mcp_authorization(
                                 owner, None, expected=grant
@@ -321,7 +322,8 @@ async def _replace(management, connections, request):
                     or bool(request.secret_changes)
                 )
                 if auth_changed:
-                    invalidated.extend(connections.oauth.invalidate(owner))
+                    manager = await connections.prepare_oauth()
+                    invalidated.extend(manager.invalidate(owner))
                 changes = tuple(
                     (item.binding, item.value) for item in request.secret_changes
                 )
@@ -426,7 +428,8 @@ async def _remove_plugin_state(store, connections, identity, request):
                     and owner.scope_key == scope_key
                 }
                 for owner in owners:
-                    invalidated.extend(connections.oauth.invalidate(owner))
+                    manager = await connections.prepare_oauth()
+                    invalidated.extend(manager.invalidate(owner))
                 result = await asyncio.to_thread(
                     store.remove_instance_locked, layout, current
                 )

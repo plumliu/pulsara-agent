@@ -16,9 +16,12 @@ import socket
 import stat
 import sys
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
-from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
+
+if TYPE_CHECKING:
+    from pulsara_agent.settings import LocalPostgresConfig
 
 
 def diagnostics_path() -> Path:
@@ -179,6 +182,7 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
     from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
     from pulsara_agent.tool_permission import preset_to_policy
     from pulsara_agent.desktop_app.application import DesktopApplication, DatabaseDataPlaneState
+    from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 
     application = None
     server = None

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal
+from typing import TypeVar
 
 import httpx
 
@@ -539,6 +541,56 @@ def _parse_route_wire_dialect(
 
 
 CatalogFetch = Callable[[], Awaitable[object]]
+_CatalogResult = TypeVar("_CatalogResult")
+
+
+async def _catalog_worker(operation: Callable[[], _CatalogResult]) -> _CatalogResult:
+    """Join blocking SDK preparation/parsing before releasing its owner."""
+    work = asyncio.create_task(asyncio.to_thread(operation), name="model-catalog-worker")
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        with suppress(BaseException):
+            work.result()
+        raise
+
+
+async def _catalog_http_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    # HTTPX constructs TLS contexts and imports its transport synchronously.
+    # Its unopened client has no network operations yet; all async entry,
+    # requests, and close still belong to the caller's original event loop.
+    client: httpx.AsyncClient | None = None
+
+    def construct() -> None:
+        nonlocal client
+        client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+
+    try:
+        await _catalog_worker(construct)
+    except asyncio.CancelledError:
+        # The worker has physically settled. A successful, but unclaimed,
+        # client must be closed even if the caller cancels repeatedly.
+        if client is not None:
+            close = asyncio.create_task(client.aclose(), name="model-catalog-client-close")
+            while not close.done():
+                try:
+                    await asyncio.shield(close)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            with suppress(BaseException):
+                close.result()
+        raise
+    assert client is not None
+    return client
 
 
 @dataclass(slots=True)
@@ -557,7 +609,7 @@ class ModelsDevCatalogClient:
         except (TypeError, ValueError) as exc:
             raise ModelCatalogInvalid("models.dev catalog is invalid") from exc
         try:
-            return parse_models_dev_catalog(payload)
+            return await _catalog_worker(lambda: parse_models_dev_catalog(payload))
         except ModelCatalogInvalid:
             raise
         except (TypeError, ValueError) as exc:
@@ -566,13 +618,13 @@ class ModelsDevCatalogClient:
     @staticmethod
     async def _fetch_http() -> object:
         timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=10.0, pool=10.0)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with await _catalog_http_client(timeout) as client:
             response = await client.get(
                 MODELS_DEV_CATALOG_URL,
                 headers={"Accept": "application/json"},
             )
             response.raise_for_status()
-            return response.json()
+            return await _catalog_worker(response.json)
 
 
 @dataclass(slots=True)
