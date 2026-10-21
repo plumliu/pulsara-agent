@@ -1,5 +1,16 @@
 <h1 align="center"><img src="frontend/public/assets/pulsara-icon.png" width="36" height="36" align="top" alt=""> Pulsara</h1>
 <p align="center"><strong>Your own team of agents.</strong></p>
+
+<p align="center">
+  <img src="assets/banner.png" alt="Pulsara — persistent sessions, auditable events, semantic memory" width="100%">
+</p>
+<p align="center">
+  <a href="https://github.com/plumliu/pulsara-agent/releases/latest"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
+  <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
+  <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
+  <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
+</p>
 <p align="center">
   <a href="https://github.com/plumliu/pulsara-agent/releases/latest">Download</a> &nbsp; | &nbsp;
   <a href="#demo">Watch the demo</a> &nbsp; | &nbsp;

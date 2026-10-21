@@ -1,6 +1,6 @@
 # Round 9：Unified Capability Semantics 与 MCP Direct/Meta Exposure 实施规格
 
-> MCP 工具演进覆盖（2026-10-21）：[`PULSARA_MCP_TOOL_EVOLUTION_IMPLEMENTATION_SPEC.zh.md`](../PULSARA_MCP_TOOL_EVOLUTION_IMPLEMENTATION_SPEC.zh.md) 已获用户确认。本文中“description/schema 变化一律停用原生工具、同 identity 新版禁止 meta”的条款被其替代；当前采用有限兼容原生绑定、不兼容单向转 meta、稀疏 MCP catalog 和失效 ref 回收。SYSTEM/tools 冻结与既有权限/SDK/结算边界继续有效。
+> MCP 工具演进覆盖（2026-10-21）：[`PULSARA_MCP_TOOL_EVOLUTION_IMPLEMENTATION_SPEC.zh.md`](PULSARA_MCP_TOOL_EVOLUTION_IMPLEMENTATION_SPEC.zh.md) 已获用户确认。本文中“description/schema 变化一律停用原生工具、同 identity 新版禁止 meta”的条款被其替代；当前采用有限兼容原生绑定、不兼容单向转 meta、稀疏 MCP catalog 和失效 ref 回收。SYSTEM/tools 冻结与既有权限/SDK/结算边界继续有效。
 
 > Epoch-boundary hard-cut 覆盖（2026-09-19）：provider-input epoch 的当前唯一权威是 [`PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。本文中 `MODEL_TARGET_CHANGED | PROVIDER_LOWERING_CHANGED` 或 compatibility mismatch 自动授权 reprojection/reset 的内容均为 historical/superseded；实现不得保留 alias、fallback、双路径或其他兼容层。其余不冲突语义继续有效。
 

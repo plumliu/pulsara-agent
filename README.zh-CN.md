@@ -1,5 +1,16 @@
 <h1 align="center"><img src="frontend/public/assets/pulsara-icon.png" width="36" height="36" align="top" alt=""> Pulsara</h1>
 <p align="center"><strong>你自己的 Agent 团队。</strong></p>
+
+<p align="center">
+  <img src="assets/banner.png" alt="Pulsara — 持久会话、可审阅的工作记录、语义记忆" width="100%">
+</p>
+<p align="center">
+  <a href="https://github.com/plumliu/pulsara-agent/releases/latest"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
+  <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
+  <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
+  <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
+</p>
 <p align="center">
   <a href="https://github.com/plumliu/pulsara-agent/releases/latest">下载桌面版</a> &nbsp; | &nbsp;
   <a href="#演示">观看演示</a> &nbsp; | &nbsp;
