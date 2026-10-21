@@ -1,12 +1,12 @@
 # Install Pulsara / 安装 Pulsara
 
-macOS 用户可从 [GitHub Releases](https://github.com/plumliu/pulsara-agent/releases/latest) 下载 alpha.3。Ubuntu 用户优先[从源码构建](DEVELOPMENT.md)，下方保留 alpha.2 deb 下载。不要把 Source code 压缩包当作安装包。
+macOS 用户可从 [GitHub Releases](https://github.com/plumliu/pulsara-agent/releases/latest) 下载 alpha.4。Ubuntu 用户优先[从源码构建](DEVELOPMENT.md)，下方保留 alpha.2 deb 下载。不要把 Source code 压缩包当作安装包。
 
-macOS users can download alpha.3 from [GitHub Releases](https://github.com/plumliu/pulsara-agent/releases/latest). Ubuntu users should [build from source](DEVELOPMENT.md); older alpha.2 deb downloads remain available below. The Source code archives are not installers.
+macOS users can download alpha.4 from [GitHub Releases](https://github.com/plumliu/pulsara-agent/releases/latest). Ubuntu users should [build from source](DEVELOPMENT.md); older alpha.2 deb downloads remain available below. The Source code archives are not installers.
 
 | 系统 / System | 安装包 / Installer |
 | --- | --- |
-| macOS 15+，Apple Silicon | [Pulsara-0.1.0-alpha.3-macos-arm64.dmg](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.3/Pulsara-0.1.0-alpha.3-macos-arm64.dmg) |
+| macOS 15+，Apple Silicon | [Pulsara-0.1.0-alpha.4-macos-arm64.dmg](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.4/Pulsara-0.1.0-alpha.4-macos-arm64.dmg) |
 | Ubuntu 24.04，amd64 | [Pulsara-0.1.0-alpha.2-linux-amd64.deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-amd64.deb) |
 | Ubuntu 24.04，arm64 | [Pulsara-0.1.0-alpha.2-linux-arm64.deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-arm64.deb) |
 
@@ -20,9 +20,9 @@ Open the DMG, drag Pulsara into Applications, eject the DMG, then launch the ins
 
 ## Ubuntu
 
-优先按[源码构建指南](DEVELOPMENT.md)在 Ubuntu 24.04 本机或容器内构建，再安装生成的 deb；两种方式均支持 amd64 和 arm64。构建所需的工具与步骤见该指南。alpha.3 未发布 Ubuntu deb，alpha.2 包不包含最新修复。
+优先按[源码构建指南](DEVELOPMENT.md)在 Ubuntu 24.04 本机或容器内构建，再安装生成的 deb；两种方式均支持 amd64 和 arm64。构建所需的工具与步骤见该指南。alpha.4 未发布 Ubuntu deb，alpha.2 包不包含最新修复。
 
-Build the current source on Ubuntu 24.04, either natively or in a container, then install the resulting deb. Both amd64 and arm64 are supported by the [build guide](DEVELOPMENT.md), which lists the required tools and commands. No Ubuntu deb was published for alpha.3; alpha.2 packages lack the latest fixes.
+Build the current source on Ubuntu 24.04, either natively or in a container, then install the resulting deb. Both amd64 and arm64 are supported by the [build guide](DEVELOPMENT.md), which lists the required tools and commands. No Ubuntu deb was published for alpha.4; alpha.2 packages lack the latest fixes.
 
 如果仍需安装旧版 alpha.2，用软件安装器打开对应架构的 deb，或在下载目录执行：
 
