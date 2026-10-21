@@ -43,7 +43,7 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     freeze_canonical_prompt,
 )
 from pulsara_agent.llm.input import PromptAnnotationPart
-from .locking import lock_canonical_identities
+from .locking import lock_canonical_identities, lock_session_admission
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +104,7 @@ class _ForkOperations:
                     return CanonicalForkCreation(
                         child_session_id, False, "CHILD_SESSION_ALREADY_EXISTS"
                     )
+                lock_session_admission(connection, session_id=source_session_id)
                 source = connection.execute(
                     "SELECT 1 FROM pulsara_v3.sessions WHERE id = %s AND memory_domain_id = %s FOR UPDATE",
                     (source_session_id, memory_domain_id),
@@ -513,16 +514,6 @@ class _ForkOperations:
                         "context_snapshot_id": snapshot_id,
                     },
                 )
-                from pulsara_agent.conversation_kernel.history_projection import (
-                    history_projection_savepoint,
-                    refresh_history_question,
-                )
-                with history_projection_savepoint(connection, session_id=child_session_id):
-                    for entry in material.entries:
-                        if entry["entry_kind"] == "USER_MESSAGE":
-                            refresh_history_question(
-                                connection, child_session_id, entry_map[str(entry["id"])],
-                            )
                 # Force all deferred exact joins before the commit acknowledgement.
                 connection.execute("SET CONSTRAINTS ALL IMMEDIATE")
         except Exception as error:

@@ -2911,8 +2911,8 @@ REVOKE ALL ON ALL TABLES IN SCHEMA pulsara_v3 FROM PUBLIC;
 CREATE TABLE pulsara_v3.history_search_documents (
     id text PRIMARY KEY,
     session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
-    q1_entry_id text NOT NULL REFERENCES pulsara_v3.transcript_entries(id) ON DELETE CASCADE,
-    q2_entry_id text REFERENCES pulsara_v3.transcript_entries(id) ON DELETE CASCADE,
+    q1_entry_id text NOT NULL,
+    q2_entry_id text,
     variant text NOT NULL CHECK (variant IN ('QA','QAQ')),
     include_tools boolean NOT NULL,
     entry_ids text[] NOT NULL,
@@ -2922,7 +2922,19 @@ CREATE TABLE pulsara_v3.history_search_documents (
     body_tech text GENERATED ALWAYS AS(body) STORED,
     positions jsonb NOT NULL,
     messages jsonb NOT NULL,
-    UNIQUE(session_id,q1_entry_id,variant,include_tools)
+    covered_entry_sequence bigint NOT NULL CHECK (covered_entry_sequence >= 1),
+    -- Exactly the applicable subset of QA/QAQ x tools/no-tools for this group.
+    -- Repeated positive-row metadata detects sparse/missing variants; zero rows
+    -- remain unknown and are conservatively revisited, not durably receipted.
+    expected_variants jsonb NOT NULL CHECK (
+        jsonb_typeof(expected_variants) = 'array'
+        AND jsonb_array_length(expected_variants) BETWEEN 1 AND 4
+    ),
+    UNIQUE(session_id,q1_entry_id,variant,include_tools),
+    FOREIGN KEY (session_id, q1_entry_id)
+        REFERENCES pulsara_v3.transcript_entries(session_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, q2_entry_id)
+        REFERENCES pulsara_v3.transcript_entries(session_id, id) ON DELETE CASCADE
 );
 CREATE INDEX idx_pulsara_v3_history_session ON pulsara_v3.history_search_documents(session_id,q1_entry_id);
 CREATE INDEX idx_pulsara_v3_history_bm25 ON pulsara_v3.history_search_documents USING bm25

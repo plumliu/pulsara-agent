@@ -75,7 +75,8 @@ def test_missing_or_unreadable_settings_degrade_without_opening_provider(
             disposition=MemoryRetrievalDisposition.COMPLETE,
             facts=("ordinary", HistoryCandidate(
                 session_id='session:2gshm5wjf42flcppodmqqhvruu', q1_entry_id='entry:hsbhejqlvgm3oe42nqmhybryyu', title="old",
-                score=1.0, document={}, messages=(),
+                score=1.0, document={}, messages=(), covered_entry_sequence=1,
+                variant="QA", include_tools=False,
             )),
             attempted_stages=(),
         )

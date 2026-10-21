@@ -699,7 +699,7 @@ class SessionContentQuery:
                 bounds = tuple((len(prefix) + a, len(prefix) + b) for a, b in bounds)
                 text = prefix + text + separator + body
         notices = self.reader._notices(
-            connection, entry["session_id"], event_cut, (entry["entry_sequence"],)
+            connection, entry["session_id"], event_cut, entry
         )
         if notices:
             if len(notices) != 1:

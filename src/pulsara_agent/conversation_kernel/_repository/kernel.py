@@ -53,6 +53,7 @@ from .contracts import (
     _content_columns,
     _utcnow,
 )
+from .locking import lock_session_admission
 
 
 class _RepositoryKernel:
@@ -109,7 +110,13 @@ class _RepositoryKernel:
             )
         return row
 
-    def _writer_transaction(self, guard: HostWriterGuard, *, deadline_monotonic: float):
+    def _writer_transaction(
+        self,
+        guard: HostWriterGuard,
+        *,
+        deadline_monotonic: float,
+        strong_session_control: bool = False,
+    ):
         repository = self
 
         class _Scope:
@@ -126,6 +133,8 @@ class _RepositoryKernel:
                     repository._finish_event_batch(committed=False)
                     raise
                 try:
+                    if strong_session_control:
+                        lock_session_admission(connection, session_id=guard.session_id)
                     repository._require_writer(connection, guard, lock=True)
                 except BaseException as error:
                     self._cm.__exit__(type(error), error, error.__traceback__)
@@ -215,7 +224,7 @@ class _RepositoryKernel:
     def _require_writer(
         connection: Connection, guard: HostWriterGuard, *, lock: bool
     ) -> Mapping[str, object]:
-        suffix = " FOR UPDATE" if lock else ""
+        suffix = " FOR NO KEY UPDATE" if lock else ""
         row = connection.execute(
             """
             SELECT * FROM pulsara_v3.sessions
@@ -644,32 +653,6 @@ class _RepositoryKernel:
             )
             for offset, draft in enumerate(drafts)
         )
-        # Existing canonical writer transaction owns disposable search maintenance;
-        # accepted occurrences are not replayed and no search event is introduced.
-        from pulsara_agent.conversation_kernel.history_projection import (
-            history_projection_savepoint,
-            refresh_history_projection,
-        )
-
-        entry_ids = [
-            draft.subject.subject_id
-            for draft in drafts if draft.subject.slot is SubjectSlot.ENTRY
-        ]
-        if entry_ids:
-            with history_projection_savepoint(connection, session_id=session_id):
-                with connection.cursor(row_factory=dict_row) as cursor:
-                    changed = cursor.execute(
-                        """SELECT entry_sequence FROM pulsara_v3.transcript_entries
-                           WHERE session_id=%s AND id=ANY(%s)
-                             AND conversation_scope_kind='ROOT'
-                           ORDER BY entry_sequence""",
-                        (session_id, entry_ids),
-                    ).fetchall()
-                    for entry in changed:
-                        refresh_history_projection(
-                            connection, session_id=session_id,
-                            entry_sequence=entry["entry_sequence"],
-                        )
         self._record_event_batch(events)
         return events
 

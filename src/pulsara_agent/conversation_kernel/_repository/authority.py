@@ -26,7 +26,7 @@ from .contracts import (
     StaleHostWriter,
     _utcnow,
 )
-from .locking import lock_canonical_identities
+from .locking import lock_canonical_identities, lock_session_admission
 
 class _AuthorityOperations:
     def validate_host_writer(
@@ -135,6 +135,7 @@ class _AuthorityOperations:
                 row_factory=dict_row,
                 deadline_monotonic=deadline_monotonic,
             ) as connection:
+                lock_session_admission(connection, session_id=session_id)
                 row = connection.execute(
                     """
                     SELECT id, workspace_id, memory_domain_id, lifecycle, writer_generation,

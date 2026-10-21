@@ -86,6 +86,9 @@ async def _search(
             q1_entry_id=derive_id("entry", "test-fixture", f"entry:q:{i}"),
             title=f"history {i}",
             score=float(100 - i),
+            covered_entry_sequence=100,
+            variant="QA",
+            include_tools=False,
             document={"identity": [i]},
             messages=(
                 {

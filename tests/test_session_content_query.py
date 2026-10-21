@@ -44,6 +44,7 @@ from tests.test_conversation_fork import (
     new_session,
 )
 from tests.test_turn_interruption_history import stop
+from tests.support.history_projection import maintain_history
 
 
 @pytest.fixture
@@ -69,6 +70,10 @@ def context(repo):
     def query(
         name="read_session_content", *, scope=SessionContentRange(0), **arguments
     ):
+        if name == "search_session_content":
+            # This repository fixture has no Core worker. Drive one production
+            # pass; failed derived builds remain valid read-path negative cases.
+            maintain_history(repo, allow_build_failure=True)
         return owner.invoke(
             name,
             arguments,
@@ -363,6 +368,8 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
     )
 
     def invoke(name="read_session_content", **args):
+        if name == "search_session_content":
+            maintain_history(repo, allow_build_failure=True)
         return owner.invoke(
             name,
             args,
@@ -419,12 +426,11 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
 
     # Rebuilding a disposable projection cannot turn a missing canonical edge
     # into a guessed category exclusion or a partially qualified answer process.
-    from pulsara_agent.conversation_kernel.history_projection import refresh_history_question
-    from psycopg.rows import dict_row
-    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    from pulsara_agent.conversation_kernel.history_publication import HistoryProjectionRepository
     question = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]['id']
-    with repo.connection_provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
-        refresh_history_question(connection, lease.guard.session_id, question)
+    assert HistoryProjectionRepository(repo.connection_provider).maintain_question(
+        lease.guard.session_id, question, deadline_monotonic=monotonic()+30,
+    ) == "build_failed"
     assert invoke('search_session_content', query='run', **args)['items'] == []
 
 
@@ -848,6 +854,8 @@ def test_cross_session_tool_public_metadata_and_full_artifact_are_one_stable_vie
     )
 
     def invoke(name="read_session_content", **args):
+        if name == "search_session_content":
+            maintain_history(repo, allow_build_failure=True)
         return owner.invoke(
             name,
             args,

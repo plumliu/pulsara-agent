@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pulsara_agent.ports.session_content import SessionContentRange
@@ -43,23 +44,7 @@ def search_history(
     ).fetchone()
     if current is None:
         raise ValueError("history caller is no longer authorized")
-    visible = []
-    if automatic and scope.visible_entry_ids:
-        entries = connection.execute(
-            "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=ANY(%s)",
-            (scope.session_id, list(scope.visible_entry_ids)),
-        ).fetchall()
-        for entry in entries:
-            m = canonical_history_message(connection, entry)
-            if m is not None:
-                visible.append(
-                    {
-                        "origin": m["origin_entry_id"],
-                        "role": m["role"],
-                        "label": m["label"],
-                        "text": m["text"],
-                    }
-                )
+    visible = _visible_history_identities(connection, scope) if automatic else []
     # All eligibility and copy folding precede LIMIT. QA/QAQ use one scoring
     # index and mutually exclusive branches; excluded Q2 never contributes.
     eligible = """e.session_id=d.session_id AND e.conversation_scope_kind='ROOT'
@@ -160,11 +145,92 @@ def search_history(
     return rows
 
 
-def refetch_history(connection, row, *, scope, include_tools=False):
+def _visible_history_identities(connection, scope):
+    visible = []
+    if scope.visible_entry_ids:
+        entries = connection.execute(
+            "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=ANY(%s)",
+            (scope.session_id, list(scope.visible_entry_ids)),
+        ).fetchall()
+        for entry in entries:
+            message = canonical_history_message(connection, entry)
+            if message is not None:
+                visible.append({
+                    "origin": message["origin_entry_id"], "role": message["role"],
+                    "label": message["label"], "text": message["text"],
+                })
+    return visible
+
+
+def _history_document_is_readable(
+    connection, *, session_id, document, variant, scope, automatic,
+):
+    """Current admission, independent of the candidate's immutable source cut.
+
+    Both reads use this owner. The second read cannot borrow authorization,
+    workspace or visibility from a snapshot retained across remote ranking.
+    """
+    sessions = connection.execute(
+        """SELECT s.id,s.workspace_id,w.workspace_kind
+        FROM pulsara_v3.sessions s JOIN pulsara_v3.workspaces w
+          ON w.id=s.workspace_id AND w.memory_domain_id=s.memory_domain_id
+        WHERE s.id=ANY(%s) AND s.memory_domain_id=%s""",
+        ([scope.session_id, session_id], scope.memory_domain_id),
+    ).fetchall()
+    sessions = {row["id"]: row for row in sessions}
+    caller, target = sessions.get(scope.session_id), sessions.get(session_id)
+    if caller is None or target is None:
+        return False
+    if automatic and (
+        target["workspace_kind"] != caller["workspace_kind"]
+        or (caller["workspace_kind"] != "transient"
+            and target["workspace_id"] != caller["workspace_id"])
+    ):
+        return False
+    visible = _visible_history_identities(connection, scope) if automatic else []
+
+    def readable(message):
+        if message["entry_id"] in scope.visible_entry_ids or (
+            session_id == scope.session_id and (
+                message["sequence"] > scope.current_range.through_sequence
+                or message["entry_id"] == scope.current_range.excluded_entry_id
+            )
+        ):
+            return False
+        return {
+            "origin": message["origin_entry_id"], "role": message["role"],
+            "label": message["label"], "text": message["text"],
+        } not in visible
+
+    if not all(readable(message) for message in document["messages"]):
+        return False
+    # QA deliberately has no Q2 message, but retains its cut-qualified Q2 ID.
+    # Repeat the mutually exclusive branch admission against this read's scope.
+    q2_readable = False
+    if document["q2_entry_id"] is not None:
+        entry = connection.execute(
+            "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s AND conversation_scope_kind='ROOT'",
+            (session_id, document["q2_entry_id"]),
+        ).fetchone()
+        if entry is not None:
+            try:
+                q2 = canonical_history_message(connection, entry)
+            except RuntimeError:
+                q2 = None
+            q2_readable = q2 is not None and readable(q2)
+    return q2_readable if variant == "QAQ" else not q2_readable
+
+
+def refetch_history(
+    connection, row, *, scope, include_tools=False, automatic=False,
+):
+    if row["include_tools"] != include_tools:
+        return None
     canonical = build_history_document(
         connection,
         row["session_id"],
         row["q1_entry_id"],
+        covered_entry_sequence=row["covered_entry_sequence"],
         include_tools=include_tools,
         variant=row["variant"],
     )
@@ -173,15 +239,11 @@ def refetch_history(connection, row, *, scope, include_tools=False):
         for key in ("body", "messages", "positions", "identity", "q2_entry_id")
     ):
         return None
-    for m in canonical["messages"]:
-        if m["entry_id"] in scope.visible_entry_ids or (
-            row["session_id"] == scope.session_id
-            and (
-                m["sequence"] > scope.current_range.through_sequence
-                or m["entry_id"] == scope.current_range.excluded_entry_id
-            )
-        ):
-            return None
+    if not _history_document_is_readable(
+        connection, session_id=row["session_id"], document=canonical,
+        variant=row["variant"], scope=scope, automatic=automatic,
+    ):
+        return None
     excerpt = excerpt_history(
         canonical, (row["hits"], row["hits_en"], row["hits_tech"])
     )
@@ -196,6 +258,9 @@ def refetch_history(connection, row, *, scope, include_tools=False):
         float(row["score"]),
         canonical,
         excerpt,
+        row["covered_entry_sequence"],
+        row["variant"],
+        row["include_tools"],
     )
 
 
@@ -208,6 +273,7 @@ class PostgresHistoryQuery:
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             rows = search_history(
                 connection, scope=scope, query=query, limit=20, automatic=True
@@ -215,8 +281,9 @@ class PostgresHistoryQuery:
             return tuple(
                 candidate
                 for row in rows
-                if (candidate := refetch_history(connection, row, scope=scope))
-                is not None
+                if (candidate := refetch_history(
+                    connection, row, scope=scope, automatic=True,
+                )) is not None
             )
 
     def canonical_refetch(self, *, scope, candidates, deadline_monotonic):
@@ -225,22 +292,20 @@ class PostgresHistoryQuery:
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             for candidate in candidates:
-                authorized = connection.execute(
-                    "SELECT 1 FROM pulsara_v3.sessions WHERE id=%s AND memory_domain_id=%s",
-                    (candidate.session_id, scope.memory_domain_id),
-                ).fetchone()
-                if authorized is None:
-                    continue
                 canonical = build_history_document(
                     connection,
                     candidate.session_id,
                     candidate.q1_entry_id,
-                    variant="QAQ"
-                    if any(m["region"] == "Q2" for m in candidate.document["messages"])
-                    else "QA",
+                    covered_entry_sequence=candidate.covered_entry_sequence,
+                    include_tools=candidate.include_tools,
+                    variant=candidate.variant,
                 )
-                if canonical == candidate.document:
+                if canonical == candidate.document and _history_document_is_readable(
+                    connection, session_id=candidate.session_id, document=canonical,
+                    variant=candidate.variant, scope=scope, automatic=True,
+                ):
                     result.append(candidate)
         return tuple(result)

@@ -7,6 +7,9 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
+from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.settings import LocalSettingsStore, LocalPostgresConfig
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
@@ -23,7 +26,34 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
 )
 
 
-async def run():
+async def _wait_for_history_coverage(source):
+    """Observe asynchronous production maintenance; never rebuild it here."""
+    started = monotonic()
+    deadline = started + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
+
+    def covered():
+        with source.repository._provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            deadline_monotonic=deadline,
+        ) as connection:
+            return connection.execute(
+                """SELECT EXISTS (
+                  SELECT 1 FROM pulsara_v3.history_search_documents d
+                  JOIN pulsara_v3.sessions s ON s.id=d.session_id
+                  WHERE s.id=%s AND d.covered_entry_sequence=s.latest_entry_sequence
+                    AND d.variant='QA' AND NOT d.include_tools
+                )""",
+                (source._lease.guard.session_id,),
+            ).fetchone()[0]
+
+    while monotonic() < deadline:
+        if await asyncio.to_thread(covered):
+            return (monotonic() - started) * 1_000
+        await asyncio.sleep(0.05)
+    raise AssertionError("background history coverage did not settle during dogfood")
+
+
+async def run(*, evidence_path: Path | None = None):
     saved = LocalSettingsStore().read()
     scrub = secret_scrubber(saved)
     connection = next(
@@ -67,6 +97,7 @@ async def run():
                     ),
                     command_id='command:zmewotay6esnpkpi5n45lbyioq',
                 )
+                coverage_wait_ms = await _wait_for_history_coverage(source)
                 caller = await core.open_session(
                     HostWorkspaceInput(
                         workspace_kind="project", workspace_root=workspace
@@ -121,6 +152,20 @@ async def run():
                 rootcalls = [
                     c for c in calls[begin:] if c["purpose"] == "agent_model_loop"
                 ]
+                evidence = {
+                    "database": database,
+                    "model": connection.target.model_id,
+                    "result": str(result),
+                    "history_candidates": history,
+                    "decision_requests": decision,
+                    "history_coverage_wait_ms": coverage_wait_ms,
+                    "calls": calls,
+                }
+                if evidence_path is not None:
+                    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                    evidence_path.write_text(
+                        scrub.scrub_text(json.dumps(evidence, ensure_ascii=False, indent=2)) + "\n"
+                    )
                 assert history and decision, (
                     "history route and real decision were not both observed"
                 )
@@ -136,15 +181,7 @@ async def run():
                     x, y = a["provider_input"], b["provider_input"]
                     assert x["tools"] == y["tools"]
                     assert y["messages"][: len(x["messages"])] == x["messages"]
-                evidence = {
-                    "database": database,
-                    "model": connection.target.model_id,
-                    "result": str(result),
-                    "history_candidates": history,
-                    "decision_requests": decision,
-                    "prefix_continuity": True,
-                    "calls": calls,
-                }
+                evidence["prefix_continuity"] = True
                 return json.loads(
                     scrub.scrub_text(json.dumps(evidence, ensure_ascii=False))
                 )

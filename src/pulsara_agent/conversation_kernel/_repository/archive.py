@@ -9,6 +9,7 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 from pulsara_agent.conversation_kernel.repository_errors import (
     SessionDeletionBusy, SessionWriterConflict,
 )
+from .locking import lock_session_admission
 
 
 # Used both for UI eligibility and, authoritatively, under the session writer lock.
@@ -75,6 +76,7 @@ class _SessionArchiveOperations:
             isolation_level=IsolationLevel.READ_COMMITTED,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
+            lock_session_admission(connection, session_id=session_id)
             row = connection.execute(
                 """SELECT s.lifecycle, s.writer_generation, s.writer_lease_owner_id,
                           s.writer_lease_expires_at > clock_timestamp() AS lease_live
@@ -119,6 +121,7 @@ class _SessionArchiveOperations:
             lane=PostgresConnectionLane.HOST_CONTROL,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
+            lock_session_admission(connection, session_id=session_id)
             row = connection.execute(
                 "SELECT lifecycle FROM pulsara_v3.sessions WHERE id=%s AND memory_domain_id=%s FOR UPDATE",
                 (session_id, memory_domain_id),

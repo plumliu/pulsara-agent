@@ -39,6 +39,7 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 )
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
+from .locking import lock_session_admission
 
 
 _TASK_PROJECTION = """SELECT t.*, s.title AS session_title, q.id AS pending_queue_item_id, latest.status AS last_turn_status,
@@ -58,8 +59,14 @@ class _ScheduledTaskOperations:
     def _scheduled_transaction(
         self, *, session_id, memory_domain_id, guard, deadline_monotonic
     ):
+        if guard is not None and guard.session_id != session_id:
+            raise ValueError("scheduled writer belongs to another session")
         scope = (
-            self._writer_transaction(guard, deadline_monotonic=deadline_monotonic)
+            self._writer_transaction(
+                guard,
+                deadline_monotonic=deadline_monotonic,
+                strong_session_control=True,
+            )
             if guard is not None
             else self._event_transaction(
                 lane=PostgresConnectionLane.HOST_CONTROL,
@@ -67,6 +74,8 @@ class _ScheduledTaskOperations:
             )
         )
         with scope as connection:
+            if guard is None:
+                lock_session_admission(connection, session_id=session_id)
             row = connection.execute(
                 """SELECT *, writer_lease_expires_at > clock_timestamp() AS lease_live,
                       clock_timestamp() AS database_now FROM pulsara_v3.sessions
@@ -85,8 +94,6 @@ class _ScheduledTaskOperations:
                 and row["lease_live"]
             ):
                 raise SessionWriterConflict("session has another live writer")
-            if guard is not None and guard.session_id != session_id:
-                raise ValueError("scheduled writer belongs to another session")
             yield connection, row
 
     def read_scheduled_task(self, *, task_id, memory_domain_id, deadline_monotonic):

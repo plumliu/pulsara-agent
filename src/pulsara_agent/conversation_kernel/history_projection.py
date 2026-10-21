@@ -1,12 +1,10 @@
-"""Transaction-local, rebuildable QA/QAQ documents from canonical ROOT rows."""
+"""Cut-aware QA/QAQ construction from immutable canonical ROOT rows."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-import logging
-
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Literal
 
 from pulsara_agent.conversation_kernel.prompt_content import (
     CanonicalPromptImageDescriptor,
@@ -24,23 +22,6 @@ from pulsara_agent.llm.input import (
     PromptAnnotationPart,
     HISTORICAL_IMAGE_MARKER,
 )
-
-
-@contextmanager
-def history_projection_savepoint(connection, *, session_id):
-    """Discard failed derived writes without aborting the canonical transaction.
-
-    Readers validate against canonical content; an old projection is never
-    accepted as a replacement for a failed refresh. No recovery job is needed.
-    """
-    try:
-        with connection.transaction():
-            yield
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "History projection refresh failed for session %s", session_id,
-            exc_info=True,
-        )
 
 
 def canonical_history_message(connection, entry, *, include_tools=False):
@@ -255,63 +236,36 @@ def canonical_history_message(connection, entry, *, include_tools=False):
     }
 
 
-def build_history_document(
-    connection, session_id, q1_id, *, include_tools=False, variant="QAQ"
-):
-    q1 = connection.execute(
-        "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
-        (session_id, q1_id),
-    ).fetchone()
-    if (
-        q1 is None
-        or q1["scheduled_input"] is not None
-        or q1["entry_kind"] != "USER_MESSAGE"
-    ):
-        return None
-    q2 = connection.execute(
-        "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND conversation_scope_kind='ROOT' AND entry_kind='USER_MESSAGE' AND entry_sequence>%s ORDER BY entry_sequence LIMIT 1",
-        (session_id, q1["entry_sequence"]),
-    ).fetchone()
-    rows = connection.execute(
-        "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND conversation_scope_kind='ROOT' AND entry_sequence>=%s AND COALESCE(turn_id,imported_history_group_id)=COALESCE(%s,%s) ORDER BY entry_sequence",
-        (
-            session_id,
-            q1["entry_sequence"],
-            q1["turn_id"],
-            q1["imported_history_group_id"],
-        ),
-    ).fetchall()
-    messages = []
-    for entry in rows:
-        try:
-            message = canonical_history_message(
-                connection, entry, include_tools=include_tools
-            )
-        except RuntimeError:
-            # An undecodable/corrupt canonical body cannot form a complete candidate.
-            return None
-        if message is not None:
-            message["region"] = "Q1" if entry["id"] == q1_id else "A"
-            messages.append(message)
-    if not messages or not any(m["region"] == "A" for m in messages):
-        return None
-    if q2 is not None and q2["scheduled_input"] is not None:
-        q2 = None
-    # Q2 is optional, and its content qualification precedes branch scoring.
-    # A failure to restore Q2 must not discard an otherwise complete QA.
-    try:
-        q2_message = (
-            canonical_history_message(connection, q2) if q2 is not None else None
-        )
-    except RuntimeError:
-        q2_message = None
-    if q2_message is None:
-        q2 = None
-    if variant == "QAQ":
-        if q2_message is None:
-            return None
-        q2_message["region"] = "Q2"
-        messages.append(q2_message)
+HistoryVariant = tuple[str, bool]
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryBuildSuccess:
+    session_id: str
+    memory_domain_id: str | None
+    q1_entry_id: str
+    covered_entry_sequence: int
+    documents: dict[HistoryVariant, dict]
+
+    @property
+    def expected_variants(self) -> frozenset[HistoryVariant]:
+        return frozenset(self.documents)
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryBuildFailure:
+    session_id: str
+    q1_entry_id: str
+    covered_entry_sequence: int
+    stage: Literal["Q1", "A"]
+    entry_id: str
+    error: RuntimeError
+
+
+type HistoryBuildResult = HistoryBuildSuccess | HistoryBuildFailure
+
+
+def _assemble_history_document(messages, q2_entry_id):
     body, positions, offset = [], [], 0
     for mi, message in enumerate(messages):
         for field in message["fields"]:
@@ -348,71 +302,143 @@ def build_history_document(
         "body": "\n".join(body),
         "positions": positions,
         "identity": identity,
-        "q2_entry_id": None if q2 is None else q2["id"],
+        "q2_entry_id": q2_entry_id,
     }
 
 
-def refresh_history_projection(connection, *, session_id, entry_sequence):
-    """Only the affected question and its predecessor; no full-history scan."""
-    with connection.cursor(row_factory=dict_row) as cursor:
-        origin = cursor.execute(
-            "SELECT q.entry_sequence FROM pulsara_v3.transcript_entries e JOIN pulsara_v3.transcript_entries q ON q.session_id=e.session_id AND COALESCE(q.turn_id,q.imported_history_group_id)=COALESCE(e.turn_id,e.imported_history_group_id) AND q.entry_kind='USER_MESSAGE' AND q.conversation_scope_kind='ROOT' WHERE e.session_id=%s AND e.entry_sequence=%s",
-            (session_id, entry_sequence),
-        ).fetchone()
-        if origin is None:
-            return
-        questions = cursor.execute(
-            "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND conversation_scope_kind='ROOT' AND entry_kind='USER_MESSAGE' AND entry_sequence<=%s ORDER BY entry_sequence DESC LIMIT 2",
-            (session_id, origin["entry_sequence"]),
-        ).fetchall()
-        for question in questions:
-            refresh_history_question(cursor, session_id, question["id"])
+def _build_history_group(
+    connection, session_id, q1_id, *, covered_entry_sequence, tool_modes
+) -> HistoryBuildResult:
+    if (
+        isinstance(covered_entry_sequence, bool)
+        or not isinstance(covered_entry_sequence, int)
+        or covered_entry_sequence < 0
+    ):
+        raise ValueError("history coverage must be a nonnegative entry sequence")
+    # The caller owns a short RR transaction. A left join retains the actual
+    # domain for legal missing-Q1 outcomes, without inventing a deleted owner.
+    q1 = connection.execute(
+        """SELECT s.memory_domain_id, e.*
+           FROM pulsara_v3.sessions s
+           LEFT JOIN pulsara_v3.transcript_entries e
+             ON e.session_id=s.id AND e.id=%s AND e.entry_sequence<=%s
+           WHERE s.id=%s""",
+        (q1_id, covered_entry_sequence, session_id),
+    ).fetchone()
+    domain = None if q1 is None else str(q1["memory_domain_id"])
 
+    def success(documents):
+        return HistoryBuildSuccess(
+            session_id, domain, q1_id, covered_entry_sequence, documents
+        )
 
-def refresh_history_question(connection, session_id, q1_id):
-    connection.execute(
-        "DELETE FROM pulsara_v3.history_search_documents WHERE session_id=%s AND q1_entry_id=%s",
-        (session_id, q1_id),
-    )
-    for tools in (False, True):
-        for variant in ("QA", "QAQ"):
-            document = build_history_document(
-                connection, session_id, q1_id, include_tools=tools, variant=variant
-            )
-            if document is None:
+    if (
+        q1 is None
+        or q1["id"] is None
+        or q1["scheduled_input"] is not None
+        or q1["entry_kind"] != "USER_MESSAGE"
+        or q1["conversation_scope_kind"] != "ROOT"
+    ):
+        return success({})
+    # This is the raw first successor, not the first content-qualified one.
+    # Scheduled/broken Q2 must not be skipped in favour of a later question.
+    q2 = connection.execute(
+        """SELECT * FROM pulsara_v3.transcript_entries
+           WHERE session_id=%s AND conversation_scope_kind='ROOT'
+             AND entry_kind='USER_MESSAGE' AND entry_sequence>%s
+             AND entry_sequence<=%s ORDER BY entry_sequence LIMIT 1""",
+        (session_id, q1["entry_sequence"], covered_entry_sequence),
+    ).fetchone()
+    rows = connection.execute(
+        """SELECT * FROM pulsara_v3.transcript_entries
+           WHERE session_id=%s AND conversation_scope_kind='ROOT'
+             AND entry_sequence>=%s AND entry_sequence<=%s
+             AND COALESCE(turn_id,imported_history_group_id)=COALESCE(%s,%s)
+           ORDER BY entry_sequence""",
+        (
+            session_id, q1["entry_sequence"], covered_entry_sequence,
+            q1["turn_id"], q1["imported_history_group_id"],
+        ),
+    ).fetchall()
+    messages_by_tools = {tools: [] for tools in tool_modes}
+    for entry in rows:
+        # User content has the same qualification/rendering in both modes.
+        # Other entries decode once per requested mode; QAQ reuses the QA result.
+        shared_user = entry["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}
+        modes = (tool_modes[0],) if shared_user else tool_modes
+        for tools in modes:
+            try:
+                message = canonical_history_message(
+                    connection, entry, include_tools=tools
+                )
+            except RuntimeError as error:
+                return HistoryBuildFailure(
+                    session_id, q1_id, covered_entry_sequence,
+                    "Q1" if entry["id"] == q1_id else "A", entry["id"], error,
+                )
+            if message is None:
                 continue
-            messages = document["messages"]
-            connection.execute(
-                """INSERT INTO pulsara_v3.history_search_documents(id,session_id,q1_entry_id,q2_entry_id,variant,include_tools,entry_ids,identity,body,positions,messages)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (
-                    f"{session_id}/{q1_id}/{variant}/{int(tools)}",
-                    session_id,
-                    q1_id,
-                    document["q2_entry_id"],
-                    variant,
-                    tools,
-                    [m["entry_id"] for m in messages],
-                    Jsonb(document["identity"]),
-                    document["body"],
-                    Jsonb(document["positions"]),
-                    Jsonb(messages),
-                ),
+            message["region"] = "Q1" if entry["id"] == q1_id else "A"
+            messages_by_tools[tools].append(message)
+            if shared_user:
+                for other in tool_modes[1:]:
+                    messages_by_tools[other].append(deepcopy(message))
+    if not any(
+        any(message["region"] == "A" for message in messages)
+        for messages in messages_by_tools.values()
+    ):
+        return success({})
+    if q2 is not None and q2["scheduled_input"] is not None:
+        q2 = None
+    try:
+        q2_message = (
+            canonical_history_message(connection, q2) if q2 is not None else None
+        )
+    except RuntimeError:
+        # Q2 is optional. Required Q1/A failures above reject the whole group.
+        q2_message = None
+    q2_id = None if q2_message is None else q2["id"]
+    if q2_message is not None:
+        q2_message["region"] = "Q2"
+    documents = {}
+    for tools, messages in messages_by_tools.items():
+        if not any(message["region"] == "A" for message in messages):
+            continue
+        documents[("QA", tools)] = _assemble_history_document(
+            deepcopy(messages), q2_id
+        )
+        if q2_message is not None:
+            documents[("QAQ", tools)] = _assemble_history_document(
+                deepcopy(messages) + [deepcopy(q2_message)], q2_id
             )
+    return success(documents)
 
 
-def rebuild_history_projection(connection, *, page_size=100):
-    """Disposable rebuild, keyset pages; page size never bounds corpus size."""
-    after = ""
-    with connection.cursor(row_factory=dict_row) as cursor:
-        cursor.execute("DELETE FROM pulsara_v3.history_search_documents")
-        while True:
-            rows = cursor.execute(
-                "SELECT id,session_id FROM pulsara_v3.transcript_entries WHERE conversation_scope_kind='ROOT' AND entry_kind='USER_MESSAGE' AND id>%s ORDER BY id LIMIT %s",
-                (after, page_size),
-            ).fetchall()
-            if not rows:
-                break
-            for row in rows:
-                refresh_history_question(cursor, row["session_id"], row["id"])
-            after = rows[-1]["id"]
+def build_history_group(
+    connection, session_id, q1_id, *, covered_entry_sequence: int
+) -> HistoryBuildResult:
+    """Build all applicable variants at one cut; failures never mean empty.
+
+    Required canonical RuntimeError is returned with its original exception.
+    Database/IO/cancellation errors propagate to their transaction owner.
+    """
+    return _build_history_group(
+        connection, session_id, q1_id,
+        covered_entry_sequence=covered_entry_sequence, tool_modes=(False, True),
+    )
+
+
+def build_history_document(
+    connection, session_id, q1_id, *, covered_entry_sequence: int,
+    include_tools=False, variant="QAQ",
+):
+    """Restore only the requested mode at the candidate's own canonical cut."""
+    if variant not in {"QA", "QAQ"}:
+        raise ValueError("history document variant is invalid")
+    result = _build_history_group(
+        connection, session_id, q1_id,
+        covered_entry_sequence=covered_entry_sequence, tool_modes=(include_tools,),
+    )
+    if isinstance(result, HistoryBuildFailure):
+        return None
+    return result.documents.get((variant, include_tools))

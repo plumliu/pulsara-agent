@@ -11,6 +11,7 @@ from pulsara_agent.conversation_kernel.interruption import (
     read_executed_notices,
     parse_imported_notice,
 )
+from pulsara_agent.conversation_kernel._repository.locking import lock_session_admission
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -251,6 +252,7 @@ def read_fork_historical_material(
             "Fork requires its single READ COMMITTED transaction with source row lock"
         )
     _deadline(deadline_monotonic)
+    lock_session_admission(connection, session_id=source_session_id)
     if (
         connection.execute(
             "SELECT 1 FROM pulsara_v3.sessions WHERE id=%s AND lifecycle='OPEN' FOR UPDATE",

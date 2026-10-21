@@ -224,7 +224,10 @@ def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
                 # Disposable documents disappear with their canonical questions;
                 # this is not a durable semantic edge that restrains deletion.
                 assert parent == "transcript_entries"
-                assert f["columns"] in (["q1_entry_id"], ["q2_entry_id"])
+                assert f["columns"] in (
+                    ["session_id", "q1_entry_id"],
+                    ["session_id", "q2_entry_id"],
+                )
                 assert (f["action"], f["deferred"], f["initially_deferred"]) == ("c", False, False)
                 continue
             if (

@@ -93,6 +93,8 @@ from pulsara_agent.conversation_kernel.contracts import (
     canonical_digest,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.history_maintenance import HistoryProjectionMaintainer
+from pulsara_agent.conversation_kernel.vocabulary import SubjectSlot
 from pulsara_agent.conversation_kernel.queued_prompt_actions import (
     QueuedPromptAction,
     QueuedPromptActionRejected,
@@ -7831,6 +7833,7 @@ class KernelHostCore:
         self._blob_store: PostgresCanonicalBlobStore | None = None
         self._blob_gc_io: KernelSessionIO | None = None
         self._blob_gc_task: asyncio.Task[None] | None = None
+        self._history_maintenance: HistoryProjectionMaintainer | None = None
         self._sessions: dict[str, KernelHostSession] = {}
         self._workspace_capability_revisions: dict[Path, int] = {}
         self._open_attempts: dict[asyncio.Future[None], frozenset[str]] = {}
@@ -7991,6 +7994,9 @@ class KernelHostCore:
             self._blob_store = PostgresCanonicalBlobStore(
                 self._access.connection_provider
             )
+            self._history_maintenance = HistoryProjectionMaintainer(
+                self._access.connection_provider
+            )
             self._blob_gc_io = KernelSessionIO(maximum_concurrency=1)
             self._blob_gc_task = asyncio.create_task(
                 self._blob_gc_loop(), name="kernel-blob-orphan-gc"
@@ -8028,9 +8034,12 @@ class KernelHostCore:
             _, cancelled, _ = await _join_task_beyond_logical_deadline(
                 worker, deadline_monotonic=deadline
             )
+            creation = worker.result()
+            if creation.created and self._history_maintenance is not None:
+                self._history_maintenance.offer_session(child_session_id)
             if cancelled is not None:
                 raise cancelled
-            return worker.result()
+            return creation
         finally:
             await self._settle_session_open(settlement)
 
@@ -8978,6 +8987,20 @@ class KernelHostCore:
             session_ids = tuple(self._sessions)
         for host_session_id in session_ids:
             await self.close_session(host_session_id)
+        if self._history_maintenance is not None:
+            history_close = asyncio.create_task(
+                self._history_maintenance.aclose(deadline_monotonic=self._canonical_deadline()),
+                name="kernel-history-maintenance-close",
+            )
+            history_deadline_expired, history_cancelled, history_error = await _join_task_beyond_logical_deadline(
+                history_close, deadline_monotonic=self._canonical_deadline(),
+            )
+            self._history_maintenance = None
+            # Physical search I/O is now terminal even if its close watchdog
+            # expired; finish provider/resource cleanup before surfacing it.
+        else:
+            history_cancelled = history_error = None
+            history_deadline_expired = False
         await self._image_validator.aclose()
         async with self._lock:
             self._extension_routes.clear()
@@ -9027,6 +9050,12 @@ class KernelHostCore:
         await self._bundled_skill_binding.aclose()
         async with self._lock:
             self._closed = True
+        if history_error is not None:
+            raise history_error
+        if history_cancelled is not None:
+            raise history_cancelled
+        if history_deadline_expired:
+            raise TimeoutError("history maintenance physical owner exited after close deadline")
         if blob_close_error is not None:
             raise blob_close_error
         if blob_close_cancellation is not None:
@@ -9051,6 +9080,13 @@ class KernelHostCore:
     def _deliver_committed_events(
         self, events: tuple[StoredCommittedEvent, ...]
     ) -> None:
+        if self._history_maintenance is not None:
+            entries: dict[str, list[str]] = {}
+            for event in events:
+                if event.subject.slot is SubjectSlot.ENTRY:
+                    entries.setdefault(event.session_id, []).append(event.subject.subject_id)
+            for session_id, entry_ids in entries.items():
+                self._history_maintenance.offer_entries(session_id, tuple(entry_ids))
         for event in events:
             route = self._extension_routes.get(event.session_id)
             if route is None:

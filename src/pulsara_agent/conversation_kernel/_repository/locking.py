@@ -35,4 +35,20 @@ def lock_canonical_identities(
     return ordered
 
 
-__all__ = ["lock_canonical_identities"]
+def lock_session_admission(connection, *, session_id: str) -> None:
+    """Serialize publication with strong session control before parent locks.
+
+    Session IDs are globally canonical, so every caller uses the same fixed
+    scope, including callers whose domain input has not yet been authorized.
+    The original parent predicates remain the authority check. Ordinary
+    NO KEY UPDATE writers deliberately do not take this admission lock.
+    """
+    lock_canonical_identities(
+        connection,
+        namespace="session-admission",
+        memory_domain_id="global",
+        identities=(session_id,),
+    )
+
+
+__all__ = ["lock_canonical_identities", "lock_session_admission"]

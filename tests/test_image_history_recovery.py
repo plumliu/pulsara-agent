@@ -7,7 +7,6 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.history_projection import (
     canonical_history_message,
-    rebuild_history_projection,
 )
 from pulsara_agent.conversation_kernel.history_excerpt import (
     HistoryCandidate,
@@ -34,6 +33,7 @@ from pulsara_agent.model_input.lowering import image_omission_part
 from pulsara_agent.ports.session_content import SessionContentRange
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_conversation_fork import final, rows
+from tests.support.history_projection import maintain_history
 from tests.test_kernel_image_input_k2_postgres import (
     _repository,
     _bound_session,
@@ -158,7 +158,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
         # Generated labels are packaging, so only the two real text parts
         # consume excerpt body quota (weighted bytes, before token rounding).
         assert sum(_weights(projected)) == len("needle-left") + 2 * 4
-        rebuild_history_projection(connection, page_size=1)
+    maintain_history(repo)
     hits = query.invoke(
         "search_session_content",
         {"query": "needle-left"},
@@ -230,6 +230,7 @@ def test_annotation_near_body_quota_remains_searchable_with_image(
     query = SessionContentQuery(
         repo, session_id=session["id"], memory_domain_id=session["memory_domain_id"]
     )
+    maintain_history(repo)
     hits = query.invoke(
         "search_session_content",
         {"query": "needle"},
@@ -329,7 +330,7 @@ def test_search_and_recall_charge_image_packaging_at_final_admission(oversized):
     selected = excerpt_history(document, ([[0, 6]],), budget=2)
     assert selected == (message,)
     candidate = HistoryCandidate(
-        'session:336wrfwkamrr3up6kjtsgvgcte', 'entry:ik465kijafixxa6kpdisy6g4vu', "", 1, document, selected
+        'session:336wrfwkamrr3up6kjtsgvgcte', 'entry:ik465kijafixxa6kpdisy6g4vu', "", 1, document, selected, 1, "QA", False
     )
     assert (
         _fits({"items": [candidate.projection()], "next_cursor": None}, "call:h")

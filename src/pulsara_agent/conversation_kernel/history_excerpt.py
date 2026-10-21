@@ -16,6 +16,9 @@ class HistoryCandidate:
     score: float
     document: dict
     messages: tuple[dict, ...]
+    covered_entry_sequence: int
+    variant: str
+    include_tools: bool
 
     def projection(self):
         return {

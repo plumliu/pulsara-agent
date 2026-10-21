@@ -12,7 +12,7 @@ from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
-from .locking import lock_canonical_identities
+from .locking import lock_canonical_identities, lock_session_admission
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +111,7 @@ class _SessionDeletionOperations:
                     isolation_level=IsolationLevel.READ_COMMITTED,
                     deadline_monotonic=deadline_monotonic,
                 ) as connection:
+                    lock_session_admission(connection, session_id=session_id)
                     # Every replan starts here: a prior physical close does not
                     # authorize deleting a writer that took over after rollback.
                     row = connection.execute(

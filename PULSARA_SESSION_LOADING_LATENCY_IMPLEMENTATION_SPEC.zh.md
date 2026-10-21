@@ -11,6 +11,10 @@
 
 本规格是本次实现的有效约束。`archived_docs` 中的旧实现规格仍只作历史背景。
 
+2026-10-22后续授权：搜索延后维护从阶段性讨论转入生产硬切，详见
+[整轮历史搜索延后维护规格](PULSARA_DEFERRED_HISTORY_SEARCH_IMPLEMENTATION_SPEC.zh.md)。
+该规格取代第九轮“暂停搜索生产实现”的阶段限制，其他载入优化合同继续有效。
+
 ## 执行路径与所有权
 
 1. `LocalSessionController` 继续拥有同会话恢复合流、生命周期门禁和 Host 发布。
