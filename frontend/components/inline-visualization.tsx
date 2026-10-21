@@ -104,7 +104,10 @@ function useVisualizationImageReader(entryId: string, item: VisualizationOccurre
 
 function ImagePage({ entryId, item, onRead }: { entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization }) {
   const read = useVisualizationImageReader(entryId, item, onRead);
-  return <div className="inline-visualization__page" data-visualization-ordinal={item.ordinal}>
+  // Reserve the saved image's layout before reading/decoding its bytes. A
+  // loading line would shrink the transcript and clamp the reader's scrollTop.
+  return <div className="inline-visualization__page inline-visualization__image-page" data-visualization-ordinal={item.ordinal}
+    style={{ aspectRatio: `${item.width} / ${item.height}` }}>
     <SavedImage read={read} title={item.sourceFilename || '图片'} inline />
   </div>;
 }

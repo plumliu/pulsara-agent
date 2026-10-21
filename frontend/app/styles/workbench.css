@@ -945,6 +945,7 @@
 .saved-image { display: block; width: 100%; }
 .saved-image__open { display: block; width: 100%; border: 0; padding: 0; cursor: zoom-in; background: transparent; }
 .saved-image__open img { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; }
+.inline-visualization__image-page { max-height: 70vh; }
 .inline-visualization__page .saved-image__open img { border-radius: 12px; }
 .saved-image-reference { display: inline; }
 

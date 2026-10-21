@@ -263,6 +263,27 @@ it('mixes direct saved images and HTML without screenshotting images and release
   view.unmount();
 });
 
+it('reserves image proportions while a newly selected image is still being read', async () => {
+  const pictures = [[500, 900], [800, 800]].map(([width, height], ordinal) => ({
+    ...item, ordinal, sourceFilename: `${ordinal}.png`, mediaType: 'image/png', codec: 'binary',
+    imageRef: 'image:' + String(ordinal).repeat(26), width, height,
+  }));
+  const pending = new Map<number, (bytes: Uint8Array) => void>();
+  const read = vi.fn((_entry: string, ordinal: number) => new Promise<Uint8Array>(resolve => pending.set(ordinal, resolve)));
+  const view = render(<InlineVisualization entryId="images" items={pictures} onRead={read}/>);
+  const page = () => view.container.querySelector<HTMLElement>('.inline-visualization__image-page')!;
+  expect(page().style.aspectRatio).toBe('500 / 900');
+  expect(screen.getByText('正在加载图片…')).toBeTruthy();
+  await act(async () => { pending.get(0)!(new Uint8Array([1])); });
+  expect(view.container.querySelector('img[alt="0.png"]')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '查看可视化 2' }));
+  expect(page().style.aspectRatio).toBe('800 / 800');
+  expect(screen.getByText('正在加载图片…')).toBeTruthy();
+  await act(async () => { pending.get(1)!(new Uint8Array([2])); });
+  expect(page().style.aspectRatio).toBe('800 / 800');
+  expect(view.container.querySelector('img[alt="1.png"]')).toBeTruthy();
+});
+
 it('permits image references only in explicit assistant chat and does not fetch before clicking', async () => {
   const {FileLinkContext}=await import('../../frontend/components/file-link-context');
   const read=vi.fn(async()=>({bytes:new Uint8Array([1]),mediaType:'image/png',width:1,height:1}));
