@@ -26,6 +26,16 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
     dependency.mkdir(parents=True)
     (dependency / 'index.js').write_text('installed dependency must not ship')
     (frontend / 'package.json').write_text('{"name":"source-fixture"}')
+    for name in ('desktop/node_modules/fixture-package/index.js',
+                 'desktop/resources/python/bin/python3',
+                 'desktop/release/fixture.dmg'):
+        artifact = source / name
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text('local build artifact must not ship')
+    for name in ('frontend/package-lock.json', 'desktop/package.json', 'desktop/package-lock.json'):
+        artifact = source / name
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, artifact)
     # Each real backend entry point fails offline before explicit preparation.
     for expression in ["build_wheel('dist')", "build_editable('dist')", "build_sdist('dist')"]:
         command = [sys.executable, '-c', f"from hatchling.build import *; {expression}"]
@@ -60,8 +70,11 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
     with tarfile.open(next((source / 'dist').glob('*.tar.gz'))) as archive:
         names = archive.getnames()
         assert not any('_vendor/ripgrep' in name for name in names)
-        assert not any('frontend/node_modules' in name for name in names)
+        assert not any('node_modules' in name.split('/') for name in names)
+        assert not any('/desktop/resources/' in name or '/desktop/release/' in name for name in names)
         assert any(name.endswith('frontend/package.json') for name in names)
+        assert any(name.endswith('frontend/package-lock.json') for name in names)
+        assert any(name.endswith('desktop/package-lock.json') for name in names)
         assert any(name.endswith('tools/prepare_ripgrep.py') for name in names)
 
 
