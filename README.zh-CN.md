@@ -1,5 +1,5 @@
 <h1 align="center"><img src="frontend/public/assets/pulsara-icon.png" width="36" height="36" align="top" alt=""> Pulsara</h1>
-<p align="center"><strong>你自己的 Agent 团队。</strong></p>
+<p align="center"><strong>你自己的 Agent 团队。🪐</strong></p>
 
 <p align="center">
   <img src="assets/banner.png" alt="Pulsara — 持久会话、可审阅的工作记录、语义记忆" width="100%">
@@ -18,22 +18,22 @@
   <a href="README.md">English</a>
 </p>
 
-## 演示
+## Demo
 
 https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
 
 <table>
   <tr>
-    <td width="50%" align="center"><strong>比较三种方法在不同样本下的误差，给我 Python 绘图脚本。</strong></td>
-    <td width="50%" align="center"><strong>设计一个知识库系统，画个架构图并整理下组件职责给我。</strong></td>
+    <td width="50%" align="center"><strong>“比较三种方法在不同样本下的误差，给我 Python 绘图脚本。” 📊</strong></td>
+    <td width="50%" align="center"><strong>“设计一个知识库系统，画个架构图并整理下组件职责给我。” 🏗️</strong></td>
   </tr>
   <tr>
     <td><a href="assets/demo-img/research-chart-with-source.png"><img src="assets/demo-img/research-chart-with-source.png" width="100%" alt="科研图表与 Python 源码并排展示"></a></td>
     <td><a href="assets/demo-img/architecture-diagram-and-notes.png"><img src="assets/demo-img/architecture-diagram-and-notes.png" width="100%" alt="架构图与组件职责文档并排展示"></a></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><strong>画一张“咖啡从产地到杯子”的流程信息图，包含种植、处理、烘焙、研磨和萃取。</strong></td>
-    <td width="50%" align="center"><strong>帮我规划作品集网站，整理需求和站点地图。</strong></td>
+    <td width="50%" align="center"><strong>“画一张‘咖啡从产地到杯子’的流程信息图，包含种植、处理、烘焙、研磨和萃取。” ☕️</strong></td>
+    <td width="50%" align="center"><strong>“帮我规划作品集网站，整理需求和站点地图。” 🗺️</strong></td>
   </tr>
   <tr>
     <td><a href="assets/demo-img/coffee-journey-svg.png"><img src="assets/demo-img/coffee-journey-svg.png" width="100%" alt="咖啡从种植到萃取的 SVG 流程图"></a></td>
@@ -41,7 +41,7 @@ https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
   </tr>
 </table>
 
-## 大任务就让一支团队来干！
+## 别忘了你有一整支团队
 
 让一个 Agent 追查问题，另一个比较方案，再安排独立审阅。Pulsara 可以按任务搭配模型，每个 Subagent 都有自己的上下文；你能打开任务图点进任何一个任务，看它做到了哪里。
 
@@ -49,13 +49,13 @@ https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
 
 > 追一下这个 Bug，比较两种修法。选定后帮我改好，让另一个 Agent 独立审阅，再跑相关测试。
 
-## 随时都能提需求！
+## 随时都能提需求
 
 工具调用、后台命令和子代理进度都能展开看。临时想起一个新想法，就能把那条消息及时告诉 Pulsara。
 
 你也能选中回复针对它做批注，比反复讲“刚才那个文件”省心多了。
 
-## 工作再繁杂 Pulsara 也跟得上！
+## 工作再繁杂 Pulsara 也跟得上
 
 耗时命令可以放到后台，Agent 继续推进别的工作。对话变长后可以压缩上下文，保存的会话让你下次回来仍有记录可查。
 
@@ -63,17 +63,17 @@ Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持
 
 你的偏好、项目约束和已有决策可以存进记忆，留给后续任务检索。在记忆页里能直接查看、修改或删除。
 
-## 装好就能开工！
+## 装好就能开工
 
 [下载最新桌面版](https://github.com/plumliu/pulsara-agent/releases/latest)
 
-| 系统 | 安装包 |
+| 操作系统 | 快捷通道 |
 | --- | --- |
-| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.4/Pulsara-0.1.0-alpha.4-macos-arm64.dmg) |
-| Ubuntu 24.04，amd64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-amd64.deb) |
-| Ubuntu 24.04，arm64 | [下载 deb](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-arm64.deb) |
+| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.4/Pulsara-0.1.0-alpha.4-macos-arm64.dmg) |
+| Ubuntu 24.04 (amd64) | [下载 deb 📦](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-amd64.deb) |
+| Ubuntu 24.04 (arm64) | [下载 deb 📦](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-arm64.deb) |
 
-Ubuntu 用户建议优先按[源码构建指南](DEVELOPMENT.md)构建当前版本。上方保留的 alpha.2 deb 不包含 alpha.4 的最新修复。
+> 💡 **Ubuntu 用户贴士**：Ubuntu 用户建议优先按[源码构建指南](DEVELOPMENT.md)构建当前版本。上方保留的 alpha.2 deb 不包含 alpha.4 的最新修复。
 
 1. 安装并打开 Pulsara。macOS 把应用拖进“应用程序”；Ubuntu 从源码构建后安装生成的 deb。
 2. 在设置中添加模型连接，选择提供方、模型和 API 协议，按界面提示填写认证信息或自定义配置。
@@ -81,7 +81,7 @@ Ubuntu 用户建议优先按[源码构建指南](DEVELOPMENT.md)构建当前版�
 
 当前是桌面预览版。macOS 首次打开的系统授权、更新方式与数据位置写在[安装说明](INSTALL.md)里。偏爱终端的话，应用也带了 `pulsara` 命令行入口。
 
-## 拿你的任务来试试
+## 30 秒上手，把脏活累活交出去
 
 欢迎把作品和使用体验带到 [Issues](https://github.com/plumliu/pulsara-agent/issues)，也欢迎提需求、报 Bug。想一起做 Pulsara，可以看[开发指南](DEVELOPMENT.md)和 [Pull requests](https://github.com/plumliu/pulsara-agent/pulls)。
 
