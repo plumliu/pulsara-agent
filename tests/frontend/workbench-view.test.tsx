@@ -2280,7 +2280,7 @@ it('keeps manual process and tool expansion at the clicked position, then resume
   expect(top).toBe(1700);
 });
 
-it('unmounts a closed process immediately without retaining per-entry animation shells or hydrating hidden bodies', () => {
+it('releases a closed process after its drawer finishes without hydrating exiting bodies', async () => {
   const observed: Array<{node:Element,notify:IntersectionObserverCallback}>=[];
   vi.stubGlobal('IntersectionObserver',class {
     constructor(private notify:IntersectionObserverCallback) {}
@@ -2294,11 +2294,19 @@ it('unmounts a closed process immediately without retaining per-entry animation 
   fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
   const host=view.container.querySelector('[data-source-entry="reasoning"]')!;
   expect(host.textContent).toContain('已保存，正文读取中');
+  const drawer = view.container.querySelector('.conversation-run__drawer')!;
+  let finish!: () => void;
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  Object.defineProperty(drawer, 'getAnimations', { value: () => [{ finished }] });
   fireEvent.click(screen.getByRole('button',{name:'收起中间过程'}));
-  expect(host.isConnected).toBe(false);
-  expect(view.container.querySelector('.conversation-run__disclosure')).toBeNull();
+  expect(host.isConnected).toBe(true);
+  expect(drawer.hasAttribute('inert')).toBe(true);
+  expect(view.container.querySelectorAll('.conversation-run__drawer')).toHaveLength(1);
   act(()=>observed.forEach(item=>item.notify([{target:item.node,isIntersecting:true}] as IntersectionObserverEntry[],{} as IntersectionObserver)));
   expect(hydrate).not.toHaveBeenCalled();
+  await act(async () => finish());
+  expect(host.isConnected).toBe(false);
+  expect(drawer.querySelector('.conversation-run__step')).toBeNull();
   expect(screen.getByText('最终正文')).toBeTruthy();
 });
 
@@ -2719,38 +2727,69 @@ it('holds the clicked process header through the final-window read and manual co
   expect(toggle.getBoundingClientRect().top).toBe(140);
   expect(top).toBe(460);
   expect(screen.queryByText('过程正文')).toBeNull();
-  // This explicitly requested transition also runs with reduced motion set.
-  vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
-  const animation = { cancel: vi.fn(), finished: new Promise<void>(() => {}), onfinish: null } as unknown as Animation;
-  const animate = vi.fn(() => animation);
+  // Each interpolated height can clamp the browser's scroll range. Adopt
+  // those nearest positions without layering a competing column animation.
+  const animate = vi.fn();
   Object.defineProperty(thread.querySelector('.thread-column')!, 'animate', { value: animate, configurable: true });
-  // If the document becomes too short, accept only the browser's necessary
-  // clamp. Do not add blank space or switch to anchoring the answer.
-  height = 760;
-  top = Math.min(top, height - 400);
-  act(resizeColumn);
-  expect(top).toBe(360);
-  expect(toggle.getBoundingClientRect().top).toBe(240);
-  expect(animate).toHaveBeenCalledWith([
-    { transform: 'translateY(-100px)' }, { transform: 'translateY(0)' },
-  ], { duration: 180, easing: 'cubic-bezier(.2, .7, .2, 1)' });
-  const settledTop = top;
-  act(resizeColumn);
-  expect(top).toBe(settledTop);
-  expect(animate).toHaveBeenCalledOnce();
-  act(() => animation.onfinish?.call(animation, new Event('finish') as AnimationPlaybackEvent));
-  act(resizeColumn);
-  expect(top).toBe(settledTop);
-  expect(animate).toHaveBeenCalledOnce();
-  height = 720;
-  top = Math.min(top, height - 400);
-  act(resizeColumn);
-  expect(animate).toHaveBeenCalledTimes(2);
+  for (const nextHeight of [900, 820, 760, 720]) {
+    height = nextHeight;
+    top = Math.min(top, height - 400);
+    act(resizeColumn);
+    expect(top).toBe(Math.min(460, height - 400));
+    expect(toggle.getBoundingClientRect().top).toBe(headerTop - top);
+  }
+  expect(animate).not.toHaveBeenCalled();
   fireEvent.wheel(thread, { deltaY: -2 });
-  expect(animation.cancel).toHaveBeenCalledOnce();
-  // A late completion from the interrupted animation cannot recapture scroll.
   top -= 2;
   fireEvent.scroll(thread);
-  act(() => animation.onfinish?.call(animation, new Event('finish') as AnimationPlaybackEvent));
   expect(top).toBe(318);
+});
+
+it('reverses a process drawer without remounting steps or hiding interleaved user messages', async () => {
+  const view = render(<ConversationMessages messages={[
+    { id: 'drawer-first', role: 'assistant', assistantKind: 'progress', turnId: 'drawer-turn', time: '', body: '第一段处理过程' },
+    { id: 'drawer-steer', role: 'user', userKind: 'steer', turnId: 'drawer-turn', time: '', body: '用户补充要求' },
+    { id: 'drawer-last', role: 'assistant', assistantKind: 'progress', turnId: 'drawer-turn', time: '', body: '最后一段处理过程' },
+    { id: 'drawer-answer', role: 'assistant', assistantKind: 'terminal', turnId: 'drawer-turn', rootFinal: true, time: '', body: '抽屉测试答案' },
+  ]} onNotify={vi.fn()} onReadToolArtifact={vi.fn()} />);
+  fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+  const step = screen.getByText('最后一段处理过程');
+  const drawers = [...view.container.querySelectorAll('.conversation-run__drawer')];
+  expect(drawers).toHaveLength(2);
+  let finish!: () => void;
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  for (const drawer of drawers) Object.defineProperty(drawer, 'getAnimations', { value: () => [{ finished }] });
+  fireEvent.click(screen.getByRole('button', { name: '收起中间过程' }));
+  expect(step.closest('[inert]')).toBeTruthy();
+  expect(screen.getByText('用户补充要求').closest('[inert]')).toBeNull();
+  expect(screen.getByText('抽屉测试答案').closest('[inert]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+  await act(async () => finish());
+  expect(screen.getByText('最后一段处理过程')).toBe(step);
+  expect(step.closest('[inert]')).toBeNull();
+  expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+});
+
+it('defers residence reporting during the drawer and ignores its completion after a session change', async () => {
+  const retain = vi.fn();
+  const messages: ComponentProps<typeof WorkbenchView>['messages'] = [
+    { id: 'moving-process', role: 'assistant', assistantKind: 'progress', turnId: 'moving-turn', time: '', body: '抽屉内容' },
+    { id: 'moving-final', role: 'assistant', assistantKind: 'terminal', turnId: 'moving-turn', rootFinal: true, time: '', body: '抽屉答案' },
+  ];
+  const base = props({ isRunning: false, messages, onRetainHistory: retain });
+  const view = render(<WorkbenchView {...base} />);
+  await waitFor(() => expect(retain).toHaveBeenCalled());
+  retain.mockClear();
+  let finish!: () => void;
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  const getAnimations = vi.fn(() => [{ finished }]);
+  Object.defineProperty(view.container.querySelector('.conversation-run__drawer')!, 'getAnimations', { value: getAnimations });
+  fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+  await waitFor(() => expect(getAnimations).toHaveBeenCalled());
+  expect(retain).not.toHaveBeenCalled();
+  const nextRetain = vi.fn();
+  view.rerender(<WorkbenchView {...base} session={{ ...base.session, id: 'other-session' }} onRetainHistory={nextRetain} />);
+  await waitFor(() => expect(nextRetain).toHaveBeenCalled());
+  await act(async () => finish());
+  expect(retain).not.toHaveBeenCalled();
 });

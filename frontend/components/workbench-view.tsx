@@ -63,6 +63,7 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  Fragment,
   type ReactNode,
   createContext,
   useCallback,
@@ -1269,8 +1270,8 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   useLayoutEffect(() => {
     if (laidOutExpanded.current === disclosure.expanded) return;
     laidOutExpanded.current = disclosure.expanded;
-    // Settle scroll and start any constrained-position animation before the
-    // first collapsed frame, rather than waiting for ResizeObserver delivery.
+    // Capture the first drawer frame; ResizeObserver maintains the reading
+    // anchor as the browser interpolates the drawer height.
     onProcessLayout?.();
   }, [disclosure.expanded, onProcessLayout]);
   useEffect(() => () => request.current?.abort(), []);
@@ -1309,8 +1310,6 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const hasProcess = earlierProcess || compactions.some(marker => !afterFinalEvents.has(marker.eventId)) || compactionInProgress
     || process.some((message) => message.role === 'assistant' || message.userKind === 'subagent-completion');
   if (!hasProcess) return <>{renderMessage(answer!, true)}{afterFinalEvents.size > 0 && <ContextCompactionDivider count={afterFinalEvents.size} />}</>;
-  const visibleProcess = process.map((message, index) => ({ message, index })).filter(({message}) => disclosure.expanded || message.visualizations?.length
-    || (message.role === 'user' && message.userKind !== 'subagent-completion'));
   // Different accepted compactions can share a canonical edge, or map from
   // separate tool results to one visible host. Group the *visual insertion
   // slot*, retaining event identity/count rather than erasing real events.
@@ -1326,6 +1325,39 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     events.add(marker.eventId); compactSlots.set(slot, events);
   }
   const compactAt = (slot: number) => compactSlots.has(slot) ? <ContextCompactionDivider count={compactSlots.get(slot)!.size} /> : null;
+  // One drawer per continuous foldable span, not one animation shell per
+  // record. User messages and visualizations stay visible in chronological
+  // order. Only the resident reading window survives until the exit finishes.
+  const processRows: ReactNode[] = [];
+  let folding: ReactNode[] = [];
+  let drawerKey = 'start';
+  const flushDrawer = () => {
+    if (!folding.length) return;
+    processRows.push(<AnimatedDisclosure key={`drawer:${drawerKey}`} open={disclosure.expanded}
+      unmountOnClose className="conversation-run__drawer">
+      <div className="conversation-run__drawer-body">{folding}</div>
+    </AnimatedDisclosure>);
+    folding = [];
+  };
+  process.forEach((message, index) => {
+    const persistent = message.visualizations?.length || (message.role === 'user' && message.userKind !== 'subagent-completion');
+    if (persistent) {
+      if (compactSlots.has(index)) folding.push(<Fragment key={`compact:${message.id}`}>{compactAt(index)}</Fragment>);
+      flushDrawer();
+      processRows.push(<div key={message.id} className="conversation-run__step">
+        {renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded }, false)}
+      </div>);
+      drawerKey = message.id;
+    } else {
+      folding.push(<div key={message.id} className="conversation-run__step">
+        {compactAt(index)}
+        {renderMessage({ ...message, historyIncludeReasoning: true }, false)}
+      </div>);
+    }
+  });
+  if (compactSlots.has(process.length)) folding.push(<Fragment key="last-compaction">{compactAt(process.length)}</Fragment>);
+  if (compactionInProgress) folding.push(<ContextCompactionDivider key="compacting" inProgress />);
+  flushDrawer();
   return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
     <button type="button" className="conversation-run__toggle" data-process-toggle="" data-process-key={choiceKey} data-process-earlier={earlierProcess || undefined}
@@ -1336,12 +1368,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
       onClick={() => changeDisclosure(!disclosure.expanded)}>
       <span>{busy ? '正在读取…' : complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
     </button>
-    {visibleProcess.map(({message, index}) => <div key={message.id} className="conversation-run__step">
-      {disclosure.expanded && compactAt(index)}
-      {renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded }, false)}
-    </div>)}
-    {disclosure.expanded && compactAt(process.length)}
-    {disclosure.expanded && compactionInProgress && <ContextCompactionDivider inProgress />}
+    {processRows}
     {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined,
       pendingAssistant: answer.pendingAssistant ? { body: answer.pendingAssistant.body } : undefined }, false)}
     {answer && compactAt(process.length + 1)}
@@ -2187,7 +2214,6 @@ export function WorkbenchView({
   // A manual disclosure owns its button's viewport position until the reader
   // scrolls or explicitly navigates. Tail-follow must not move it during resize.
   const disclosureAnchor = useRef<{ element: HTMLElement; top: number; processKey?: string; collapsing?: boolean } | undefined>(undefined);
-  const collapseMotion = useRef<Animation | undefined>(undefined);
   const programmaticTop = useRef<number | undefined>(undefined);
   const previousScrollTop = useRef<number | undefined>(undefined);
   const userScrollPending = useRef(false);
@@ -2196,8 +2222,6 @@ export function WorkbenchView({
   const automaticProcessRead = useRef<{ request: AbortController; turnId?: string } | undefined>(undefined);
   const loadRequests = useRef(new Map<string, Promise<void>>());
   const resetReading = useCallback(() => {
-    collapseMotion.current?.cancel();
-    collapseMotion.current = undefined;
     disclosureAnchor.current = undefined;
     followLatestRef.current = false;
     setAtBottom(false);
@@ -2240,8 +2264,6 @@ export function WorkbenchView({
     loadRequests.current.clear();
     return () => {
       locateRequest.current?.abort();
-      collapseMotion.current?.cancel();
-      collapseMotion.current = undefined;
       if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
     };
   }, [session.id]);
@@ -2309,7 +2331,7 @@ export function WorkbenchView({
 
   const restoreReadingPosition = useCallback((): void => {
     const thread = threadRef.current;
-    if (!thread || userScrollPending.current || collapseMotion.current) return;
+    if (!thread || userScrollPending.current) return;
     const clicked = disclosureAnchor.current;
     // Rewindowing can replace the header's DOM node without changing the turn.
     if (clicked?.processKey && !thread.contains(clicked.element)) {
@@ -2324,28 +2346,10 @@ export function WorkbenchView({
       previousScrollTop.current = thread.scrollTop;
       const actualTop = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top;
       if (clicked.collapsing && clicked.element.getAttribute('aria-expanded') === 'false' && Math.abs(actualTop - clicked.top) > .5) {
-        // The browser has clamped scrolling after the content shrank. Accept
-        // its nearest position without spacer DOM, and visually ease that one
-        // unavoidable move. No hidden process remains mounted for animation.
-        const offset = clicked.top - actualTop;
+        // Height is already interpolated by the drawer. Browser clamping now
+        // moves the header continuously; a second column transform would fight
+        // that animation and feed transient geometry back into scroll anchoring.
         clicked.top = actualTop;
-        const column = thread.querySelector<HTMLElement>('.thread-column');
-        const animation = column?.animate?.([
-          { transform: `translateY(${offset}px)` }, { transform: 'translateY(0)' },
-        ], { duration: 180, easing: 'cubic-bezier(.2, .7, .2, 1)' });
-        if (animation) {
-          collapseMotion.current = animation;
-          animation.onfinish = () => {
-            if (collapseMotion.current !== animation) return;
-            collapseMotion.current = undefined;
-            // Transformed overflow can slightly change browser clamping. Use
-            // the settled position rather than starting a second correction.
-            if (disclosureAnchor.current === clicked && thread.contains(clicked.element)) {
-              clicked.top = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top;
-            }
-            restoreReadingPosition();
-          };
-        }
       }
       return;
     }
@@ -2362,8 +2366,6 @@ export function WorkbenchView({
   useLayoutEffect(restoreReadingPosition);
 
   const jumpToLatest = useCallback(async () => {
-    collapseMotion.current?.cancel();
-    collapseMotion.current = undefined;
     locateRequest.current?.abort();
     locatingEntry.current = undefined;
     const request = new AbortController(); locateRequest.current = request;
@@ -2452,15 +2454,19 @@ export function WorkbenchView({
   const locatingEntry = useRef<string | undefined>(undefined);
   const residenceFrame = useRef<number | undefined>(undefined);
   const reportResidence = useCallback(() => {
-    if (!onRetainHistory || residenceFrame.current !== undefined) return;
+    if (!onRetainHistory || residenceFrame.current !== undefined || currentSessionRef.current !== session.id) return;
     residenceFrame.current = requestAnimationFrame(() => {
       residenceFrame.current = undefined;
-      if (collapseMotion.current) {
-        // Transient visual translation must not choose history retention.
-        void collapseMotion.current.finished.then(reportResidence, () => {});
+      if (currentSessionRef.current !== session.id) return;
+      const thread = threadRef.current;
+      const drawerAnimations = [...thread?.querySelectorAll<HTMLElement>('.conversation-run__drawer') ?? []]
+        .flatMap(drawer => drawer.getAnimations?.() ?? []);
+      if (drawerAnimations.length) {
+        // A moving clip must not retire the contents it is revealing. Retry
+        // with the settled DOM and current reading owner after finish/cancel.
+        void Promise.allSettled(drawerAnimations.map(animation => animation.finished)).then(reportResidence);
         return;
       }
-      const thread = threadRef.current;
       if (!thread) return;
       if (locatingEntry.current) return;
       const interest: import('../lib/runtime-adapter').HistoryResidence = collectHistoryResidence(thread);
@@ -2473,7 +2479,7 @@ export function WorkbenchView({
       if (locatingEntry.current) interest.pinnedEntryIds.push(locatingEntry.current);
       onRetainHistory(interest);
     });
-  }, [onRetainHistory, readingOwner]);
+  }, [onRetainHistory, readingOwner, session.id]);
   useLayoutEffect(reportResidence);
   useLayoutEffect(() => {
     const thread = threadRef.current;

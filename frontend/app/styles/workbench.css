@@ -637,9 +637,10 @@
 
 /* One continuous reply, with a quiet disclosure for intermediate activity. */
 .conversation-run { margin: 24px 0 32px; min-width: 0; }
-.conversation-run__toggle { display: flex; align-items: center; gap: 7px; margin: 0 0 6px 40px; padding: 3px 0; background: transparent; color: var(--muted); font-size: var(--type-small); }
+.conversation-run__toggle { display: flex; align-items: center; gap: 7px; margin: 0 0 6px 40px; padding: 3px 0; background: transparent; color: var(--muted); font-size: var(--type-small); transition: margin-bottom .26s cubic-bezier(.2,.7,.2,1), padding-bottom .26s cubic-bezier(.2,.7,.2,1); }
 .conversation-run[data-process-expanded="false"] .conversation-run__toggle { margin-bottom: 0; padding-bottom: 0; }
 .conversation-run[data-process-expanded="false"] .user-steer { margin-block: 8px 0; }
+.conversation-run > .conversation-run__step .user-steer { transition: margin .26s cubic-bezier(.2,.7,.2,1); }
 .conversation-run[data-process-expanded="false"] > .assistant-turn--response .assistant-copy { margin-top: 0; }
 .conversation-run__toggle:hover { color: var(--ink); }
 .conversation-run__toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; border-radius: 3px; }
@@ -654,7 +655,11 @@
 .conversation-run > div:last-child .assistant-turn,
 .conversation-run > div:last-child .assistant-copy { margin-bottom: 0; }
 
-/* Collapsed process bodies are unmounted; only visible steps have layout. */
+/* The resident span slides as one drawer; its body unmounts after closing.
+   Keep text opaque so the motion reads as a drawer, rather than a crossfade. */
+.conversation-run__drawer.animated-disclosure { opacity: 1; visibility: visible; overflow: clip; align-content: end; transition: grid-template-rows .26s cubic-bezier(.2,.7,.2,1); }
+.conversation-run__drawer > .animated-disclosure__content { display: flex; flex-direction: column; justify-content: flex-end; overflow: visible; }
+.conversation-run__drawer-body { flex: none; }
 .conversation-run__step { display: grid; grid-template-rows: 1fr; }
 .conversation-run__toggle svg { transition: transform .2s ease; }
 
