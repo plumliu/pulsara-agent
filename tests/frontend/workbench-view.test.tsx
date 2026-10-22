@@ -2710,6 +2710,64 @@ it.each(['wheel', 'scrollbar', 'native-scrollbar', 'shift-space'] as const)(
   },
 );
 
+it.each(['drawer', 'viewport', 'short-thread'] as const)(
+  'keeps tail-follow when completion clamps the viewport before the %s resize notification', async change => {
+    const observations = new Map<Element, () => void>();
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private callback: () => void) {}
+      observe(node: Element) { observations.set(node, this.callback); }
+      disconnect() {} unobserve() {}
+    });
+    const progress = { id: 'finishing-process', role: 'assistant' as const, assistantKind: 'progress' as const,
+      turnId: 'finishing-turn', time: '', body: '正在核对结果' };
+    const answer = { id: 'finishing-answer', role: 'assistant' as const, assistantKind: 'terminal' as const,
+      turnId: 'finishing-turn', rootFinal: true, time: '', body: '最终答案' };
+    const base = props({ activeTurnId: 'finishing-turn', messages: [progress] });
+    const view = render(<WorkbenchView {...base} />);
+    const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+    let height = 2000, viewport = 400, top = 1600;
+    const limit = () => Math.max(0, height - viewport);
+    Object.defineProperties(thread, {
+      scrollHeight: { get: () => height }, clientHeight: { get: () => viewport },
+      scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(limit(), value)); } },
+    });
+    view.rerender(<WorkbenchView {...base} />);
+    view.rerender(<WorkbenchView {...base} isRunning={false} messages={[progress, answer]} />);
+    await screen.findByRole('button', { name: '展开处理过程' });
+    // The browser clamps scrollTop as the automatic drawer exit changes the
+    // scroll range. Its scroll event may precede ResizeObserver delivery.
+    if (change === 'viewport') viewport = 600;
+    else height = change === 'short-thread' ? 350 : 1700;
+    top = limit();
+    fireEvent.scroll(thread);
+    expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
+    act(() => observations.get(thread)?.());
+    height += 100;
+    act(() => observations.get(thread)?.());
+    expect(top).toBe(limit());
+    expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
+  },
+);
+
+it('still releases tail-follow for native upward scrolling during a drawer resize', () => {
+  const base = props({ isRunning: false, messages: [
+    { id: 'resizing-answer', role: 'assistant', time: '', body: '最新正文' },
+  ] });
+  const view = render(<WorkbenchView {...base} />);
+  const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  let height = 2000, top = 1600;
+  Object.defineProperties(thread, {
+    scrollHeight: { get: () => height }, clientHeight: { get: () => 400 },
+    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(height - 400, value)); } },
+  });
+  view.rerender(<WorkbenchView {...base} />);
+  height = 1700;
+  top = 1299.75;
+  fireEvent.scroll(thread);
+  expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+  expect(top).toBe(1299.75);
+});
+
 it('pauses automatic positioning before a scrollbar drag moves the viewport', () => {
   const base = props({ isRunning: false, messages: [
     { id: 'scrollbar-answer', role: 'assistant', time: '', body: '阅读正文' },

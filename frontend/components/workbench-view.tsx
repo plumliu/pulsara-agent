@@ -2860,6 +2860,15 @@ export function WorkbenchView({
           if (!userScrollPending.current && programmaticTop.current !== undefined
             && element.scrollTop === programmaticTop.current) { programmaticTop.current = undefined; return; }
           if (locatingTaskRef.current) return;
+          // Drawer/viewport shrink can clamp the old tail upward before its
+          // ResizeObserver runs. Moving upward while still exactly at the new
+          // physical tail is layout, not a reader leaving it. Explicit user
+          // input already releases following; a native drag below the tail does too.
+          if (followLatestRef.current && !userScrollPending.current && movedAway
+            && element.scrollTop === Math.max(0, element.scrollHeight - element.clientHeight)) {
+            programmaticTop.current = undefined;
+            return;
+          }
           // Native scrollbar drags can arrive without a DOM pointerdown.
           // Only our exact programmed position is suppressed above.
           if (disclosureAnchor.current && (movedAway || movedTowardLatest)) {

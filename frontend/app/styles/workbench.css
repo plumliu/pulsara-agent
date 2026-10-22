@@ -643,11 +643,12 @@
 
 /* One continuous reply, with a quiet disclosure for intermediate activity. */
 .conversation-run { margin: 24px 0 32px; min-width: 0; }
-.conversation-run__toggle { display: flex; align-items: center; gap: 7px; margin: 0 0 6px 40px; padding: 3px 0; background: transparent; color: var(--muted); font-size: var(--type-small); transition: margin-bottom .26s cubic-bezier(.2,.7,.2,1), padding-bottom .26s cubic-bezier(.2,.7,.2,1); }
-.conversation-run[data-process-expanded="false"] .conversation-run__toggle { margin-bottom: 0; padding-bottom: 0; }
+/* The persistent lower control and answer keep the same geometry in both
+   states. Only the drawer changes height; shrinking this button moves text
+   even when its top is correctly anchored. */
+.conversation-run__toggle { display: flex; align-items: center; gap: 7px; margin: 0 0 6px 40px; padding: 3px 0; background: transparent; color: var(--muted); font-size: var(--type-small); transition: color .15s ease; }
 .conversation-run[data-process-expanded="false"] .user-steer { margin-block: 8px 0; }
 .conversation-run > .conversation-run__step .user-steer { transition: margin .26s cubic-bezier(.2,.7,.2,1); }
-.conversation-run[data-process-expanded="false"] > .assistant-turn--response .assistant-copy { margin-top: 0; }
 .conversation-run__toggle:hover { color: var(--ink); }
 .conversation-run__toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; border-radius: 3px; }
 .conversation-run__toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
