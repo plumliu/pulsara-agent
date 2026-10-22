@@ -197,11 +197,8 @@
 .archive-delete-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 13px; color: var(--muted); font-size: var(--type-label); font-variant-numeric: tabular-nums; }
 .archive-delete-pagination > div { display: flex; align-items: center; gap: 12px; }
 .archive-delete-pagination button { display: inline-flex; align-items: center; gap: 3px; min-height: 28px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); font-size: var(--type-label); }
-.has-archive-results > footer { background: color-mix(in srgb,var(--paper-raised) 70%,var(--paper-solid)); }
-.archive-delete-footer-note { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; color: var(--muted); font-size: var(--type-label); }
-.archive-delete-footer-note > svg { color: var(--annotation-accent); }
-.has-archive-results > footer .archive-delete-retry { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-color: color-mix(in srgb,var(--blue) 25%,var(--line)); background: color-mix(in srgb,var(--blue-soft) 45%,var(--paper-solid)); color: var(--blue); }
-.has-archive-results > footer .archive-delete-retry:hover:not(:disabled) { background: var(--blue-soft); }
+.session-delete-dialog.has-archive-results > header > .archive-delete-retry { display: inline-flex; align-items: center; justify-content: center; flex: none; gap: 6px; width: auto; height: 30px; margin: -5px 0 0; padding: 0 8px; border: 1px solid color-mix(in srgb,var(--blue) 25%,var(--line)); border-radius: 7px; background: color-mix(in srgb,var(--blue-soft) 45%,var(--paper-solid)); color: var(--blue); font-size: var(--type-label); white-space: nowrap; }
+.session-delete-dialog.has-archive-results > header > .archive-delete-retry:hover:not(:disabled) { background: var(--blue-soft); }
 .archive-delete-spinner { animation: avatar-spin 1.2s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .archive-delete-spinner { animation: none; } }
 @media (max-width: 540px) {
@@ -213,7 +210,7 @@
   .archive-delete-row-heading { gap: 8px; }
   .archive-delete-pagination { gap: 7px; }
   .archive-delete-pagination > div { gap: 6px; }
-  .archive-delete-footer-note { flex-basis: 100%; }
+  .session-delete-dialog.has-archive-results > header > .archive-delete-retry { gap: 4px; padding: 0 5px; }
 }
 @media (max-width: 700px) { .archived-sessions > ul > li { align-items: stretch; flex-direction: column; gap: 7px; } .archived-session-actions { justify-content: flex-end; } }
 

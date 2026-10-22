@@ -84,10 +84,13 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('navigation', {name: '已归档会话分页'})).toBeNull();
     fireEvent.click(screen.getByRole('button', {name: /归档会话删除结果 ·/}));
     expect(within(screen.getByRole('list', {name: '归档删除结果'})).getAllByRole('listitem')).toHaveLength(5);
+    expect(screen.getByText('查看各会话的删除结果。')).toBeTruthy();
+    expect(screen.getByRole('dialog').querySelector('footer')).toBeNull();
+    expect(screen.queryByRole('button', {name: '重试未完成项…'})).toBeNull();
     fireEvent.click(within(screen.getByRole('navigation', {name: '归档删除结果分页'})).getByRole('button', {name: '下一页'}));
     expect(screen.getByText('归档批次 6')).toBeTruthy();
     expect(screen.queryByRole('button', {name: /归档会话删除结果 ·/})).toBeNull();
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭', exact: true}));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭删除结果', exact: true}));
     fireEvent.click(screen.getByRole('button', {name: '会话', exact: true}));
     expect(screen.queryByRole('button', {name: /归档会话删除结果 ·/})).toBeNull();
   });
@@ -105,7 +108,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(progress);
     expect(screen.queryByRole('button', {name: /正在删除归档会话 ·/})).toBeNull();
     if (closeWhileRunning) {
-      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭', exact: true}));
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭删除结果', exact: true}));
       expect(screen.getByRole('button', {name: /正在删除归档会话 ·/})).toBeTruthy();
     }
     await act(async () => pending.resolve({status: 'DELETED', session_id: 'archived-1', cleanup_warning: null}));
@@ -114,7 +117,7 @@ describe('PulsaraApp', () => {
     } else {
       await screen.findByText('本次处理已结束');
     }
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭', exact: true}));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '关闭删除结果', exact: true}));
     expect(screen.queryByRole('button', {name: /归档会话删除结果 ·/})).toBeNull();
     expect(screen.queryByText('归档会话已处理')).toBeNull();
   });
@@ -139,7 +142,11 @@ describe('PulsaraApp', () => {
     expect(screen.getByText('本条已跳过，请重启 Pulsara')).toBeTruthy();
     expect(screen.getByText('会话正忙')).toBeTruthy();
     expect(screen.getByText(/操作结果已保留，但会话列表/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', {name: '重试未完成项…'}));
+    const retry = screen.getByRole('button', {name: '重试未完成项…'});
+    expect(retry.parentElement?.tagName).toBe('HEADER');
+    expect(retry.nextElementSibling).toBe(screen.getByRole('button', {name: '关闭删除结果'}));
+    expect(screen.getByRole('dialog').querySelector('footer')).toBeNull();
+    fireEvent.click(retry);
     expect(screen.getByRole('dialog').textContent).toContain('3 条已归档会话');
     adapter.deleteArchivedSession.mockImplementation(async id => ({status: 'DELETED', session_id: id, cleanup_warning: null}));
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: '永久删除'}));

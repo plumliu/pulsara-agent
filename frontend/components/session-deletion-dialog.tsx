@@ -77,8 +77,9 @@ export function SessionDeletionDialog({ session, sessions, results, busy, error,
         <span className="session-delete-icon"><HeaderIcon size={20} aria-hidden="true" /></span>
         <div className="session-delete-heading">
           <h2 id="session-delete-title">{results ? '归档会话删除结果' : sessions ? `永久删除本次列表中的 ${sessions.length} 条已归档会话？` : '删除这条会话？'}</h2>
-          <p id="session-delete-description">{results ? '逐条查看操作结果；关闭此窗口不会停止正在处理的会话。' : sessions ? '无法撤销。执行时已取消归档的会话将跳过。' : '会话、记录及绑定的定时任务将永久删除，无法撤销。'}</p>
+          <p id="session-delete-description">{results ? '查看各会话的删除结果。' : sessions ? '无法撤销。执行时已取消归档的会话将跳过。' : '会话、记录及绑定的定时任务将永久删除，无法撤销。'}</p>
         </div>
+        {results && onRetry && incomplete > 0 && <button className="archive-delete-retry" disabled={busy} onClick={onRetry}><RotateCcw size={14} aria-hidden="true" /><span>重试未完成项…</span></button>}
         <button aria-label={results ? '关闭删除结果' : '关闭删除确认'} disabled={!canClose} onClick={onClose}><X size={17} /></button>
       </header>
       <div className="memory-delete-body session-delete-body">
@@ -125,11 +126,11 @@ export function SessionDeletionDialog({ session, sessions, results, busy, error,
         {session?.live && <p className="session-delete-runtime"><CirclePause size={15} aria-hidden="true" />将先停止此会话及其后台任务。</p>}
         {error && <p className="memory-delete-alert" role="alert">{error}</p>}
       </div>
-      <footer>{results && <span className="archive-delete-footer-note">{incomplete > 0 ? <><TriangleAlert size={13} aria-hidden="true" />{incomplete} 项需要处理</> : busy ? '正在处理，可稍后查看结果' : '本次结果已全部记录'}</span>}<button disabled={!canClose} onClick={onClose}>{results ? '关闭' : '取消'}</button>
-        {results ? onRetry && <button className="archive-delete-retry" disabled={busy || incomplete === 0} onClick={onRetry}><RotateCcw size={14} aria-hidden="true" />重试未完成项…</button> : <button className="is-danger" disabled={busy} onClick={onConfirm}>
+      {!results && <footer><button disabled={!canClose} onClick={onClose}>取消</button>
+        <button className="is-danger" disabled={busy} onClick={onConfirm}>
           {busy ? session?.live ? '正在停止并删除…' : '正在删除…' : error ? '重试确认' : session?.live ? '停止并删除' : '永久删除'}
-        </button>}
-      </footer>
+        </button>
+      </footer>}
     </section>
   </div>, document.body);
 }
