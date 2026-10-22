@@ -606,6 +606,26 @@ describe('current-session runtime actions', () => {
 });
 
 describe('empty session welcome composer', () => {
+  it.each(['wheel', 'scrollbar', 'keyboard'] as const)('never offers latest on welcome after %s input, but keeps it available once messages exist', method => {
+    const input = props({ isRunning: false });
+    const view = render(<WorkbenchView {...input} />);
+    const thread = view.container.querySelector('.thread-scroll') as HTMLElement;
+    Object.defineProperties(thread, {
+      scrollHeight: { configurable: true, value: 1200 },
+      clientHeight: { configurable: true, value: 400 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    if (method === 'wheel') fireEvent.wheel(thread, { deltaY: -1 });
+    else if (method === 'scrollbar') fireEvent.pointerDown(thread);
+    else fireEvent.keyDown(thread, { key: 'PageUp' });
+    fireEvent.scroll(thread);
+    expect(view.container.querySelector('.is-welcome')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
+    view.rerender(<WorkbenchView {...input} messages={[{ id: 'first-message', role: 'user', body: '已发送的消息', time: '现在' }]} />);
+    expect(view.container.querySelector('.is-welcome')).toBeNull();
+    expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+  });
+
   it('disables compaction for an empty session even with an unsent draft, but allows existing context', () => {
     const input = props({ isRunning: false });
     const view = render(<WorkbenchView {...input} />);
@@ -648,8 +668,7 @@ describe('empty session welcome composer', () => {
       scrollTop: { configurable: true, writable: true, value: 0 },
     });
     fireEvent.scroll(thread);
-    const latest = await screen.findByRole('button', { name: '回到最新' });
-    await waitFor(() => expect(latest.style.bottom).toBe('532px'));
+    expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
     const editor = screen.getByLabelText('发送给 Pulsara');
     act(() => editor.focus());
     expect(document.activeElement).toBe(editor);
@@ -659,6 +678,7 @@ describe('empty session welcome composer', () => {
     expect(editor.contains(document.activeElement)).toBe(true);
     expect(view.container.querySelector('.is-welcome')).toBeNull();
     // The composer moved without resizing; the old welcome offset must not linger.
+    const latest = await screen.findByRole('button', { name: '回到最新' });
     await waitFor(() => expect(latest.style.bottom).toBe('162px'));
     expect(screen.queryByRole('heading', { name: isWelcomeHeading })).toBeNull();
     expect(animate).toHaveBeenCalledWith([
@@ -2691,7 +2711,9 @@ it.each(['wheel', 'scrollbar', 'native-scrollbar', 'shift-space'] as const)(
 );
 
 it('pauses automatic positioning before a scrollbar drag moves the viewport', () => {
-  const base = props({ isRunning: false });
+  const base = props({ isRunning: false, messages: [
+    { id: 'scrollbar-answer', role: 'assistant', time: '', body: '阅读正文' },
+  ] });
   const view = render(<WorkbenchView {...base} />);
   const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
   let height = 1000, top = 600;

@@ -2950,7 +2950,7 @@ export function WorkbenchView({
           interaction={interaction} toolDecisionPending={toolDecisionPending} onRead={onReadInteraction}
           onResolve={onResolveInteraction} onNotify={onNotify} />
       </section>}
-      {(!atBottom || !atLatestHistory) && (
+      {!welcome && (!atBottom || !atLatestHistory) && (
         <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} disabled={jumpingToLatest}
           onClick={() => { void jumpToLatest(); }}>
           <span className="jump-to-bottom__icon" aria-hidden="true">
