@@ -2609,3 +2609,71 @@ describe('long turn process reading', () => {
     await waitFor(() => expect(load).toHaveBeenCalledWith('band', 'older'));
   });
 });
+
+it.each(['wheel', 'scrollbar', 'native-scrollbar', 'shift-space'] as const)(
+  'releases tail-follow for a tiny upward %s movement and resumes in the downward 20px return zone', async gesture => {
+    const observations = new Map<Element, () => void>();
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private callback: () => void) {}
+      observe(node: Element) { observations.set(node, this.callback); }
+      disconnect() {} unobserve() {}
+    });
+    const base = props({ isRunning: false, messages: [
+      { id: 'tiny-scroll-answer', role: 'assistant', time: '', body: '阅读正文' },
+    ] });
+    const view = render(<WorkbenchView {...base} />);
+    const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+    let height = 1000, top = 600;
+    Object.defineProperties(thread, {
+      scrollHeight: { get: () => height }, clientHeight: { get: () => 400 },
+      scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(height - 400, value)); } },
+    });
+    view.rerender(<WorkbenchView {...base} />);
+    if (gesture === 'wheel') fireEvent.wheel(thread, { deltaY: -.25 });
+    if (gesture === 'scrollbar') fireEvent.pointerDown(thread);
+    if (gesture === 'shift-space') fireEvent.keyDown(thread, { key: ' ', shiftKey: true });
+    // Native scrollbars may deliver only a scroll event to the document.
+    top = 599.75;
+    fireEvent.scroll(thread);
+    fireEvent.pointerUp(thread);
+    expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    view.rerender(<WorkbenchView {...base} />);
+    expect(top).toBe(599.75);
+    // New output/viewport layout must not recapture the reader near the tail.
+    height = 1060;
+    act(() => observations.get(thread)?.());
+    expect(top).toBe(599.75);
+    fireEvent.wheel(thread, { deltaY: 10 });
+    top = 630;
+    fireEvent.scroll(thread);
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+    expect(top).toBe(630);
+    fireEvent.wheel(thread, { deltaY: 10 });
+    top = 640;
+    fireEvent.scroll(thread);
+    expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
+    expect(top).toBe(660);
+    height = 1080;
+    act(() => observations.get(thread)?.());
+    expect(top).toBe(680);
+  },
+);
+
+it('pauses automatic positioning before a scrollbar drag moves the viewport', () => {
+  const base = props({ isRunning: false });
+  const view = render(<WorkbenchView {...base} />);
+  const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  let height = 1000, top = 600;
+  Object.defineProperties(thread, {
+    scrollHeight: { get: () => height }, clientHeight: { get: () => 400 },
+    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(height - 400, value)); } },
+  });
+  view.rerender(<WorkbenchView {...base} />);
+  fireEvent.pointerDown(thread);
+  height = 1020;
+  view.rerender(<WorkbenchView {...base} />);
+  expect(top).toBe(600);
+  expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+});

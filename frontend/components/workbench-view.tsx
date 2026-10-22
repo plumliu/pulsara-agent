@@ -1778,7 +1778,7 @@ function reasoningSelectionLabel(
   if (selection?.kind === 'toggle') return selection.enabled ? '推理开启' : '推理关闭';
   if (selection?.kind === 'budget_tokens') return `推理 ${selection.tokens.toLocaleString('zh-CN')} tokens`;
   if (connection.reasoning.kind === 'fixed_on') return '推理固定开启';
-  if (connection.reasoning.kind === 'provider_default') return '推理由提供方决定';
+  if (connection.reasoning.kind === 'provider_default') return '默认';
   return '无推理选项';
 }
 
@@ -1803,6 +1803,10 @@ function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
     </button>;
   })}</div>;
 }
+
+// User-chosen comfort zone when scrolling downward to resume following.
+// Upward input always leaves following, including inside this zone.
+const LATEST_FOLLOW_DISTANCE = 20;
 
 export function WorkbenchView({
   history, onLoadHistory, onReadLatestHistory, onReadProcessEnd, onHydrateEntries, onRetainHistory, onLocateEntry,
@@ -2175,6 +2179,7 @@ export function WorkbenchView({
   // scrolls or explicitly navigates. Tail-follow must not move it during resize.
   const disclosureAnchor = useRef<{ element: HTMLElement; top: number } | undefined>(undefined);
   const programmaticTop = useRef<number | undefined>(undefined);
+  const previousScrollTop = useRef<number | undefined>(undefined);
   const userScrollPending = useRef(false);
   const userScrollFrame = useRef<number | undefined>(undefined);
   const locateRequest = useRef<AbortController | undefined>(undefined);
@@ -2185,12 +2190,16 @@ export function WorkbenchView({
     followLatestRef.current = false;
     setAtBottom(false);
     readingAnchor.current = threadRef.current ? captureHistoryAnchor(threadRef.current) : undefined;
+    previousScrollTop.current = threadRef.current?.scrollTop;
   }, []);
   const beginUserScroll = useCallback((towardLatest = false) => {
     locateRequest.current?.abort();
     setJumpingToLatest(false);
-    disclosureAnchor.current = undefined;
     userScrollPending.current = true;
+    // User input takes ownership before the browser moves the viewport. Even a
+    // subpixel move away from the bottom must not turn following back on.
+    resetReading();
+    programmaticTop.current = undefined;
     if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
     // A wheel/key gesture at the physical edge may produce no scroll event.
     // End suppression at the browser's next layout opportunity in either case.
@@ -2198,14 +2207,14 @@ export function WorkbenchView({
       userScrollFrame.current = undefined;
       userScrollPending.current = false;
       const thread = threadRef.current;
-      if (towardLatest && currentHistory.current?.atLatest !== false && thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight < 1) {
+      if (towardLatest && currentHistory.current?.atLatest !== false && thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= LATEST_FOLLOW_DISTANCE) {
         followLatestRef.current = true;
         setAtBottom(true);
         readingAnchor.current = undefined;
         programmaticTop.current = undefined;
       } else if (!followLatestRef.current && thread) readingAnchor.current = captureHistoryAnchor(thread);
     });
-  }, []);
+  }, [resetReading]);
   useLayoutEffect(() => {
     currentSessionRef.current = session.id;
     locatingEntry.current = undefined;
@@ -2215,6 +2224,7 @@ export function WorkbenchView({
     readingAnchor.current = undefined;
     userScrollPending.current = false;
     programmaticTop.current = undefined;
+    previousScrollTop.current = undefined;
     loadRequests.current.clear();
     return () => {
       locateRequest.current?.abort();
@@ -2285,14 +2295,13 @@ export function WorkbenchView({
 
   const restoreReadingPosition = useCallback(() => {
     const thread = threadRef.current;
-    if (!thread) return;
+    if (!thread || userScrollPending.current) return;
     const clicked = disclosureAnchor.current;
     if (clicked && thread.contains(clicked.element) && !clicked.element.closest('[inert]')) {
-      if (!userScrollPending.current) {
-        const delta = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top - clicked.top;
-        if (Math.abs(delta) > .5) thread.scrollTop += delta;
-        programmaticTop.current = thread.scrollTop;
-      }
+      const delta = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top - clicked.top;
+      if (Math.abs(delta) > .5) thread.scrollTop += delta;
+      programmaticTop.current = thread.scrollTop;
+      previousScrollTop.current = thread.scrollTop;
       return;
     }
     disclosureAnchor.current = undefined;
@@ -2300,9 +2309,10 @@ export function WorkbenchView({
       const previous = thread.scrollTop;
       thread.scrollTop = thread.scrollHeight;
       if (thread.scrollTop !== previous) programmaticTop.current = thread.scrollTop;
-    } else if (readingAnchor.current && !userScrollPending.current) {
+    } else if (readingAnchor.current) {
       programmaticTop.current = restoreHistoryAnchor(thread, readingAnchor.current);
     }
+    previousScrollTop.current = thread.scrollTop;
   }, []);
   useLayoutEffect(restoreReadingPosition);
 
@@ -2703,7 +2713,7 @@ export function WorkbenchView({
         }}
         onWheel={event => {
           if (nestedScrollConsumes(event.target, event.currentTarget, event.deltaY)) return;
-          if (event.deltaY < 0) resetReading();
+          if (!event.deltaY) return;
           beginUserScroll(event.deltaY > 0);
         }}
         onTouchStart={event => { if (!nestedScrollConsumes(event.target, event.currentTarget, 0)) beginUserScroll(); }}
@@ -2715,18 +2725,24 @@ export function WorkbenchView({
           if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return;
           const upward = ['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey);
           if (nestedScrollConsumes(target, event.currentTarget, upward ? -1 : 1)) return;
-          if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) resetReading();
           if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll(['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey));
         }}
         onScroll={(event) => {
           if (event.target !== event.currentTarget) return;
           const element = event.currentTarget;
+          const movedTowardLatest = previousScrollTop.current !== undefined && element.scrollTop > previousScrollTop.current;
+          const movedAway = previousScrollTop.current !== undefined && element.scrollTop < previousScrollTop.current;
+          previousScrollTop.current = element.scrollTop;
           if (!userScrollPending.current && programmaticTop.current !== undefined
-            && Math.abs(element.scrollTop - programmaticTop.current) < 1) { programmaticTop.current = undefined; return; }
+            && element.scrollTop === programmaticTop.current) { programmaticTop.current = undefined; return; }
           if (locatingTaskRef.current) return;
           if (disclosureAnchor.current && !userScrollPending.current) return;
           userScrollPending.current = false;
-          const nextAtBottom = currentHistory.current?.atLatest !== false && element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+          // The small return zone applies only while moving toward the tail;
+          // it must never recapture an upward gesture, even a fractional one.
+          const nextAtBottom = currentHistory.current?.atLatest !== false
+            && !movedAway && (followLatestRef.current || movedTowardLatest)
+            && element.scrollHeight - element.scrollTop - element.clientHeight <= LATEST_FOLLOW_DISTANCE;
           followLatestRef.current = nextAtBottom;
           setAtBottom(nextAtBottom);
           readingAnchor.current = nextAtBottom ? undefined : captureHistoryAnchor(element);
