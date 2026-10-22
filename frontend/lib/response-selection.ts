@@ -58,9 +58,23 @@ export interface MappedSelection { annotation: PromptAnnotationPart; range: Rang
 
 export function mapResponseSelection(selection: Selection | null): MappedSelection | undefined {
   if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return;
-  const range = selection.getRangeAt(0);
-  const start = element(range.startContainer); const end = element(range.endContainer);
+  const range = selection.getRangeAt(0).cloneRange();
+  const start = element(range.startContainer);
   const root = start?.closest<HTMLElement>('[data-annotation-entry]');
+  // Chromium can anchor a drag from the blank reply footer at <time>, offset
+  // zero: no timestamp text is selected, but the endpoint is outside the body.
+  // Normalize only this reply's empty trailing chrome, never another message or
+  // selected footer text. Keep the native selection untouched for the browser.
+  const footer = root?.closest('.assistant-copy')?.querySelector(':scope > .response-actions');
+  if (root && footer?.contains(range.endContainer)) {
+    const trailing = range.cloneRange();
+    trailing.setStartAfter(root);
+    const contents = trailing.cloneContents();
+    if (contents.textContent?.trim()
+      || contents.querySelector('[data-annotation-entry],[data-annotation-exclude],iframe,input,textarea,[contenteditable="true"]')) return;
+    range.setEnd(root, root.childNodes.length);
+  }
+  const end = element(range.endContainer);
   if (!root || root !== end?.closest('[data-annotation-entry]')) return;
   if (start?.closest('input,textarea,[contenteditable="true"],[data-source-decoration]')
     && end?.closest('input,textarea,[contenteditable="true"],[data-source-decoration]') === start.closest('input,textarea,[contenteditable="true"],[data-source-decoration]')) return;

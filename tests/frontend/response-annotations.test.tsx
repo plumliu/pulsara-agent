@@ -35,6 +35,26 @@ beforeEach(() => {
 afterEach(() => { cleanup(); store.destroy(); window.getSelection()?.removeAllRanges(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('draft annotation UI', () => {
+  it('offers and creates an exact annotation when a reverse drag starts in the blank footer', async () => {
+    const { container } = render(<ResponseAnnotations sessionId="one" store={store} canAnnotate onNotify={() => {}}>
+      <div className="thread-scroll"><div className="assistant-copy">
+        <div className="assistant-markdown"><AnnotationBody entryId="entry:a" body={body}>
+          <MarkdownBody annotationSource body={body} onNotify={() => {}} />
+        </AnnotationBody></div>
+        <div className="response-actions"><button><svg /></button><time>15:18</time></div>
+      </div></div>
+    </ResponseAnnotations>);
+    const text = container.querySelectorAll('[data-source-text]')[1].firstChild!;
+    const time = container.querySelector('time')!;
+    const selection = window.getSelection()!;
+    selection.setBaseAndExtent(time, 0, text, 0);
+    fireEvent.pointerUp(text.parentElement!);
+    const add = await screen.findByRole('button', { name: '添加注释' });
+    fireEvent.click(add);
+    expect(store.annotations('one')[0].value).toEqual(second);
+    expect(await screen.findByRole('textbox', { name: '批注内容' })).toBeTruthy();
+  });
+
   it('retains an eligible selection when the drag ends in the gutter and hides after deselection', async () => {
     const { container } = render(<Harness />);
     const text = container.querySelector('[data-source-text]')!.firstChild!;

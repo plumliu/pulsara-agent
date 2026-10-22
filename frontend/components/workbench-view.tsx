@@ -1210,7 +1210,10 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   const summarized = contextLoadingSummarized && message.historyContextState === 'loading';
   if (summarized && !knownContent) return null;
   return <div ref={ref} data-source-entry={message.id} data-content-state={contextPending ? 'loading' : contentState} data-source-entries={message.sourceEntryIds?.join(' ')}>
-    {message.pendingAssistant && knownContent && message.historyContextState !== 'error' && contentState !== 'error'
+    {/* Exact known input/output keeps its layout while canonical reads catch up.
+        Errors still expose their status and retry action below. */}
+    {knownContent && (contextPending || pending || message.pendingAssistant)
+      && message.historyContextState !== 'error' && contentState !== 'error'
       ? knownContent : summarized ? knownContent : contextPending ? <div role="status">{knownContent}{message.historyContextState === 'error' ? '记录分组读取失败，请重试此页。' : '正在读取记录分组…'}</div>
       : pending ? <div role="status" className="history-content-status">
         {knownContent}
@@ -1359,11 +1362,12 @@ export function ConversationMessages({
     () => findToolChainConnections(messages), [messages],
   );
   const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
+  const knownPromptContent = (message: Message) => message.role === 'user'
+    ? localSubmissions.find(item => item.commandId === message.inputSource?.commandId
+      && (!item.queueItemId || item.queueItemId === message.inputSource?.queueItemId))?.content ?? message.pendingContent
+    : undefined;
   const renderMessage = (message: Message, startsRun: boolean, visible = true) => {
-    const pendingContent = message.role === 'user'
-      ? localSubmissions.find(item => item.commandId === message.inputSource?.commandId
-        && (!item.queueItemId || item.queueItemId === message.inputSource?.queueItemId))?.content ?? message.pendingContent
-      : undefined;
+    const pendingContent = knownPromptContent(message);
     const assistant = (value: Message, preview = false) => <AssistantMessage message={value}
       responseActionEligible={!preview && isCompleteAnswer(value, taskFinalAnswerId)} startsAssistantRun={startsRun}
       joinsPreviousToolChain={toolChainConnections.before.has(value.id)}
@@ -1449,7 +1453,13 @@ export function ConversationMessages({
       shownWindows.add(window.id);
       flush();
       const gap = history!.windows.indexOf(window) > 0;
-      if (window.hasOlder || window.error || window.loading || window.contextState === 'loading' || gap) content.push(<div key={`history:${window.id}`} className="history-boundary" role="region" aria-label={gap ? '中间记录尚未加载' : '较早记录'}>
+      // A tail context refresh is invisible when every pending entry already
+      // has exact local content. Actual gaps and unknown shells keep feedback.
+      const unknownContext = window.contextState === 'loading' && timeline.some(candidate =>
+        candidate.windowId === window.id && 'message' in candidate
+        && candidate.message.historyContextState === 'loading'
+        && !candidate.message.pendingAssistant && !knownPromptContent(candidate.message));
+      if (window.hasOlder || window.error || window.loading || unknownContext || gap) content.push(<div key={`history:${window.id}`} className="history-boundary" role="region" aria-label={gap ? '中间记录尚未加载' : '较早记录'}>
         {window.loading || window.contextState === 'loading' ? <span role="status">正在加载…</span> : <>
           <span>{gap ? '中间记录尚未加载' : '较早记录尚未加载'}</span>
           {window.error && <span role="alert">{window.error}</span>}

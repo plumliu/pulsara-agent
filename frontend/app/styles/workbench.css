@@ -121,7 +121,8 @@
 .prompt-lightbox-state { display: grid; justify-items: center; gap: 10px; max-width: min(520px, calc(100vw - 40px)); padding: 24px; border-radius: 12px; background: color-mix(in srgb, #111 88%, transparent); color: white; text-align: center; }
 .prompt-lightbox-state button { padding: 7px 10px; border-radius: 7px; background: white; color: #111; }
 .prompt-lightbox-caption { position: absolute; right: 0; bottom: 0; left: 0; padding: 11px 16px; background: linear-gradient(transparent, rgb(0 0 0 / .72)); color: white; text-align: center; pointer-events: none; }
-.message-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; padding-right: 4px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); }
+/* Delivery labels and numeric timestamps share a line box across font fallbacks. */
+.message-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; padding-right: 4px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); line-height: 18px; min-height: 18px; }
 .user-steer { min-width: 0; margin-bottom: 8px; }
 .user-steer__heading { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin: 0 3px 5px 0; color: var(--muted); font-family: var(--sans); font-size: var(--type-label); line-height: 1.4; }
 .user-steer__heading strong { font-weight: 500; }

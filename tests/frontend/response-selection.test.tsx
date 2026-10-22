@@ -19,6 +19,42 @@ function mount(body: string) {
 }
 
 describe('canonical response selection', () => {
+  it('maps a blank footer endpoint to the same reply without including its timestamp', () => {
+    const body = '第一段。\n\n最后一段。';
+    const { container } = render(<div className="assistant-copy">
+      <div className="assistant-markdown"><AnnotationBody entryId="entry:a" body={body}>
+        <MarkdownBody annotationSource body={body} onNotify={() => {}} />
+      </AnnotationBody></div>
+      <div className="response-actions"><button><svg /></button><time>15:18</time></div>
+    </div>);
+    const text = container.querySelectorAll('[data-source-text]')[1].firstChild!;
+    const time = container.querySelector('time')!;
+    expect(select(text, 1, time, 0)).toEqual({ type: 'annotation', quote: '后一段。',
+      source: { entry_id: 'entry:a', start: body.indexOf('后一段。'), end: body.length } });
+    const native = window.getSelection()!.getRangeAt(0);
+    expect(native.endContainer).toBe(time);
+    const mapped = mapResponseSelection(window.getSelection())!;
+    expect(mapped.root.contains(mapped.range.endContainer)).toBe(true);
+    expect(select(text, 1, time.firstChild!, 1)).toBeUndefined();
+    expect(select(time.firstChild!, 0)).toBeUndefined();
+  });
+
+  it('does not trim a different reply footer or an excluded region into a valid quote', () => {
+    const { container } = render(<>
+      <div className="assistant-copy"><AnnotationBody entryId="a" body="first">
+        <MarkdownBody annotationSource body="first" onNotify={() => {}} />
+      </AnnotationBody><div data-annotation-exclude=""><svg /></div>
+        <div className="response-actions"><time>12:00</time></div></div>
+      <div className="assistant-copy"><AnnotationBody entryId="b" body="second">
+        <MarkdownBody annotationSource body="second" onNotify={() => {}} />
+      </AnnotationBody><div className="response-actions"><time>12:01</time></div></div>
+    </>);
+    const text = container.querySelector('[data-source-text]')!.firstChild!;
+    const times = container.querySelectorAll('time');
+    expect(select(text, 0, times[0], 0)).toBeUndefined();
+    expect(select(text, 0, times[1], 0)).toBeUndefined();
+  });
+
   it('maps CJK bold and deletion to exact original offsets across normalization and repeated text', () => {
     const body = '😀前文\n\n$$ x+y $$\n\n**方案 A：**固定费用；~~错误：~~修正\n\n**方案 A：**固定费用；~~错误：~~修正';
     const { container } = mount(body);

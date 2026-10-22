@@ -473,6 +473,72 @@ describe('prompt delivery and preparation', () => {
     expect(screen.getByText('收到')).toBeTruthy();
   });
 
+  it.each([0, 1, 4])('keeps known input layout through canonical hydration after %i replies', priorReplies => {
+    const previous = Array.from({ length: priorReplies }, (_, index) => ({
+      id: `answer:${index}`, turnId: `previous:${index}`, role: 'assistant' as const,
+      assistantKind: 'terminal' as const, rootFinal: true, body: '之前的回复', time: '12:00',
+      historyContextState: 'ready' as const, historyWindowId: 'tail',
+    }));
+    const localSubmissions = [{ ...submission, status: 'queued' as const }];
+    const base = props({ messages: previous, isRunning: false, localSubmissions });
+    const view = render(<WorkbenchView {...base} />);
+    const waiting = screen.getByLabelText('Pulsara 处理状态');
+    const user = { id: 'entry:start', turnId: 'turn:start', role: 'user' as const,
+      userKind: 'prompt' as const, body: '', time: '12:01', historyWindowId: 'tail',
+      inputSource: { commandId: submission.commandId, queueItemId: submission.queueItemId, deliveryMode: 'new-turn' as const },
+      pendingContent: submission.content };
+    for (const phase of ['context', 'unloaded', 'loading', 'ready'] as const) {
+      const contextState = phase === 'context' ? 'loading' as const : 'ready' as const;
+      const history = { hasOlder: false, loading: false, windows: [{
+        id: 'tail', hasOlder: false, hasNewer: false, loading: false, contextState,
+        entryIds: [...previous.map(message => message.id), user.id],
+      }] };
+      view.rerender(<WorkbenchView {...base} isRunning activeTurnId="turn:start" history={history}
+        messages={[...previous, { ...user, historyContextState: contextState,
+          contentState: phase === 'context' ? 'unloaded' : phase,
+          promptContent: phase === 'ready' ? submission.content : undefined }]} />);
+      expect(screen.getByLabelText('Pulsara 处理状态')).toBe(waiting);
+      expect(screen.getAllByText('开始处理这条消息')).toHaveLength(1);
+      expect(view.container.querySelector('.history-boundary, .history-content-status')).toBeNull();
+      expect(screen.queryByText('正在读取记录分组…')).toBeNull();
+      expect(screen.queryByText('已保存，正文读取中…')).toBeNull();
+      expect(view.container.querySelector('[data-source-entry="entry:start"] > .user-turn')).toBeTruthy();
+    }
+    expect(screen.getByText('12:01')).toBeTruthy();
+    expect(screen.queryByText('本地已知内容')).toBeNull();
+  });
+
+  it('retains canonical read errors and retry for locally known input', () => {
+    const read = vi.fn(async () => {});
+    const base = props({ isRunning: true, activeTurnId: 'turn:start', onHydrateEntries: read });
+    const user = { id: 'entry:start', turnId: 'turn:start', role: 'user' as const, body: '', time: '',
+      pendingContent: submission.content, historyContextState: 'ready' as const,
+      contentState: 'error' as const, contentError: '正文读取失败' };
+    const view = render(<WorkbenchView {...base} messages={[user]} />);
+    expect(screen.getByText('开始处理这条消息')).toBeTruthy();
+    expect(screen.getByText('正文读取失败')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '重试正文' }));
+    expect(read).toHaveBeenCalledWith(['entry:start'], false);
+    view.rerender(<WorkbenchView {...base} messages={[{ ...user, contentState: 'unloaded', historyContextState: 'error' }]} />);
+    expect(screen.getByText('记录分组读取失败，请重试此页。')).toBeTruthy();
+  });
+
+  it('still shows tail loading for an input whose content is not locally known', () => {
+    const history = { hasOlder: false, loading: false, windows: [{
+      id: 'tail', hasOlder: false, hasNewer: false, loading: false,
+      contextState: 'loading' as const, entryIds: ['other-input'],
+    }] };
+    render(<WorkbenchView {...props({ isRunning: true, activeTurnId: 'other-turn', history,
+      localSubmissions: [{ ...submission, status: 'queued' }],
+      messages: [{ id: 'other-input', turnId: 'other-turn', role: 'user', body: '', time: '',
+        historyWindowId: 'tail', historyContextState: 'loading', contentState: 'unloaded',
+        inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'new-turn' } }],
+    })} />);
+    expect(screen.getByText('正在加载…')).toBeTruthy();
+    expect(screen.getAllByText('开始处理这条消息')).toHaveLength(1);
+    expect(screen.queryByText('本地已知内容')).toBeNull();
+  });
+
   it.each(['unknown', 'rejected', 'cancelled'] as const)('does not imply preparation for %s delivery', status => {
     render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [{ ...submission, status }] })} />);
     expect(screen.queryByText('已送达')).toBeNull();
@@ -1728,7 +1794,9 @@ describe('bounded history reading and DOM locations', () => {
     await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith(['input'], false));
     view.rerender(<WorkbenchView {...base} messages={[{ ...message, historyContextState: 'loading' }]} />);
     expect(screen.getAllByText('保留本地原文')).toHaveLength(1);
-    expect(screen.getByText('正在读取记录分组…')).toBeTruthy();
+    expect(screen.queryByText('正在读取记录分组…')).toBeNull();
+    expect(view.container.querySelector('[data-source-entry="input"]')?.getAttribute('data-content-state')).toBe('loading');
+    expect(view.container.querySelector('[data-source-entry="input"] > .user-turn')).toBeTruthy();
     view.rerender(<WorkbenchView {...base} messages={[{ ...message, contentState: 'error', contentError: '读取失败' }]} />);
     expect(screen.getAllByText('保留本地原文')).toHaveLength(1);
     expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();

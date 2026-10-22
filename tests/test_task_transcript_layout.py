@@ -174,3 +174,58 @@ def test_task_error_text_uses_full_notice_width_and_wraps_normally(browser, widt
         assert all(not item["overflow"] for item in metrics)
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("previous_turns", [0, 1, 4])
+@pytest.mark.parametrize("width", [390, 1446])
+def test_prompt_delivery_handoff_keeps_short_and_scrolling_transcripts_still(
+    browser, previous_turns, width
+):
+    # Workbench component tests cover pending -> known -> canonical content,
+    # including context/body reads. Chromium covers the actual font line boxes,
+    # margin collapse and tail-follow boundary that jsdom cannot measure.
+    user = '''<article class="user-turn">
+      <header class="user-heading"><strong>你</strong></header>
+      <div class="user-message"><div class="prompt-content-body">hello</div></div>
+      <div class="message-foot">{footer}</div></article>'''
+    assistant = '''<article class="assistant-turn assistant-turn--operational assistant-turn--run-start">
+      <header class="assistant-heading"><div class="assistant-identity"><strong>Pulsara</strong></div></header>
+      <div class="assistant-progress"><i></i>{status}</div></article>'''
+    previous = (
+        user.format(footer="<time>15:16</time>")
+        + '<article class="assistant-turn"><div class="assistant-heading">Pulsara</div>'
+        '<div class="assistant-copy">你好！有什么需要帮忙的吗？</div></article>'
+    ) * previous_turns
+    page = browser.new_page(viewport={"width": width, "height": 952})
+    try:
+        measurements = []
+        for status, footer in [
+            ("准备开始…", '<span role="status">已送达</span>'),
+            ("正在处理…", '<span role="status">本地已知内容</span>'),
+            ("正在处理…", '<time>15:17</time>'),
+        ]:
+            page.set_content(f'''<html><style>{CSS}</style>
+              <div class="desktop-shell" style="display:block">
+                <main class="workbench" style="display:block">
+                  <div class="thread-scroll" style="height:790px;scroll-behavior:auto;overflow-anchor:none">
+                    <div class="thread-column conversation-transcript">{previous}
+                      <div id="input">{user.format(footer=footer)}</div>
+                      {assistant.format(status=status)}
+                    </div>
+                  </div>
+                </main>
+              </div></html>''')
+            measurements.append(page.evaluate('''() => {
+                const thread = document.querySelector('.thread-scroll');
+                thread.scrollTop = thread.scrollHeight;
+                const user = document.querySelector('#input .user-turn').getBoundingClientRect();
+                const assistant = document.querySelector('.assistant-progress').getBoundingClientRect();
+                return {userTop: user.top, userHeight: user.height,
+                    assistantTop: assistant.top, scrollTop: thread.scrollTop,
+                    columnHeight: document.querySelector('.thread-column').getBoundingClientRect().height};
+            }'''))
+        assert measurements[1] == measurements[0], measurements
+        assert measurements[2] == measurements[0], measurements
+        assert (measurements[0]["scrollTop"] > 0) == (previous_turns == 4)
+    finally:
+        page.close()
