@@ -50,6 +50,16 @@ def desktop_page(browser, *, width, platform, sidebar, workspace, surface=False,
             </div></div></div></aside>'''}
         {controls}
     </main>''')
+    if not surface:
+        # Match the production display:contents wrapper: it still participates
+        # in CSS inheritance between the shell and the two connected panes.
+        page.evaluate('''() => {
+            const shell = document.querySelector('.desktop-shell');
+            const connected = document.createElement('div');
+            connected.className = 'session-connected-views';
+            shell.append(connected);
+            connected.append(shell.querySelector('.workbench'), shell.querySelector('.desktop-workspace'));
+        }''')
     page.add_style_tag(content="* { box-sizing: border-box; } body { margin: 0; } button { border: 0; }")
     for name in ("base", "shell", "workbench", "responsive", "desktop"):
         page.add_style_tag(content=(STYLES / f"{name}.css").read_text())
@@ -122,6 +132,58 @@ def test_manual_sidebar_toggles_keep_their_transition(browser, width):
         }''')
         lower, upper = (62, 314) if width > 1150 else (-252, 0)
         assert all(lower < value < upper for value in result), result
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("workspace", [320, 1000])
+def test_sidebar_motion_preserves_window_controls_and_workspace_bounds(browser, platform, workspace):
+    page = desktop_page(browser, width=1440, platform=platform, sidebar=True,
+                        workspace=workspace, motion=True)
+    try:
+        samples = page.evaluate('''async () => {
+            const shell = document.querySelector('.desktop-shell');
+            const rect = selector => document.querySelector(selector).getBoundingClientRect();
+            const frame = () => new Promise(requestAnimationFrame);
+            await frame(); await frame();
+            const samples = [];
+            for (const open of [false, true]) {
+                shell.classList.toggle('sidebar-visible', open);
+                getComputedStyle(shell).gridTemplateColumns;
+                const motion = shell.getAnimations()
+                    .find(animation => animation.transitionProperty === '--desktop-navigation-width');
+                if (!motion) throw new Error('Missing sidebar motion');
+                motion.pause();
+                for (const progress of [0, .25, .5, .75, 1]) {
+                    motion.currentTime = motion.effect.getTiming().duration * progress;
+                    const button = document.querySelector('.desktop-titlebar button');
+                    const bounds = button.getBoundingClientRect();
+                    samples.push({
+                        navigation: rect('.desktop-navigation').width,
+                        workbenchLeft: rect('.workbench').left,
+                        topbarLeft: rect('.topbar').left,
+                        workspaceRight: rect('.desktop-workspace').right,
+                        surfaceWidth: rect('.workspace-surface').width,
+                        toggleHit: document.elementFromPoint(bounds.x + bounds.width / 2,
+                            bounds.y + bounds.height / 2)?.closest('button') === button,
+                    });
+                }
+                for (const animation of shell.getAnimations({subtree: true})) animation.finish();
+                await frame(); await frame();
+            }
+            return samples;
+        }''')
+        for sample in samples:
+            navigation = sample["navigation"]
+            assert 62 <= navigation <= 314, sample
+            assert sample["workbenchLeft"] == pytest.approx(navigation, abs=.1), sample
+            assert sample["topbarLeft"] == pytest.approx(
+                max(124, navigation) if platform == "darwin" else navigation, abs=.1,
+            ), sample
+            assert sample["surfaceWidth"] == pytest.approx(min(workspace, 1440 - navigation - 360), abs=.1), sample
+            assert sample["workspaceRight"] == pytest.approx(1440, abs=.1), sample
+            assert sample["toggleHit"], sample
     finally:
         page.close()
 

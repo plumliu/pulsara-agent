@@ -1,5 +1,8 @@
 /* Chromium owns the interpolation; these are disposable layout values only. */
-@property --desktop-navigation-width { syntax: '<length>'; inherits: true; initial-value: 314px; }
+@property --desktop-navigation-width { syntax: '<length>'; inherits: false; initial-value: 314px; }
+/* Forward animated geometry only to its layout consumers, through the connected
+   views wrapper. Inheriting it through messages restyles the transcript each frame. */
+.desktop-shell :is(.session-connected-views, .workbench, .topbar, .desktop-workspace) { --desktop-navigation-width: inherit; }
 /* Keep the saved width on every page so entering a conversation is not a toggle. */
 .desktop-shell { --desktop-navigation-width: 314px; grid-template-rows: 44px minmax(0, 1fr); min-height: 420px; }
 .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { grid-template-columns: var(--desktop-navigation-width) minmax(360px, 1fr) auto; transition: --desktop-navigation-width .22s cubic-bezier(.2,.7,.2,1); }
