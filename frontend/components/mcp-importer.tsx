@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FileInput, LoaderCircle, X } from 'lucide-react';
 import type { McpImportPreview, McpImportSelection, McpImportSource } from '../lib/pulsara-types';
 
@@ -17,6 +17,11 @@ export function McpImporter({ onPreview, onImport, onClose }: {
   const [allowLocal, setAllowLocal] = useState(false);
   const [error, setError] = useState('');
   const [installed, setInstalled] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onClose(); };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [busy, onClose]);
   const item = items?.find((candidate) => candidate.server_id === selected);
   const choose = (candidate?: McpImportPreview) => {
     setSelected(candidate?.server_id ?? ''); setClassifications({}); setValues({});

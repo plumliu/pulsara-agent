@@ -194,6 +194,90 @@ def test_project_mcp_import_test_and_authorization_share_exact_directory_owner(t
     asyncio.run(run())
 
 
+def test_three_sidebar_add_flows_persist_only_in_the_selected_workspace(tmp_path, monkeypatch):
+    """Real HTTP handlers and filesystem owners, without launching an MCP process."""
+    import json
+    from aiohttp import ClientSession
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+    from tests.test_desktop_http_surface import _Bridge, _model_server_dependencies
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("PULSARA_HOME", str(home))
+    (tmp_path / "index.html").write_text("<title>Sidebar capability audit</title>")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "skill-source"
+    source.mkdir()
+    document = "---\nname: sidebar-review\ndescription: Review this directory.\n---\n# Review\n"
+    (source / "SKILL.md").write_text(document)
+    controller, handle, primary, sibling, other = _controller_with_sessions(workspace, tmp_path / "other")
+
+    async def run():
+        server = LocalHttpServer(
+            sessions=controller, bridge=_Bridge(), static_root=tmp_path,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession(headers={
+                "X-Pulsara-Connection-Id": "connection-1",
+                "X-Pulsara-Connection-Generation": "1",
+            }) as client:
+                async def post(path, body, status=200):
+                    async with client.post(server.origin + path, json=body) as response:
+                        result = await response.json()
+                        assert response.status == status, result
+                        return result
+
+                base = f"/api/sessions/{handle.session_id}/capabilities"
+                preview = await post("/api/capabilities/skills/preview", {"source_path": str(source)})
+                assert preview["items"][0]["valid"]
+                skill_input = {key: preview["items"][0][key] for key in ("source_path", "name", "description")}
+                skill = await post(base + "/skills/install", skill_input)
+                assert skill["installation"]["installed"]
+                destination = workspace / ".pulsara/skills/sidebar-review/SKILL.md"
+                assert destination.read_text() == document
+                assert (source / "SKILL.md").read_text() == document
+                duplicate = await post(base + "/skills/install", skill_input)
+                assert not duplicate["installation"]["installed"]
+                assert destination.read_text() == document
+
+                content = json.dumps({"mcpServers": {"imported": {
+                    "command": "never-launch-sidebar-audit", "args": ["--fixture"], "disabled": True,
+                }}})
+                preview = await post("/api/capabilities/mcp/import/preview", {"content": content, "shape": "auto"})
+                assert preview["items"][0]["server_id"] == "imported"
+                imported = await post(base + "/mcp/import", {
+                    "content": content, "shape": "auto", "selected_server_id": "imported",
+                    "classifications": {}, "values": {},
+                }, 201)
+                assert imported["operation"]["success"]
+
+                manual_input = {"server_id": "manual", "config": {
+                    "display_name": "手动添加", "enabled": False,
+                    "transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"},
+                }, "secret_changes": []}
+                manual = await post(base + "/mcp", manual_input, 201)
+                assert manual["operation"]["success"]
+                before = (workspace / ".pulsara/mcp.yaml").read_bytes()
+                await post(base + "/mcp", manual_input, 409)
+                assert (workspace / ".pulsara/mcp.yaml").read_bytes() == before
+
+                configs = load_workspace_mcp_server_configs(workspace)
+                assert {item.server_id for item in configs} == {"imported", "manual"}
+                assert all(not item.enabled for item in configs)
+                assert (primary.refresh_requests, sibling.refresh_requests, other.refresh_requests) == (3, 3, 0)
+                assert not (home / "mcp.yaml").exists()
+                assert not (home / "skills").exists()
+                assert not (tmp_path / "other/.pulsara").exists()
+        finally:
+            await server.aclose()
+            await controller.core.mcp_management.aclose()
+
+    asyncio.run(run())
+
+
 def test_plugin_install_controller_does_not_reacquire_shared_management_lane(tmp_path):
     from pulsara_agent.plugins.contracts import FailedPluginInstallOutcome, PluginInstallDisposition
 

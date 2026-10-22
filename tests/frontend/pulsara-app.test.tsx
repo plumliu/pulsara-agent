@@ -691,6 +691,89 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('tab', { name: /^技能 / }).getAttribute('aria-selected')).toBe('true');
   });
 
+  it.each(['skill', 'mcp-import', 'mcp-create'] as const)(
+    'submits %s from the sidebar to the selected directory, preserves rejected drafts, and permits retry', async entry => {
+      const adapter = new FakeAdapter();
+      const rejected = '同名能力已存在，请更换名称。';
+      const skillCandidate = {sourcePath: '/tmp/sidebar-skill', name: 'sidebar-skill', description: '检查当前目录', valid: true, details: []};
+      adapter.previewSkillImport.mockResolvedValue([skillCandidate]);
+      vi.spyOn(adapter as RuntimeAdapter, 'previewMcpImport').mockResolvedValue([
+        {server_id: 'sidebar-mcp', transport: 'stdio', fields: [], notices: [], issues: []},
+      ]);
+      const skillSuccess = await adapter.installSkill(initialSession.id, skillCandidate);
+      adapter.installSkill.mockClear();
+      adapter.installSkill.mockResolvedValueOnce({
+        ...skillSuccess, installation: {...skillSuccess.installation, installed: false, message: rejected},
+      }).mockResolvedValueOnce(skillSuccess);
+      const mcpSuccess = {
+        operation: {status: 'ADDED', success: true, message: '添加成功', details: []},
+        adoption: {scope: 'workspace', pendingSessions: 1, when: 'next-provider-dispatch'},
+        capabilities: capabilitySnapshot,
+      } satisfies ProjectCapabilityMutationResult;
+      const mcpFailure = {...mcpSuccess, operation: {...mcpSuccess.operation, success: false, message: rejected}};
+      adapter.createProjectMcp.mockResolvedValueOnce(mcpFailure).mockResolvedValueOnce(mcpSuccess);
+      adapter.importProjectMcp.mockResolvedValueOnce(mcpFailure).mockResolvedValueOnce(mcpSuccess);
+
+      renderWorkbench(<PulsaraApp adapter={adapter} />);
+      const inspector = await screen.findByLabelText('会话标签工作区');
+      fireEvent.click(within(inspector).getByRole('button', {name: '项目能力'}));
+      if (entry !== 'skill') fireEvent.click(await within(inspector).findByRole('tab', {name: /MCP/}));
+      fireEvent.click(await within(inspector).findByRole('button', {name: entry === 'mcp-import' ? '导入 MCP' : '添加', exact: true}));
+      const dialog = await screen.findByRole('dialog');
+      let submit: HTMLElement;
+      if (entry === 'skill') {
+        adapter.pickWorkspaceDirectory.mockResolvedValueOnce(skillCandidate.sourcePath);
+        fireEvent.click(within(dialog).getByRole('button', {name: '来源目录 选择目录'}));
+        await within(dialog).findByRole('button', {name: `来源目录 ${skillCandidate.sourcePath}`});
+        fireEvent.click(within(dialog).getByRole('button', {name: '读取预览'}));
+        await within(dialog).findByLabelText('安装名称');
+        submit = within(dialog).getByRole('button', {name: '安装所选技能'});
+      } else if (entry === 'mcp-import') {
+        fireEvent.change(within(dialog).getByLabelText('配置内容'), {target: {value: '{"mcpServers":{"sidebar-mcp":{"command":"fixture"}}}'}});
+        fireEvent.click(within(dialog).getByRole('button', {name: '读取预览'}));
+        await within(dialog).findByLabelText('选择服务（分别导入）');
+        submit = within(dialog).getByRole('button', {name: '确认导入此服务'});
+      } else {
+        fireEvent.change(within(dialog).getByLabelText('服务 ID'), {target: {value: 'sidebar-mcp'}});
+        fireEvent.change(within(dialog).getByLabelText('服务地址'), {target: {value: 'https://example.org/mcp'}});
+        fireEvent.change(within(dialog).getByLabelText('认证方式'), {target: {value: 'bearer'}});
+        fireEvent.change(within(dialog).getByLabelText('Token'), {target: {value: 'sidebar-test-secret'}});
+        submit = within(dialog).getByRole('button', {name: '保存连接'});
+      }
+      fireEvent.click(submit);
+      await screen.findByText(rejected);
+      expect(screen.getByRole('dialog')).toBe(dialog);
+      expect(within(dialog).queryByText('已安装')).toBeNull();
+      expect(within(dialog).queryByRole('button', {name: '已导入'})).toBeNull();
+      await waitFor(() => expect(submit).toHaveProperty('disabled', false));
+      fireEvent.click(submit);
+
+      if (entry === 'skill') {
+        expect(await within(dialog).findByText('已安装')).toBeTruthy();
+        expect(adapter.previewSkillImport).toHaveBeenCalledExactlyOnceWith(skillCandidate.sourcePath);
+        expect(adapter.installSkill).toHaveBeenLastCalledWith(initialSession.id, skillCandidate);
+        expect(adapter.installSkill).toHaveBeenCalledTimes(2);
+      } else if (entry === 'mcp-import') {
+        expect(await within(dialog).findByRole('button', {name: '已导入'})).toHaveProperty('disabled', true);
+        expect(adapter.importProjectMcp).toHaveBeenCalledTimes(2);
+        expect(adapter.importProjectMcp).toHaveBeenLastCalledWith(initialSession.id, {
+          content: '{"mcpServers":{"sidebar-mcp":{"command":"fixture"}}}', shape: 'auto',
+          selected_server_id: 'sidebar-mcp', classifications: {}, values: {},
+        });
+      } else {
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+        expect(adapter.createProjectMcp).toHaveBeenCalledTimes(2);
+        expect(adapter.createProjectMcp).toHaveBeenLastCalledWith(initialSession.id, expect.objectContaining({
+          serverId: 'sidebar-mcp', config: expect.objectContaining({transport: expect.objectContaining({endpoint: 'https://example.org/mcp'})}),
+          secretChanges: [{binding: {owner: {kind: 'local', scope_key: capabilitySnapshot.credentialScopeKey, server_id: 'sidebar-mcp', plugin_id: null}, name: 'bearer'}, value: 'sidebar-test-secret'}],
+        }));
+      }
+      expect(adapter.installUserSkill).not.toHaveBeenCalled();
+      expect(adapter.importUserMcp).not.toHaveBeenCalled();
+      expect(adapter.createUserMcp).not.toHaveBeenCalled();
+    },
+  );
+
   it('keeps the project capability dialog open while its mutation is saving', async () => {
     const adapter = new FakeAdapter();
     adapter.previewSkillImport.mockResolvedValue([{sourcePath: '/tmp/market-skill', name: 'market-skill', description: 'A portable skill', valid: true, details: []}]);

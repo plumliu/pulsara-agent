@@ -118,7 +118,7 @@
 .prompt-lightbox-state button { padding: 7px 10px; border-radius: 7px; background: white; color: #111; }
 .prompt-lightbox-caption { position: absolute; right: 0; bottom: 0; left: 0; padding: 11px 16px; background: linear-gradient(transparent, rgb(0 0 0 / .72)); color: white; text-align: center; pointer-events: none; }
 /* Delivery labels and numeric timestamps share a line box across font fallbacks. */
-.message-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; padding-right: 4px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); line-height: 18px; min-height: 18px; }
+.message-foot { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 7px; padding-right: 4px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); line-height: 18px; min-height: 18px; }
 .user-steer { min-width: 0; margin-bottom: 8px; }
 .user-steer__heading { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin: 0 3px 5px 0; color: var(--muted); font-family: var(--sans); font-size: var(--type-label); line-height: 1.4; }
 .user-steer__heading strong { font-weight: 500; }
@@ -267,9 +267,9 @@
 .math-copy-target--display:focus-visible { border-color: var(--line-strong); box-shadow: 0 0 0 2px color-mix(in srgb, var(--line-strong) 24%, transparent); }
 .math-copy-target:active { background: color-mix(in srgb, var(--paper-darker) 34%, transparent); }
 .response-actions { display: flex; width: 100%; min-height: 21px; align-items: flex-end; gap: 6px; margin-top: 6px; line-height: 1; }
-.response-actions button { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 6px; background: transparent; color: var(--faint); }
-.response-actions button svg { display: block; }
-.response-actions button:hover { background: var(--paper-deep); color: var(--ink); }
+.response-actions button, .user-message-copy { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 6px; background: transparent; color: var(--faint); }
+.response-actions button svg, .user-message-copy svg { display: block; }
+.response-actions button:hover, .user-message-copy:hover { background: var(--paper-deep); color: var(--ink); }
 .response-time { margin-left: auto; margin-right: 4px; margin-bottom: 4px; color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); font-variant-numeric: tabular-nums; letter-spacing: .02em; line-height: 1; }
 
 .interaction-card { font-family: var(--sans); --interaction-accent: var(--blue); --interaction-soft: var(--blue-soft); margin: 18px 0 8px 40px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--paper-solid); box-shadow: var(--shadow-sm); animation: pop-in .18s ease-out; }

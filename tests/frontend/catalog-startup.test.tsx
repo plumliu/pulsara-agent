@@ -93,12 +93,20 @@ describe('initial model catalog observation', () => {
   });
 
   it('clears the pending observation timer on unmount', async () => {
-    const adapter = new FakeAdapter();
-    const read = vi.spyOn(adapter, 'bootstrap').mockResolvedValue(loadingBootstrap());
-    const view = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByText('模型目录正在载入，请稍候。');
-    view.unmount();
-    await act(async () => { await pause(350); });
-    expect(read).toHaveBeenCalledTimes(1);
+    // Keep the first poll pending even when other test workers delay rendering.
+    vi.useFakeTimers();
+    try {
+      const adapter = new FakeAdapter();
+      const read = vi.spyOn(adapter, 'bootstrap').mockResolvedValue(loadingBootstrap());
+      const view = renderWorkbench(<PulsaraApp adapter={adapter} />);
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.getByText('模型目录正在载入，请稍候。')).toBeTruthy();
+      expect(read).toHaveBeenCalledTimes(1);
+      view.unmount();
+      await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

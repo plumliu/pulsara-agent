@@ -972,6 +972,7 @@ function UserMessage({
   senderKind = 'user',
   pendingContent,
   deliveryStatus,
+  onNotify,
   onReadPromptImage = unavailablePromptImage,
   visible = true,
 }: {
@@ -980,6 +981,7 @@ function UserMessage({
   senderKind?: 'user' | 'agent';
   pendingContent?: LocalPromptSubmission['content'];
   deliveryStatus?: string;
+  onNotify: WorkbenchViewProps['onNotify'];
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
   visible?: boolean;
 }) {
@@ -988,11 +990,17 @@ function UserMessage({
   if (message.userKind === 'subagent-completion') {
     return <SubagentCompletionEvent message={message} visible={visible} />;
   }
+  const copyText = content ? promptContentTextProjection(content) : message.body;
+  const copyButton = copyText && <button type="button" className="user-message-copy" aria-label="复制消息" title="复制消息"
+    onClick={() => { void writeClipboardText(copyText).then(
+      () => onNotify('已复制消息'),
+      () => onNotify('无法复制消息', '系统剪贴板暂时不可用，请重试'),
+    ); }}><Copy size={13} /></button>;
 
   if (message.userKind === 'steer') {
     const renderSteerBubble = (body: ReactNode) => body ? <div className="user-message">{body}</div> : null;
     return <article className="user-turn user-steer" aria-label="引导">
-      <header className="user-steer__heading"><strong>引导</strong><CornerDownLeft size={13} aria-hidden="true" /></header>
+      <header className="user-steer__heading"><strong>引导</strong><CornerDownLeft size={13} aria-hidden="true" />{copyButton}</header>
       {content ? <PromptContentView content={content} variant="message"
         onReadImage={onReadPromptImage} renderMessageBody={renderSteerBubble} />
         : renderSteerBubble(<p style={sourceTextStyle}>{message.body}</p>)}
@@ -1016,7 +1024,7 @@ function UserMessage({
             renderMessageBody={renderBubble}
           />
         : renderBubble(<p style={sourceTextStyle}>{message.body}</p>)}
-      <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
+      <div className="message-foot">{copyButton}{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
     </article>
   );
 }
@@ -1503,9 +1511,9 @@ export function ConversationMessages({
     }, true);
     return <HistoryMessageHost key={message.id} message={message}
       contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
-      ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
+      ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onNotify={onNotify} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
       {message.role === 'user'
-        ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onReadPromptImage={onReadPromptImage} visible={visible} />
+        ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onNotify={onNotify} onReadPromptImage={onReadPromptImage} visible={visible} />
         : assistant(message)}
     </HistoryMessageHost>;
   };
@@ -2904,7 +2912,7 @@ export function WorkbenchView({
               aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>
               <UserMessage message={{ id: item.commandId, role: 'user', userKind: 'prompt', time: '',
                 body: item.content ? promptContentTextProjection(item.content) : '消息内容暂时无法读取。' }}
-                pendingContent={item.content} onReadPromptImage={onReadPromptImage}
+                pendingContent={item.content} onNotify={onNotify} onReadPromptImage={onReadPromptImage}
                 deliveryStatus={item.status === 'sending' ? '正在发送…'
                   : item.status === 'rejected' ? `发送失败${item.detail ? `：${item.detail}` : ''}`
                     : item.status === 'cancelled' ? '发送已取消'
@@ -2928,7 +2936,7 @@ export function WorkbenchView({
                 role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
                 promptContent: item.content, status: 'completed',
                 time: item.submittedAt ? new Date(item.submittedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '' }}
-                onReadPromptImage={onReadPromptImage} />
+                onNotify={onNotify} onReadPromptImage={onReadPromptImage} />
             </div>
           ))}
           {atLatestHistory && canControl && interaction && (
