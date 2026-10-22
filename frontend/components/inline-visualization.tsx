@@ -17,20 +17,22 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
   const [size, setSize] = useState({width: 0, height: 0});
   const [measurement, setMeasurement] = useState<{rect: VisualizationRootRect | null; width: number; height: number}>();
   const [environment, setEnvironment] = useState<VisualizationEnvironment>();
+  const [readStarted, setReadStarted] = useState(false);
+  const [frameMounted, setFrameMounted] = useState(false);
   const page = useRef<HTMLDivElement>(null);
   const probe = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const pending = useRef<{args: unknown[]; promise: Promise<string | Uint8Array>} | undefined>(undefined);
   const {ordinal, contentDigest: digest, contentSize, state, mediaType, codec} = item;
   useEffect(() => {
-    if (state !== 'READY' || !digest || !contentSize) return;
+    if (!readStarted || state !== 'READY' || !digest || !contentSize) return;
     let live = true;
     const controller = new AbortController();
     const args = [entryId, ordinal, digest, contentSize, onRead, attempt];
     if (!pending.current || args.some((v, i) => v !== pending.current!.args[i])) pending.current = {args, promise: onRead(entryId, ordinal, digest, contentSize, {ordinal, contentDigest: digest, contentSize, state, mediaType, codec}, controller.signal)};
     void pending.current.promise.then(html => {if (live) setResult(typeof html === "string" ? {html} : {error: "可视化类型不匹配。"});}, () => {if (live) setResult({error: '已保存的可视化暂时无法读取。'});});
     return () => {live = false; controller.abort(); pending.current = undefined;};
-  }, [entryId, ordinal, digest, contentSize, state, mediaType, codec, onRead, attempt]);
+  }, [readStarted, entryId, ordinal, digest, contentSize, state, mediaType, codec, onRead, attempt]);
   useLayoutEffect(() => {
     if (!probe.current) return;
     const measure = () => {
@@ -51,14 +53,27 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
     window.addEventListener('message', receive); return () => window.removeEventListener('message', receive);
   }, [size]);
   useEffect(() => {
-    let visible = true;
-    const update = () => setEnvironment(visualizationEnvironment(visible && active));
-    const intersection = new IntersectionObserver(entries => {visible = Boolean(entries[0]?.isIntersecting); update();});
+    let visible = false;
+    const update = () => {
+      const next = visualizationEnvironment(visible && active);
+      setEnvironment(next);
+      if (next.visible) setReadStarted(true);
+    };
+    const intersection = new IntersectionObserver(entries => {
+      const entry = entries[0];
+      visible = Boolean(entry?.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0);
+      update();
+    });
     if (page.current) intersection.observe(page.current);
     const mutation = new MutationObserver(update); mutation.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme', 'class', 'style']});
     document.addEventListener('visibilitychange', update); update();
     return () => {intersection.disconnect(); mutation.disconnect(); document.removeEventListener('visibilitychange', update);};
   }, [active]);
+  useEffect(() => {
+    // A read may finish after the reader scrolls away. Start the document only
+    // when it can be seen; subsequent visibility changes retain its live state.
+    if (environment?.visible && result.html !== undefined) setFrameMounted(true);
+  }, [environment?.visible, result.html]);
   const selectedRoot = !maximized && measurement?.width === size.width && measurement?.height === size.height ? measurement.rect : null;
   const rect = selectedRoot && selectedRoot.y + selectedRoot.height <= size.height ? selectedRoot : null;
   // Enclose the measured bounds in whole CSS pixels. A fractional iframe
@@ -79,7 +94,7 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
               {result.error && <button onClick={() => {setResult({}); setAttempt(v => v + 1);}}><RotateCcw size={14}/>重试</button>}
             </div>
           </div>
-          : result.html === undefined || !environment ? <div role="status">正在加载可视化…</div>
+          : result.html === undefined || !environment || !frameMounted ? <div role="status">正在加载可视化…</div>
           : <div className="inline-visualization__crop" style={rect ? {height: cropHeight} : undefined}>
             <SandboxedHtmlPreview frameRef={frame} title={item.sourceFilename || '可视化'} source={{html: result.html, measure: true, allowTextSelection: false, environment}}
               style={{width: size.width || '100%', height: size.height || '100%', transform: rect ? `translateY(${-cropTop}px)` : undefined}}/>

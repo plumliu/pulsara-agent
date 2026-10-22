@@ -1,4 +1,4 @@
-export default function installVisualizationEnvironment(initial) {
+export default function installVisualizationEnvironment(initial, setPlayback = () => {}) {
   // Shared by the embedded frame and the screenshot worker. Defaults match the
   // light application tokens and still-image capture mode. The live host sends
   // its actual computed tokens and reducedMotion=false, independent of the OS.
@@ -16,6 +16,7 @@ export default function installVisualizationEnvironment(initial) {
     const root = document.documentElement;
     root.style.colorScheme = current.theme;
     for (const [key, value] of Object.entries(current.colors)) root.style.setProperty(`--pulsara-${key}`, value);
+    setPlayback(current.visible);
   };
   Object.defineProperty(window, 'PulsaraVisualization', { value: Object.freeze({
     getSnapshot: () => current,

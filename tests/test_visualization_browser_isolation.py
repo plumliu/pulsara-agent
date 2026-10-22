@@ -526,9 +526,12 @@ def test_zoom_control_reveals_on_iframe_hover_and_keyboard_focus() -> None:
             page.mouse.move(1000, 500)
             assert button.evaluate('el=>getComputedStyle(el).opacity') == '0'
             page.frames[1].locator('h1').hover()
+            # Live transitions now remain enabled even with the OS reduce flag.
+            page.wait_for_function("() => getComputedStyle(document.querySelector('button')).opacity === '1'")
             assert button.evaluate('el=>getComputedStyle(el).opacity') == '1'
             page.mouse.move(1000, 500)
             button.focus()
+            page.wait_for_function("() => getComputedStyle(document.querySelector('button')).opacity === '1'")
             assert button.evaluate('el=>getComputedStyle(el).opacity') == '1'
             page.close()
             touch = browser.new_page(has_touch=True, reduced_motion='reduce')
@@ -585,5 +588,97 @@ def test_toast_keeps_its_layout_inside_maximized_visualization() -> None:
             assert geometry[0] < geometry[1] < geometry[2]
             page.locator('.inline-visualization__zoom').focus()
             assert page.locator('.inline-visualization__zoom').evaluate('el => getComputedStyle(el).padding') == '6px'
+        finally:
+            browser.close()
+
+
+def test_hidden_gallery_page_keeps_document_and_animation_without_extending_scroll() -> None:
+    css = (Path(__file__).resolve().parents[1] / 'frontend/app/styles/workbench.css').read_text()
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 800, 'height': 800})
+            page.set_content('<style>' + css + '''</style>
+                <div class="thread-scroll" style="height:500px;overflow:auto">
+                  <button id="before">Before gallery</button>
+                  <section class="inline-visualization">
+                    <div class="inline-visualization__layout">
+                      <div class="inline-visualization__figure">
+                        <div id="long" class="inline-visualization__page">
+                          <div class="inline-visualization__viewport-probe"></div>
+                          <div class="inline-visualization__stage" style="height:1600px">
+                            <div class="inline-visualization__crop" style="height:1600px">
+                              <iframe sandbox="allow-scripts" style="width:600px;height:960px"></iframe>
+                            </div>
+                            <button id="hidden-control">Long page control</button>
+                          </div>
+                        </div>
+                        <div id="short" class="inline-visualization__page" hidden inert aria-hidden="true">
+                          <div class="inline-visualization__viewport-probe"></div>
+                          <div class="inline-visualization__stage" style="height:120px">
+                            <button id="short-control">Short page control</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                  <button id="after">After gallery</button>
+                </div>''')
+            frame = page.locator('iframe')
+            frame.evaluate('''(frame) => {
+                window.retainedFrame = frame;
+                window.retainedWindow = frame.contentWindow;
+                frame.srcdoc = `<!doctype html><style>
+                    @keyframes spin { to { transform:rotate(360deg) } }
+                    #animated { width:20px;height:20px;animation:spin 8s linear infinite }
+                    </style><div id="animated">Chart</div><input value="initial">
+                    <button onclick="window.clicks=(window.clicks||0)+1">Inner control</button>`;
+            }''')
+            inner = page.frames[1]
+            inner.wait_for_function("() => document.querySelector('#animated')?.getAnimations().length === 1")
+            inner.locator('input').fill('retained input')
+            inner.evaluate('''() => {
+                window.retainedAnimation = document.querySelector('#animated').getAnimations()[0];
+                retainedAnimation.pause(); retainedAnimation.currentTime = 432;
+            }''')
+            dimensions = page.locator('#long').evaluate('''el => ({
+                probe: el.querySelector('.inline-visualization__viewport-probe').clientHeight,
+                frameWidth: el.querySelector('iframe').clientWidth,
+                frameHeight: el.querySelector('iframe').clientHeight,
+            })''')
+            assert dimensions == {'probe': 960, 'frameWidth': 600, 'frameHeight': 960}
+            assert page.locator('.thread-scroll').evaluate('el => el.scrollHeight') > 1600
+            page.evaluate('''() => {
+                const long = document.querySelector('#long'), short = document.querySelector('#short');
+                long.hidden = true; long.inert = true; long.setAttribute('aria-hidden', 'true');
+                short.hidden = false; short.inert = false; short.setAttribute('aria-hidden', 'false');
+                document.querySelector('.thread-scroll').scrollTop = 0;
+            }''')
+            assert page.locator('.thread-scroll').evaluate('el => el.scrollHeight') == 500
+            assert page.locator('.inline-visualization__figure').evaluate('el => el.clientHeight') == 120
+            assert page.locator('#long').evaluate('''el => ({
+                probe: el.querySelector('.inline-visualization__viewport-probe').clientHeight,
+                frameWidth: el.querySelector('iframe').clientWidth,
+                frameHeight: el.querySelector('iframe').clientHeight,
+            })''') == dimensions
+            assert page.evaluate('''() => document.querySelector('iframe') === retainedFrame
+                && retainedFrame.contentWindow === retainedWindow''')
+            assert inner.evaluate('''() => document.querySelector('#animated').getAnimations()[0] === retainedAnimation
+                && retainedAnimation.playState === 'paused' && retainedAnimation.currentTime === 432''')
+            assert page.locator('#long').evaluate('el => el.inert && getComputedStyle(el).visibility === "hidden"')
+            page.locator('#before').focus()
+            page.keyboard.press('Tab')
+            assert page.evaluate('() => document.activeElement.id') == 'short-control'
+            page.locator('#hidden-control').evaluate('el => el.focus()')
+            assert page.evaluate('() => document.activeElement.id') == 'short-control'
+            page.evaluate('''() => {
+                const long = document.querySelector('#long'), short = document.querySelector('#short');
+                short.hidden = true; short.inert = true; short.setAttribute('aria-hidden', 'true');
+                long.hidden = false; long.inert = false; long.setAttribute('aria-hidden', 'false');
+            }''')
+            assert inner.locator('input').input_value() == 'retained input'
+            assert inner.evaluate("() => document.querySelector('#animated').getAnimations()[0] === retainedAnimation")
+            inner.evaluate('() => retainedAnimation.play()')
+            inner.wait_for_function('() => retainedAnimation.currentTime > 432')
         finally:
             browser.close()

@@ -1240,7 +1240,7 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.assistant-heading--response')).toHaveLength(1);
     expect(container.querySelectorAll('.conversation-run > .assistant-heading--run-start')).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
     expect(await screen.findByLabelText('reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByText('读取文件')).toBeTruthy();
     expect(screen.getByRole('button', { name: '展开思考摘要' })).toBeTruthy();
@@ -1267,7 +1267,7 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     expect(screen.queryByText('terminal')).toBeNull();
     expect(screen.getByText('运行命令')).toBeTruthy();
     expect(container.querySelector('.terminal-command')).toBeNull();
@@ -1297,7 +1297,7 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     fireEvent.click(await screen.findByRole('button', { name: /展开工具详情：edit_file/ }));
 
     const diffOutput = screen.getByLabelText('文件差异');
@@ -1330,7 +1330,7 @@ describe('PulsaraApp', () => {
     };
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     fireEvent.click(await screen.findByRole('button', { name: /展开工具详情：mcp__external__report/ }));
 
     expect(screen.queryByLabelText('文件差异')).toBeNull();
@@ -1355,7 +1355,7 @@ describe('PulsaraApp', () => {
     };
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     fireEvent.click(expand);
 
@@ -1400,7 +1400,7 @@ describe('PulsaraApp', () => {
     };
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     const active = adapter.lastConnection!;
     active.readToolArtifact.mockImplementationOnce(() => page.promise);
@@ -1448,7 +1448,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValues.set('session:hrluejkx3v2ajzf4ec6bb3ierm', artifactProjection('{"session":"B"}'));
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     const first = adapter.lastConnection!;
     first.readToolArtifact.mockImplementationOnce(() => oldPage.promise);
@@ -1458,7 +1458,7 @@ describe('PulsaraApp', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
     await screen.findByRole('heading', { name: '另一个会话' });
-    const processToggle = screen.queryByRole('button', { name: '展开中间过程' });
+    const processToggle = screen.queryByRole('button', { name: '展开处理过程' });
     if (processToggle) fireEvent.click(processToggle);
     await act(async () => oldPage.resolve({
       resultEntryId: 'result-shared', text: '会话 A 的迟到 artifact', offsetChars: 0,
@@ -1483,7 +1483,7 @@ describe('PulsaraApp', () => {
         }], isRunning: false, activeTurnId: undefined,
       };
       renderWorkbench(<PulsaraApp adapter={adapter} />);
-      fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+      fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
       expect(screen.queryByText('观察到 0 项能力')).toBeNull();
     },
   );
@@ -1536,7 +1536,7 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     expect(screen.getByText('刷新扩展能力')).toBeTruthy();
     expect(screen.queryByText('reload_capabilities')).toBeNull();
     expect(await screen.findByText('使用 pdf 技能')).toBeTruthy();
@@ -1582,7 +1582,7 @@ describe('PulsaraApp', () => {
     };
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     const intermediate = (await screen.findByText('我先检查文件，然后继续处理。')).closest('.assistant-copy');
     const terminal = screen.getByText('最终结果已经准备好。').closest('.assistant-copy');
 
@@ -1919,7 +1919,7 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     await screen.findByText('我先修正测试。');
     const turns = container.querySelectorAll('.assistant-turn');
 
@@ -1953,7 +1953,7 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     expect(await screen.findByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.queryByRole('tooltip')).toBeNull();
@@ -3527,7 +3527,7 @@ describe('PulsaraApp', () => {
     adapter.taskInventory = [{id:'task-readme',label:'检查 README',role:'研究',objective:'读取 README.md 并报告一级标题。',status:'completed',color:'blue',parentId:'turn-1',batchId:'batch-1',dependencyIds:[],completionAccepted:true}];
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
-    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
     const summary = await screen.findByLabelText('任务执行');
     expect(summary.textContent).not.toContain('读取 README.md 并报告一级标题。');
     expect(summary.querySelector('.subagent-run__body')).toBeNull();
@@ -4556,9 +4556,9 @@ it('passes an explicit process reasoning read through the active session reader'
     await screen.findByText('最后已核验的回复');
     const active = adapter.lastConnection!;
     expect(active.hydrateEntries).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
+    fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
     await waitFor(() => expect(active.readProcessEnd).toHaveBeenCalledWith('assistant-1', expect.any(AbortSignal)));
-    await screen.findByRole('button', { name: '收起中间过程' });
+    await screen.findByRole('button', { name: '收起处理过程' });
     const thought = observed.find(item => item.node.getAttribute('data-reasoning-entry') === 'assistant-1') ?? observed[0];
     expect(thought).toBeTruthy();
     act(() => thought.notify([{target:thought.node,isIntersecting:true}] as IntersectionObserverEntry[],{} as IntersectionObserver));

@@ -71,6 +71,6 @@ if (environment) {
 }
 ```
 
-Apply the same pause rule to JavaScript animations. Live displays keep `reducedMotion=false` regardless of OS motion preferences; do not disable live transitions with a reduced-motion media query. The separate still-image capture uses `reducedMotion=true` to request a stable frame. Hidden pages receive `visible=false`; reopening a page can reset its local state, so do not rely on persisted controls. The environment API provides display context only; it grants no host-file, tool or messaging access.
+The live host pauses ordinary `requestAnimationFrame`, function timers, CSS/WAAPI and SVG animations while hidden, without requiring this subscription. Use rAF timestamps or `performance.now()` for elapsed animation time; their activity clock excludes host pauses, while `Date` remains real wall time. Live displays keep `reducedMotion=false` regardless of OS motion preferences; do not disable live transitions with a reduced-motion media query. The separate still-image capture uses `reducedMotion=true` to request a stable frame. Hidden pages receive `visible=false`; a retained document keeps its controls, but reopening an unloaded page can reset local state. The environment API provides display context only; it grants no host-file, tool or messaging access.
 
 `examples/analyze_csv.py` provides an adaptable standalone HTML example.

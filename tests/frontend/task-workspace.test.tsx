@@ -355,8 +355,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       onCancel={vi.fn()} onNotify={vi.fn()} activities={new Map([['task-a', [guidance]]])}
       loadActivities={loadActivities} skills={[]} modelConfigurations={[]} artifactOwnerKey="task" onReadToolArtifact={vi.fn()}
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
-    await screen.findByRole('button', { name: '收起中间过程' });
-    fireEvent.click(screen.getByRole('button', { name: '收起中间过程' }));
+    await screen.findByRole('button', { name: '收起处理过程' });
+    fireEvent.click(screen.getByRole('button', { name: '收起处理过程' }));
     const transcript = view.container.querySelector('.task-conversation')!;
     const assertGuidance = () => {
       expect(within(transcript as HTMLElement).getAllByText(guidance.body)).toHaveLength(1);
@@ -373,7 +373,13 @@ describe('TaskWorkspace PR03 hard cut', () => {
   });
 
   it('renders the full child visualization from its canonical task entry only in the sidebar', async () => {
-    vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(private callback: IntersectionObserverCallback) {}
+      observe(target: Element) {
+        this.callback([{target, isIntersecting: true, intersectionRect: {width: 600, height: 400}} as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+      }
+      disconnect() {}
+    });
     vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
     const body = '```pulsara-visualization\nchart.html\n```';
     const read = vi.fn(async () => '<h1>worker chart</h1>');
@@ -441,7 +447,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     const detail = screen.getByLabelText('精确任务 详情');
     await waitFor(() => expect(loadActivities).toHaveBeenCalled());
     expect(detail.querySelectorAll('.task-conversation .user-turn')).toHaveLength(1);
-    expect(within(detail).getByRole('button', { name: '收起中间过程' }).getAttribute('aria-expanded')).toBe('true');
+    expect(within(detail).getByRole('button', { name: '收起处理过程' }).getAttribute('aria-expanded')).toBe('true');
     expect(detail.querySelectorAll('.task-conversation .assistant-turn')).toHaveLength(1);
     expect(within(detail).getByText('主 Agent')).toBeTruthy();
     expect(within(detail).getAllByText('精确任务')).toHaveLength(2);
@@ -596,7 +602,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     expect(dialog.querySelectorAll('.task-graph-edges > path')).toHaveLength(1);
     fireEvent.click(within(dialog).getByRole('button', { name: /后续节点/ }));
     await waitFor(() => expect(loadActivities).toHaveBeenCalledWith('task-b'));
-    expect(within(dialog).getByRole('button', { name: '收起中间过程' }).getAttribute('aria-expanded')).toBe('true');
+    expect(within(dialog).getByRole('button', { name: '收起处理过程' }).getAttribute('aria-expanded')).toBe('true');
     expect(within(dialog).getByText('第一页活动')).toBeTruthy();
     expect(loadActivities).not.toHaveBeenCalledWith('task-b', 'activity:next');
     fireEvent.click(within(dialog).getByRole('button', { name: '加载更多任务活动' }));

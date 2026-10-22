@@ -6,9 +6,18 @@ import { InlineVisualization } from '../../frontend/components/inline-visualizat
 import { visualizationLayoutMessageType } from '../../frontend/lib/visualization-frame';
 import examples from '../fixtures/visualization-markers.json';
 
+const intersectionEntry = (target: Element, width = 100, height = 100): IntersectionObserverEntry =>
+  ({target, isIntersecting: true, intersectionRect: {width, height}} as IntersectionObserverEntry);
+
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class {constructor(private callback: () => void) {} observe() {this.callback();} disconnect() {}});
-  vi.stubGlobal('IntersectionObserver', class {observe() {} disconnect() {}});
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) {
+      if (target.classList.contains('inline-visualization__page')) this.callback([intersectionEntry(target)], this as unknown as IntersectionObserver);
+    }
+    disconnect() {}
+  });
   vi.stubGlobal('matchMedia', () => ({matches: false, addEventListener() {}, removeEventListener() {}}));
 });
 afterEach(() => {cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks();});
@@ -170,13 +179,72 @@ it('sends hidden environment to inactive pages and restores visibility on select
   expect(view.container.querySelector('iframe')).toBe(frame);
 });
 
+it('waits for positive-area visibility to read and mount, then retains the paused frame offscreen', async () => {
+  const observed: Array<{target: Element; callback: IntersectionObserverCallback}> = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) { observed.push({target, callback: this.callback}); }
+    disconnect() {}
+  });
+  let resolve!: (html: string) => void;
+  const read = vi.fn(() => new Promise<string>(done => { resolve = done; }));
+  const view = render(<InlineVisualization entryId="a" items={[item]} onRead={read}/>);
+  const page = observed.find(value => value.target.classList.contains('inline-visualization__page'))!;
+  const observe = (width: number, height: number) => act(() => page.callback([intersectionEntry(page.target, width, height)], {} as IntersectionObserver));
+  expect(read).not.toHaveBeenCalled();
+  expect(view.container.querySelector('iframe')).toBeNull();
+  observe(100, 0);
+  observe(0, 100);
+  expect(read).not.toHaveBeenCalled();
+  observe(100, 100);
+  expect(read).toHaveBeenCalledTimes(1);
+  observe(0, 0);
+  await act(async () => { resolve('<input value="retain">'); });
+  expect(view.container.querySelector('iframe')).toBeNull();
+  observe(100, 100);
+  await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
+  const frame = view.container.querySelector('iframe')!;
+  const source = frame.srcdoc;
+  const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+  observe(0, 0);
+  expect(post).toHaveBeenLastCalledWith(expect.objectContaining({environment: expect.objectContaining({visible: false})}), '*');
+  observe(100, 100);
+  expect(post).toHaveBeenLastCalledWith(expect.objectContaining({environment: expect.objectContaining({visible: true})}), '*');
+  expect(view.container.querySelector('iframe')).toBe(frame);
+  expect(frame.srcdoc).toBe(source);
+  expect(read).toHaveBeenCalledTimes(1);
+});
+
+it('does not start HTML while the document is hidden and pauses existing documents without remounting', async () => {
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  const read = vi.fn(async () => '<input>');
+  const view = render(<InlineVisualization entryId="a" items={[item]} onRead={read}/>);
+  expect(read).not.toHaveBeenCalled();
+  visibility.mockReturnValue('visible');
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
+  const frame = view.container.querySelector('iframe')!;
+  const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+  visibility.mockReturnValue('hidden');
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(post).toHaveBeenLastCalledWith(expect.objectContaining({environment: expect.objectContaining({visible: false})}), '*');
+  visibility.mockReturnValue('visible');
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(post).toHaveBeenLastCalledWith(expect.objectContaining({environment: expect.objectContaining({visible: true})}), '*');
+  expect(view.container.querySelector('iframe')).toBe(frame);
+  expect(read).toHaveBeenCalledTimes(1);
+});
+
 it('lazily loads actual PNG thumbnails and keeps thumbnail failures independent of pages', async () => {
   type Observed = {callback: IntersectionObserverCallback; elements: Element[]; root?: Element | Document | null};
   const observed: Observed[]=[];
   vi.stubGlobal('IntersectionObserver',class {
     record: Observed;
     constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {this.record={callback,elements:[],root:options?.root};observed.push(this.record);}
-    observe(element: Element) {this.record.elements.push(element);} disconnect() {}
+    observe(element: Element) {
+      this.record.elements.push(element);
+      if (element.classList.contains('inline-visualization__page')) this.record.callback([intersectionEntry(element)], this as unknown as IntersectionObserver);
+    } disconnect() {}
   });
   const read = vi.fn(async () => '<p>saved</p>');
   const thumb = vi.fn().mockResolvedValueOnce('data:image/png;base64,UE5H').mockRejectedValueOnce(Error('no thumbnail'));

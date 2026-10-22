@@ -110,6 +110,9 @@ function SessionItem({
       </span>
       {session.unread && <span className="unread-dot" aria-label="有新活动" />}
     </button>
+    {session.status === 'running' && <span className="session-row__activity" role="img" aria-label={`${session.title} 正在处理`} title="正在处理">
+      <LoaderCircle size={14} className="is-spinning" aria-hidden="true" />
+    </span>}
     <details className="session-row__menu" onToggle={event => { if (event.currentTarget.open) onRefreshSessions(); }}>
       <summary aria-label={`${session.title} 更多操作`}><Ellipsis size={15} /></summary>
       <div className="session-row__menu-actions">

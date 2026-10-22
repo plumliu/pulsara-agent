@@ -44,7 +44,7 @@ it.each([false, true])('loads a view_image result through the app sidebar (inher
   if (inherited) {
     const label = await within(detail).findByText('上下文继承自：上游分析');
     fireEvent.click(label);
-    fireEvent.click(within(label.closest('details')!).getByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(within(label.closest('details')!).getByRole('button', { name: '展开处理过程' }));
   }
   fireEvent.click(await within(detail).findByRole('button', { name: '展开工具详情：view_image' }));
   await waitFor(() => expect(read).toHaveBeenCalledExactlyOnceWith(image));

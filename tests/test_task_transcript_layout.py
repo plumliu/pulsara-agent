@@ -229,3 +229,63 @@ def test_prompt_delivery_handoff_keeps_short_and_scrolling_transcripts_still(
         assert (measurements[0]["scrollTop"] > 0) == (previous_turns == 4)
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("width", [320, 720])
+def test_process_drawer_spacing_does_not_depend_on_a_final_answer(browser, width):
+    # ConversationRun now groups consecutive process entries inside one drawer.
+    # While streaming, that drawer is the run's last child; when the answer
+    # arrives, HistoryMessageHost adds a sibling. Neither may restyle old steps.
+    def reasoning(label):
+        return f'<div class="reasoning-disclosure"><div class="reasoning-row"><button class="reasoning-row__summary">{label}</button></div></div>'
+
+    def tool(label):
+        return f'<div class="trace-node"><div class="trace-card"><button class="trace-card__summary">{label}</button></div></div>'
+
+    def step(entry, body):
+        return f'<div class="conversation-run__step"><div data-source-entry="{entry}"><article class="assistant-turn assistant-turn--operational">{body}</article></div></div>'
+
+    steps = (
+        step("first", reasoning("思考一") + f'<div class="execution-rail">{tool("写入文件")}</div>')
+        + step("second", reasoning("思考二"))
+        + step("third", f'<div class="execution-rail">{tool("读取文件")}</div>')
+        + step("fourth", f'<div class="execution-rail">{tool("修改文件")}{tool("查看图片")}</div>')
+        + step("fifth", reasoning("继续思考"))
+        + step("commentary", '<div class="assistant-copy"><div class="assistant-markdown"><p>检查完成，继续处理。</p></div></div>')
+    )
+    page = browser.new_page(viewport={"width": 1000, "height": 900})
+    try:
+        page.set_content(f'''<!doctype html><html><style>{CSS}</style>
+          <section class="conversation-run" data-process-expanded="true" style="width:{width}px">
+            <header class="assistant-heading">Pulsara 正在执行</header>
+            <button class="conversation-run__toggle" aria-expanded="true">处理过程</button>
+            <div class="animated-disclosure is-open conversation-run__drawer">
+              <div class="animated-disclosure__content"><div class="conversation-run__drawer-body">{steps}</div></div>
+            </div>
+          </section></html>''')
+        measure = '''() => {
+          const drawer = document.querySelector('.conversation-run__drawer');
+          const cards = [...drawer.querySelectorAll('.reasoning-row, .trace-card')].map(el => el.getBoundingClientRect());
+          return {
+            gaps: cards.slice(1).map((rect, i) => rect.top - cards[i].bottom),
+            commentaryMargin: getComputedStyle(drawer.querySelector('.assistant-copy')).marginBottom,
+            stepMargins: [...drawer.querySelectorAll('.assistant-turn')].map(el => getComputedStyle(el).marginBottom),
+          };
+        }'''
+        running = page.evaluate(measure)
+        page.evaluate('''() => {
+          const run = document.querySelector('.conversation-run');
+          run.querySelector('.assistant-heading').textContent = 'Pulsara';
+          run.querySelector('button').textContent = '处理过程';
+          run.insertAdjacentHTML('beforeend', '<div data-source-entry="final"><article class="assistant-turn assistant-turn--response"><div class="assistant-copy"><p>最终答案</p></div></article></div>');
+        }''')
+        completed = page.evaluate(measure)
+        assert running == completed
+        assert running["gaps"] == pytest.approx([8, 8, 8, 8, 6, 8])
+        assert running["stepMargins"] == ["8px"] * 6
+        assert running["commentaryMargin"] == "12px"
+        assert page.locator('[data-source-entry="final"] .assistant-turn').evaluate(
+            'el => getComputedStyle(el).marginBottom'
+        ) == "0px"
+    finally:
+        page.close()

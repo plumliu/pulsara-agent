@@ -453,7 +453,13 @@
   52% { border-color: color-mix(in srgb, var(--violet) 38%, var(--line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--violet) 8%, transparent); transform: translateY(0); }
   100% { border-color: var(--line); box-shadow: 0 0 0 0 transparent; transform: translateY(0); }
 }
-.jump-to-bottom { position: absolute; left: 50%; bottom: 126px; z-index: 8; display: flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--paper-solid); color: var(--muted); font-size: var(--type-label); box-shadow: var(--shadow-md); transform: translateX(-50%); }
+.jump-to-bottom { position: absolute; left: 50%; bottom: 126px; z-index: 8; display: flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--paper-solid); color: var(--muted); font-size: var(--type-label); line-height: 16px; box-shadow: var(--shadow-md); transform: translateX(-50%); animation: jump-to-bottom-enter .2s cubic-bezier(.2,.7,.2,1); transition: transform .16s cubic-bezier(.2,.7,.2,1), background-color .16s ease, border-color .16s ease, color .16s ease, box-shadow .16s ease; }
+.jump-to-bottom:hover:not(:disabled) { transform: translate(-50%, -2px); color: var(--ink); border-color: var(--muted); background: var(--paper-raised); box-shadow: var(--shadow-lg); }
+.jump-to-bottom:active:not(:disabled) { transform: translateX(-50%) scale(.96); box-shadow: var(--shadow-sm); }
+.jump-to-bottom:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.jump-to-bottom__icon { display: grid; place-items: center; flex: none; width: 16px; height: 16px; }
+.jump-to-bottom__icon > svg { display: block; }
+@keyframes jump-to-bottom-enter { from { opacity: 0; transform: translate(-50%, 6px) scale(.96); } to { opacity: 1; transform: translateX(-50%); } }
 .composer-wrap { position: relative; z-index: 10; padding: 0 25px 14px; background: linear-gradient(transparent, var(--paper) 23%); }
 /* The open model menu must paint above the workbench topbar (z-index: 12). */
 .composer-wrap:has(.model-menu) { z-index: 13; }
@@ -652,8 +658,10 @@
 .conversation-run__step .execution-rail { margin-top: 8px; }
 .conversation-run__step .assistant-turn--operational > .execution-rail:first-child { margin-top: 0; }
 .conversation-run__step .trace-node:last-child { margin-bottom: 0; }
-.conversation-run > div:last-child .assistant-turn,
-.conversation-run > div:last-child .assistant-copy { margin-bottom: 0; }
+/* Only trim the trailing answer host. During streaming the drawer is last,
+   but its nested process steps must keep the same gaps as after completion. */
+.conversation-run > [data-source-entry]:last-child .assistant-turn,
+.conversation-run > [data-source-entry]:last-child .assistant-copy { margin-bottom: 0; }
 
 /* The resident span slides as one drawer; its body unmounts after closing.
    Keep text opaque so the motion reads as a drawer, rather than a crossfade. */
@@ -909,7 +917,9 @@
 .inline-visualization__thumbnail-image { display: grid; place-items: center; flex: 1; min-height: 0; overflow: hidden; }
 .inline-visualization__thumbnail-image img { width: 100%; height: 100%; min-height: 0; object-fit: contain; }
 .inline-visualization button:disabled { opacity: .35; cursor: default; }
-.inline-visualization__page[hidden] { display: none; }
+/* Keep resident documents and their CSS animations alive while the host pauses
+   playback. Hidden pages must not participate in the selected page's layout. */
+.inline-visualization__page[hidden] { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 0; overflow: clip; visibility: hidden; pointer-events: none; }
 
 /* 690px text column + two 100px margins: 72px rail, 12px gap, safe outer space. */
 @container (min-width: 890px) {
@@ -941,6 +951,7 @@
 .conversation-transcript > .conversation-run:last-child { margin-bottom: 0; }
 .conversation-transcript .assistant-markdown { line-height: 1.52; }
 .conversation-transcript .assistant-markdown p { margin-bottom: 5px; }
+.conversation-transcript .assistant-markdown hr { margin: 18px 0; border: 0; border-top: 1px solid var(--line-strong); }
 .conversation-transcript .assistant-markdown :is(h1, h2, h3) { margin-block: 12px 5px; }
 .user-message :is(.prompt-content-body, p) { line-height: 1.7; }
 .user-message p + p { margin-top: 10px; }

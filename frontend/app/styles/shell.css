@@ -135,6 +135,9 @@
 .session-row { position: relative; --session-row-surface: var(--paper-raised); }
 .session-row:is(:hover, :has(:focus-visible), :has(> .session-row__menu[open])) { --session-row-surface: color-mix(in srgb, var(--paper-solid) 70%, var(--paper-raised)); }
 .session-row:has(> .session-item.is-active) { --session-row-surface: var(--paper-deep); }
+.session-row__activity { position: absolute; top: 50%; right: 5px; display: grid; place-items: center; width: 26px; height: 26px; transform: translateY(-50%); color: var(--muted); pointer-events: none; transition: opacity .16s ease; }
+.session-row:has(> .session-row__activity) > .session-item { padding-right: 32px; }
+.session-row:is(:hover, :has(:focus-visible), :has(> .session-row__menu[open])) > .session-row__activity { opacity: 0; }
 .session-row__menu { position: absolute; top: 50%; right: 5px; z-index: 2; transform: translateY(-50%); }
 .session-row__menu > summary { display: grid; place-items: center; width: 26px; height: 26px; cursor: pointer; border-radius: 6px; background: var(--session-row-surface); color: var(--muted); opacity: 0; pointer-events: none; transform: translateX(4px); transition: opacity .16s ease, transform .16s ease; list-style: none; }
 .session-row__menu > summary::-webkit-details-marker { display: none; }
@@ -170,6 +173,7 @@
 .session-delete-dialog > footer .is-danger { background: var(--red); color: white; border-color: var(--red); }
 .session-delete-dialog > footer .is-danger:not(:disabled):hover { background: var(--red); filter: brightness(.94); }
 @media (hover: none) {
+  .session-row__activity { opacity: 0; }
   .session-item__copy > small, .session-row__menu > summary { opacity: 1; transform: none; }
   .session-row__menu > summary { pointer-events: auto; }
 }

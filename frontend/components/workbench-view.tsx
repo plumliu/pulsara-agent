@@ -1364,9 +1364,9 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
       data-history-entry={answer?.id ?? messages[0].id}
       data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
       data-thread-disclosure="" aria-expanded={disclosure.expanded} aria-busy={busy} disabled={busy}
-      aria-label={disclosure.expanded ? '收起中间过程' : '展开中间过程'}
+      aria-label={disclosure.expanded ? '收起处理过程' : '展开处理过程'}
       onClick={() => changeDisclosure(!disclosure.expanded)}>
-      <span>{busy ? '正在读取…' : complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
+      <span>{busy ? '正在读取…' : '处理过程'}</span><ChevronRight size={13} />
     </button>
     {processRows}
     {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined,
@@ -2895,7 +2895,10 @@ export function WorkbenchView({
       {(!atBottom || !atLatestHistory) && (
         <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} disabled={jumpingToLatest}
           onClick={() => { void jumpToLatest(); }}>
-          <ArrowDown size={13} /> {jumpingToLatest ? '正在读取最新消息…' : '回到最新'}
+          <span className="jump-to-bottom__icon" aria-hidden="true">
+            {isRunning ? <LoaderCircle size={14} className="is-spinning" /> : <ArrowDown size={14} />}
+          </span>
+          <span>{jumpingToLatest ? '正在读取最新消息…' : '回到最新'}</span>
         </button>
       )}
 
