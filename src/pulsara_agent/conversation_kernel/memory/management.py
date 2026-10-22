@@ -114,16 +114,6 @@ class MemoryManagementFact:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class MemoryManagementRelationProjection:
-    relation_id: str
-    subject: MemoryManagementFact
-    companion: MemoryManagementFact
-    relative_role: MemoryRelativeRole
-    recorded_at: str
-    public_summary: str | None
-
-
 def relative_role(kind: str, *, selected_is_source: bool) -> MemoryRelativeRole:
     if kind == "CONTRADICTS":
         return MemoryRelativeRole.CONFLICTS_WITH
@@ -319,7 +309,6 @@ def validate_product_record(record: object) -> dict:
             "companion",
             "relative_role",
             "recorded_at",
-            "public_summary",
             "effect",
         }
         MemoryManagementFact(**record["subject"])
@@ -328,11 +317,6 @@ def validate_product_record(record: object) -> dict:
         validate_canonical_memory_recorded_at(record["recorded_at"])
         if record["effect"] not in {"REMOVED", "BECOMES_ACTIVE_CONFLICT"}:
             raise ValueError("关系变化无效")
-        if (
-            record["public_summary"] is not None
-            and len(record["public_summary"].encode()) > 2048
-        ):
-            raise ValueError("整理摘要超出边界")
     elif kind == "RESTORATION_CONFLICT":
         allowed = {"type", "subject", "companion", "reason", "group"}
         MemoryManagementFact(**record["subject"])

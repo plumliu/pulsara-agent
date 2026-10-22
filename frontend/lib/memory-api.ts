@@ -27,7 +27,7 @@ export type MemoryRecord =
   | { type: 'END'; counts: Record<string, number> };
 
 export class MemoryApiError extends Error {
-  constructor(message: string, public status: number, public preview?: MemoryRecord[]) { super(message); }
+  constructor(message: string, public status: number, public preview?: MemoryRecord[], public code?: string) { super(message); }
 }
 
 function query(values: Record<string, string | number | null | undefined>) {
@@ -80,8 +80,8 @@ export async function decodeMemoryStream(response: Response): Promise<MemoryReco
 export class LocalMemoryApi {
   private async read<T>(path: string): Promise<T> {
     const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store' });
-    const data = await response.json() as T & { error?: { message?: string } };
-    if (!response.ok) throw new MemoryApiError(data.error?.message ?? '记忆读取失败', response.status);
+    const data = await response.json() as T & { error?: { message?: string; code?: string } };
+    if (!response.ok) throw new MemoryApiError(data.error?.message ?? '记忆读取失败', response.status, undefined, data.error?.code);
     return data;
   }
   projects(cursor?: string) { return this.read<MemoryPage<MemoryProject>>(`/api/memories/projects${query({ cursor })}`); }
@@ -97,8 +97,8 @@ export class LocalMemoryApi {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...selection, statement, expected_updated_at: fact.updated_at }),
     });
-    const result = await response.json() as { fact: MemoryFact; user_edited_at: string | null; changed: boolean; error?: { message?: string } };
-    if (!response.ok) throw new MemoryApiError(result.error?.message ?? '记忆编辑失败，请刷新详情后重试', response.status);
+    const result = await response.json() as { fact: MemoryFact; user_edited_at: string | null; changed: boolean; error?: { message?: string; code?: string } };
+    if (!response.ok) throw new MemoryApiError(result.error?.message ?? '记忆编辑失败，请刷新详情后重试', response.status, undefined, result.error?.code);
     return result;
   }
   private async send(id: string, preview: boolean, records: MemoryRecord[]) {
@@ -109,11 +109,15 @@ export class LocalMemoryApi {
       method: preview ? 'POST' : 'DELETE', body, credentials: 'same-origin',
     });
     if (!response.headers.get('Content-Type')?.includes('application/x-ndjson')) {
-      const data = await response.json() as { error?: { message?: string } };
-      throw new MemoryApiError(data.error?.message ?? '记忆操作失败', response.status);
+      const data = await response.json() as { error?: { message?: string; code?: string } };
+      throw new MemoryApiError(data.error?.message ?? '记忆操作失败', response.status, undefined, data.error?.code);
     }
     const result = await decodeMemoryStream(response);
     if (!response.ok) throw new MemoryApiError('记忆已发生变化，请重新查看并确认', response.status, result);
+    const header = result[0];
+    if (header?.type !== 'HEADER' || header.root !== id || (!preview && header.result !== 'DELETED')) {
+      throw new Error('记忆操作结果无法确认，请刷新核对后重试');
+    }
     return result;
   }
   preview(selection: MemorySelection, id: string, additional: string[] = []) {

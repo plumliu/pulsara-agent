@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryView } from '../../frontend/components/memory-view';
 import { LocalMemoryApi, MemoryApiError, type MemoryDetail, type MemoryFact, type MemoryRecord } from '../../frontend/lib/memory-api';
 
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+const notify = vi.fn();
+afterEach(() => { cleanup(); vi.useRealTimers(); notify.mockReset(); });
 const fact: MemoryFact = { fact_id: 'memory:a', context_id: 'ctx:global', statement: '用户喜欢散步，雨天除外。', kind: 'USER_PROFILE', lifecycle: 'ACTIVE', recorded_at: '2026-09-05T00:00:00Z', updated_at: '2026-09-05T00:00:00Z', context_label: '全局记忆' };
 const confirmation: MemoryRecord[] = [{ type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, disposition: 'READY' }, { type: 'FACT_DELETE', fact }, { type: 'END', counts: { HEADER: 1, FACT_DELETE: 1 } }];
 function setup() {
@@ -29,7 +30,7 @@ describe('MemoryView', () => {
       return { ready: done, updateCallbackDone: done, finished: done };
     } });
     try {
-      render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+      render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
       fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
       // I/O starts without waiting for animation or snapshot capture.
       expect(api.detail).toHaveBeenCalledOnce();
@@ -41,7 +42,8 @@ describe('MemoryView', () => {
         expect(panel.getAttribute('aria-busy')).toBe('false');
         expect(within(panel).getByText(fact.statement, { selector: 'p.memory-statement' })).toBeTruthy();
       } else {
-        expect(screen.getByRole('alert').textContent).toContain('详情读取失败');
+        expect(notify).toHaveBeenCalledExactlyOnceWith('无法读取记忆详情', '详情读取失败', 'warning');
+        expect(screen.queryByRole('alert')).toBeNull();
         expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
       }
     } finally {
@@ -60,7 +62,7 @@ describe('MemoryView', () => {
     });
     const changed = { ...fact, statement: '用户更正：晴天沿河散步。', updated_at: '2026-09-05T01:00:00+00:00' };
     vi.mocked(api.editStatement).mockResolvedValue({ fact: changed, changed: true, user_edited_at: changed.updated_at });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const panel = await screen.findByRole('complementary', { name: '记忆详情' });
     const actions = panel.querySelector<HTMLDivElement>('.memory-detail-actions')!;
@@ -79,28 +81,47 @@ describe('MemoryView', () => {
     expect(within(panel).getByRole('button', { name: '查看记忆：关联的旧安排' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /用户更正：晴天沿河散步/ })).toBeTruthy();
     expect(within(panel).queryByRole('button', { name: '在对话中查看' })).toBeNull();
+    expect(notify).toHaveBeenCalledExactlyOnceWith('记忆正文已保存', '已有关系未自动更改。', 'success');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+  it.each([
+    ['USER_PROFILE', '  ', 8192],
+    ['RESPONSE_PREFERENCE', '中'.repeat(683), 2048],
+  ] as const)('reports invalid %s edits with a toast while keeping the draft', async (kind, statement, maximum) => {
+    const api = setup();
+    vi.mocked(api.detail).mockResolvedValue({fact: {...fact, kind}, relations: [], next_cursor: null});
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', {name: /用户喜欢散步/}));
+    fireEvent.click(await screen.findByRole('button', {name: '编辑记忆'}));
+    fireEvent.change(screen.getByRole('textbox', {name: '记忆正文'}), {target: {value: statement}});
+    fireEvent.click(screen.getByRole('button', {name: '保存正文'}));
+    expect(notify).toHaveBeenCalledExactlyOnceWith('记忆正文未保存', `记忆正文必须在 1 至 ${maximum} UTF-8 字节之间`, 'warning');
+    expect(api.editStatement).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', {name: '记忆正文'})).toHaveProperty('value', statement);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
   it('keeps the edit draft after an optimistic concurrency conflict and cancels without saving', async () => {
     const api = setup();
     vi.mocked(api.editStatement).mockRejectedValue(new MemoryApiError('记忆已发生变化，请刷新详情后再编辑', 409));
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const panel = await screen.findByRole('complementary', { name: '记忆详情' });
     fireEvent.click(within(panel).getByRole('button', { name: '编辑记忆' }));
     fireEvent.change(within(panel).getByRole('textbox', { name: '记忆正文' }), { target: { value: '用户提出的新正文' } });
     fireEvent.click(within(panel).getByRole('button', { name: '保存正文' }));
-    expect((await within(panel).findByRole('alert')).textContent).toContain('记忆已发生变化，请刷新详情后再编辑');
+    await waitFor(() => expect(notify).toHaveBeenLastCalledWith('记忆正文未保存', '记忆已发生变化，请刷新详情后再编辑', 'warning'));
+    expect(within(panel).queryByRole('alert')).toBeNull();
     expect((within(panel).getByRole('textbox', { name: '记忆正文' }) as HTMLTextAreaElement).value).toBe('用户提出的新正文');
     vi.mocked(api.editStatement).mockRejectedValueOnce(new Error('network interrupted'));
     fireEvent.click(within(panel).getByRole('button', { name: '保存正文' }));
-    await waitFor(() => expect(within(panel).getByRole('alert').textContent).toContain('重新打开详情核对正文'));
+    await waitFor(() => expect(notify).toHaveBeenLastCalledWith('记忆正文未保存', expect.stringContaining('重新打开详情核对正文'), 'warning'));
     fireEvent.click(within(panel).getByRole('button', { name: '取消' }));
     expect(within(panel).getByText(fact.statement, { selector: 'p.memory-statement' })).toBeTruthy();
   });
   it.each(['starting', 'reconnecting', 'offline', 'failed'] as const)('shows a connection state instead of reading memories while %s', status => {
     const api = setup();
     const reconnect = vi.fn();
-    render(<MemoryView api={api} databaseState={status === 'starting' ? undefined : 'ready'} runtimeStatus={status} onReconnect={reconnect} onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} api={api} databaseState={status === 'starting' ? undefined : 'ready'} runtimeStatus={status} onReconnect={reconnect} onOpenSettings={vi.fn()} />);
     expect(screen.getByRole('status').textContent).toContain('本地服务');
     if (status === 'offline' || status === 'failed') {
       fireEvent.click(screen.getByRole('button', { name: '重新连接' }));
@@ -116,19 +137,21 @@ describe('MemoryView', () => {
     const api = setup();
     let rejectProjects!: (error: Error) => void;
     vi.mocked(api.projects).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectProjects = reject; }));
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     if (timing === 'after') await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     await act(async () => { rejectProjects(new Error('项目列表读取失败')); });
-    expect(screen.queryByRole('alert')?.textContent).toBe('项目列表读取失败');
+    expect(notify).toHaveBeenCalledExactlyOnceWith('无法读取项目列表', '项目列表读取失败', 'warning');
+    expect(screen.queryByRole('alert')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     expect(api.catalog).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('alert')?.textContent).toBe('项目列表读取失败');
+    expect(notify).toHaveBeenCalledExactlyOnceWith('无法读取项目列表', '项目列表读取失败', 'warning');
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('button', { name: /用户喜欢散步/ })).toBeTruthy();
   });
   it('clears the previous query immediately and ignores its pending detail response', async () => {
     vi.useFakeTimers();
     const api = setup();
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     let resolveDetail!: (value: MemoryDetail) => void;
     vi.mocked(api.detail).mockImplementationOnce(() => new Promise(resolve => { resolveDetail = resolve; }));
@@ -153,15 +176,19 @@ describe('MemoryView', () => {
     const api = setup();
     let resolveOld!: (value: { items: MemoryFact[]; next_cursor: null }) => void;
     vi.mocked(api.catalog).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     fireEvent.change(screen.getByRole('textbox', { name: '搜索记忆' }), { target: { value: '新查询' } });
     vi.mocked(api.catalog).mockRejectedValueOnce(new Error('当前查询失败'));
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
-    expect(screen.getByRole('alert').textContent).toBe('当前查询失败');
+    expect(notify).toHaveBeenCalledExactlyOnceWith('无法读取记忆列表', '当前查询失败', 'warning');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('heading', {name: '没有找到匹配的记忆'})).toBeNull();
     await act(async () => { resolveOld({ items: [fact], next_cursor: null }); });
     expect(screen.queryByRole('button', { name: /用户喜欢散步/ })).toBeNull();
-    expect(screen.getByRole('alert').textContent).toBe('当前查询失败');
+    expect(notify).toHaveBeenCalledExactlyOnceWith('无法读取记忆列表', '当前查询失败', 'warning');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('heading', {name: '没有找到匹配的记忆'})).toBeNull();
   });
   it('keeps pagination bound to the committed query under StrictMode', async () => {
     vi.useFakeTimers();
@@ -170,7 +197,7 @@ describe('MemoryView', () => {
     vi.mocked(api.catalog)
       .mockResolvedValueOnce({ items: [fact], next_cursor: 'next-page' })
       .mockResolvedValueOnce({ items: [companion], next_cursor: null });
-    render(<StrictMode><MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} /></StrictMode>);
+    render(<StrictMode><MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} /></StrictMode>);
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     expect(api.catalog).toHaveBeenCalledTimes(1);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '加载更多记忆' })); });
@@ -190,7 +217,7 @@ describe('MemoryView', () => {
     const previousScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
     try {
-      render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+      render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
       const row = await screen.findByRole('button', { name: /用户喜欢散步/ });
       fireEvent.click(row);
       const panel = await screen.findByRole('complementary', { name: '记忆详情' });
@@ -232,7 +259,7 @@ describe('MemoryView', () => {
       ? { items: [other], next_cursor: 'next-page' }
       : { items: [fact], next_cursor: null });
     vi.mocked(api.detail).mockImplementation(async (_selection, id) => id === fact.fact_id ? initial : { ...initial, fact: old, relations: [] });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: '关于你' }));
     fireEvent.change(screen.getByRole('textbox', { name: '搜索记忆' }), { target: { value: '散步' } });
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
@@ -258,7 +285,7 @@ describe('MemoryView', () => {
     vi.mocked(api.projects).mockResolvedValue({ items: [project], next_cursor: null });
     vi.mocked(api.catalog).mockImplementation(async (selection) => ({ items: selection.view === 'global' ? [fact] : [projectFact], next_cursor: null }));
     vi.mocked(api.detail).mockImplementation(async (_selection, id) => id === fact.fact_id ? initial : { ...initial, fact: projectFact, relations: [] });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const panel = await screen.findByRole('complementary', { name: '记忆详情' });
     fireEvent.click(within(panel).getByRole('button', { name: '查看记忆：项目中的关联记忆' }));
@@ -272,7 +299,7 @@ describe('MemoryView', () => {
   });
   it('keeps an empty relationship graph without creation-source controls or labels', async () => {
     const api = setup();
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const panel = await screen.findByRole('complementary', { name: '记忆详情' });
     expect(within(panel).getByRole('region', { name: '记忆关系图' })).toBeTruthy();
@@ -290,7 +317,7 @@ describe('MemoryView', () => {
     vi.mocked(api.detail).mockResolvedValueOnce({ fact, relations: [relation], next_cursor: 'next' })
       .mockResolvedValueOnce({ fact, relations: [{ ...relation, relation_id: 'relation:last',
         companion: { ...fact, fact_id: 'memory:last', statement: '最后一条关联记忆' } }], next_cursor: null });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const panel = await screen.findByRole('complementary', { name: '记忆详情' });
     const graph = within(panel).getByRole('region', { name: '记忆关系图' });
@@ -317,7 +344,7 @@ describe('MemoryView', () => {
       fact, relations: [{ relation_id: 'relation:test', relative_role, subject: fact, companion: { ...fact, fact_id: 'memory:other', statement: '另一条记忆' }, recorded_at: fact.recorded_at }],
       next_cursor: null,
     });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const graph = await screen.findByRole('region', { name: '记忆关系图' });
     expect(within(graph).getByText(phrase)).toBeTruthy();
@@ -333,7 +360,7 @@ describe('MemoryView', () => {
       { ...fact, fact_id: 'memory:conflict', needs_confirmation: true },
       { ...fact, fact_id: 'memory:preference', kind: 'RESPONSE_PREFERENCE' },
     ], next_cursor: null });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     await screen.findAllByRole('button', { name: /用户喜欢散步/ });
     expect(screen.queryByText('相关时使用')).toBeNull();
     expect(screen.getByText('已被替代', { selector: '.memory-usage' })).toBeTruthy();
@@ -347,13 +374,13 @@ describe('MemoryView', () => {
     const api = setup();
     const companion = { ...fact, fact_id: 'memory:b', statement: '另一条记忆' };
     vi.mocked(api.catalog).mockResolvedValue({ items: [fact, companion], next_cursor: null });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const panel = await screen.findByRole('complementary', { name: '记忆详情' });
     await within(panel).findByText(fact.statement, { selector: 'p.memory-statement' });
     vi.mocked(api.detail).mockRejectedValueOnce(new Error('暂时无法读取'));
     fireEvent.click(screen.getByRole('button', { name: /另一条记忆/ }));
-    await screen.findByRole('alert');
+    await waitFor(() => expect(notify).toHaveBeenLastCalledWith('无法读取记忆详情', '暂时无法读取', 'warning'));
     expect(screen.getByRole('complementary', { name: '记忆详情' })).toBe(panel);
     expect(within(panel).getByText(fact.statement, { selector: 'p.memory-statement' })).toBeTruthy();
     let resolve!: (detail: MemoryDetail) => void;
@@ -372,7 +399,7 @@ describe('MemoryView', () => {
     vi.mocked(api.detail)
       .mockImplementationOnce(() => new Promise(done => { first = done; }))
       .mockImplementationOnce(() => new Promise(done => { second = done; }));
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     fireEvent.click(screen.getByRole('button', { name: /另一条记忆/ }));
     const panel = screen.getByRole('complementary', { name: '记忆详情' });
@@ -387,7 +414,7 @@ describe('MemoryView', () => {
   it('distinguishes an empty library, search results, and project selection', async () => {
     const api = setup();
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     expect(screen.getByRole('tab', { name: '全局记忆' }).getAttribute('aria-selected')).toBe('true');
     expect(await screen.findByRole('heading', { name: '还没有全局记忆' })).toBeTruthy();
     fireEvent.change(screen.getByRole('textbox', { name: '搜索记忆' }), { target: { value: '散步' } });
@@ -414,7 +441,7 @@ describe('MemoryView', () => {
     vi.mocked(api.catalog).mockResolvedValue({ items: [projectFact], next_cursor: null });
     vi.mocked(api.detail).mockResolvedValue({ fact: projectFact, relations: [], next_cursor: null });
     vi.mocked(api.preview).mockResolvedValue(projectConfirmation);
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(screen.getByRole('tab', { name: '项目记忆' }));
     const selector = screen.getByRole('combobox', { name: '选择项目' });
     await waitFor(() => expect(within(selector).getByRole('option', { name: /项目 A/ })).toBeTruthy());
@@ -430,13 +457,13 @@ describe('MemoryView', () => {
   });
   it.each(['database_not_configured', 'database_configured_unverified', 'database_unavailable', 'database_schema_action_required'] as const)('gates %s without reading memories', async databaseState => {
     const api = setup();
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState={databaseState} onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState={databaseState} onOpenSettings={vi.fn()} />);
     expect(screen.getByRole('button', { name: /前往通用设置/ })).toBeTruthy();
     expect(api.catalog).not.toHaveBeenCalled(); expect(api.projects).not.toHaveBeenCalled();
   });
   it('keeps details in the page but confirms deletion in a separate dialog', async () => {
     const api = setup();
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const detail = await screen.findByRole('complementary', { name: '记忆详情' });
     expect(within(detail).getByText('暂无关联记忆')).toBeTruthy();
@@ -457,7 +484,8 @@ describe('MemoryView', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '确认删除' }));
     await waitFor(() => expect(api.delete).toHaveBeenCalledExactlyOnceWith(fact.fact_id, confirmation));
     expect(screen.queryByRole('dialog', { name: '删除这条记忆？' })).toBeNull();
-    expect(await screen.findByText(/记忆已删除。/)).toBeTruthy();
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('记忆已删除', expect.any(String), 'success'));
+    expect(screen.queryByText(/记忆已删除/)).toBeNull();
   });
   it('groups cascading deletion, restored facts, and relationship changes without lengthening details', async () => {
     const api = setup();
@@ -470,7 +498,7 @@ describe('MemoryView', () => {
       { type: 'FACT_RESTORE', fact: old, planned_lifecycle: 'ACTIVE' },
       { type: 'END', counts: { HEADER: 1, FACT_DELETE: 2, RELATION_EFFECT: 1, FACT_RESTORE: 1 } },
     ]);
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const detail = await screen.findByRole('complementary', { name: '记忆详情' });
     fireEvent.click(within(detail).getByRole('button', { name: /删除记忆/ }));
@@ -495,9 +523,98 @@ describe('MemoryView', () => {
     expect(screen.queryByRole('dialog', { name: '删除这条记忆？' })).toBeNull();
     expect(api.delete).not.toHaveBeenCalled();
   });
+  it('refreshes the catalog after deletion, shows the restored memory, and uses a toast instead of an inline notice', async () => {
+    const api = setup();
+    const restored = {...fact, fact_id: 'memory:restored', statement: '重新生效的旧记忆'};
+    vi.mocked(api.catalog).mockResolvedValueOnce({items: [fact], next_cursor: null})
+      .mockResolvedValue({items: [restored], next_cursor: null});
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', {name: /用户喜欢散步/}));
+    fireEvent.click(await screen.findByRole('button', {name: /删除记忆/}));
+    fireEvent.click(await screen.findByRole('button', {name: '确认删除'}));
+    expect(await screen.findByRole('button', {name: /重新生效的旧记忆/})).toBeTruthy();
+    expect(screen.queryByRole('button', {name: /用户喜欢散步/})).toBeNull();
+    expect(screen.queryByRole('complementary', {name: '记忆详情'})).toBeNull();
+    expect(notify).toHaveBeenCalledExactlyOnceWith('记忆已删除', expect.any(String), 'success');
+    expect(document.querySelector('.memory-notice')).toBeNull();
+  });
+  it('reports a failed initial deletion preview through a toast and lets the user retry', async () => {
+    const api = setup();
+    vi.mocked(api.preview).mockRejectedValueOnce(new Error('预览读取失败'));
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', {name: /用户喜欢散步/}));
+    fireEvent.click(await screen.findByRole('button', {name: /删除记忆/}));
+    await waitFor(() => expect(notify).toHaveBeenCalledExactlyOnceWith('无法预览删除影响', '预览读取失败', 'warning'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    const retry = screen.getByRole('button', {name: '删除记忆…'});
+    await waitFor(() => expect(retry).toHaveProperty('disabled', false));
+    fireEvent.click(retry);
+    await screen.findByRole('dialog', {name: '删除这条记忆？'});
+    expect(api.delete).not.toHaveBeenCalled();
+  });
+  it('uses a toast for unresolved deletion while keeping the conflict choices and confirmation disabled', async () => {
+    const api = setup();
+    const old = {...fact, fact_id: 'memory:old', lifecycle: 'SUPERSEDED' as const};
+    vi.mocked(api.preview).mockResolvedValue([
+      {type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, disposition: 'NEEDS_RESOLUTION'},
+      {type: 'FACT_DELETE', fact}, {type: 'FACT_RESTORE', fact: old, planned_lifecycle: 'ACTIVE'},
+      {type: 'RESTORATION_CONFLICT', subject: old, companion: fact, reason: 'ACTIVE_SEMANTIC_COLLISION', group: 'group:old'},
+      {type: 'END', counts: {HEADER: 1, FACT_DELETE: 1, FACT_RESTORE: 1, RESTORATION_CONFLICT: 1}},
+    ]);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', {name: /用户喜欢散步/}));
+    fireEvent.click(await screen.findByRole('button', {name: /删除记忆/}));
+    const dialog = await screen.findByRole('dialog', {name: '删除这条记忆？'});
+    expect(notify).toHaveBeenCalledExactlyOnceWith('暂不能直接删除', expect.any(String), 'warning');
+    expect(within(dialog).getByRole('checkbox')).toBeTruthy();
+    expect(within(dialog).getByRole('button', {name: '确认删除'})).toHaveProperty('disabled', true);
+    expect(dialog.querySelector('.memory-delete-blocked, .memory-delete-alert')).toBeNull();
+  });
+  it('uses a toast for pagination failure and keeps the loaded rows and retry action', async () => {
+    const api = setup();
+    vi.mocked(api.catalog).mockResolvedValueOnce({items: [fact], next_cursor: 'next'})
+      .mockRejectedValueOnce(new Error('下一页读取失败'));
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    await screen.findByRole('button', {name: /用户喜欢散步/});
+    fireEvent.click(screen.getByRole('button', {name: '加载更多记忆'}));
+    await waitFor(() => expect(notify).toHaveBeenCalledExactlyOnceWith('无法加载更多记忆', '下一页读取失败', 'warning'));
+    expect(screen.getByRole('button', {name: /用户喜欢散步/})).toBeTruthy();
+    expect(screen.getByRole('button', {name: '加载更多记忆'})).toHaveProperty('disabled', false);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+  it.each(['LOCAL_RESOURCE_NOT_FOUND', 'MEMORY_PROJECT_NOT_FOUND', 'MEMORY_ADDITIONAL_ROOT_NOT_FOUND', undefined])(
+    'keeps the memory visible when deletion fails with a 404 whose code is %s', async code => {
+      const api = setup();
+      vi.mocked(api.delete).mockRejectedValue(new MemoryApiError('删除请求未完成', 404, undefined, code));
+      render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+      fireEvent.click(await screen.findByRole('button', {name: /用户喜欢散步/}));
+      fireEvent.click(await screen.findByRole('button', {name: /删除记忆/}));
+      fireEvent.click(await screen.findByRole('button', {name: '确认删除'}));
+      await waitFor(() => expect(notify).toHaveBeenCalledExactlyOnceWith('记忆未删除', '删除请求未完成', 'warning'));
+      expect(screen.getByRole('button', {name: /用户喜欢散步/})).toBeTruthy();
+      expect(screen.getByRole('complementary', {name: '记忆详情'})).toBeTruthy();
+      expect(api.catalog).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText('这条记忆已不存在，列表已更新。')).toBeNull();
+    },
+  );
+  it('refreshes an already missing root and reports it through a toast', async () => {
+    const api = setup();
+    vi.mocked(api.catalog).mockResolvedValueOnce({items: [fact], next_cursor: null})
+      .mockResolvedValue({items: [], next_cursor: null});
+    vi.mocked(api.delete).mockRejectedValue(new MemoryApiError('这条记忆已不存在', 404, undefined, 'MEMORY_NOT_FOUND'));
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', {name: /用户喜欢散步/}));
+    fireEvent.click(await screen.findByRole('button', {name: /删除记忆/}));
+    fireEvent.click(await screen.findByRole('button', {name: '确认删除'}));
+    await screen.findByRole('heading', {name: '还没有全局记忆'});
+    expect(notify).toHaveBeenCalledExactlyOnceWith('这条记忆已不存在', '列表已更新。');
+    expect(screen.queryByRole('complementary', {name: '记忆详情'})).toBeNull();
+    expect(document.querySelector('.memory-notice')).toBeNull();
+  });
   it('closes the deletion dialog with Escape without deleting the memory', async () => {
     const api = setup();
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     fireEvent.click(await screen.findByRole('button', { name: /删除记忆/ }));
     const dialog = await screen.findByRole('dialog', { name: '删除这条记忆？' });
@@ -512,15 +629,16 @@ describe('MemoryView', () => {
     const old = { ...fact, fact_id: 'memory:old', statement: '可能恢复的旧记忆', lifecycle: 'SUPERSEDED' as const };
     const fresh: MemoryRecord[] = [{ type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, disposition: 'NEEDS_RESOLUTION' }, { type: 'FACT_DELETE', fact }, { type: 'FACT_RESTORE', fact: old, planned_lifecycle: 'ACTIVE' }, { type: 'RESTORATION_CONFLICT', subject: old, companion: fact, reason: 'ACTIVE_SEMANTIC_COLLISION', group: 'group:old' }, { type: 'END', counts: { HEADER: 1, FACT_DELETE: 1, FACT_RESTORE: 1, RESTORATION_CONFLICT: 1 } }];
     vi.mocked(api.delete).mockRejectedValue(new MemoryApiError('记忆发生变化', 409, fresh));
-    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
+    render(<MemoryView onNotify={notify} runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     fireEvent.click(await screen.findByRole('button', { name: /删除记忆/ }));
     fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
     const dialog = await screen.findByRole('dialog', { name: '删除这条记忆？' });
     expect(within(dialog).getByRole('checkbox')).toBeTruthy();
     expect(dialog.querySelector<HTMLButtonElement>('.memory-delete-confirm')?.disabled).toBe(true);
-    expect(within(dialog).getByRole('alert').textContent).toContain('记忆发生变化');
-    expect(within(dialog).getByText('目前不能直接删除')).toBeTruthy();
+    expect(notify).toHaveBeenLastCalledWith('记忆未删除', '记忆发生变化', 'warning');
+    expect(within(dialog).queryByRole('alert')).toBeNull();
+    expect(dialog.querySelector('.memory-delete-blocked')).toBeNull();
     let rejectPreview!: (error: Error) => void;
     vi.mocked(api.preview).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectPreview = reject; }));
     fireEvent.click(within(dialog).getByRole('checkbox'));
@@ -529,16 +647,17 @@ describe('MemoryView', () => {
     expect(screen.getByRole('dialog', { name: '删除这条记忆？' })).toBe(dialog);
     expect(dialog.querySelector<HTMLButtonElement>('.memory-delete-confirm')?.disabled).toBe(true);
     await act(async () => rejectPreview(new Error('重算失败')));
-    expect(within(dialog).getByRole('alert').textContent).toContain('重算失败');
+    expect(notify).toHaveBeenLastCalledWith('无法预览删除影响', '重算失败', 'warning');
+    expect(within(dialog).queryByRole('alert')).toBeNull();
     expect((within(dialog).getByRole('button', { name: '确认删除' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(within(dialog).getByRole('button', { name: '重新计算影响' }));
     await waitFor(() => expect((within(dialog).getByRole('button', { name: '确认删除' }) as HTMLButtonElement).disabled).toBe(false));
   });
   it('clears loaded memories on database readiness loss', async () => {
     const api = setup(); const props = { api, runtimeStatus: 'online' as const, onReconnect: vi.fn(), onOpenSettings: vi.fn() };
-    const view = render(<MemoryView {...props} databaseState="ready" />);
+    const view = render(<MemoryView onNotify={notify} {...props} databaseState="ready" />);
     await screen.findByRole('button', { name: /用户喜欢散步/ });
-    view.rerender(<MemoryView {...props} databaseState="database_unavailable" />);
+    view.rerender(<MemoryView onNotify={notify} {...props} databaseState="database_unavailable" />);
     expect(screen.queryByText(fact.statement)).toBeNull();
   });
 });

@@ -830,6 +830,89 @@ def test_memory_page_deletion_restores_superseded_and_cascades_basis(
     )
 
 
+@pytest.mark.parametrize("relation_kind", (None, "SUPERSEDES", "BASED_ON", "CONTRADICTS"))
+def test_memory_deletion_http_round_trip_commits_the_actual_preview(
+    direct_memory_session, tmp_path, relation_kind,
+):
+    from urllib.parse import quote
+    from aiohttp import ClientSession
+    from pulsara_agent.conversation_kernel.host import KernelHostCore
+    from tests.test_desktop_memory_management import server_for
+
+    repository, _, invoke, remember = direct_memory_session
+    suffix = uuid4().hex
+    _, original, _ = remember(f"The original audit venue {suffix} is Building A.")
+    root = original["memory_id"]
+    other = None
+    if relation_kind == "BASED_ON":
+        _, other, _ = remember(f"The audit map {suffix} points to Building A.", based_on=(root,))
+    elif relation_kind is not None:
+        _, other, _ = remember(f"The replacement audit venue {suffix} is Building B.")
+        invoke("mark_memory_relation", {
+            "source_memory_id": other["memory_id"], "target_memory_id": root,
+            "relation_kind": relation_kind,
+        }, PreparedMemoryRelationWrite(
+            memory_domain_id="u_local", source_memory_id=other["memory_id"],
+            target_memory_id=root, relation_kind=MemoryRelationKind(relation_kind),
+        ))
+        root = other["memory_id"]
+
+    core = object.__new__(KernelHostCore)
+    async def resources():
+        return repository
+    core._ensure_resources = resources
+    core._canonical_deadline = lambda: monotonic() + 30
+
+    async def run():
+        server, _ = await server_for(tmp_path)
+        server.sessions.core = core
+        server.sessions.memory_domain_id = "u_local"
+        endpoint = server.origin + "/api/memories/" + quote(root, safe="")
+        request = b"\n".join(json.dumps(record).encode() for record in (
+            {"type": "HEADER", "view": "global", "workspace_id": None, "root": root},
+            {"type": "END", "counts": {"HEADER": 1}},
+        )) + b"\n"
+        try:
+            async with ClientSession(headers={"Content-Type": "application/x-ndjson"}) as client:
+                missing_additional = b"\n".join(json.dumps(record).encode() for record in (
+                    {"type": "HEADER", "view": "global", "workspace_id": None, "root": root},
+                    {"type": "ADDITIONAL_ROOT", "fact_id": _name("memory")},
+                    {"type": "END", "counts": {"HEADER": 1, "ADDITIONAL_ROOT": 1}},
+                )) + b"\n"
+                async with client.post(endpoint + "/deletion-preview", data=missing_additional) as response:
+                    assert response.status == 404
+                    assert (await response.json())["error"]["code"] == "MEMORY_ADDITIONAL_ROOT_NOT_FOUND"
+                async with client.post(endpoint + "/deletion-preview", data=request) as response:
+                    preview = await response.read()
+                    assert response.status == 200, preview
+                effects = [json.loads(line) for line in preview.splitlines() if json.loads(line)["type"] == "RELATION_EFFECT"]
+                assert bool(effects) == (relation_kind is not None)
+                assert all("public_summary" not in record for record in effects)
+                async with client.delete(endpoint, data=preview) as response:
+                    result = await response.read()
+                    assert response.status == 200, result
+                records = [json.loads(line) for line in result.splitlines()]
+                assert records[0]["result"] == "DELETED"
+                assert records[0]["root"] == root
+                assert sum(record["type"] == "FACT_DELETE" for record in records) == (2 if relation_kind == "BASED_ON" else 1)
+                assert sum(record["type"] == "FACT_RESTORE" for record in records) == (1 if relation_kind == "SUPERSEDES" else 0)
+                async with client.get(endpoint + "?view=global") as response:
+                    assert response.status == 404
+                    assert (await response.json())["error"]["code"] == "MEMORY_NOT_FOUND"
+        finally:
+            await server.aclose()
+
+    asyncio.run(run())
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30,
+    ) as c:
+        assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE id=%s", (root,)).fetchone() is None
+        if relation_kind in {"SUPERSEDES", "CONTRADICTS"}:
+            assert c.execute("SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s", (original["memory_id"],)).fetchone() == ("ACTIVE",)
+        elif relation_kind == "BASED_ON":
+            assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE id=%s", (other["memory_id"],)).fetchone() is None
+
+
 @pytest.mark.parametrize("growth_scope", ("global", "same_project", "cross_project"))
 def test_memory_deletion_replans_when_the_locked_graph_grows(
     direct_memory_session,

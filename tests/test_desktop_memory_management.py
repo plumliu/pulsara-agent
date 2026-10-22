@@ -123,6 +123,7 @@ def test_stream_over_eight_mib_reaches_executor_with_exact_complete_records(tmp_
         "wrong_root",
         "extra_field",
         "not_ready",
+        "missing_field",
     ],
 )
 def test_malformed_confirmation_never_opens_executor(tmp_path, mutation):
@@ -135,6 +136,10 @@ def test_malformed_confirmation_never_opens_executor(tmp_path, mutation):
             stream.append(stream[-1])
         if mutation == "count":
             stream[-1] = b'{"type":"END","counts":{"HEADER":1}}'
+        if mutation == "missing_field":
+            record = json.loads(stream[1])
+            del record["fact"]
+            stream[1] = canonical_json_bytes(record)
         if mutation in {"wrong_root", "extra_field", "not_ready"}:
             header = json.loads(stream[0])
             if mutation == "wrong_root":

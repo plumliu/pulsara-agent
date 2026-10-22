@@ -100,3 +100,18 @@ def test_confirmation_keeps_complete_text_and_subsecond_updated_at():
     assert list(with_end([record]))[-1] == {"type": "END", "counts": {"FACT_DELETE": 1}}
     with pytest.raises(ValueError):
         validate_product_record({**record, "fingerprint": "unneeded"})
+
+
+def test_relation_confirmation_has_no_removed_formation_summary():
+    fact = MemoryManagementFact(
+        'memory:77n3iseeb7g5nrddf77nociut4', "ctx:global", "FACT", "ACTIVE",
+        "完整正文", "2026-09-05T00:00:00Z", "2026-09-05T00:00:00.123456+00:00",
+    )
+    record = {
+        "type": "RELATION_EFFECT", "relation_id": "relation:confirmation",
+        "subject": asdict(fact), "companion": asdict(fact),
+        "relative_role": "UPDATES", "recorded_at": fact.recorded_at, "effect": "REMOVED",
+    }
+    assert validate_product_record(record) == record
+    with pytest.raises(ValueError, match="字段不匹配"):
+        validate_product_record({**record, "public_summary": None})

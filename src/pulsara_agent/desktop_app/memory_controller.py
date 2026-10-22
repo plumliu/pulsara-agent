@@ -17,9 +17,9 @@ from pulsara_agent.conversation_kernel.memory.management import (
 )
 
 
-# A relation record carries two 8192-byte statements, a 2048-byte public summary,
-# canonical IDs/context/timestamps/enums and JSON syntax. Six bytes per source
-# byte covers JSON escaping. This bounds ONE record, never a graph or upload.
+# Retain the existing single-record admission budget as relation metadata shrinks.
+# It covers two 8192-byte statements, canonical IDs/context/timestamps/enums and
+# JSON escaping/envelope space. This bounds ONE record, never a graph or upload.
 MAXIMUM_RECORD_BYTES = 6 * (2 * 8192 + 2048 + 4096)
 STREAM_IDLE_SECONDS = 30  # loopback transport idle watchdog, not a total upload cap
 
@@ -81,7 +81,10 @@ class MemoryConfirmationUpload:
                 pending = bytearray(rest)
                 if ended or not line or len(line) > MAXIMUM_RECORD_BYTES:
                     raise ValueError("删除确认记录不完整或超出单条边界")
-                record = validate_product_record(json.loads(line))
+                try:
+                    record = validate_product_record(json.loads(line))
+                except (KeyError, TypeError) as exc:
+                    raise ValueError("删除确认记录字段不匹配") from exc
                 kind = record["type"]
                 if order[kind] < last_order:
                     raise ValueError("删除确认记录顺序无效")

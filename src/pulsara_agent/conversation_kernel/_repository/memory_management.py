@@ -506,9 +506,11 @@ class _MemoryManagementOperations:
                 (domain, sorted(ids)),
             ).fetchall()
         }
-        if not set(seeds) <= facts.keys():
+        if root not in facts:
+            raise MemoryManagementError("MEMORY_NOT_FOUND", 404, "这条记忆已不存在")
+        if not set(additional) <= facts.keys():
             raise MemoryManagementError(
-                "MEMORY_NOT_FOUND", 404, "一并删除的记忆已不存在"
+                "MEMORY_ADDITIONAL_ROOT_NOT_FOUND", 404, "一并删除的记忆已不存在，请重新预览"
             )
         removed = [r for r in relations if r["id"] in graph.relation_ids]
         restores = [

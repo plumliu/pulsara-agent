@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decodeMemoryStream, LocalMemoryApi, MemoryApiError, type MemoryFact } from '../../frontend/lib/memory-api';
+import { decodeMemoryStream, LocalMemoryApi, MemoryApiError, type MemoryFact, type MemoryRecord } from '../../frontend/lib/memory-api';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -32,6 +32,29 @@ describe('memory confirmation stream', () => {
     line(header) + line({ type: 'UNKNOWN' }) + line(end),
   ])('rejects incomplete or inconsistent product records', async (text) => {
     await expect(decodeMemoryStream(response(text))).rejects.toThrow();
+  });
+
+  it('keeps the server error code so an unrelated 404 cannot masquerade as an absent memory', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({error: {
+      code: 'LOCAL_RESOURCE_NOT_FOUND', message: '请求的本地资源已失效。',
+    }}), {status: 404, headers: {'Content-Type': 'application/json'}})));
+    await expect(new LocalMemoryApi().delete(header.root, [header, end] as MemoryRecord[])).rejects.toMatchObject({
+      status: 404, code: 'LOCAL_RESOURCE_NOT_FOUND', message: '请求的本地资源已失效。',
+    });
+  });
+
+  it('requires the complete deletion result for the requested memory before reporting success', async () => {
+    const confirmation = [header, end] as MemoryRecord[];
+    const resultHeader = {type: 'HEADER', root: header.root, view: 'global', workspace_id: null, result: 'DELETED'};
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const api = new LocalMemoryApi();
+    for (const returnedHeader of [header, {...resultHeader, root: 'another-memory'}]) {
+      fetcher.mockResolvedValueOnce(new Response(line(returnedHeader) + line(end), {headers: {'Content-Type': 'application/x-ndjson'}}));
+      await expect(api.delete(header.root, confirmation)).rejects.toThrow('记忆操作结果无法确认');
+    }
+    fetcher.mockResolvedValueOnce(new Response(line(resultHeader) + line(end), {headers: {'Content-Type': 'application/x-ndjson'}}));
+    expect(await api.delete(header.root, confirmation)).toEqual([resultHeader, end]);
   });
 });
 
