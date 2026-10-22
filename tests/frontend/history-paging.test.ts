@@ -16,32 +16,34 @@ const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve();};
 afterEach(()=>vi.unstubAllGlobals());
 
 it('retires read pages around the viewport and rereads either gap with the original paired cut', async () => {
- const pair={session_id:'session:test',cut_sequence:'100',event_sequence_cut:'300'};
+ const pair={session_id:'session:test',cut_sequence:'1000',event_sequence_cut:'300'};
  const range=(first:number,last:number)=>Array.from({length:last-first+1},(_,i)=>entry(`e:${first+i}`,first+i));
  const calls=fixture((url,body)=>{
   if(url.endsWith('/context'))return context(body);
-  if(url.endsWith('/history')){const edge=Number(body.cursor.entry_sequence),first=Math.max(1,edge-10);return{history_page:{entries:range(first,edge-1),has_more:first>1,older_history_cursor:first>1?{...pair,entry_sequence:String(first)}:undefined}};}
-  if(url.endsWith('/window')){const edge=Number(body.cursor.entry_sequence);return{...pair,entries:body.cursor.direction==='newer'?range(edge+1,100):range(Math.max(1,edge-10),edge-1),older_cursor:body.cursor.direction==='older'&&edge>11?{...pair,entry_sequence:String(edge-10),direction:'older'}:undefined};}
+  if(url.endsWith('/history')){const edge=Number(body.cursor.entry_sequence),first=Math.max(1,edge-100);return{history_page:{entries:range(first,edge-1),has_more:first>1,older_history_cursor:first>1?{...pair,entry_sequence:String(first)}:undefined}};}
+  if(url.endsWith('/window')){const edge=Number(body.cursor.entry_sequence);return{...pair,entries:body.cursor.direction==='newer'?range(edge+1,Math.min(edge+128,1000)):range(Math.max(1,edge-100),edge-1),older_cursor:body.cursor.direction==='older'&&edge>101?{...pair,entry_sequence:String(edge-100),direction:'older'}:undefined};}
   throw Error(url);
  });
- const reader=new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},snapshot(range(91,100),{...pair,entry_sequence:'91'},'100','300'));
+ const reader=new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},snapshot(range(901,1000),{...pair,entry_sequence:'901'},'1000','300'));
  await reader.initialize();await flush();
  for(let i=0;i<9;i++){await reader.readHistory();await flush();}
- expect(reader.current().messages).toHaveLength(100);
- let p=reader.retainHistory({visibleEntryIds:['e:55'],pinnedEntryIds:[]})!;
- expect(p.messages).toHaveLength(40);
- expect(p.messages.map(m=>m.id)).toContain('e:100');
+ expect(reader.current().messages).toHaveLength(1000);
+ let p=reader.retainHistory({visibleEntryIds:['e:550'],pinnedEntryIds:[]})!;
+ expect(p.messages).toHaveLength(300);
+ expect(p.messages.map(m=>m.id)).not.toContain('e:1000');
+ expect(p.history!.windows).toHaveLength(1);
+ expect(p.history!.atLatest).toBe(false);
  expect(p.messages.map(m=>m.id)).not.toContain('e:1');
- const middle=p.history!.windows.find(w=>w.entryIds.includes('e:55'))!;
+ const middle=p.history!.windows.find(w=>w.entryIds.includes('e:550'))!;
  expect(middle).toMatchObject({hasOlder:true,hasNewer:true});
  await reader.readHistory(middle.id,'older');await flush();
  expect(calls.at(-2)?.body.cursor ?? calls.at(-1)?.body.cursor).toBeDefined();
  const older=calls.filter(c=>c.url.endsWith('/window')).at(-1)!;
- expect(older.body.cursor).toEqual({...pair,entry_sequence:'41',direction:'older'});
- p=await reader.readHistory(reader.current().history!.windows.find(w=>w.entryIds.includes('e:55'))!.id,'newer');await flush();
- expect(calls.filter(c=>c.url.endsWith('/window')).at(-1)!.body.cursor).toEqual({...pair,entry_sequence:'70',direction:'newer'});
+ expect(older.body.cursor).toEqual({...pair,entry_sequence:'401',direction:'older'});
+ p=await reader.readHistory(reader.current().history!.windows.find(w=>w.entryIds.includes('e:550'))!.id,'newer');await flush();
+ expect(calls.filter(c=>c.url.endsWith('/window')).at(-1)!.body.cursor).toEqual({...pair,entry_sequence:'700',direction:'newer'});
  expect(p.history!.windows).toHaveLength(1);
- expect(p.messages.at(-1)?.id).toBe('e:100');
+ expect(p.messages.at(-1)?.id).toBe('e:1000');
 });
 
 it('unloads re-readable resident bodies but retains visible and selected bodies, then coalesces exact rereads', async () => {
@@ -50,7 +52,7 @@ it('unloads re-readable resident bodies but retains visible and selected bodies,
  const reader=new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},snapshot([1,2,3].map(n=>entry(`e:${n}`,n,{content:n===1?{...full}:{...content},blocks:[]}))));
  await reader.initialize();await flush();
  await reader.hydrateEntries(['e:2']);
- expect(reader.retainHistory({visibleEntryIds:['e:1'],pinnedEntryIds:['e:2']})).toBeUndefined();
+ reader.retainHistory({visibleEntryIds:['e:1'],pinnedEntryIds:['e:2']});
  let p=reader.current();
  expect(p.messages.map(m=>m.contentState)).toEqual(['ready','ready','unloaded']);
  expect(await reader.readCanonicalEntryContent('e:1',content.digest,Number(content.size))).toBe(text);
@@ -71,33 +73,37 @@ it.each(['late','failure'])('uses a complete server tail pair after %s context a
  const forward=deferred<unknown>();let forwardBody:any;
  const calls=fixture((url,body)=>{
   if(url.endsWith('/connections'))return payload([entry('e:20',20)]);
-  if(url.endsWith('/context')){if(body.entry_ids.includes('e:200')&&!lateBody){lateBody=body;return mode==='late'?late.promise:new Response('failed',{status:503});}return context(body,{cut_sequence:String(head),event_sequence_cut:String(head+1000)});}
-  if(url.endsWith('/observe'))return{observation:{through_event_sequence:String(head+1000),committed:range(head===50?21:head-49,head).map(value=>({projection_kind:'IMMUTABLE_ENTRY',entry:value}))}};
-  if(url.endsWith('/window')){forwardBody=body;return forward.promise;}
+  if(url.endsWith('/context')){if(body.entry_ids.includes('e:600')&&!lateBody){lateBody=body;return mode==='late'?late.promise:new Response('failed',{status:503});}return context(body,{cut_sequence:String(head),event_sequence_cut:String(head+1000)});}
+  if(url.endsWith('/observe'))return{observation:{through_event_sequence:String(head+1000),committed:range(head===100?21:head-99,head).map(value=>({projection_kind:'IMMUTABLE_ENTRY',entry:value}))}};
+  if(url.endsWith('/window')){if(!forwardBody){forwardBody=body;return forward.promise;}return{session_id:'session:test',cut_sequence:'600',event_sequence_cut:'1600',entries:range(329,456)};}
   throw Error(url);
  });
  const reader=await connect();await flush();
- for(head of [50,100,150,200]){await reader.observe();await flush();}
+ for(head of [100,200,300,400,500,600]){await reader.observe();await flush();}
  const interest={visibleEntryIds:['e:20'],pinnedEntryIds:[]};
  reader.retainHistory!(interest);
- expect(reader.current().messages).toHaveLength(181); // Tail context still owns the bridge.
- if(mode==='late')late.resolve(context(lateBody,{cut_sequence:'200',event_sequence_cut:'1200'}));
+ expect(reader.current().messages).toHaveLength(581); // Tail context still owns the bridge.
+ if(mode==='late')late.resolve(context(lateBody,{cut_sequence:'600',event_sequence_cut:'1600'}));
  else await reader.readHistory!(reader.current().history!.windows[0].id,'newer');
  await flush();
  let p=reader.retainHistory!(interest)!;
- expect(p.messages.map(m=>m.id)).not.toContain('e:100');
- expect(p.history!.windows).toHaveLength(2);
+ expect(p.messages.map(m=>m.id)).not.toContain('e:300');
+ expect(p.history!.windows).toHaveLength(1);
  const old=p.history!.windows[0];
  const first=reader.readHistory!(old.id,'newer');await flush();
  reader.retainHistory!(interest); // Stable cursor identity must accept the pending read.
- const edge=Number(forwardBody.cursor.entry_sequence),end=Math.min(edge+128,200);
- forward.resolve({session_id:'session:test',cut_sequence:'200',event_sequence_cut:'1200',entries:range(edge+1,end),newer_cursor:end<200?{session_id:'session:test',cut_sequence:'200',event_sequence_cut:'1200',entry_sequence:String(end),direction:'newer'}:undefined});
+ const edge=Number(forwardBody.cursor.entry_sequence),end=Math.min(edge+128,600);
+ forward.resolve({session_id:'session:test',cut_sequence:'600',event_sequence_cut:'1600',entries:range(edge+1,end),newer_cursor:end<600?{session_id:'session:test',cut_sequence:'600',event_sequence_cut:'1600',entry_sequence:String(end),direction:'newer'}:undefined});
  await first;await flush();
- expect(calls.filter(c=>c.url.endsWith('/window'))[0].body.cursor).toEqual({session_id:'session:test',cut_sequence:'200',event_sequence_cut:'1200',entry_sequence:'50',direction:'newer'});
+ expect(calls.filter(c=>c.url.endsWith('/window'))[0].body.cursor).toEqual({session_id:'session:test',cut_sequence:'600',event_sequence_cut:'1600',entry_sequence:'200',direction:'newer'});
+ p=reader.current();
+ expect(p.history!.atLatest).toBe(false);
+ expect(p.messages.at(-1)?.id).toBe('e:328');
+ await reader.readHistory!(p.history!.windows[0].id,'newer'); await flush();
  p=reader.current();
  expect(p.messages.some(m=>m.id==='e:149')).toBe(true);
  expect(p.history!.windows).toHaveLength(1);
- expect(p.eventSequence).toBe(1200);
+ expect(p.eventSequence).toBe(1600);
 });
 
 it('releases repeated offscreen accepted live and queue handoffs without dropping uncommitted drafts',async()=>{
@@ -113,7 +119,7 @@ it('releases repeated offscreen accepted live and queue handoffs without droppin
  // isolate retention from the separately covered live-frame parser.
  const owner=reader as unknown as {drafts:Map<string,any>;liveResults:Map<string,any>;knownQueuedContent:Map<string,any>;entries:Map<string,any>};
  owner.drafts.set('uncommitted',{id:'uncommitted',turnId:'turn:root',scopeKind:'ROOT',taskId:'',body:'still running',reasoning:[],traces:[]});
- for(n=21;n<=32;n++){
+ for(n=21;n<=300;n++){
   await reader.observe();await flush();
   const id=`e:${n}`,ref=blob(`reply:${n}`),canonical=owner.entries.get(id);
   canonical.blocks=[{block_id:`block:${id}`,block_kind:'TEXT',content:ref}];
@@ -125,7 +131,7 @@ it('releases repeated offscreen accepted live and queue handoffs without droppin
  }
  expect(owner.drafts.size).toBe(1);expect(owner.drafts.has('uncommitted')).toBe(true);
  expect(owner.liveResults.size).toBe(0);expect(owner.knownQueuedContent.size).toBe(0);
- expect(reader.current().messages.filter(m=>!m.id.startsWith('live:')).length).toBeLessThanOrEqual(3);
+ expect(reader.current().messages.filter(m=>!m.id.startsWith('live:')).length).toBeLessThanOrEqual(129);
  expect(calls.filter(c=>c.url.endsWith('/read-content'))).toHaveLength(0);
 });
 
@@ -139,12 +145,14 @@ it('keeps a refreshed snapshot tail while the observation cursor and a late cont
   if(url.endsWith('/observe'))return{observation:{through_event_sequence:String(end+100),committed:range(end-19,end).map(value=>({projection_kind:'IMMUTABLE_ENTRY',entry:value}))}};
   throw Error(url);
  });
- const reader=await connect();await flush();await reader.snapshot();await flush();
+ const reader=await connect();await flush();reader.retainHistory!({visibleEntryIds:['e:20'],pinnedEntryIds:[],followLatest:false});await reader.snapshot();await flush();
  for(end of [40,60,80]){await reader.observe();await flush();}
  late.resolve(context(lateBody,{cut_sequence:'200',event_sequence_cut:'400'}));await flush();
- const p=reader.retainHistory!({visibleEntryIds:['e:20'],pinnedEntryIds:[]})!;
- expect(p.messages.some(m=>m.id==='e:200')).toBe(true);
- expect(p.messages.some(m=>m.id==='e:80')).toBe(false);
+ reader.retainHistory!({visibleEntryIds:['e:20'],pinnedEntryIds:[]});
+ const p=reader.current();
+ expect(p.messages.map(m=>m.id)).toEqual(range(20,80).map(e=>e.entry_id));
+ expect(p.history!.atLatest).toBe(false);
+ expect((await reader.readLatestHistory!()).messages.at(-1)?.id).toBe('e:200');
  expect(p.eventSequence).toBe(180);
  expect(calls.filter(c=>c.url.endsWith('/observe')).map(c=>c.body.after_event_sequence)).toEqual(['30','140','160']);
 });
@@ -162,7 +170,7 @@ it.each(['0','9007199254740993'])('reads just one older page with exact event cu
 });
 it('locates a bounded anchor directly and keeps an unloaded gap until forward pages join',async()=>{
  const calls=fixture((url,body)=>{if(url.endsWith('/connections'))return payload([entry('tail',20)]);if(url.endsWith('/context'))return context(body);if(url.endsWith('/window')&&body.anchor_entry_id)return{session_id:'session:test',cut_sequence:'20',event_sequence_cut:'30',entries:[entry('old',2)],newer_cursor:{...cursor,entry_sequence:'2',direction:'newer'}};if(url.endsWith('/window'))return{session_id:'session:test',cut_sequence:'20',event_sequence_cut:'30',entries:Array.from({length:18},(_,i)=>entry(`fill:${i}`,i+3))};throw Error(url);});
- const reader=await connect();let p=await reader.locateEntry!('old',new AbortController().signal);expect(p.history!.windows).toHaveLength(2);expect(calls.filter(c=>c.url.endsWith('/history'))).toHaveLength(0);p=await reader.readHistory!(p.history!.windows[0].id,'newer');expect(p.history!.windows).toHaveLength(1);expect(p.messages.find(m=>m.id==='tail')?.body).toBe('tail');
+ const reader=await connect();let p=await reader.locateEntry!('old',new AbortController().signal);expect(p.history!.windows).toHaveLength(1);expect(p.messages.map(m=>m.id)).toEqual(['old']);expect(p.history!.atLatest).toBe(false);expect(calls.filter(c=>c.url.endsWith('/history'))).toHaveLength(0);p=await reader.readHistory!(p.history!.windows[0].id,'newer');expect(p.history!.windows).toHaveLength(1);expect(p.messages.find(m=>m.id==='tail')?.body).toBe('tail');
 });
 it('keeps result semantic identity when an older assistant becomes its render host',async()=>{
  const result=entry('result',20,{entry_kind:'TOOL_RESULT',blocks:[],content:inline('完成'),tool_result:{assistant_entry_id:'creator',tool_call_id:'call:1',result_state:'SUCCESS'}});

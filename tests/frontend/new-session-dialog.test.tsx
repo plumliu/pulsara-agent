@@ -4,7 +4,7 @@ import { NewSessionDialog } from '../../frontend/components/overlays';
 
 afterEach(cleanup);
 
-function setup(onPickDirectory: (path: string, signal: AbortSignal) => Promise<string | null>) {
+function setup(onPickDirectory: (signal: AbortSignal) => Promise<string | null>) {
   const onCreate = vi.fn(async () => true);
   const view = render(<NewSessionDialog open canCreateSession
     onClose={() => {}} onCreate={onCreate} onPickDirectory={onPickDirectory} />);
@@ -13,7 +13,7 @@ function setup(onPickDirectory: (path: string, signal: AbortSignal) => Promise<s
 }
 
 it('requires an explicit directory selection and preserves it on cancellation or failure', async () => {
-  const pick = vi.fn<(path: string, signal: AbortSignal) => Promise<string | null>>()
+  const pick = vi.fn<(signal: AbortSignal) => Promise<string | null>>()
     .mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('无法打开系统窗口'))
     .mockResolvedValueOnce('/tmp/文件夹 "quoted" ').mockResolvedValueOnce(null);
   const { preview, onCreate } = setup(pick);
@@ -25,7 +25,7 @@ it('requires an explicit directory selection and preserves it on cancellation or
   fireEvent.click(screen.getByRole('button', { name: '选择目录' }));
   await screen.findByRole('button', { name: '选择目录' });
   expect(preview.value).toBe('');
-  expect(pick).toHaveBeenCalledWith('', expect.any(AbortSignal));
+  expect(pick).toHaveBeenCalledWith(expect.any(AbortSignal));
   expect(screen.queryByRole('alert')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '选择目录' }));
   expect((await screen.findByRole('alert')).textContent).toBe('无法打开系统窗口');
@@ -42,7 +42,7 @@ it('requires an explicit directory selection and preserves it on cancellation or
 
 it('blocks duplicate selection and submission while pending and ignores results after closing', async () => {
   let resolve!: (path: string) => void;
-  const pick = vi.fn<(path: string, signal: AbortSignal) => Promise<string>>()
+  const pick = vi.fn<(signal: AbortSignal) => Promise<string>>()
     .mockImplementation(() => new Promise<string>((done) => { resolve = done; }));
   const { unmount, onCreate } = setup(pick);
   fireEvent.click(screen.getByRole('button', { name: '选择目录' }));
@@ -53,7 +53,7 @@ it('blocks duplicate selection and submission while pending and ignores results 
   expect(pick).toHaveBeenCalledTimes(1);
   expect(onCreate).not.toHaveBeenCalled();
   unmount();
-  expect(pick.mock.calls[0][1].aborted).toBe(true);
+  expect(pick.mock.calls[0][0].aborted).toBe(true);
   const next = setup(async () => null);
   await act(async () => resolve('/tmp/late-selection'));
   expect(next.preview.value).toBe('');

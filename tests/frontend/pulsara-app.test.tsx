@@ -4938,3 +4938,32 @@ describe('user capability synchronization', () => {
     expect(screen.queryByText('本地服务连接已中断')).toBeNull();
   });
 });
+
+it('settles a consumed offscreen input before its resident tail retires, without replaying the local bubble on return', async () => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = {...projection(''), messages:[], isRunning:false, activeTurnId:undefined};
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
+  await screen.findByLabelText('发送给 Pulsara');
+  const active = adapter.lastConnection!;
+  await typeComposer('远端已接受的旧输入');
+  fireEvent.click(screen.getByRole('button',{name:'发送'}));
+  await waitFor(() => expect(active.submitPrompt).toHaveBeenCalledOnce());
+  const commandId = active.submitPrompt.mock.calls[0][0];
+  const oldHistory = {readingOwner:{},atLatest:false,initialReady:true,hasOlder:false,loading:false,compactions:[],windows:[{
+    id:'old-band',entryIds:['old'],firstEntryId:'old',lastEntryId:'old',hasOlder:false,hasNewer:true,loading:false,contextState:'ready' as const,
+  }]};
+  await act(async () => active.emit({...projection(''),eventSequence:20,isRunning:false,history:oldHistory,
+    messages:[{id:'old',role:'assistant',assistantKind:'terminal',rootFinal:true,time:'',body:'正在翻阅的旧消息'}],
+    canonicalInputs:[{id:'accepted-offscreen',inputSource:{commandId,queueItemId:'queue:accepted',deliveryMode:'new-turn'},contentState:'unloaded',historyContextState:'ready'}],
+  }));
+  expect(screen.getByText('正在翻阅的旧消息')).toBeTruthy();
+  expect(screen.queryByText('远端已接受的旧输入')).toBeNull();
+  // Subsequent retention has retired the already re-readable accepted input.
+  const latest = {...projection('最新回复'),messages:[{id:'assistant-1',role:'assistant' as const,assistantKind:'terminal' as const,rootFinal:true,time:'',body:'最新回复'}],eventSequence:600,isRunning:false,canonicalInputs:[],
+    history:{...oldHistory,readingOwner:{},atLatest:true,windows:[{...oldHistory.windows[0],id:'tail',entryIds:['assistant-1'],firstEntryId:'assistant-1',lastEntryId:'assistant-1',hasNewer:false}]}};
+  Object.assign(active,{readLatestHistory:vi.fn(async () => latest)});
+  fireEvent.click(screen.getByRole('button',{name:'回到最新'}));
+  await screen.findByText('最新回复');
+  expect(screen.queryByText('远端已接受的旧输入')).toBeNull();
+  expect(document.querySelector('[data-pending-message]')).toBeNull();
+});

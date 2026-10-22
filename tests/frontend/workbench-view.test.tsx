@@ -1116,16 +1116,15 @@ describe('completed reply process disclosure', () => {
     expect(screen.getByText(final.body)).toBeTruthy();
   });
 
-  it('does not join live reasoning across an unloaded history gap', () => {
+  it('renders the reader’s old band with only a bottom continuation boundary', () => {
     const view = render(<ConversationMessages activeTurnId="turn-one" isRunning
-      messages={[{ ...progress, historyGroupId: 'root-process', historyWindowId: 'older' }, {
-        id: 'live', role: 'assistant', turnId: 'turn-one', assistantKind: 'live',
-        status: 'running', time: '', body: '', reasoning: [{ id: 'reason', kind: 'full', body: '当前思考' }],
-      }]} history={{ hasOlder: false, loading: false, windows: [{ id: 'older',
+      messages={[{ ...progress, historyGroupId: 'root-process', historyWindowId: 'older' }]}
+      history={{ atLatest: false, hasOlder: false, loading: false, windows: [{ id: 'older',
         firstEntryId: 'progress', lastEntryId: 'progress', hasOlder: false, hasNewer: true, loading: false }] }}
       artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
-    expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(2);
-    expect(screen.getByText('后续记录尚未加载')).toBeTruthy();
+    expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
+    expect(screen.getByText('后面还有消息')).toBeTruthy();
+    expect(screen.queryByText('后续记录尚未加载')).toBeNull();
   });
 
   it.each([1, 3])('folds %s leading completion notifications without an earlier assistant step', count => {
@@ -1681,19 +1680,20 @@ describe('bounded history reading and DOM locations', () => {
     expect(screen.getByText('正文 older')).toBeTruthy();
   });
 
-  it('keeps disconnected windows explicit and routes each boundary to its own reader cursor', async () => {
+  it('places paging only at the two edges of the single displayed reading band', async () => {
     const read = vi.fn(async () => {});
-    const windows = [
-      { id: 'anchor', firstEntryId: 'old', lastEntryId: 'old', hasOlder: true, hasNewer: true, loading: false },
-      { id: 'tail', firstEntryId: 'answer', lastEntryId: 'answer', hasOlder: true, hasNewer: false, loading: false },
-    ];
-    render(<WorkbenchView {...props({ isRunning: false, messages: [{ ...answer('old', 'root-old'), historyWindowId: 'anchor' }, answer('answer')],
-      history: { ...history, windows }, onLoadHistory: read })} />);
-    expect(screen.getByRole('region', { name: '中间记录尚未加载' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '加载后续记录' }));
+    const windows = [{ id: 'anchor', firstEntryId: 'old', lastEntryId: 'old', hasOlder: true, hasNewer: true, loading: false }];
+    const view = render(<WorkbenchView {...props({ isRunning: false, messages: [{ ...answer('old', 'root-old'), historyWindowId: 'anchor' }],
+      history: { ...history, atLatest: false, windows }, onLoadHistory: read })} />);
+    expect(screen.queryByText('中间记录尚未加载')).toBeNull();
+    expect(screen.queryByText('后续记录尚未加载')).toBeNull();
+    const band = view.container.querySelector('[data-source-entry="old"]')!;
+    expect(screen.getByRole('region', {name: '较早记录'}).compareDocumentPosition(band) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(band.compareDocumentPosition(screen.getByRole('region', {name: '后续消息'})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '继续向后阅读' }));
     await waitFor(() => expect(read).toHaveBeenCalledWith('anchor', 'newer'));
-    fireEvent.click(within(screen.getByRole('region', { name: '中间记录尚未加载' })).getByRole('button', { name: '加载更早记录' }));
-    await waitFor(() => expect(read).toHaveBeenCalledWith('tail', 'older'));
+    fireEvent.click(screen.getByRole('button', { name: '加载更早记录' }));
+    await waitFor(() => expect(read).toHaveBeenCalledWith('anchor', 'older'));
   });
 
   it('shows one loading status at the older boundary and restores the keyboard page action afterwards', async () => {
@@ -1702,7 +1702,7 @@ describe('bounded history reading and DOM locations', () => {
       body: '中间步骤', historyEarlierUnloaded: true }, answer('answer')];
     const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages, onLoadHistory: read };
     const view = render(<ConversationMessages {...base} history={history} />);
-    expect(screen.getByText('本轮较早过程尚未加载')).toBeTruthy();
+    expect(screen.queryByText('本轮较早过程尚未加载')).toBeNull();
     view.rerender(<ConversationMessages {...base} history={{ ...history, loading: true, windows: [{ ...history.windows[0], loading: true }] }} />);
     expect(screen.getAllByText('正在加载…')).toHaveLength(1);
     expect(screen.queryByText('较早记录尚未加载')).toBeNull();
@@ -1725,7 +1725,7 @@ describe('bounded history reading and DOM locations', () => {
     expect(view.container.querySelector('[data-source-entry="pending-one"]')).toBeNull();
     view.rerender(<ConversationMessages {...base} history={history} />);
     expect(screen.queryByText('正在加载…')).toBeNull();
-    expect(screen.getByText('本轮较早过程尚未加载')).toBeTruthy();
+    expect(screen.queryByText('本轮较早过程尚未加载')).toBeNull();
     const button = screen.getByRole('button', { name: '加载更早记录' });
     button.focus();
     await userEvent.keyboard('{Enter}');
@@ -1737,7 +1737,7 @@ describe('bounded history reading and DOM locations', () => {
     const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
     const view = render(<ConversationMessages {...base} messages={[process, answer('answer')]} />);
     expect(screen.queryByText('中间步骤')).toBeNull();
-    expect(screen.getByText('本轮较早过程尚未加载')).toBeTruthy();
+    expect(screen.queryByText('本轮较早过程尚未加载')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     const host = view.container.querySelector('.conversation-run');
     view.rerender(<ConversationMessages {...base} messages={[{ ...process, id: 'earlier', body: '较早步骤' }, process, answer('answer')]} />);
@@ -1871,7 +1871,7 @@ describe('independent interruption timeline rows', () => {
       history: { hasOlder: true, loading: false, windows: [window] } })} />);
     expect(screen.getByText('本轮回复已中断。')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '加载更早记录' })).toHaveLength(1);
-    fireEvent.click(screen.getByRole('button', { name: '加载后续记录' }));
+    fireEvent.click(screen.getByRole('button', { name: '继续向后阅读' }));
     await waitFor(() => expect(read).toHaveBeenCalledWith('feedback-window', 'newer'));
   });
 
@@ -2199,7 +2199,7 @@ it('reports viewport working-set interests through the existing thread scroll ow
  vi.spyOn(thread,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,400));
  for(const node of thread.querySelectorAll<HTMLElement>('[data-source-entry]')) vi.spyOn(node,'getBoundingClientRect').mockReturnValue(new DOMRect(0,node.dataset.sourceEntry==='visible'?20:4000,600,80));
  fireEvent.scroll(thread);
- await waitFor(()=>expect(retain).toHaveBeenCalledWith({visibleEntryIds:['visible'],pinnedEntryIds:[]}));
+ await waitFor(()=>expect(retain).toHaveBeenCalledWith(expect.objectContaining({visibleEntryIds:['visible'],pinnedEntryIds:[]})));
  retain.mockClear();
  view.rerender(<WorkbenchView {...props({onRetainHistory:retain,isRunning:false,messages:[
   {id:'collapsed:one',turnId:'same',historyGroupId:'same',role:'assistant',body:'hidden one',time:''},
@@ -2210,7 +2210,7 @@ it('reports viewport working-set interests through the existing thread scroll ow
  expect(thread.querySelector('[data-source-entry="collapsed:one"]')).toBeNull();
  vi.spyOn(header,'getBoundingClientRect').mockReturnValue(new DOMRect(0,20,600,30));
  fireEvent.scroll(thread);
- await waitFor(()=>expect(retain).toHaveBeenCalledWith({visibleEntryIds:['collapsed:one'],pinnedEntryIds:[]}));
+ await waitFor(()=>expect(retain).toHaveBeenCalledWith(expect.objectContaining({visibleEntryIds:['collapsed:one'],pinnedEntryIds:[]})));
 });
 
 it('keeps repeated tool-call and live reasoning IDs isolated by their canonical assistant owner on reread', () => {
@@ -2397,4 +2397,56 @@ it('preserves thought beside commentary throughout canonical reasoning hydration
   view.rerender(<WorkbenchView {...base} messages={[{...message,pendingAssistant:undefined,reasoning:reason,reasoningContentState:'ready'}]} />);
   expect(screen.getByText('核对数据口径')).toBeTruthy();
   expect(view.container.querySelector('.conversation-run')).toBe(run);
+});
+
+it('keeps old-band bottom distinct from latest and leaves the old band in place when return-latest fails', async () => {
+  const latest = vi.fn().mockRejectedValue(new Error('暂时无法读取'));
+  const notify = vi.fn();
+  const history = {atLatest:false, readingOwner:{}, hasOlder:false, loading:false, windows:[{
+    id:'old',entryIds:['old'],firstEntryId:'old',lastEntryId:'old',hasOlder:false,hasNewer:true,loading:false,
+  }]};
+  const view = render(<WorkbenchView {...props({history,isRunning:true,activeTurnId:'running',contextCompactionInProgress:true,
+    messages:[{id:'old',role:'user',time:'',body:'旧位置'}],onReadLatestHistory:latest,onNotify:notify,
+    localSubmissions:[{sessionId:'session-one',connectionGeneration:1,commandId:'sending',status:'sending',displayAsMessage:true,deliveryMode:'new-turn',content:textPrompt('远处待发送输入')}],
+  })} />);
+  const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  Object.defineProperty(thread,'scrollHeight',{value:1000,configurable:true});
+  Object.defineProperty(thread,'clientHeight',{value:500,configurable:true});
+  thread.scrollTop = 500;
+  fireEvent.wheel(thread,{deltaY:100}); fireEvent.scroll(thread);
+  expect(screen.getByRole('button',{name:'回到最新'})).toBeTruthy();
+  expect(screen.queryByText('远处待发送输入')).toBeNull();
+  expect(screen.queryByLabelText('Pulsara 处理状态')).toBeNull();
+  expect(view.container.querySelector('.context-compaction-divider--progress')).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'回到最新'}));
+  await waitFor(() => expect(notify).toHaveBeenCalledWith('无法回到最新','暂时无法读取','warning'));
+  expect(screen.getByText('旧位置')).toBeTruthy();
+  expect(thread.scrollTop).toBe(500);
+  expect(screen.getByRole('button',{name:'回到最新'})).toBeTruthy();
+});
+
+it('keeps forward loading and retry at the bottom edge only', async () => {
+  const load = vi.fn(async () => {});
+  const window = {id:'old',entryIds:['old'],hasOlder:true,hasNewer:true,loading:true,boundaryDirection:'newer' as const};
+  const base = {messages:[{id:'old',role:'user' as const,body:'旧位置',time:''}],artifactOwnerKey:'session',onReadToolArtifact:vi.fn(),onNotify:vi.fn(),onLoadHistory:load};
+  const view = render(<ConversationMessages {...base} history={{hasOlder:true,loading:true,windows:[window]}} />);
+  expect(screen.getAllByText('正在加载…')).toHaveLength(1);
+  expect(within(screen.getByRole('region',{name:'后续消息'})).getByRole('status')).toBeTruthy();
+  view.rerender(<ConversationMessages {...base} history={{hasOlder:true,loading:false,windows:[{...window,loading:false,error:'后续读取失败'}]}} />);
+  expect(within(screen.getByRole('region',{name:'较早记录'})).queryByRole('alert')).toBeNull();
+  fireEvent.click(within(screen.getByRole('region',{name:'后续消息'})).getByRole('button',{name:'重试'}));
+  await waitFor(() => expect(load).toHaveBeenCalledExactlyOnceWith('old','newer'));
+});
+
+it('preserves the selected response DOM when cache-page identity changes around the reading band', () => {
+  const messages = [{id:'answer',historyGroupId:'group',historyWindowId:'first-page',turnId:'turn',role:'assistant' as const,assistantKind:'terminal' as const,rootFinal:true,time:'',body:'选中的正文保持不变。'}];
+  const base = props({messages,isRunning:false});
+  const view = render(<WorkbenchView {...base} />);
+  const element = screen.getByText('选中的正文保持不变。');
+  const range = document.createRange(); range.selectNodeContents(element);
+  window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+  view.rerender(<WorkbenchView {...base} messages={messages.map(message => ({...message,historyWindowId:'retained-page'}))} />);
+  expect(screen.getByText('选中的正文保持不变。')).toBe(element);
+  expect(window.getSelection()!.toString()).toBe('选中的正文保持不变。');
+  window.getSelection()!.removeAllRanges();
 });

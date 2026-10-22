@@ -112,13 +112,15 @@ import { promptContentTextProjection } from '../lib/prompt-content';
 
 
 export interface WorkbenchHistory {
+  readingOwner?: object;
+  atLatest?: boolean;
   hasOlder: boolean;
   loading: boolean;
   error?: string;
   compactions?: Array<{ eventId: string; adoptedAfterEntrySequence: number; displayBeforeEntryId?: string; displayAfterEntryId?: string }>;
   windows: Array<{
     id: string; firstEntryId?: string; lastEntryId?: string; entryIds?: string[];
-    hasOlder: boolean; hasNewer: boolean; loading: boolean; error?: string;
+    hasOlder: boolean; hasNewer: boolean; loading: boolean; boundaryDirection?: 'older' | 'newer'; error?: string; contextError?: string;
     contextState?: 'loading' | 'ready' | 'error';
   }>;
 }
@@ -127,7 +129,8 @@ interface WorkbenchViewProps {
   history?: WorkbenchHistory;
   onLoadHistory?: (windowId?: string, direction?: 'older' | 'newer') => Promise<void>;
   onHydrateEntries?: (entryIds: string[], includeReasoning?: boolean) => Promise<void>;
-  onRetainHistory?: (interest: {visibleEntryIds: string[]; pinnedEntryIds: string[]}) => void;
+  onReadLatestHistory?: (signal: AbortSignal) => Promise<void>;
+  onRetainHistory?: (interest: import('../lib/runtime-adapter').HistoryResidence) => void;
   onLocateEntry?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onCompletePaths?: import('../lib/file-reference').CompleteWorkspacePaths;
@@ -1223,12 +1226,11 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   </div>;
 }
 
-function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId, historyLoading = false }: {
+function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId }: {
   messages: Message[];
   renderMessage: (message: Message, startsRun: boolean, visible?: boolean) => ReactNode;
   focusRequest?: object | number;
   taskFinalAnswerId?: string;
-  historyLoading?: boolean;
   completed: boolean;
   active: boolean;
   assistantLabel: string;
@@ -1255,7 +1257,6 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const hasProcess = process.some((message) => message.role === 'assistant' || message.userKind === 'subagent-completion');
   if (!hasProcess) return renderMessage(answer!, true);
   return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
-    {!historyLoading && messages.some(message => message.historyEarlierUnloaded) && <div role="status" className="history-boundary">本轮较早过程尚未加载</div>}
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
     <button type="button" className="conversation-run__toggle"
       data-history-entry={messages[0].id}
@@ -1414,9 +1415,8 @@ export function ConversationMessages({
       ? focusSourceEntry
       : focusTaskHighlighted && run.some(message => message.subagentRuns?.some(task => task.id === focusTaskId))
         ? focusTaskRevision : undefined;
-    content.push(<ConversationRun key={`${artifactOwnerKey}:${run[0].historyGroupId ?? `${run[0].entryOwnerKind ?? 'owner'}:${run[0].turnId ?? run[0].id}`}:${run[0].historyWindowId ?? ''}:${run[0].historyGroupId ? '' : segmentBoundary}`} messages={run}
+    content.push(<ConversationRun key={`${artifactOwnerKey}:${run[0].historyGroupId ?? `${run[0].entryOwnerKind ?? 'owner'}:${run[0].turnId ?? run[0].id}`}:${run[0].historyGroupId ? '' : segmentBoundary}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel} taskFinalAnswerId={taskFinalAnswerId}
-      historyLoading={history?.windows.some(window => window.id === run[0].historyWindowId && (window.loading || window.contextState === 'loading'))}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
       active={isRunning && run[0].turnId === activeTurnId} />);
     run = [];
@@ -1439,7 +1439,7 @@ export function ConversationMessages({
     });
     timeline.splice(position < 0 ? timeline.length : position, 0, { notice, windowId: window.id });
   }
-  const shownWindows = new Set<string>();
+  const readingWindow = history?.windows[0];
   const emitNotice = (notice: TurnInterruptionNotice, independent = false) => {
     flush();
     content.push(<div key={`${notice.ownerKind}:${notice.ownerId}`} data-source-entry={independent ? notice.displayAfterEntryId : undefined}>
@@ -1447,26 +1447,25 @@ export function ConversationMessages({
     </div>);
     segmentBoundary = `${notice.ownerKind}:${notice.ownerId}`;
   };
-  timeline.forEach((item, itemIndex) => {
-    const window = history?.windows.find(candidate => candidate.id === item.windowId);
-    if (window && !shownWindows.has(window.id)) {
-      shownWindows.add(window.id);
-      flush();
-      const gap = history!.windows.indexOf(window) > 0;
-      // A tail context refresh is invisible when every pending entry already
-      // has exact local content. Actual gaps and unknown shells keep feedback.
-      const unknownContext = window.contextState === 'loading' && timeline.some(candidate =>
-        candidate.windowId === window.id && 'message' in candidate
-        && candidate.message.historyContextState === 'loading'
-        && !candidate.message.pendingAssistant && !knownPromptContent(candidate.message));
-      if (window.hasOlder || window.error || window.loading || unknownContext || gap) content.push(<div key={`history:${window.id}`} className="history-boundary" role="region" aria-label={gap ? '中间记录尚未加载' : '较早记录'}>
-        {window.loading || window.contextState === 'loading' ? <span role="status">正在加载…</span> : <>
-          <span>{gap ? '中间记录尚未加载' : '较早记录尚未加载'}</span>
-          {window.error && <span role="alert">{window.error}</span>}
-          {onLoadHistory && (window.hasOlder || window.error) && <button type="button" onClick={() => { void onLoadHistory(window.id, 'older').catch(() => {}); }}>{window.error ? '重试' : '加载更早记录'}</button>}
-        </>}
-      </div>);
-    }
+  if (readingWindow) {
+    const window = readingWindow;
+    // A tail context refresh is invisible when every pending entry already
+    // has exact local content. Actual gaps and unknown shells keep feedback.
+    const unknownContext = window.contextState === 'loading' && timeline.some(candidate =>
+      candidate.windowId === window.id && 'message' in candidate
+      && candidate.message.historyContextState === 'loading'
+      && !candidate.message.pendingAssistant && !knownPromptContent(candidate.message));
+    const olderError = window.boundaryDirection === 'newer' ? window.contextError : window.error;
+    const olderLoading = window.loading && window.boundaryDirection !== 'newer';
+    if (window.hasOlder || olderError || olderLoading || unknownContext) content.push(<div key={`history:${window.id}`} className="history-boundary" role="region" aria-label="较早记录">
+      {olderLoading || window.contextState === 'loading' ? <span role="status">正在加载…</span> : <>
+        <span>更早的消息</span>
+        {olderError && <span role="alert">{olderError}</span>}
+        {onLoadHistory && (window.hasOlder || olderError) && <button type="button" disabled={window.loading} onClick={() => { void onLoadHistory(window.id, 'older').catch(() => {}); }}>{olderError ? '重试' : '加载更早记录'}</button>}
+      </>}
+    </div>);
+  }
+  timeline.forEach(item => {
     if ('notice' in item) emitNotice(item.notice, true);
     else {
       const message = item.message;
@@ -1501,14 +1500,15 @@ export function ConversationMessages({
       }
       for (const notice of interruptionNotices.filter(n => n.displayAfterMessageId === message.id)) emitNotice(notice);
     }
-    if (window?.hasNewer && timeline.findLastIndex(candidate => candidate.windowId === window.id) === itemIndex) {
-      flush(); content.push(<div key={`newer:${window.id}`} className="history-boundary">
-        <span>后续记录尚未加载</span>
-        {onLoadHistory && <button type="button" disabled={window.loading} onClick={() => { void onLoadHistory(window.id, 'newer').catch(() => {}); }}>加载后续记录</button>}
-      </div>);
-    }
   });
   flush();
+  if (readingWindow?.hasNewer) content.push(<div key="history-newer" className="history-boundary" role="region" aria-label="后续消息">
+    {readingWindow.loading && readingWindow.boundaryDirection === 'newer' ? <span role="status">正在加载…</span> : <>
+      <span>后面还有消息</span>
+      {readingWindow.boundaryDirection === 'newer' && readingWindow.error && <span role="alert">{readingWindow.error}</span>}
+      {onLoadHistory && <button type="button" disabled={readingWindow.loading} onClick={() => { void onLoadHistory(readingWindow.id, 'newer').catch(() => {}); }}>{readingWindow.boundaryDirection === 'newer' && readingWindow.error ? '重试' : '继续向后阅读'}</button>}
+    </>}
+  </div>);
   if (contextCompactionInProgress) content.push(<ContextCompactionDivider key="compaction-progress" inProgress />);
   return content;
 }
@@ -1733,7 +1733,7 @@ function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
 }
 
 export function WorkbenchView({
-  history, onLoadHistory, onHydrateEntries, onRetainHistory, onLocateEntry,
+  history, onLoadHistory, onReadLatestHistory, onHydrateEntries, onRetainHistory, onLocateEntry,
   focusSourceEntry,
   workspace,
   session,
@@ -2094,6 +2094,10 @@ export function WorkbenchView({
   // cannot place a boundary inside a partially loaded history window.
   const [locatedFocus, setLocatedFocus] = useState<WorkbenchViewProps['focusSourceEntry']>();
   const currentSessionRef = useRef(session.id);
+  const currentHistory = useRef(history); currentHistory.current = history;
+  const atLatestHistory = history?.atLatest !== false;
+  const readingOwner = history?.readingOwner;
+  const [jumpingToLatest, setJumpingToLatest] = useState(false);
   const readingAnchor = useRef<HistoryReadingAnchor | undefined>(undefined);
   // A manual disclosure owns its button's viewport position until the reader
   // scrolls or explicitly navigates. Tail-follow must not move it during resize.
@@ -2110,6 +2114,8 @@ export function WorkbenchView({
     readingAnchor.current = threadRef.current ? captureHistoryAnchor(threadRef.current) : undefined;
   }, []);
   const beginUserScroll = useCallback((towardLatest = false) => {
+    locateRequest.current?.abort();
+    setJumpingToLatest(false);
     disclosureAnchor.current = undefined;
     userScrollPending.current = true;
     if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
@@ -2119,7 +2125,7 @@ export function WorkbenchView({
       userScrollFrame.current = undefined;
       userScrollPending.current = false;
       const thread = threadRef.current;
-      if (towardLatest && thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight < 1) {
+      if (towardLatest && currentHistory.current?.atLatest !== false && thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight < 1) {
         followLatestRef.current = true;
         setAtBottom(true);
         readingAnchor.current = undefined;
@@ -2129,6 +2135,7 @@ export function WorkbenchView({
   }, []);
   useLayoutEffect(() => {
     currentSessionRef.current = session.id;
+    locatingEntry.current = undefined;
     disclosureAnchor.current = undefined;
     followLatestRef.current = true;
     setAtBottom(followLatestRef.current);
@@ -2161,17 +2168,19 @@ export function WorkbenchView({
   const locateEntry = useCallback(async (entryId: string, signal: AbortSignal, annotation = false) => {
     if (signal.aborted || currentSessionRef.current !== session.id) throw new DOMException('定位已取消', 'AbortError');
     locateRequest.current?.abort();
+    setJumpingToLatest(false);
     const request = new AbortController(); locateRequest.current = request;
     const abort = () => request.abort();
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) request.abort();
     const owner = session.id;
     locatingEntry.current = entryId;
-    resetReading(); readingAnchor.current = undefined;
+    resetReading();
     try {
       const read = annotation ? onLocateAnnotation : onLocateEntry;
       if (read) await read(entryId, request.signal);
       if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
+      readingAnchor.current = undefined;
       setLocatedFocus({ sessionId: owner, entryId });
       const thread = threadRef.current;
       if (!thread) return;
@@ -2220,6 +2229,27 @@ export function WorkbenchView({
   }, []);
   useLayoutEffect(restoreReadingPosition);
 
+  const jumpToLatest = useCallback(async () => {
+    locateRequest.current?.abort();
+    locatingEntry.current = undefined;
+    const request = new AbortController(); locateRequest.current = request;
+    const owner = session.id;
+    setJumpingToLatest(true);
+    try {
+      if (onReadLatestHistory) await onReadLatestHistory(request.signal);
+      if (request.signal.aborted || currentSessionRef.current !== owner) return;
+      if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
+      if (residenceFrame.current !== undefined) { cancelAnimationFrame(residenceFrame.current); residenceFrame.current = undefined; }
+      followLatestRef.current = true;
+      disclosureAnchor.current = undefined;
+      readingAnchor.current = undefined; userScrollPending.current = false;
+      setAtBottom(true);
+      restoreReadingPosition();
+    } catch (error) {
+      if (!request.signal.aborted) onNotify('无法回到最新', error instanceof Error ? error.message : '请重试。', 'warning');
+    } finally { if (locateRequest.current === request) setJumpingToLatest(false); }
+  }, [onReadLatestHistory, onNotify, restoreReadingPosition, session.id]);
+
   const disclosureChoices = useMemo(() => ({sessionId: session.id, choices: new Map<string, boolean>()}), [session.id]).choices;
   const locatingEntry = useRef<string | undefined>(undefined);
   const residenceFrame = useRef<number | undefined>(undefined);
@@ -2229,15 +2259,19 @@ export function WorkbenchView({
       residenceFrame.current = undefined;
       const thread = threadRef.current;
       if (!thread) return;
-      const interest = collectHistoryResidence(thread);
+      const interest: import('../lib/runtime-adapter').HistoryResidence = collectHistoryResidence(thread);
+      if (currentHistory.current?.readingOwner !== readingOwner) return;
+      interest.readingOwner = readingOwner;
+      interest.followLatest = followLatestRef.current;
       if (!followLatestRef.current && !userScrollPending.current) readingAnchor.current = captureHistoryAnchor(thread) ?? readingAnchor.current;
+      interest.anchorEntryId = readingAnchor.current?.entryId;
       if (readingAnchor.current) interest.pinnedEntryIds.push(readingAnchor.current.entryId);
       if (locatingEntry.current) interest.pinnedEntryIds.push(locatingEntry.current);
       onRetainHistory(interest);
     });
-  }, [onRetainHistory]);
+  }, [onRetainHistory, readingOwner]);
   useLayoutEffect(reportResidence);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(reportResidence);
@@ -2255,7 +2289,6 @@ export function WorkbenchView({
       document.removeEventListener('selectionchange', reportResidence);
       if (residenceFrame.current !== undefined) cancelAnimationFrame(residenceFrame.current);
       residenceFrame.current = undefined;
-      locatingEntry.current = undefined;
     };
   }, [reportResidence, session.id]);
 
@@ -2366,6 +2399,7 @@ export function WorkbenchView({
       setSubmitting(false);
     }
     if (!accepted) return;
+    if (currentHistory.current?.atLatest === false) void jumpToLatest();
     const editorHeight = composerEditorRef.current?.getBoundingClientRect().height;
     const layout = editorHeight === undefined ? null : {
       sessionId: session.id,
@@ -2379,7 +2413,7 @@ export function WorkbenchView({
     onPermissionChange('bypass-permissions');
   }, [canControl, activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
     modelBindingMissing, modelReady, onNotify, onPermissionChange, onSend,
-    permission, requestPlan, session.id, setRequestPlan, submitting, welcome]);
+    permission, requestPlan, session.id, setRequestPlan, submitting, welcome, jumpToLatest]);
 
   const changeBinding = async (binding: ModelCallBindingPayload) => {
     if (!canControl || modelBindingBusy) return;
@@ -2437,7 +2471,7 @@ export function WorkbenchView({
     if (!focusTaskHighlighted || !focusTaskId || focusTaskRevision < 1) return;
     const thread = threadRef.current;
     if (!thread) return;
-    resetReading(); readingAnchor.current = undefined;
+    resetReading();
     const locate = () => {
       const target = [...thread.querySelectorAll<HTMLElement>('[data-task-id]')].find(element => element.dataset.taskId === focusTaskId);
       if (!target) return;
@@ -2552,7 +2586,7 @@ export function WorkbenchView({
           if (locatingTaskRef.current) return;
           if (disclosureAnchor.current && !userScrollPending.current) return;
           userScrollPending.current = false;
-          const nextAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+          const nextAtBottom = currentHistory.current?.atLatest !== false && element.scrollHeight - element.scrollTop - element.clientHeight < 80;
           followLatestRef.current = nextAtBottom;
           setAtBottom(nextAtBottom);
           readingAnchor.current = nextAtBottom ? undefined : captureHistoryAnchor(element);
@@ -2577,17 +2611,17 @@ export function WorkbenchView({
           {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
           {history && !messages.length && !interruptionNotices?.length && (hasCanonicalHistory || history.loading || history.error) && <div className="history-boundary" role="status">
             {history.loading ? '正在读取最近记录…' : history.error ?? '此区域有已保存记录，暂无主对话正文。'}
-            {onLoadHistory && (history.hasOlder || history.error) && <button type="button" disabled={history.loading} onClick={() => { void loadHistory(history.windows[0]?.id).catch(() => {}); }}>{history.error ? '重试' : '加载更早记录'}</button>}
+            {onLoadHistory && !history.windows.length && (history.hasOlder || history.error) && <button type="button" disabled={history.loading} onClick={() => { void loadHistory(history.windows[0]?.id).catch(() => {}); }}>{history.error ? '重试' : '加载更早记录'}</button>}
           </div>}
-          <ConversationMessages history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
+          <ConversationMessages key={session.id} history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             onNotify={onNotify} onFork={onFork} canFork={canControl}
-            contextCompactionInProgress={contextCompactionInProgress}
+            contextCompactionInProgress={atLatestHistory && contextCompactionInProgress}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={locatedFocus?.sessionId === session.id ? locatedFocus : focusSourceEntry} />
-          {conversationSubmissions.map(item => (
+          {atLatestHistory && conversationSubmissions.map(item => (
             <div key={item.commandId} data-pending-message={item.commandId}
               aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>
               <UserMessage message={{ id: item.commandId, role: 'user', userKind: 'prompt', time: '',
@@ -2601,7 +2635,7 @@ export function WorkbenchView({
                           : '已送达'} />
             </div>
           ))}
-          {(preparingSubmission || awaitingFirstActivity) && (
+          {atLatestHistory && (preparingSubmission || awaitingFirstActivity) && (
             <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label="Pulsara 处理状态">
               <AssistantHeading message={{ id: 'pending-preparation', role: 'assistant', time: '', body: '' }} response={false} />
               <div className="assistant-progress" role="status"><i aria-hidden="true" />
@@ -2609,7 +2643,7 @@ export function WorkbenchView({
               </div>
             </article>
           )}
-          {pendingSteers.map(item => (
+          {atLatestHistory && pendingSteers.map(item => (
             <div key={item.queueItemId} data-queue-item-id={item.queueItemId} data-action-command-id={item.commandId}
               aria-description="引导已提交，等待当前任务接收">
               <UserMessage message={{ id: item.queueItemId, turnId: item.targetTurnId,
@@ -2619,7 +2653,7 @@ export function WorkbenchView({
                 onReadPromptImage={onReadPromptImage} />
             </div>
           ))}
-          {canControl && interaction && (
+          {atLatestHistory && canControl && interaction && (
             <InteractionCard
               key={`${interaction.id}:${'workflowRevision' in interaction ? interaction.workflowRevision : 'live'}`}
               interaction={interaction}
@@ -2632,14 +2666,16 @@ export function WorkbenchView({
         </div>
       </div>
 
-      {!atBottom && (
-        <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} onClick={() => {
-          followLatestRef.current = true;
-          disclosureAnchor.current = undefined;
-          readingAnchor.current = undefined; userScrollPending.current = false;
-          setAtBottom(true); restoreReadingPosition();
-        }}>
-          <ArrowDown size={13} /> 回到最新
+      {!atLatestHistory && canControl && interaction && <section className="history-current-interaction" aria-label="当前待处理事项">
+        <p>当前任务需要你处理</p>
+        <InteractionCard key={`${interaction.id}:${'workflowRevision' in interaction ? interaction.workflowRevision : 'live'}`}
+          interaction={interaction} toolDecisionPending={toolDecisionPending} onRead={onReadInteraction}
+          onResolve={onResolveInteraction} onNotify={onNotify} />
+      </section>}
+      {(!atBottom || !atLatestHistory) && (
+        <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} disabled={jumpingToLatest}
+          onClick={() => { void jumpToLatest(); }}>
+          <ArrowDown size={13} /> {jumpingToLatest ? '正在读取最新消息…' : '回到最新'}
         </button>
       )}
 

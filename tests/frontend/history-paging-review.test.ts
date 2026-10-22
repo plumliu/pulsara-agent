@@ -188,8 +188,10 @@ it('keeps a disconnected tool result and its gap until reading the intervening r
   });
   const reader = await connect();
   const located = await reader.locateEntry!('creator', new AbortController().signal);
-  expect(located.messages.map(message => message.id)).toEqual(['creator', 'result']);
-  expect(located.history!.windows.map(window => window.firstEntryId)).toEqual(['creator', 'result']);
+  expect(located.messages.map(message => message.id)).toEqual(['creator']);
+  expect(located.history!.atLatest).toBe(false);
+  expect(located.messages[0].traces?.[0].resultText).toBeUndefined();
+  expect(located.history!.windows.map(window => window.firstEntryId)).toEqual(['creator']);
   const connected = await reader.readHistory!(located.history!.windows[0].id, 'newer');
   expect(connected.history!.windows).toHaveLength(1);
   expect(connected.messages.some(message => message.id === 'result')).toBe(false);

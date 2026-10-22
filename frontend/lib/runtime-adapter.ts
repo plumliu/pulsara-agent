@@ -268,6 +268,13 @@ interface ProtocolTurnInterruptionNotice {
   display_after_entry_sequence: string | number;
 }
 
+export type CanonicalInput = Pick<Message, 'id' | 'userKind' | 'inputSource' | 'contentState' | 'historyContextState'>;
+
+function canonicalInputs(messages: Message[]): CanonicalInput[] {
+  return messages.filter(message => message.role === 'user' && message.inputSource).map(({id, userKind, inputSource, contentState, historyContextState}) =>
+    ({id, userKind, inputSource, contentState, historyContextState}));
+}
+
 export interface RuntimeProjection {
   /** Derived from the retained transcript/live window, joined to task pages on demand. */
   subagentRuns?: SubagentRun[];
@@ -276,6 +283,8 @@ export interface RuntimeProjection {
   /** Canonical ROOT order within loaded windows; absence does not establish adjacency. */
   canonicalRootTurnIds?: readonly string[];
   messages: Message[];
+  /** Input handoff facts across all resident entries, independent of the reading band. */
+  canonicalInputs: CanonicalInput[];
   history?: BrowserHistoryState;
   taskCreators?: Record<string, string>;
   taskBatchCreators?: Record<string, string>;
@@ -936,6 +945,7 @@ export interface RuntimeConnection {
   subscribePresentation?: (listener: (request: PresentationRequest) => void) => () => void;
   readHistory?: (windowId?: string, direction?: 'older' | 'newer', signal?: AbortSignal) => Promise<RuntimeProjection>;
   hydrateEntries?: (ids: string[], signal?: AbortSignal, includeReasoning?: boolean) => Promise<RuntimeProjection>;
+  readLatestHistory?: (signal?: AbortSignal) => Promise<RuntimeProjection>;
   retainHistory?: (interest: HistoryResidence) => RuntimeProjection | undefined;
   locateEntry?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   subscribe?: (listener: () => void) => () => void;
@@ -1257,16 +1267,22 @@ interface ProtocolHistoryPage {
 }
 
 export interface BrowserHistoryState {
+  /** Identity of the last successful explicit navigation; process-local only. */
+  readingOwner: object;
+  atLatest: boolean;
   initialReady: boolean;
   initialError?: string;
   hasOlder: boolean;
   loading: boolean;
   error?: string;
-  windows: Array<{id: string; firstEntryId?: string; lastEntryId?: string; entryIds: string[]; hasOlder: boolean; hasNewer: boolean; loading: boolean; error?: string; contextState: 'loading' | 'ready' | 'error'; contextError?: string}>;
+  windows: Array<{id: string; firstEntryId?: string; lastEntryId?: string; entryIds: string[]; hasOlder: boolean; hasNewer: boolean; loading: boolean; boundaryDirection?: 'older' | 'newer'; error?: string; contextState: 'loading' | 'ready' | 'error'; contextError?: string}>;
   compactions: Array<{eventId: string; adoptedAfterEntrySequence: number; turnId: string; displayAfterEntryId?: string}>;
 }
 /** The current browser consumers; canonical history remains re-readable. */
 export interface HistoryResidence {
+  readingOwner?: object;
+  anchorEntryId?: string;
+  followLatest?: boolean;
   visibleEntryIds: string[];
   pinnedEntryIds: string[];
 }
@@ -1292,7 +1308,7 @@ interface BrowserPageContext {
 interface BrowserHistoryPage {
   id: string; entryIds: string[]; cut?: {cut_sequence: string; event_sequence_cut: string};
   older?: ProtocolHistoryCursor | BrowserWindowCursor; newer?: BrowserWindowCursor;
-  loading: boolean; error?: string; read?: Promise<void>;
+  loading: boolean; readDirection?: 'older' | 'newer'; error?: string; read?: Promise<void>;
   contextState: 'loading' | 'ready' | 'error'; contextError?: string; context?: BrowserPageContext; contextRead?: Promise<void>; needsFreshContext?: boolean; requiredContextEventCut?: string;
 }
 function waitForRead<T>(read: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -2249,10 +2265,12 @@ abstract class CanonicalHistoryReader {
   }
   protected projectInterruptionNotices(messages: Message[]): TurnInterruptionNotice[] {
     const mounted: TurnInterruptionNotice[] = [];
+    const readingIds = this.readingIds();
     for (const notice of this.interruptionNotices.values()) {
       const sequence = numeric(notice.display_after_entry_sequence);
       if (![...this.entries.values()].some(entry => numeric(entry.entry_sequence) === sequence)) continue;
       const source = [...this.entries.values()].find(entry => numeric(entry.entry_sequence) === sequence);
+      if (!source || !readingIds.has(source.entry_id)) continue;
       const message = source && messages.find(message => message.id === source.entry_id || message.sourceEntryIds?.includes(source.entry_id));
       mounted.push({ownerKind: notice.owner_kind, ownerId: notice.owner_id, reason: notice.reason,
         publicDetail: notice.public_detail, terminalAtUtc: notice.terminal_at_utc,
@@ -2280,6 +2298,39 @@ abstract class CanonicalHistoryReader {
   private tailPage?: BrowserHistoryPage;
   private pairedTailPage?: BrowserHistoryPage;
   private locatingEntries = new Set<string>();
+  private readingEntryId?: string;
+  private navigation?: object;
+  private readingOwner: object = {};
+  private entryWindowBytes = new WeakMap<ProtocolEntry, number>();
+
+  private readingCluster(clusters = this.connectedWindows()): BrowserHistoryPage[] {
+    if (this.readingEntryId) return clusters.find(cluster => cluster.some(page => page.entryIds.includes(this.readingEntryId!))) ?? [];
+    return clusters.find(cluster => this.tailPage && cluster.includes(this.tailPage)) ?? clusters.at(-1) ?? [];
+  }
+  private readingIds(): Set<string> { return new Set(this.readingCluster().flatMap(page => page.entryIds)); }
+  private readingAtLatest(): boolean { return !this.tailPage || this.readingCluster().includes(this.tailPage); }
+  protected readingMessages(messages: Message[]): Message[] {
+    const ids = this.readingIds(), atLatest = this.readingAtLatest();
+    return messages.filter(message => this.entries.has(message.id) ? ids.has(message.id) : atLatest).map(message => ({
+      ...message,
+      subagentRuns: message.subagentRuns?.map(run => ({ ...run, activities: run.activities.filter(activity =>
+        this.entries.has(activity.id) ? ids.has(activity.id) : atLatest) })),
+    }));
+  }
+
+  async readLatestHistory(signal?: AbortSignal): Promise<RuntimeProjection> {
+    signal?.throwIfAborted();
+    const navigation = {}; this.navigation = navigation;
+    const target = this.tailPage;
+    if (target) await waitForRead(this.loadPageContext(target), signal);
+    signal?.throwIfAborted();
+    if (this.readerClosed || this.navigation !== navigation) throw new DOMException('Navigation superseded', 'AbortError');
+    const latest = this.connectedWindows().find(cluster => this.tailPage && cluster.includes(this.tailPage));
+    if (target && (target.contextState !== 'ready' || !latest?.includes(target))) throw new Error('最新消息暂时无法读取，请重试。');
+    this.readingEntryId = undefined;
+    this.readingOwner = navigation;
+    return this.project();
+  }
 
   protected transientHistoryEntries(): string[] { return []; }
   protected releaseSettledHistory(visible: ReadonlySet<string>): boolean { void visible; return false; }
@@ -2288,16 +2339,25 @@ abstract class CanonicalHistoryReader {
   }
 
   retainHistory(interest: HistoryResidence): RuntimeProjection | undefined {
-    if (this.readerClosed || !this.initialContextReady) return;
+    if (this.readerClosed || !this.initialContextReady || (interest.readingOwner && interest.readingOwner !== this.readingOwner)) return;
     // Hidden or not-yet-laid-out views supply no reading position.
     if (!interest.visibleEntryIds.length && !interest.pinnedEntryIds.length) return;
     // Observation has no paired history cut until its original context read
     // succeeds. Keep the bridge and handoffs intact rather than mutating state
     // without publishing it or inventing a cursor.
-    if (this.tailPage && !this.tailPage.cut) return;
-    const requested = new Set([...interest.visibleEntryIds, ...interest.pinnedEntryIds, ...this.locatingEntries]);
-    let changed = this.releaseSettledHistory(requested);
-    const bodies = new Set([...requested, ...this.transientHistoryEntries()]);
+    const reading = this.readingCluster();
+    const readingIds = new Set(reading.flatMap(page => page.entryIds));
+    const visual = [...interest.visibleEntryIds, ...interest.pinnedEntryIds, ...(interest.anchorEntryId ? [interest.anchorEntryId] : [])].filter(id => readingIds.has(id));
+    // A queued report from a retired DOM must never navigate back to its island.
+    if (!visual.length) return;
+    const previousAnchor = this.readingEntryId;
+    if (interest.followLatest && this.readingAtLatest()) this.readingEntryId = undefined;
+    else this.readingEntryId = (interest.anchorEntryId && readingIds.has(interest.anchorEntryId) ? interest.anchorEntryId : visual[0]);
+    if (this.tailPage && !this.tailPage.cut) return previousAnchor !== this.readingEntryId ? this.project() : undefined;
+    const requested = new Set(visual);
+    if (this.readingEntryId) requested.add(this.readingEntryId);
+    let changed = this.releaseSettledHistory(requested) || previousAnchor !== this.readingEntryId;
+    const bodies = new Set([...requested, ...this.locatingEntries, ...this.transientHistoryEntries()]);
     for (const key of this.contentReads.keys()) bodies.add(key.replace(/:reasoning$/, ''));
     for (const entry of this.entries.values()) if (entry.input_source?.command_id && entry.input_source.queue_item_id) {
       const key = `${entry.input_source.command_id}:${entry.input_source.queue_item_id}`;
@@ -2313,17 +2373,31 @@ abstract class CanonicalHistoryReader {
     }
     const ordered = [...this.pages].sort((a, b) => compareSequence(this.entries.get(a.entryIds[0])!.entry_sequence, this.entries.get(b.entryIds[0])!.entry_sequence));
     const keep = new Set<BrowserHistoryPage>();
-    for (let index = 0; index < ordered.length; index++) {
-      const page = ordered[index];
-      if (!page.entryIds.some(id => bodies.has(id))) continue;
-      keep.add(page);
-      // One already-admitted neighbour each way buffers crossing the viewport
-      // edge. This is a physical reading window, never a total history cap.
-      if (interest.visibleEntryIds.some(id => page.entryIds.includes(id))) {
-        if (index) keep.add(ordered[index - 1]);
-        if (index + 1 < ordered.length) keep.add(ordered[index + 1]);
+    const orderedEntries = [...this.entries.values()].sort((a, b) => compareSequence(a.entry_sequence, b.entry_sequence));
+    const positions = new Map(orderedEntries.map((entry, index) => [entry.entry_id, index]));
+    const keepIds = new Set(bodies);
+    // Each side is one existing history-request budget, independent of observe
+    // batch size. Whole admitted pages and explicit consumers may exceed it.
+    const buffer = (edge: number, direction: -1 | 1, includeEdge = false) => {
+      let bytes = 0, count = 0;
+      for (let index = edge + (includeEdge ? 0 : direction); index >= 0 && index < orderedEntries.length; index += direction) {
+        const entry = orderedEntries[index];
+        const previous = orderedEntries[index - direction];
+        if (!(includeEdge && index === edge) && previous && BigInt(decimal(entry.entry_sequence)) !== BigInt(decimal(previous.entry_sequence)) + BigInt(direction)) break;
+        const size = this.entryWindowBytes.get(entry) ?? 0;
+        if (count >= 128 || bytes + size > (2 << 20)) break;
+        keepIds.add(entry.entry_id); bytes += size; count++;
       }
+    };
+    const visiblePositions = [...requested].map(id => positions.get(id)).filter((index): index is number => index !== undefined);
+    if (visiblePositions.length) {
+      const first = visiblePositions.reduce((a, b) => Math.min(a, b)), last = visiblePositions.reduce((a, b) => Math.max(a, b));
+      for (let index = first; index <= last; index++) keepIds.add(orderedEntries[index].entry_id);
+      buffer(first, -1); buffer(last, 1);
     }
+    const tail = this.tailPage?.entryIds.at(-1);
+    if (tail && positions.has(tail)) buffer(positions.get(tail)!, -1, true);
+    for (const page of ordered) if (page.entryIds.some(id => keepIds.has(id))) keep.add(page);
     if (this.tailPage) keep.add(this.tailPage);
     if (this.pairedTailPage) keep.add(this.pairedTailPage);
     for (const page of this.pages) if (page.read || page.contextRead) keep.add(page);
@@ -2397,6 +2471,7 @@ abstract class CanonicalHistoryReader {
         }
         if (!observed) { entry.root_final = old.root_final; entry.fork_eligible = old.fork_eligible; }
       }
+      this.entryWindowBytes.set(entry, new TextEncoder().encode(JSON.stringify(entry)).byteLength);
       this.entries.set(entry.entry_id, entry);
     }
   }
@@ -2501,40 +2576,43 @@ abstract class CanonicalHistoryReader {
   private connectedWindows(): BrowserHistoryPage[][] {
     const ordered = this.pages.filter(page => page.entryIds.length).sort((a,b) => compareSequence(this.entries.get(a.entryIds[0])!.entry_sequence, this.entries.get(b.entryIds[0])!.entry_sequence));
     const clusters: BrowserHistoryPage[][] = [];
+    let lastSequence = BigInt(0);
     for (const page of ordered) {
       const cluster = clusters.at(-1);
-      const lastSequence = cluster && cluster.reduce((max, item) => {
-        const value = BigInt(decimal(this.entries.get(item.entryIds.at(-1)!)!.entry_sequence)); return value > max ? value : max;
-      }, BigInt(0));
-      if (cluster && BigInt(decimal(this.entries.get(page.entryIds[0])!.entry_sequence)) <= lastSequence! + BigInt(1)) cluster.push(page);
-      else clusters.push([page]);
+      const end = BigInt(decimal(this.entries.get(page.entryIds.at(-1)!)!.entry_sequence));
+      if (cluster && BigInt(decimal(this.entries.get(page.entryIds[0])!.entry_sequence)) <= lastSequence + BigInt(1)) {
+        cluster.push(page);
+        if (end > lastSequence) lastSequence = end;
+      } else { clusters.push([page]); lastSequence = end; }
     }
     return clusters;
   }
   protected historyState(): BrowserHistoryState {
-    const windows = this.connectedWindows().map(cluster => {
+    const reading = this.readingCluster();
+    const windows = (reading.length ? [reading] : []).map(cluster => {
       const ids = [...new Set(cluster.flatMap(page => page.entryIds))].sort((a,b) => compareSequence(this.entries.get(a)!.entry_sequence, this.entries.get(b)!.entry_sequence));
       const first = cluster.find(page => page.entryIds[0] === ids[0])!;
       const last = cluster.findLast(page => page.entryIds.at(-1) === ids.at(-1))!;
       return {id: this.pages.find(page => cluster.includes(page))!.id, firstEntryId: ids[0], lastEntryId: ids.at(-1), entryIds: ids,
         hasOlder: Boolean(first.older), hasNewer: Boolean(last.newer), loading: cluster.some(page => page.loading),
+        boundaryDirection: cluster.find(page => page.loading || page.error)?.readDirection,
         error: cluster.find(page => page.error || page.contextError)?.error ?? cluster.find(page => page.contextError)?.contextError,
         contextState: cluster.some(page => page.contextState === 'error') ? 'error' as const : cluster.some(page => page.contextState !== 'ready') ? 'loading' as const : 'ready' as const,
         contextError: cluster.find(page => page.contextError)?.contextError};
     });
     const compactions = new Map<string, BrowserPageContext['compactions'][number]>();
-    for (const page of this.pages) for (const item of page.context?.compactions ?? []) {
+    for (const page of reading) for (const item of page.context?.compactions ?? []) {
       // A boundary belongs here only when the actual canonical edge is held.
       if (page.entryIds.some(id => compareSequence(this.entries.get(id)!.entry_sequence, item.adopted_after_entry_sequence) === 0)) compactions.set(item.event_id, item);
     }
-    return {initialReady: this.initialContextReady || !this.pages.length, initialError: this.initialContextReady ? undefined : this.pages[0]?.contextError, windows, hasOlder: Boolean(windows[0]?.hasOlder), loading: windows.some(window => window.loading), error: this.boundaryError ?? windows.find(window => window.error)?.error,
+    return {readingOwner: this.readingOwner, atLatest: this.readingAtLatest(), initialReady: this.initialContextReady || !this.pages.length, initialError: this.initialContextReady ? undefined : this.pages[0]?.contextError, windows, hasOlder: Boolean(windows[0]?.hasOlder), loading: windows.some(window => window.loading), error: this.boundaryError ?? windows.find(window => window.error)?.error,
       compactions: [...compactions.values()].map(item => ({eventId: item.event_id, adoptedAfterEntrySequence: numeric(item.adopted_after_entry_sequence), turnId: item.turn_id, displayAfterEntryId: [...this.entries.values()].find(entry => compareSequence(entry.entry_sequence, item.adopted_after_entry_sequence) === 0)?.entry_id}))};
   }
   async readHistory(windowId?: string, direction: 'older' | 'newer' = 'older', signal?: AbortSignal): Promise<RuntimeProjection> {
     signal?.throwIfAborted();
     if (this.boundaryError) { this.refreshBoundaryOccurrences([]); await this.boundaryRead; return this.project(); }
-    const cluster = this.connectedWindows().find(pages => pages.some(page => page.id === windowId)) ?? this.connectedWindows()[0];
-    if (!cluster) return this.project();
+    const cluster = this.connectedWindows().find(pages => pages.some(page => page.id === windowId)) ?? this.readingCluster();
+    if (!cluster?.length) return this.project();
     const pendingContext = cluster.filter(page => page.contextRead || page.contextState !== 'ready');
     if (pendingContext.length) {
       await waitForRead(Promise.all(pendingContext.map(page => this.loadPageContext(page))), signal);
@@ -2546,7 +2624,7 @@ abstract class CanonicalHistoryReader {
     const cursor = direction === 'older' ? page.older : page.newer;
     if (!cursor) return this.project();
     const operation = (async () => {
-      page.loading = true; page.error = undefined; this.changed();
+      page.loading = true; page.readDirection = direction; page.error = undefined; this.changed();
       try {
         let entries: ProtocolEntry[], older: ProtocolHistoryCursor | BrowserWindowCursor | undefined, newer: BrowserWindowCursor | undefined;
         if ('direction' in cursor) {
@@ -2588,9 +2666,23 @@ abstract class CanonicalHistoryReader {
     try { await operation; } finally { if (page.read === operation) page.read = undefined; }
     return this.project();
   }
-  async locateEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+  locateEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    return this.navigateToEntry(entryId, signal, false);
+  }
+  private async navigateToEntry(entryId: string, signal: AbortSignal, annotation: boolean): Promise<RuntimeProjection> {
+    const navigation = {}; this.navigation = navigation;
     this.locatingEntries.add(entryId);
-    try { return await this.readLocatedEntry(entryId, signal); }
+    try {
+      await this.readLocatedEntry(entryId, signal);
+      const entry = this.entries.get(entryId);
+      if (annotation && (!entry || !['ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'].includes(entry.entry_kind))) throw new RuntimeApiError('ANNOTATION_SOURCE_MISSING', '当前会话中找不到来源回复。', false);
+      if (this.entryContentState(entryId) !== 'ready') throw new RuntimeApiError('HISTORY_CONTENT_UNAVAILABLE', this.contentErrors.get(entryId) ?? '来源正文暂时无法读取，请重试。', true);
+      signal.throwIfAborted();
+      if (this.readerClosed || this.navigation !== navigation) throw new DOMException('Navigation superseded', 'AbortError');
+      this.readingEntryId = entryId;
+      this.readingOwner = navigation;
+      return this.project();
+    }
     finally { this.locatingEntries.delete(entryId); }
   }
   private async readLocatedEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
@@ -2610,16 +2702,35 @@ abstract class CanonicalHistoryReader {
     signal.throwIfAborted();
     const contextPage = this.pages.find(page => page.entryIds.includes(entryId) && page.contextState === 'ready');
     if (!contextPage) throw new RuntimeApiError('HISTORY_CONTEXT_UNAVAILABLE', '来源区域的展示上下文暂时无法读取，请重试。', true);
-    await this.hydrateEntries([entryId], signal);
+    // A result may render inside its request, and an expanded process also
+    // needs reasoning. Read that actual host before switching: waiting for an
+    // offscreen IntersectionObserver would deadlock source navigation.
+    const cluster = this.connectedWindows().find(pages => pages.some(page => page.entryIds.includes(entryId)))!;
+    const ids = new Set(cluster.flatMap(page => page.entryIds));
+    const entries = [...this.entries.values()].filter(entry => ids.has(entry.entry_id))
+      .sort((a, b) => compareSequence(a.entry_sequence, b.entry_sequence));
+    const hosts = [
+      ...projectEntries(entries, new Set(), () => true),
+      ...projectSubagentRuns(entries, [], [], () => true).flatMap(run => run.activities),
+    ];
+    const host = hosts.find(item => item.id === entryId || item.sourceEntryIds?.includes(entryId));
+    const sourceIds = host?.sourceEntryIds ?? [host?.id ?? entryId];
+    const hostPages = this.pages.filter(page => page.entryIds.some(id => sourceIds.includes(id)));
+    await waitForRead(Promise.all(hostPages.map(page => this.loadPageContext(page))), signal);
+    if (sourceIds.some(id => !hostPages.some(page => page.contextState === 'ready' && page.entryIds.includes(id)))) {
+      throw new RuntimeApiError('HISTORY_CONTEXT_UNAVAILABLE', '来源区域的展示上下文暂时无法读取，请重试。', true);
+    }
+    const hostEntry = this.entries.get(host?.id ?? entryId);
+    const includeReasoning = !(hostEntry?.root_final || hostEntry?.fork_eligible) || host?.id !== entryId;
+    await this.hydrateEntries(sourceIds, signal, includeReasoning);
+    for (const id of sourceIds) if (this.entryContentState(id) !== 'ready' || (includeReasoning && this.entryContentState(id, true) !== 'ready')) {
+      throw new RuntimeApiError('HISTORY_CONTENT_UNAVAILABLE', this.contentErrors.get(`${id}:reasoning`) ?? '来源正文暂时无法读取，请重试。', true);
+    }
     signal.throwIfAborted();
     return this.project();
   }
-  async locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
-    await this.locateEntry(entryId, signal);
-    const entry = this.entries.get(entryId);
-    if (!entry || !['ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'].includes(entry.entry_kind)) throw new RuntimeApiError('ANNOTATION_SOURCE_MISSING', '当前会话中找不到来源回复。', false);
-    if (this.entryContentState(entryId) !== 'ready') throw new RuntimeApiError('ANNOTATION_SOURCE_UNAVAILABLE', this.contentErrors.get(entryId) ?? '来源正文暂时无法读取。', true);
-    return this.project();
+  locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    return this.navigateToEntry(entryId, signal, true);
   }
   protected entryContentState(entryId: string, reasoning = false): 'unloaded' | 'loading' | 'ready' | 'error' {
     const key = reasoning ? `${entryId}:reasoning` : entryId;
@@ -2642,6 +2753,7 @@ abstract class CanonicalHistoryReader {
         try {
           await this.hydrateContentReference(entry.content, {entry_id: entryId}, '这条会话内容暂时无法完整读取。');
           for (const block of [...entry.blocks ?? [], ...(includeReasoning ? entry.reasoning_blocks ?? [] : [])]) await this.hydrateContentReference(block.content, {entry_id: entryId, block_id: block.block_id}, '这段正文暂时无法完整读取。');
+          this.contentErrors.delete(entryId);
         } catch (error) { if (!this.readerClosed && this.entries.has(entryId)) this.contentErrors.set(key, error instanceof Error ? error.message : '正文暂时无法读取。'); }
       })();
       this.contentReads.set(key, operation); this.changed();
@@ -2705,7 +2817,7 @@ abstract class CanonicalHistoryReader {
       message.historyContextState = context ? 'ready' : page?.contextState;
       message.historyContextError = context ? undefined : page?.contextError;
       message.historyWindowId = windows.find(window => window.entryIds.includes(message.id))?.id;
-      message.historyEarlierUnloaded = Boolean(context && context.entry.segment_start_entry_id && !this.entries.has(context.entry.segment_start_entry_id));
+      message.historyEarlierUnloaded = Boolean(context && context.entry.segment_start_entry_id && !windows.some(window => window.entryIds.includes(context.entry.segment_start_entry_id)));
       // Live observations keep their advisory presentation until canonical
       // metadata supplies a stable host; they are never verified bodies.
       if (!this.entries.has(message.id)) continue;
@@ -3021,7 +3133,8 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
     this.decorateSubagentRuns(subagentRuns);
     attachSubagentRuns(messages, subagentRuns, this.taskCreators());
     this.decorateHistory(messages);
-    return {messages, history: this.presentationHistory(messages), taskCreators: this.taskCreators(), taskBatchCreators: Object.fromEntries(this.pages.flatMap(page => (page.context?.batches ?? []).map(batch => [batch.batch_id, batch.creator_entry_id]))), interruptionNotices: this.projectInterruptionNotices(messages), canonicalRootTurnIds, subagentRuns, agentTasks, subagentProgress: {},
+    const readingMessages = this.readingMessages(messages);
+    return {messages: readingMessages, canonicalInputs: canonicalInputs(messages), history: this.presentationHistory(readingMessages), taskCreators: this.taskCreators(), taskBatchCreators: Object.fromEntries(this.pages.flatMap(page => (page.context?.batches ?? []).map(batch => [batch.batch_id, batch.creator_entry_id]))), interruptionNotices: this.projectInterruptionNotices(readingMessages), canonicalRootTurnIds, subagentRuns, agentTasks, subagentProgress: {},
       presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base, isRunning: false,
       queuedCount: numeric(this.control.prompt_queue_total_count), queuedPrompts: projectQueuedPrompts(this.control),
@@ -4291,11 +4404,13 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     );
     const todo = projectTodo(this.liveControl);
     const interaction = projectInteraction(this.liveControl, this.control);
+    const readingMessages = this.readingMessages(messages);
     return {
-      messages,
-      history: this.presentationHistory(messages),
+      messages: readingMessages,
+      canonicalInputs: canonicalInputs(messages),
+      history: this.presentationHistory(readingMessages),
       taskCreators: this.taskCreators(), taskBatchCreators: Object.fromEntries(this.pages.flatMap(page => (page.context?.batches ?? []).map(batch => [batch.batch_id, batch.creator_entry_id]))),
-      interruptionNotices: this.projectInterruptionNotices(messages),
+      interruptionNotices: this.projectInterruptionNotices(readingMessages),
       canonicalRootTurnIds,
       subagentRuns,
       subagentProgress: Object.fromEntries([...this.taskProgress].map(([id, progress]) => [id, progress.summary])),
@@ -5734,9 +5849,11 @@ export function mergeRuntimeTaskInventory(
     ...projection.subagentRuns ?? [],
   ].map(run => [run.id, run]));
   const attached: SubagentRun[] = [];
+  const readingIds = projection.history && new Set(projection.history.windows.flatMap(window => window.entryIds));
   for (const task of merged) {
     const source = runById.get(task.id);
-    const activities = projectTaskActivities(task, source?.activities ?? []);
+    const activities = projectTaskActivities(task, source?.activities ?? []).filter(activity => !readingIds
+      || readingIds.has(activity.id) || (activity.id.startsWith('live:') && projection.history?.atLatest !== false));
     attached.push({
       id: task.id, label: task.label, role: task.role, objective: task.objective,
       batchId: task.batchId,

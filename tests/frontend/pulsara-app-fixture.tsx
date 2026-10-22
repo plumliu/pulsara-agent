@@ -271,6 +271,7 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
     queuedCount: 0,
     queuedPrompts: [],
     promptTransitions: [],
+    canonicalInputs: [],
     planMode: false,
     activeTurnId: 'turn-1',
     control: {},
@@ -314,7 +315,9 @@ class FakeConnection implements RuntimeConnection {
     return () => { this.listeners.delete(listener); };
   });
   publishRead(value: RuntimeProjection) {
-    this.value = value;
+    this.value = {...value, canonicalInputs: [...new Map([
+      ...value.canonicalInputs ?? [], ...value.messages.filter(message => message.role === 'user' && message.inputSource),
+    ].map(input => [input.id, input])).values()]};
     for (const listener of this.listeners) listener();
   }
   readHistory = vi.fn(async (_windowId?: string, _direction?: 'older' | 'newer', _signal?: AbortSignal) => {
@@ -339,7 +342,9 @@ class FakeConnection implements RuntimeConnection {
     generation = 1,
     private readonly queryCommandResult?: CommandReceipt,
   ) {
-    this.value = value;
+    this.value = {...value, canonicalInputs: [...new Map([
+      ...value.canonicalInputs ?? [], ...value.messages.filter(message => message.role === 'user' && message.inputSource),
+    ].map(input => [input.id, input])).values()]};
     this.role = role;
     this.generation = generation;
   }
@@ -363,10 +368,12 @@ class FakeConnection implements RuntimeConnection {
   }
 
   emit(value: RuntimeProjection) {
-    this.value = value;
+    this.value = {...value, canonicalInputs: [...new Map([
+      ...value.canonicalInputs ?? [], ...value.messages.filter(message => message.role === 'user' && message.inputSource),
+    ].map(input => [input.id, input])).values()]};
     const observer = this.observer;
     this.observer = undefined;
-    observer?.(value);
+    observer?.(this.value);
   }
 
   submitPrompt = vi.fn(async (commandId: string): Promise<CommandReceipt> => {

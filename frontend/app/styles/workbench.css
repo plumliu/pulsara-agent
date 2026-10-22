@@ -969,3 +969,7 @@
 .user-message :is(.prompt-content-body, p) { line-height: 1.7; }
 .user-message p + p { margin-top: 10px; }
 .trace-icon svg { width: 12px; height: 12px; }
+
+.history-current-interaction { flex: none; max-height: 40vh; overflow-y: auto; padding: 10px 24px; border-top: 1px solid var(--line); background: var(--paper-solid); }
+.history-current-interaction > p { margin: 0 0 8px; font: 12px/1.5 var(--sans); color: var(--muted); }
+.history-current-interaction .interaction-card { max-width: 850px; margin: 0 auto; }

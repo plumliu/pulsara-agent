@@ -110,6 +110,7 @@ const emptyProjection: RuntimeProjection = {
   queuedCount: 0,
   queuedPrompts: [],
   promptTransitions: [],
+  canonicalInputs: [],
   planMode: false,
   control: {},
   liveControl: {},
@@ -177,17 +178,19 @@ function requirePromptReceipt(
 }
 
 function canonicalInputMatches(
-  message: RuntimeProjection['messages'][number],
+  message: RuntimeProjection['canonicalInputs'][number],
   submission: LocalPromptSubmission,
 ): boolean {
   return message.inputSource?.commandId === submission.commandId
     && (!submission.queueItemId || message.inputSource.queueItemId === submission.queueItemId);
 }
 
-function canonicalPromptReady(message: RuntimeProjection['messages'][number]): boolean {
+function canonicalPromptReady(message: RuntimeProjection['canonicalInputs'][number], projection: RuntimeProjection): boolean {
   // The history host cannot display the canonical bubble until its grouping is
-  // ready too. Keep the exact submitted content through that handoff.
-  return (message.contentState === undefined || message.contentState === 'ready')
+  // ready too. Keep exact submitted content through a visible handoff; an
+  // offscreen, context-confirmed input is re-readable and can release its preview.
+  const outsideReadingBand = projection.history && !projection.history.windows.some(window => window.entryIds.includes(message.id));
+  return (outsideReadingBand || message.contentState === undefined || message.contentState === 'ready')
     && message.historyContextState !== 'loading' && message.historyContextState !== 'error';
 }
 
@@ -476,8 +479,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setLocalSubmissions((current) => {
       const projected: LocalPromptSubmission[] = current.flatMap((item) => {
         if (item.sessionId !== (owner?.sessionId ?? activeSessionIdRef.current)) return [item];
-        const canonical = next.messages.find(message => canonicalInputMatches(message, item));
-        if (canonical && canonicalPromptReady(canonical)) return [];
+        const canonical = next.canonicalInputs.find(message => canonicalInputMatches(message, item));
+        if (canonical && canonicalPromptReady(canonical, next)) return [];
         if (canonical) return [{ ...item, status: 'consumed' as const, consumedEntryId: canonical.id }];
         // A history/body publication can precede the committed queue suffix.
         // It cannot downgrade an exact terminal receipt to older pending state.
@@ -2044,9 +2047,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       }
       const delivery = item.receipt?.promptDelivery;
       if (item.kind === 'send' && item.status === 'accepted' && item.receipt?.planDraftDecision === 'revise'
-        && projection.messages.some(message => message.inputSource?.commandId === item.commandId)) return [];
+        && projection.canonicalInputs.some(message => message.inputSource?.commandId === item.commandId)) return [];
       if (item.kind === 'send' && delivery) {
-        if (projection.messages.some(message => message.userKind === 'steer'
+        if (projection.canonicalInputs.some(message => message.userKind === 'steer'
           && message.inputSource?.commandId === item.commandId
           && message.inputSource.queueItemId === delivery.queueItemId)) return [];
       }
@@ -2063,7 +2066,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       item.status === 'unknown' || (item.kind === 'send' && item.status === 'accepted'
         && !projection.queuedPrompts.some(prompt => prompt.commandId === item.commandId
           && prompt.queueItemId === item.receipt?.promptDelivery?.queueItemId)
-        && !projection.messages.some(message => message.inputSource?.commandId === item.commandId
+        && !projection.canonicalInputs.some(message => message.inputSource?.commandId === item.commandId
           && (item.receipt?.planDraftDecision === 'revise'
             || message.inputSource.queueItemId === item.receipt?.promptDelivery?.queueItemId)))
     ) && !promptReconciliationInFlight.current.has(queryKey(item))
@@ -2085,7 +2088,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         // Rejections happen before the action command is inserted. A missing
         // command alone is not proof, but a consumed exact NEW_TURN source can
         // never subsequently be cancelled/redirected by this action's CAS.
-        const sourceConsumed = connection.current().messages.some(message => (
+        const sourceConsumed = connection.current().canonicalInputs.some(message => (
           message.userKind === 'prompt'
           && message.inputSource?.commandId === candidate.source.commandId
           && message.inputSource.queueItemId === candidate.source.queueItemId
@@ -2924,6 +2927,16 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
   }, [ownsHistoryReader, publishProjection]);
 
+  const readLatestHistory = useCallback(async (signal: AbortSignal) => {
+    const active = connectionRef.current ?? historyRef.current;
+    if (!active?.readLatestHistory) throw new Error('本地服务未连接。');
+    const readSignal = AbortSignal.any([historyReadAbort.current.signal, signal]);
+    const next = await active.readLatestHistory(readSignal);
+    readSignal.throwIfAborted();
+    if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
+    publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
+  }, [ownsHistoryReader, publishProjection]);
+
   const hydrateEntries = useCallback(async (ids: string[], includeReasoning = false) => {
     const active = connectionRef.current ?? historyRef.current;
     if (!active?.hydrateEntries) throw new Error('本地服务未连接。');
@@ -3063,6 +3076,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           messages={renderedMessages}
           history={projection.history}
           onLoadHistory={loadHistory}
+          onReadLatestHistory={readLatestHistory}
           onHydrateEntries={hydrateEntries}
           onRetainHistory={retainHistory}
           interruptionNotices={mergedProjection.interruptionNotices}
@@ -3086,7 +3100,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
             && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
             && (item.displayAsMessage || !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId))
-            && !projection.messages.some(message => canonicalInputMatches(message, item) && canonicalPromptReady(message))
+            && !projection.canonicalInputs.some(message => canonicalInputMatches(message, item) && canonicalPromptReady(message, projection))
           ))}
           runtimeStatus={runtimeStatus}
           runtimeError={runtimeError}
