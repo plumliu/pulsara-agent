@@ -2532,6 +2532,7 @@ describe('long turn process reading', () => {
     const text = screen.getByText('过程 500');
     const thread = view.container.querySelector('.thread-scroll')!;
     if (mode === 'selection') {
+      vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(0, 20, 100, 20)] as unknown as DOMRectList);
       const range = document.createRange(); range.selectNodeContents(text);
       const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
       fireEvent(document, new Event('selectionchange'));
@@ -2768,6 +2769,98 @@ it('still releases tail-follow for native upward scrolling during a drawer resiz
   expect(top).toBe(1299.75);
 });
 
+describe('selection and empty-space reading intent', () => {
+  afterEach(() => document.getSelection()?.removeAllRanges());
+  function setup() {
+    const observations = new Map<Element, () => void>();
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private callback: () => void) {}
+      observe(node: Element) { observations.set(node, this.callback); }
+      disconnect() {} unobserve() {}
+    });
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(0, 20, 100, 20)] as unknown as DOMRectList);
+    const base = props({ isRunning: false, messages: [
+      { id: 'selection-answer', role: 'assistant', assistantKind: 'terminal', rootFinal: true, status: 'completed', time: '', body: '供选择的正文' },
+    ] });
+    const view = render(<WorkbenchView {...base} />);
+    const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+    const geometry = {height: 1000, top: 600};
+    Object.defineProperties(thread, {
+      scrollHeight: { get: () => geometry.height }, clientHeight: { get: () => 400 },
+      clientWidth: { get: () => 600 },
+      scrollTop: { get: () => geometry.top, set: value => { geometry.top = Math.max(0, Math.min(geometry.height - 400, value)); } },
+    });
+    vi.spyOn(thread, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 610, 400));
+    view.rerender(<WorkbenchView {...base} />);
+    const select = (node = screen.getByText('供选择的正文')) => {
+      const range = document.createRange(); range.selectNodeContents(node);
+      document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
+      fireEvent(document, new Event('selectionchange'));
+    };
+    const clear = () => { document.getSelection()!.removeAllRanges(); fireEvent(document, new Event('selectionchange')); };
+    const resize = () => act(() => observations.get(thread)?.());
+    return {geometry, thread, select, clear, resize};
+  }
+  it('keeps following after an ordinary click on an empty scrollport margin', () => {
+    const {geometry, thread, resize} = setup();
+    fireEvent.pointerDown(thread, {button: 0, clientX: 100, clientY: 100});
+    fireEvent.pointerUp(thread); fireEvent.click(thread);
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+    geometry.height += 60; resize();
+    expect(geometry.top).toBe(660);
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+  });
+  it('pauses for selected text without offering latest until new output extends below it', () => {
+    const {geometry, select, clear, resize} = setup();
+    select();
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+    geometry.height += 15; resize();
+    expect(geometry.top).toBe(600);
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+    geometry.height += 45; resize();
+    expect(geometry.top).toBe(600);
+    expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
+    expect(document.getSelection()?.toString()).toBe('供选择的正文');
+    clear(); resize();
+    expect(geometry.top).toBe(600);
+    expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
+  });
+  it('resumes after clearing a selection while the reader is still near latest', () => {
+    const {geometry, select, clear, resize} = setup();
+    select(); clear();
+    geometry.height += 60; resize();
+    expect(geometry.top).toBe(660);
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+  });
+  it('lets an upward gesture take ownership from a paused selection', () => {
+    const {geometry, thread, select, clear, resize} = setup();
+    select(); fireEvent.wheel(thread, {deltaY: -.25});
+    geometry.top = 599.75; fireEvent.scroll(thread);
+    clear(); geometry.height += 60; resize();
+    expect(geometry.top).toBe(599.75);
+    expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
+  });
+  it('keeps selected text still after a downward gesture at the physical tail', async () => {
+    const {geometry, thread, select, resize} = setup();
+    select(); fireEvent.wheel(thread, {deltaY: 10});
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+    geometry.height += 60; resize();
+    expect(geometry.top).toBe(600);
+    expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
+  });
+  it.each(['whitespace', 'hidden', 'inert'] as const)('ignores a %s selection in the conversation', mode => {
+    const {geometry, thread, select, resize} = setup();
+    const node = document.createElement('span');
+    node.textContent = mode === 'whitespace' ? ' \n\t ' : '不可见的文字';
+    if (mode !== 'whitespace') node.setAttribute(mode, '');
+    thread.append(node); select(node);
+    geometry.height += 60; resize();
+    expect(geometry.top).toBe(660);
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+  });
+});
+
 it('pauses automatic positioning before a scrollbar drag moves the viewport', () => {
   const base = props({ isRunning: false, messages: [
     { id: 'scrollbar-answer', role: 'assistant', time: '', body: '阅读正文' },
@@ -2776,11 +2869,12 @@ it('pauses automatic positioning before a scrollbar drag moves the viewport', ()
   const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
   let height = 1000, top = 600;
   Object.defineProperties(thread, {
-    scrollHeight: { get: () => height }, clientHeight: { get: () => 400 },
+    scrollHeight: { get: () => height }, clientHeight: { get: () => 400 }, clientWidth: { get: () => 600 },
     scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(height - 400, value)); } },
   });
+  vi.spyOn(thread, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 610, 400));
   view.rerender(<WorkbenchView {...base} />);
-  fireEvent.pointerDown(thread);
+  fireEvent.pointerDown(thread, {button: 0, clientX: 605, clientY: 100});
   height = 1020;
   view.rerender(<WorkbenchView {...base} />);
   expect(top).toBe(600);

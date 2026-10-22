@@ -12,7 +12,18 @@ export function hasHistorySelection(root: HTMLElement): boolean {
   const selection = root.ownerDocument.getSelection();
   if (!selection || selection.isCollapsed) return false;
   for (let index = 0; index < selection.rangeCount; index++) {
-    if (selection.getRangeAt(index).intersectsNode(root)) return true;
+    const selected = selection.getRangeAt(index);
+    if (!selected.intersectsNode(root)) continue;
+    const range = selected.cloneRange();
+    const contents = root.ownerDocument.createRange(); contents.selectNodeContents(root);
+    if (range.compareBoundaryPoints(Range.START_TO_START, contents) < 0) range.setStart(root, 0);
+    if (range.compareBoundaryPoints(Range.END_TO_END, contents) > 0) range.setEnd(root, root.childNodes.length);
+    if (!range.toString().trim()) continue;
+    const node = range.commonAncestorContainer;
+    const parent = node instanceof Element ? node : node.parentElement;
+    if (parent?.closest('[hidden], [inert]')) continue;
+    if (parent && root.ownerDocument.defaultView?.getComputedStyle(parent).visibility === 'hidden') continue;
+    if ([...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)) return true;
   }
   return false;
 }

@@ -1,8 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { captureHistoryAnchor, collectHistoryResidence, restoreHistoryAnchor, waitForHistoryEntry } from '../../frontend/lib/history-dom';
+import { captureHistoryAnchor, collectHistoryResidence, hasHistorySelection, restoreHistoryAnchor, waitForHistoryEntry } from '../../frontend/lib/history-dom';
 import { registerAnnotationBody, waitForAnnotationBody } from '../../frontend/lib/response-selection';
 
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
+
+describe('rendered history selections', () => {
+  afterEach(() => document.getSelection()?.removeAllRanges());
+  it.each(['text', 'whitespace', 'hidden', 'inert', 'unrendered', 'outside', 'outside-and-empty'] as const)('recognizes only visible conversation text: %s', mode => {
+    document.body.innerHTML = '<p>外部文字</p><main><span>正文</span></main>';
+    const root = document.querySelector('main')!;
+    const text = root.querySelector('span')!;
+    if (mode === 'whitespace' || mode === 'outside-and-empty') text.textContent = ' \n\t ';
+    if (mode === 'hidden' || mode === 'inert') text.setAttribute(mode, '');
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue((mode === 'unrendered' ? [] : [new DOMRect(0, 0, 100, 20)]) as unknown as DOMRectList);
+    const range = document.createRange();
+    range.selectNodeContents(mode === 'outside' ? document.querySelector('p')! : root);
+    if (mode === 'hidden' || mode === 'inert') range.selectNodeContents(text);
+    if (mode === 'outside-and-empty') range.setStartBefore(document.querySelector('p')!);
+    document.getSelection()!.removeAllRanges(); document.getSelection()!.addRange(range);
+    expect(hasHistorySelection(root)).toBe(mode === 'text');
+  });
+});
 
 it('retains viewport preparation, selection aliases and focus without pinning every expanded disclosure', () => {
  const root=document.createElement('div');document.body.append(root);

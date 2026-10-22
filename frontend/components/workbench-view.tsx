@@ -2241,6 +2241,7 @@ export function WorkbenchView({
   const disclosureAnchor = useRef<{ element: HTMLElement; top: number; processKey?: string; edge?: string; collapsing?: boolean } | undefined>(undefined);
   const programmaticTop = useRef<number | undefined>(undefined);
   const previousScrollTop = useRef<number | undefined>(undefined);
+  const selectionPausedFollow = useRef(false);
   const userScrollPending = useRef(false);
   const userScrollFrame = useRef<number | undefined>(undefined);
   const locateRequest = useRef<AbortController | undefined>(undefined);
@@ -2251,6 +2252,7 @@ export function WorkbenchView({
   const olderAutoRequest = useRef<{ owner?: object; windowId?: string; firstEntryId?: string } | undefined>(undefined);
   const checkOlderBoundary = useRef<() => void>(() => {});
   const resetReading = useCallback(() => {
+    selectionPausedFollow.current = false;
     disclosureAnchor.current = undefined;
     followLatestRef.current = false;
     setAtBottom(false);
@@ -2275,9 +2277,10 @@ export function WorkbenchView({
       userScrollPending.current = false;
       const thread = threadRef.current;
       if (towardLatest && currentHistory.current?.atLatest !== false && thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= LATEST_FOLLOW_DISTANCE) {
-        followLatestRef.current = true;
+        selectionPausedFollow.current = hasHistorySelection(thread);
+        followLatestRef.current = !selectionPausedFollow.current;
         setAtBottom(true);
-        readingAnchor.current = undefined;
+        readingAnchor.current = selectionPausedFollow.current ? captureHistoryAnchor(thread) : undefined;
         programmaticTop.current = undefined;
       } else if (!followLatestRef.current && thread) readingAnchor.current = captureHistoryAnchor(thread);
       checkOlderBoundary.current();
@@ -2288,6 +2291,7 @@ export function WorkbenchView({
     locatingEntry.current = undefined;
     disclosureAnchor.current = undefined;
     followLatestRef.current = true;
+    selectionPausedFollow.current = false;
     setAtBottom(followLatestRef.current);
     readingAnchor.current = undefined;
     userScrollPending.current = false;
@@ -2400,6 +2404,10 @@ export function WorkbenchView({
       programmaticTop.current = restoreHistoryAnchor(thread, readingAnchor.current);
     }
     previousScrollTop.current = thread.scrollTop;
+    if (selectionPausedFollow.current) {
+      setAtBottom(currentHistory.current?.atLatest !== false
+        && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= LATEST_FOLLOW_DISTANCE);
+    }
   }, []);
   useLayoutEffect(restoreReadingPosition);
   const loadOlderAtBoundary = useCallback(() => {
@@ -2437,6 +2445,7 @@ export function WorkbenchView({
       if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
       if (residenceFrame.current !== undefined) { cancelAnimationFrame(residenceFrame.current); residenceFrame.current = undefined; }
       followLatestRef.current = true;
+      selectionPausedFollow.current = false;
       disclosureAnchor.current = undefined;
       readingAnchor.current = undefined; userScrollPending.current = false;
       setAtBottom(true);
@@ -2459,13 +2468,32 @@ export function WorkbenchView({
   useEffect(() => {
     const selected = () => {
       const thread = threadRef.current;
-      if (!thread || !hasHistorySelection(thread)) return;
-      locateRequest.current?.abort();
-      resetReading();
+      if (!thread) return;
+      const nearLatest = currentHistory.current?.atLatest !== false
+        && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= LATEST_FOLLOW_DISTANCE;
+      if (hasHistorySelection(thread)) {
+        locateRequest.current?.abort();
+        if (!selectionPausedFollow.current) {
+          const following = followLatestRef.current;
+          resetReading();
+          selectionPausedFollow.current = following;
+        }
+        // Freeze the reader while selecting, without announcing unseen messages
+        // until output actually extends beyond the existing return zone.
+        if (selectionPausedFollow.current) setAtBottom(nearLatest);
+      } else if (selectionPausedFollow.current) {
+        selectionPausedFollow.current = false;
+        if (nearLatest && !userScrollPending.current) {
+          followLatestRef.current = true;
+          readingAnchor.current = undefined;
+          setAtBottom(true);
+          restoreReadingPosition();
+        } else setAtBottom(false);
+      }
     };
     document.addEventListener('selectionchange', selected);
     return () => document.removeEventListener('selectionchange', selected);
-  }, [resetReading]);
+  }, [resetReading, restoreReadingPosition]);
   const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean) => {
     if (!onReadProcessEnd) return;
     signal.throwIfAborted();
@@ -2841,7 +2869,14 @@ export function WorkbenchView({
           beginUserScroll(event.deltaY > 0);
         }}
         onTouchStart={event => { if (!nestedScrollConsumes(event.target, event.currentTarget, 0)) beginUserScroll(); }}
-        onPointerDown={event => { if (event.target === event.currentTarget) beginUserScroll(); }}
+        onPointerDown={event => {
+          const thread = event.currentTarget;
+          if (event.button !== 0 || event.target !== thread || thread.clientWidth <= 0 || thread.scrollHeight <= thread.clientHeight) return;
+          const left = thread.getBoundingClientRect().left + thread.clientLeft;
+          // A press on the native scrollbar takes ownership before it moves.
+          // Empty margins inside the scrollport are ordinary clicks.
+          if (event.clientX < left || event.clientX >= left + thread.clientWidth) beginUserScroll();
+        }}
         onPointerUp={() => { userScrollPending.current = false; }}
         onTouchEnd={() => { userScrollPending.current = false; }}
         onKeyDown={event => {
@@ -2864,11 +2899,13 @@ export function WorkbenchView({
           // ResizeObserver runs. Moving upward while still exactly at the new
           // physical tail is layout, not a reader leaving it. Explicit user
           // input already releases following; a native drag below the tail does too.
-          if (followLatestRef.current && !userScrollPending.current && movedAway
+          if ((followLatestRef.current || selectionPausedFollow.current) && !userScrollPending.current && movedAway
             && element.scrollTop === Math.max(0, element.scrollHeight - element.clientHeight)) {
             programmaticTop.current = undefined;
             return;
           }
+          if (selectionPausedFollow.current && !movedAway && !movedTowardLatest) return;
+          if (movedAway || movedTowardLatest) selectionPausedFollow.current = false;
           // Native scrollbar drags can arrive without a DOM pointerdown.
           // Only our exact programmed position is suppressed above.
           if (disclosureAnchor.current && (movedAway || movedTowardLatest)) {
@@ -2883,9 +2920,10 @@ export function WorkbenchView({
           const nextAtBottom = currentHistory.current?.atLatest !== false
             && !movedAway && (followLatestRef.current || movedTowardLatest)
             && element.scrollHeight - element.scrollTop - element.clientHeight <= LATEST_FOLLOW_DISTANCE;
-          followLatestRef.current = nextAtBottom;
+          selectionPausedFollow.current = nextAtBottom && hasHistorySelection(element);
+          followLatestRef.current = nextAtBottom && !selectionPausedFollow.current;
           setAtBottom(nextAtBottom);
-          readingAnchor.current = nextAtBottom ? undefined : captureHistoryAnchor(element);
+          readingAnchor.current = followLatestRef.current ? undefined : captureHistoryAnchor(element);
           checkOlderBoundary.current();
         }}
       >
