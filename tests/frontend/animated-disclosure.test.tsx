@@ -50,7 +50,7 @@ it('ignores an old closing transition after rapid reopen and releases immediatel
   view.rerender(<AnimatedDisclosure open unmountOnClose><p>content</p></AnimatedDisclosure>);
   await act(async()=>settle());
   expect(screen.getByText('content')).toBeTruthy();
-  getAnimations.mockReturnValue([]); // CSS reduced-motion has no transitions.
+  getAnimations.mockReturnValue([]); // Already-settled or non-rendered containers have no active transitions.
   view.rerender(<AnimatedDisclosure open={false} unmountOnClose><p>content</p></AnimatedDisclosure>);
   expect(screen.queryByText('content')).toBeNull();
 });

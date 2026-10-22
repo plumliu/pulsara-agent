@@ -103,4 +103,3 @@
 .toast:disabled { cursor: default; pointer-events: none; opacity: 1; }
 .toast.is-dragging { cursor: grabbing; }
 .toast.is-dragging, .toast.is-exiting { transition: none; }
-@media (prefers-reduced-motion: reduce) { .toast { transition: none; } }

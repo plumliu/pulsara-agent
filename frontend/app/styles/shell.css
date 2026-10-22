@@ -95,9 +95,6 @@
 @media (hover: none) {
   .session-list__scroll { --pulsara-sidebar-scrollbar-thumb: color-mix(in srgb, var(--ink) 24%, transparent); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .session-list__scroll { transition: none; }
-}
 .session-section + .session-section { margin-top: 11px; }
 .session-section--quick { padding-top: 10px; border-top: 1px solid var(--line); }
 .session-group-heading { display: flex; align-items: center; gap: 3px; min-width: 0; }
@@ -175,9 +172,6 @@
 @media (hover: none) {
   .session-item__copy > small, .session-row__menu > summary { opacity: 1; transform: none; }
   .session-row__menu > summary { pointer-events: auto; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .session-item__copy > small, .session-row__menu > summary { transition: none; transform: none; }
 }
 .unread-dot { width: 5px; height: 5px; margin-top: 5px; border-radius: 50%; background: var(--blue); }
 .sidebar-footer { flex-shrink: 0; margin-top: auto; padding: 12px 6px 2px; border-top: 1px solid var(--line); }

@@ -55,7 +55,6 @@ body { margin: 0; color: var(--pulsara-foreground, #17191f); }
 
 ```js
 const environment = window.PulsaraVisualization;
-const motion = matchMedia('(prefers-reduced-motion: reduce)');
 function apply(state) {
   document.documentElement.style.setProperty(
     '--animation-state', state.visible && !state.reducedMotion ? 'running' : 'paused'
@@ -66,13 +65,12 @@ if (environment) {
   const unsubscribe = environment.subscribe(apply);
   // Call unsubscribe when removing the component that owns this listener.
 } else {
-  const update = () => apply({visible: !document.hidden, reducedMotion: motion.matches});
+  const update = () => apply({visible: !document.hidden, reducedMotion: false});
   update();
-  motion.addEventListener('change', update);
   document.addEventListener('visibilitychange', update);
 }
 ```
 
-Apply the same pause rule to JavaScript animations. Hidden pages receive `visible=false`; reopening a page can reset its local state, so do not rely on persisted controls. The environment API provides display context only; it grants no host-file, tool or messaging access.
+Apply the same pause rule to JavaScript animations. Live displays keep `reducedMotion=false` regardless of OS motion preferences; do not disable live transitions with a reduced-motion media query. The separate still-image capture uses `reducedMotion=true` to request a stable frame. Hidden pages receive `visible=false`; reopening a page can reset its local state, so do not rely on persisted controls. The environment API provides display context only; it grants no host-file, tool or messaging access.
 
 `examples/analyze_csv.py` provides an adaptable standalone HTML example.

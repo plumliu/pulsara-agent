@@ -73,7 +73,7 @@ export class StartupCover {
             document.addEventListener('visibilitychange', hidden);
             document.body.animate(
               [{ opacity: 1 }, { opacity: 0 }],
-              { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 200, fill: 'forwards' }
+              { duration: 200, fill: 'forwards' }
             ).finished.then(finish, finish);
           });
         })()`)]);

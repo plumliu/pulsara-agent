@@ -199,4 +199,3 @@
   .memory-delete-dialog > header, .memory-delete-dialog > footer { padding: 14px 16px; }
   .memory-delete-body { padding: 16px; }
 }
-@media (prefers-reduced-motion: reduce) { .memory-view button { transition: none; } }

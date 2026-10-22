@@ -18,7 +18,7 @@ export function AnimatedDisclosure({
   if (open && !hasOpened) setHasOpened(true);
   useEffect(() => {
     if (open || !unmountOnClose || !hasOpened) return;
-    // CSS owns timing and reduced-motion. Await only this container's own
+    // CSS owns transition timing. Await only this container's own
     // transitions; cancellation/no animation must release the subtree too.
     const animations = container.current?.getAnimations?.() ?? [];
     if (!animations.length) { setHasOpened(false); return; }

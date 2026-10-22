@@ -105,10 +105,6 @@ _PAGE = Template("""<!doctype html>
       body { padding-left: 18px; padding-right: 18px; }
       main { padding: 36px 24px; border-radius: 20px; }
     }
-    @media (prefers-reduced-motion: reduce) {
-      main { animation: none; }
-      .return-button { transition: none; }
-    }
     @media (prefers-color-scheme: dark) {
       :root {
         --card: #242621; --line: #393c32;

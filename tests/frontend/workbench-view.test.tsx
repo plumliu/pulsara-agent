@@ -2677,3 +2677,80 @@ it('pauses automatic positioning before a scrollbar drag moves the viewport', ()
   expect(top).toBe(600);
   expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
 });
+
+it('holds the clicked process header through the final-window read and manual collapse', async () => {
+  let resizeColumn: () => void = () => {};
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: () => void) {}
+    observe(node: Element) { if (node.classList.contains('thread-column')) resizeColumn = this.callback; }
+    disconnect() {} unobserve() {}
+  });
+  const read = vi.fn(async () => {});
+  const base = props({ isRunning: false, onReadProcessEnd: read, messages: [
+    { id: 'collapse-process', role: 'assistant', assistantKind: 'progress', turnId: 'collapse-turn', time: '', body: '过程正文' },
+    { id: 'collapse-answer', role: 'assistant', assistantKind: 'terminal', turnId: 'collapse-turn', rootFinal: true, time: '', body: '最终正文' },
+  ] });
+  const view = render(<WorkbenchView {...base} />);
+  fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+  const toggle = await screen.findByRole('button', { name: '收起中间过程' });
+  const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  let top = 600, headerTop = 740, height = 2200;
+  Object.defineProperties(thread, {
+    scrollHeight: { get: () => height }, clientHeight: { get: () => 400 },
+    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(height - 400, value)); } },
+  });
+  vi.spyOn(thread, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 600, 400));
+  vi.spyOn(toggle, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, headerTop - top, 600, 24));
+  const answer = view.container.querySelector('[data-source-entry="collapse-answer"]')!.firstElementChild!;
+  vi.spyOn(answer, 'getBoundingClientRect').mockImplementation(() =>
+    new DOMRect(0, headerTop + (toggle.getAttribute('aria-expanded') === 'true' ? 800 : 40) - top, 600, 80));
+  let finish!: () => void;
+  read.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+  fireEvent.click(toggle);
+  expect(toggle.getBoundingClientRect().top).toBe(140);
+  // Reading the final window retires earlier content before the disclosure commits.
+  headerTop = 600;
+  act(resizeColumn);
+  expect(toggle.getBoundingClientRect().top).toBe(140);
+  await act(async () => finish());
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  height = 1000;
+  act(resizeColumn);
+  expect(toggle.getBoundingClientRect().top).toBe(140);
+  expect(top).toBe(460);
+  expect(screen.queryByText('过程正文')).toBeNull();
+  // This explicitly requested transition also runs with reduced motion set.
+  vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+  const animation = { cancel: vi.fn(), finished: new Promise<void>(() => {}), onfinish: null } as unknown as Animation;
+  const animate = vi.fn(() => animation);
+  Object.defineProperty(thread.querySelector('.thread-column')!, 'animate', { value: animate, configurable: true });
+  // If the document becomes too short, accept only the browser's necessary
+  // clamp. Do not add blank space or switch to anchoring the answer.
+  height = 760;
+  top = Math.min(top, height - 400);
+  act(resizeColumn);
+  expect(top).toBe(360);
+  expect(toggle.getBoundingClientRect().top).toBe(240);
+  expect(animate).toHaveBeenCalledWith([
+    { transform: 'translateY(-100px)' }, { transform: 'translateY(0)' },
+  ], { duration: 180, easing: 'cubic-bezier(.2, .7, .2, 1)' });
+  const settledTop = top;
+  act(resizeColumn);
+  expect(top).toBe(settledTop);
+  expect(animate).toHaveBeenCalledOnce();
+  act(() => animation.onfinish?.call(animation, new Event('finish') as AnimationPlaybackEvent));
+  act(resizeColumn);
+  expect(top).toBe(settledTop);
+  expect(animate).toHaveBeenCalledOnce();
+  height = 720;
+  top = Math.min(top, height - 400);
+  act(resizeColumn);
+  expect(animate).toHaveBeenCalledTimes(2);
+  fireEvent.wheel(thread, { deltaY: -2 });
+  expect(animation.cancel).toHaveBeenCalledOnce();
+  // A late completion from the interrupted animation cannot recapture scroll.
+  top -= 2;
+  fireEvent.scroll(thread);
+  act(() => animation.onfinish?.call(animation, new Event('finish') as AnimationPlaybackEvent));
+  expect(top).toBe(318);
+});

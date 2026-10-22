@@ -7,7 +7,9 @@ export const environmentMessageType = 'pulsara-visualization-environment';
 export function visualizationEnvironment(visible: boolean): VisualizationEnvironment {
   const style = getComputedStyle(document.documentElement);
   return { theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light',
-    visible: visible && document.visibilityState !== 'hidden', reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    // Live playback always has motion. The separate still-image worker owns
+    // reducedMotion=true for capture; it is not a user/OS preference anymore.
+    visible: visible && document.visibilityState !== 'hidden', reducedMotion: false,
     colors: { background: style.getPropertyValue('--paper-solid').trim(), foreground: style.getPropertyValue('--ink').trim(),
       muted: style.getPropertyValue('--muted').trim(), accent: style.getPropertyValue('--amber').trim(),
       border: style.getPropertyValue('--line').trim(), soft: style.getPropertyValue('--paper-deep').trim() } };

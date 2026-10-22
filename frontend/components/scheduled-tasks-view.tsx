@@ -87,7 +87,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
     locatedTaskId.current = highlightedTaskId;
     focusedRow.current.scrollIntoView?.({ block: 'center' });
     focusedRow.current.focus({ preventScroll: true });
-    // Match the home-directory locator and clear even with reduced motion.
+    // Match the home-directory locator; do not depend on animationend delivery.
     const timer = setTimeout(() => setHighlightedTaskId(undefined), 2200);
     return () => clearTimeout(timer);
   }, [highlightedTaskId]);

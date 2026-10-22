@@ -142,13 +142,17 @@ it.each(['pointerCancel', 'lostPointerCapture'] as const)('%s cancels an incompl
   expect(dismiss).not.toHaveBeenCalled();
 });
 
-it('reduced motion dismisses without animation', () => {
+it('keeps entrance and exit animations when the OS requests reduced motion', async () => {
   vi.stubGlobal('matchMedia', () => ({ matches: true }));
   const dismiss = vi.fn();
   render(<Harness dismiss={dismiss} />);
+  expect(motions).toHaveLength(2);
   fireEvent.click(screen.getByText('测试通知').closest('button')!);
+  expect(screen.getByText('测试通知')).toBeTruthy();
+  const exit = expectRightExit();
+  await act(async () => exit.finish());
   expect(screen.queryByText('测试通知')).toBeNull();
-  expect(motions).toHaveLength(0);
+  expect(dismiss).toHaveBeenCalledExactlyOnceWith(1);
 });
 
 it('expiry during a drag releases capture and completes one exit without an extra dismissal', async () => {

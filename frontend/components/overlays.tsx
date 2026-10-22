@@ -166,7 +166,6 @@ function Toast({ toast, exiting, onDismiss, onExitComplete }: {
     if (!exiting) setOffset(0);
   };
   useEffect(() => {
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
     // Moving the portal between modals preserves this element's lifetime.
     entrance.current = button.current?.animate?.([
       { opacity: 0, transform: 'translateY(8px) scale(.985)' },
@@ -179,7 +178,7 @@ function Toast({ toast, exiting, onDismiss, onExitComplete }: {
     if (!exiting || !target) return;
     cancelEntrance();
     releaseDrag(target);
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || !target.animate) {
+    if (!target.animate) {
       onExitComplete(toast.id);
       return;
     }
@@ -245,7 +244,6 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDi
 
   useLayoutEffect(() => {
     const next = new Map<number, { element: HTMLDivElement; top: number; animation?: Animation }>();
-    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     for (const [id, element] of items.current) {
       const previous = positions.current.get(id);
       const transform = window.getComputedStyle(element).transform;
@@ -253,7 +251,7 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDi
       const top = element.getBoundingClientRect().top - offset;
       const distance = previous?.element === element ? previous.top - top + offset : 0;
       previous?.animation?.cancel();
-      const animation = !reducedMotion && Math.abs(distance) > .5 ? element.animate?.([
+      const animation = Math.abs(distance) > .5 ? element.animate?.([
         { transform: `translateY(${distance}px)` }, { transform: 'none' },
       ], { duration: 220, easing: 'cubic-bezier(.2,.7,.2,1)' }) : undefined;
       next.set(id, { element, top, animation });

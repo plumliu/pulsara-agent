@@ -145,7 +145,3 @@
   .scheduled-dialog-actions button { min-height: 40px; }
   .scheduled-confirm-body { padding-inline: 16px; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .scheduled-row.is-highlighted { animation: none; }
-  .scheduled-view button, .scheduled-dialog button, .scheduled-expand svg { transition: none; }
-}

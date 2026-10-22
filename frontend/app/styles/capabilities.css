@@ -289,10 +289,6 @@
   .mcp-secret-row > :is(input,select) { grid-column: 1; }
   .mcp-secret-row > button { grid-column: 2; grid-row: 1 / 4; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .capability-drawer, .capability-list-row > svg, .capability-row-more > svg { transition: none; }
-  .hook-review-details::details-content, .hook-review-details > summary::before { transition: none; }
-}
 
 .mcp-authorization-status { color: var(--muted); font-size: var(--type-small); }
 .mcp-authorization-status[data-state="authorized"] { color: var(--green); }

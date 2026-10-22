@@ -1,6 +1,7 @@
 export default function installVisualizationEnvironment(initial) {
   // Shared by the embedded frame and the screenshot worker. Defaults match the
-  // light application tokens; the live host sends its actual computed tokens.
+  // light application tokens and still-image capture mode. The live host sends
+  // its actual computed tokens and reducedMotion=false, independent of the OS.
   const defaults = { theme: 'light', visible: true, reducedMotion: true, colors: {
     background: '#fdfbf6', foreground: '#17191f', muted: '#7d7b74', accent: '#d79a42', border: 'rgba(29, 31, 38, 0.12)', soft: '#e9e5db',
   } };

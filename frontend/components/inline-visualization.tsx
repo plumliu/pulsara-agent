@@ -56,9 +56,8 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
     const intersection = new IntersectionObserver(entries => {visible = Boolean(entries[0]?.isIntersecting); update();});
     if (page.current) intersection.observe(page.current);
     const mutation = new MutationObserver(update); mutation.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme', 'class', 'style']});
-    const media = matchMedia('(prefers-reduced-motion: reduce)'); media.addEventListener('change', update);
     document.addEventListener('visibilitychange', update); update();
-    return () => {intersection.disconnect(); mutation.disconnect(); media.removeEventListener('change', update); document.removeEventListener('visibilitychange', update);};
+    return () => {intersection.disconnect(); mutation.disconnect(); document.removeEventListener('visibilitychange', update);};
   }, [active]);
   const selectedRoot = !maximized && measurement?.width === size.width && measurement?.height === size.height ? measurement.rect : null;
   const rect = selectedRoot && selectedRoot.y + selectedRoot.height <= size.height ? selectedRoot : null;

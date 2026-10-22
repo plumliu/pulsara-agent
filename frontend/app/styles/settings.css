@@ -33,7 +33,6 @@
 @media (max-width: 600px) { .avatar-setting.setting-row { grid-template-columns: 30px minmax(0,1fr) auto; }.avatar-setting .setting-row__control { grid-column: 3; justify-self: end; } }
 .avatar-spinner { animation: avatar-spin 1s linear infinite; }
 @keyframes avatar-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .avatar-spinner { animation: none; } }
 .model-config-dialog.avatar-crop-dialog { width: min(380px,calc(100% - 24px)); padding: 16px; }
 .avatar-crop-dialog > header { margin-bottom: 12px; }
 .avatar-crop-dialog h2 { margin: 0; font-family: var(--serif); font-size: var(--type-heading-small); font-weight: 400; }
@@ -136,7 +135,6 @@
 .settings-switch[aria-checked="true"] { background: var(--blue); border-color: var(--blue); }
 .settings-switch[aria-checked="true"] > span { transform: translateX(15px); background: white; }
 .settings-switch:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
-@media (prefers-reduced-motion: reduce) { .settings-switch, .settings-switch > span { transition: none; } }
 .archived-sessions > header > div:first-of-type { min-width: 0; }
 .archived-sessions > header > .archived-header-actions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
 .archived-header-actions > button { display: inline-flex; align-items: center; justify-content: center; padding: 6px; color: var(--muted); border-radius: 6px; background: transparent; }
@@ -200,7 +198,6 @@
 .session-delete-dialog.has-archive-results > header > .archive-delete-retry { display: inline-flex; align-items: center; justify-content: center; flex: none; gap: 6px; width: auto; height: 30px; margin: -5px 0 0; padding: 0 8px; border: 1px solid color-mix(in srgb,var(--blue) 25%,var(--line)); border-radius: 7px; background: color-mix(in srgb,var(--blue-soft) 45%,var(--paper-solid)); color: var(--blue); font-size: var(--type-label); white-space: nowrap; }
 .session-delete-dialog.has-archive-results > header > .archive-delete-retry:hover:not(:disabled) { background: var(--blue-soft); }
 .archive-delete-spinner { animation: avatar-spin 1.2s linear infinite; }
-@media (prefers-reduced-motion: reduce) { .archive-delete-spinner { animation: none; } }
 @media (max-width: 540px) {
   .has-archive-results .session-delete-body { padding: 18px 16px; gap: 18px; }
   .archive-delete-overview { padding: 10px 12px 6px; }
@@ -224,9 +221,6 @@
   0%, 100% { background-color: transparent; }
   45% { background-color: color-mix(in srgb, var(--blue) 8%, var(--paper-raised)); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .settings-home.is-highlighted { animation: none; }
-}
 
 .retrieval-spinner { display: flex; color: var(--muted); }
 .retrieval-spinner svg { animation: spin .8s linear infinite; }
@@ -240,7 +234,6 @@
 .retrieval-warning-tooltip { position: fixed; z-index: 1100; width: 260px; max-width: calc(100vw - 16px); padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper-solid); box-shadow: var(--shadow-md); color: var(--ink); font-size: var(--type-small); line-height: 1.5; }
 .retrieval-drawer { border-top: 1px solid var(--line); animation: retrieval-drawer-enter .16s ease-out; }
 @keyframes retrieval-drawer-enter { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-@media (prefers-reduced-motion: reduce) { .retrieval-drawer { animation: none; } }
 .retrieval-segments { display: flex; gap: 5px; margin: 0; padding: 0; border: 0; }
 .retrieval-segments label { position: relative; display: flex; align-items: center; justify-content: center; min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--muted); font-size: var(--type-caption); white-space: nowrap; cursor: pointer; }
 .retrieval-segments label:hover { border-color: var(--line-strong); color: var(--ink); }
@@ -292,4 +285,3 @@
 .settings-cli-details dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
 .settings-cli-resolution { display: flex; align-items: baseline; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .settings-cli-resolution > span { flex: none; color: var(--muted); font-weight: 600; }
-@media (prefers-reduced-motion: reduce) { .settings-cli-conflict svg:last-child { transition: none; } }

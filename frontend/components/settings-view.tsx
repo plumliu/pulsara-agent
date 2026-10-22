@@ -179,7 +179,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [homeHighlighted, setHomeHighlighted] = useState(Boolean(highlightHome));
   useEffect(() => {
     if (!highlightHome) return;
-    // Also clear the highlight when reduced motion disables the CSS animation.
+    // Clear the highlight even if its element disappears before animationend.
     const timer = setTimeout(() => setHomeHighlighted(false), 2200);
     return () => clearTimeout(timer);
   }, [highlightHome]);

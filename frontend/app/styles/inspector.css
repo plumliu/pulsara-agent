@@ -162,9 +162,6 @@
 
 @keyframes task-edge-flow { to { stroke-dashoffset: -9; } }
 
-@media (prefers-reduced-motion: reduce) {
-  .task-graph-edges > path.is-selected { animation: none; }
-}
 
 .project-capability-overview > p { margin: -2px 0 12px; }
 .project-capability-overview > p, .session-search-recent { color: var(--muted); font-size: var(--type-caption); line-height: 1.45; }
@@ -258,7 +255,4 @@
 .task-inherited-context summary::-webkit-details-marker { display: none; }
 .task-inherited-context summary::before { content: '▶'; flex: none; font-size: 9px; transition: transform .22s ease; }
 .task-inherited-context details[open] > summary::before { transform: rotate(90deg); }
-@media (prefers-reduced-motion: reduce) {
-  .task-inherited-context details::details-content, .task-inherited-context summary::before { transition: none; }
-}
 .task-inherited-context__material { margin-top: 14px; font-size: var(--type-small); }

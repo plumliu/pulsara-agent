@@ -25,7 +25,6 @@ function AnnotationView({ node, editor, deleteNode }: NodeViewProps) {
     const previous = previousPosition.current; previousPosition.current = next;
     if (!previous || (previous.x === next.x && previous.y === next.y)) return;
     movement.current?.cancel();
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
     movement.current = chip.animate?.([
       { transform: `translate(${previous.x - next.x}px, ${previous.y - next.y}px)` },
       { transform: 'translate(0, 0)' },
