@@ -31,7 +31,7 @@ interface SessionSidebarProps {
   onRefreshSessions: () => void;
   onNewSession: () => void;
   onCreateSession: (selection: SessionWorkspaceSelection) => Promise<boolean>;
-  onPickDirectory: (initialPath: string, signal: AbortSignal) => Promise<string | null>;
+  onPickDirectory: (signal: AbortSignal) => Promise<string | null>;
   onNotify: (title: string, detail: string) => void;
   canCreateSession: boolean;
   onOpenSearch: () => void;
@@ -170,7 +170,7 @@ export function SessionSidebar({
     setPickingDirectory(!selection);
     try {
       if (!selection) {
-        const path = await onPickDirectory(workspace.path, request.signal);
+        const path = await onPickDirectory(request.signal);
         if (request.signal.aborted || path === null) return;
         selection = { kind: 'project', path };
       }

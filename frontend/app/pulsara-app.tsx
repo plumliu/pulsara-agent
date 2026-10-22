@@ -3024,7 +3024,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onRefreshSessions={() => { void readSessionList().catch(() => {}); }}
           onNewSession={openNewSession}
           onCreateSession={createSession}
-          onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}
+          onPickDirectory={signal => adapter.pickWorkspaceDirectory(signal)}
           onNotify={(title, detail) => notify(title, detail, 'warning')}
           canCreateSession={canCreateSession}
           onOpenSearch={() => setSearchOpen(true)}
@@ -3315,7 +3315,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         canCreateSession={canCreateSession}
         onClose={() => setNewSessionOpen(false)}
         onCreate={createSession}
-        onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}
+        onPickDirectory={signal => adapter.pickWorkspaceDirectory(signal)}
       />}
       <ToastStack
         toasts={[...toasts, ...(bulkDeletion && !bulkResultsOpen && !bulkDeleteTarget && !deleteTarget && !bulkNoticeDismissed ? [{

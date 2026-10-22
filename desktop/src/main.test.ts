@@ -12,7 +12,11 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
-function fixture() {
+function fixture(options: {
+  desktop?: string | Error;
+  desktopState?: 'directory' | 'missing' | 'file';
+  canceled?: boolean;
+} = {}) {
   const cover = deferred();
   const previous = deferred();
   const database = deferred();
@@ -21,15 +25,26 @@ function fixture() {
   const stopping = deferred();
   const calls: string[] = [];
   const failures: string[] = [];
-  const handlers = new Map<string, (event: unknown) => Promise<void>>();
+  const handlers = new Map<string, (event: unknown) => Promise<unknown>>();
+  const dialogOptions: { defaultPath: string; properties: string[] }[] = [];
   const app = Object.assign(new EventEmitter(), {
-    isPackaged: false, setName() {}, setPath() {}, getPath() { return '/tmp/pulsara-main-test'; },
+    isPackaged: false, setName() {}, setPath() {}, getPath(name: string) {
+      if (name === 'home') return '/tmp/home';
+      if (name === 'desktop') {
+        if (options.desktop instanceof Error) throw options.desktop;
+        return options.desktop ?? '/tmp/home/桌面';
+      }
+      return '/tmp/pulsara-main-test';
+    },
     requestSingleInstanceLock() { return true; }, exit(code: number) { calls.push('exit:' + code); }, quit() {},
     whenReady() { return { then(action: () => Promise<void>) { return ready = action(); } }; },
   });
   let ready: Promise<void>;
   class Window extends EventEmitter {
+    static current: Window;
+    constructor() { super(); Window.current = this; }
     webContents = Object.assign(new EventEmitter(), {
+      mainFrame: { url: 'http://127.0.0.1:12345/' },
       setWindowOpenHandler() {}, session: { setPermissionRequestHandler() {} },
     });
     isMinimized() { return false; }
@@ -81,11 +96,20 @@ function fixture() {
   }
   const electron = {
     app, BrowserWindow: Window,
-    ipcMain: { handle(name: string, action: (event: unknown) => Promise<void>) { handlers.set(name, action); } },
+    dialog: { async showOpenDialog(parent: Window, input: typeof dialogOptions[number]) {
+      assert.equal(parent, Window.current);
+      dialogOptions.push(input);
+      return { canceled: options.canceled ?? false, filePaths: options.canceled ? [] : ['/tmp/chosen/项目 '] };
+    } },
+    ipcMain: { handle(name: string, action: (event: unknown) => Promise<unknown>) { handlers.set(name, action); } },
     Menu: { buildFromTemplate() {}, setApplicationMenu() {} },
   };
   const modules: Record<string, unknown> = {
     electron,
+    'node:fs/promises': { async stat() {
+      if (options.desktopState === 'missing') throw new Error('ENOENT');
+      return { isDirectory: () => options.desktopState !== 'file' };
+    } },
     'node:child_process': { execFileSync() { return '/tmp/pulsara-main-test'; } },
     './postgres': { BundledPostgres: Postgres }, './runtime': { PythonRuntime: Runtime },
     './ui-preferences': { UiPreferences: class {} },
@@ -98,7 +122,7 @@ function fixture() {
     process: { platform: 'darwin', env: {} },
     require(name: string) { return Object.hasOwn(modules, name) ? modules[name] : require(name); },
   });
-  return { cover, previous, database, spawned, preparingDatabase, stopping, handlers, calls, failures, ready: ready! };
+  return { dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, handlers, calls, failures, ready: ready! };
 }
 
 test('main overlaps cover loading and kernel preparation but gates the start frame and navigation', async () => {
@@ -175,3 +199,26 @@ test('quit during the old-owner wait settles the imported child without starting
   assert.equal(value.calls.at(-1), 'exit:0');
   assert.deepEqual(value.failures, []);
 });
+
+for (const scenario of [
+  { name: 'localized desktop', options: { desktop: '/tmp/home/桌面' }, expected: '/tmp/home/桌面' },
+  { name: 'configured desktop elsewhere', options: { desktop: '/mnt/work/Desktop' }, expected: '/mnt/work/Desktop' },
+  { name: 'desktop lookup unavailable', options: { desktop: new Error('Unavailable') }, expected: '/tmp/home' },
+  { name: 'desktop missing', options: { desktopState: 'missing' as const }, expected: '/tmp/home' },
+  { name: 'desktop path is a file', options: { desktopState: 'file' as const }, expected: '/tmp/home' },
+  { name: 'desktop configured as home', options: { desktop: '/tmp/home' }, expected: '/tmp/home' },
+  { name: 'cancellation', options: { canceled: true }, expected: '/tmp/home/桌面' },
+]) {
+  test(`directory picker uses ${scenario.name} without changing the selected path`, async () => {
+    const value = fixture(scenario.options);
+    value.previous.resolve();
+    value.database.resolve();
+    value.cover.resolve();
+    await value.ready;
+    const selected = await value.handlers.get('desktop:choose-directory')!(value.trustedEvent());
+    assert.equal(selected, scenario.options.canceled ? null : '/tmp/chosen/项目 ');
+    assert.equal(value.dialogOptions.length, 1);
+    assert.equal(value.dialogOptions[0].defaultPath, scenario.expected);
+    assert.deepEqual(Array.from(value.dialogOptions[0].properties), ['openDirectory', 'createDirectory']);
+  });
+}

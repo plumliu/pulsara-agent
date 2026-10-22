@@ -590,7 +590,7 @@ export interface RuntimeAdapter {
   }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
   createSession(selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload): Promise<SessionSummary>;
-  pickWorkspaceDirectory(initialPath: string, signal?: AbortSignal): Promise<string | null>;
+  pickWorkspaceDirectory(signal?: AbortSignal): Promise<string | null>;
   completeWorkspacePaths(sessionId: string, prefix: string, cursor: string | null, signal: AbortSignal): Promise<import('./file-reference').WorkspacePathPage>;
   forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome>;
   deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }>;
@@ -2177,7 +2177,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
-  async pickWorkspaceDirectory(initialPath: string, signal?: AbortSignal): Promise<string | null> {
+  async pickWorkspaceDirectory(signal?: AbortSignal): Promise<string | null> {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const host = desktopHost();
     if (!host) throw new Error('请从 Pulsara 桌面应用选择目录。');

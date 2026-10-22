@@ -215,7 +215,19 @@ else {
       return clipboard.writeText(value);
     });
     handle('choose-files',async()=>{const result=await dialog.showOpenDialog(window!,{properties:['openFile','multiSelections']});return result.canceled?[]:result.filePaths;});
-    handle('choose-directory',async()=>{const result=await dialog.showOpenDialog(window!,{properties:['openDirectory','createDirectory']});return result.canceled?null:result.filePaths[0];});
+    handle('choose-directory', async () => {
+      // Electron owns platform-specific desktop lookup (including Linux XDG).
+      // A desktop folder is optional; never create one just to open the picker.
+      let defaultPath = app.getPath('home');
+      try {
+        const desktop = app.getPath('desktop');
+        if ((await stat(desktop)).isDirectory()) defaultPath = desktop;
+      } catch { /* Missing/unavailable desktop: start at the user's home. */ }
+      const result = await dialog.showOpenDialog(window!, {
+        defaultPath, properties: ['openDirectory', 'createDirectory'],
+      });
+      return result.canceled ? null : result.filePaths[0];
+    });
     handle('open-path',async value=>{
       if (!value || typeof value.path!=='string' || !path.isAbsolute(value.path) || typeof value.reveal!=='boolean') throw new Error('无效的本地文件操作。');
       if (value.reveal) {shell.showItemInFolder(value.path);return;}

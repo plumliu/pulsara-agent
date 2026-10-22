@@ -2848,7 +2848,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(add);
     fireEvent.click(add);
     expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledTimes(1);
-    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith('/tmp/project', expect.any(AbortSignal));
+    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(add.getAttribute('aria-busy')).toBe('false');
     expect(add.getAttribute('title')).toBe('等待选择目录');
     expect(adapter.connectCalls).toHaveLength(connectionsBeforePicker);
@@ -2910,7 +2910,7 @@ describe('PulsaraApp', () => {
     const view = renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '选择目录并创建会话' }));
-    const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [string, AbortSignal])[1];
+    const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [AbortSignal])[0];
     view.unmount();
     expect(signal.aborted).toBe(true);
     await act(async () => picked.resolve('/tmp/project'));
@@ -2951,7 +2951,7 @@ describe('PulsaraApp', () => {
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '选择目录并创建会话' }));
-    const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [string, AbortSignal])[1];
+    const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [AbortSignal])[0];
     await act(async () => disconnect(new Error('connection lost')));
     expect(signal.aborted).toBe(false);
     expect(adapter.createSession).not.toHaveBeenCalled();
@@ -3042,7 +3042,7 @@ describe('PulsaraApp', () => {
     expect((screen.getByRole('button', { name: /^创建会话/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '选择目录' }));
     await waitFor(() => expect(pathPreview.value).toBe('/tmp/project'));
-    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith('', expect.any(AbortSignal));
+    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith(expect.any(AbortSignal));
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
     await waitFor(() => expect(adapter.createSession).toHaveBeenCalledWith({ kind: 'project', path: '/tmp/project' }));
   });

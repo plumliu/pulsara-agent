@@ -15,7 +15,7 @@ interface NewSessionDialogProps {
   canCreateSession: boolean;
   onClose: () => void;
   onCreate: (selection: SessionWorkspaceSelection) => Promise<boolean>;
-  onPickDirectory: (initialPath: string, signal: AbortSignal) => Promise<string | null>;
+  onPickDirectory: (signal: AbortSignal) => Promise<string | null>;
 }
 
 export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, onPickDirectory }: NewSessionDialogProps) {
@@ -34,7 +34,7 @@ export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, on
     setPicking(true);
     setPickerError('');
     try {
-      const path = await onPickDirectory(workspacePath, request.signal);
+      const path = await onPickDirectory(request.signal);
       if (!request.signal.aborted && path !== null) setWorkspacePath(path);
     } catch (error) {
       if (!request.signal.aborted) setPickerError(error instanceof Error ? error.message : '无法打开目录选择窗口，请重试。');

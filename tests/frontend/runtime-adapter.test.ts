@@ -97,9 +97,9 @@ it('requests a native directory selection and distinguishes cancellation', async
   stubRuntimeFetch(fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
   const controller = new AbortController();
-  expect(await adapter.pickWorkspaceDirectory('/tmp/current', controller.signal)).toBe('/tmp/项目 ');
+  expect(await adapter.pickWorkspaceDirectory(controller.signal)).toBe('/tmp/项目 ');
   expect(chooseDirectory).toHaveBeenCalledExactlyOnceWith();
-  expect(await adapter.pickWorkspaceDirectory('/tmp/项目 ')).toBeNull();
+  expect(await adapter.pickWorkspaceDirectory()).toBeNull();
   expect(fetchMock).not.toHaveBeenCalled();
 });
 
