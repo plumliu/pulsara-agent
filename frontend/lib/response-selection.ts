@@ -56,26 +56,50 @@ function atomIsSelected(range: Range, atom: HTMLElement): boolean {
 
 export interface MappedSelection { annotation: PromptAnnotationPart; range: Range; root: HTMLElement }
 
+function emptyResponseBoundary(range: Range): boolean {
+  const contents = range.cloneContents();
+  if (contents.textContent?.trim()
+    || contents.querySelector('[data-annotation-entry],[data-annotation-exclude],iframe,input,textarea,[contenteditable="true"],.execution-rail,.reasoning-disclosure,.subagent-group,.user-turn')) return false;
+  // Only the surrounding reply controls may contribute non-text decoration.
+  return [...contents.querySelectorAll('img,svg,canvas,video,audio,object,embed')]
+    .every(node => node.closest('.assistant-heading,.conversation-run__toggle,.response-actions'));
+}
+
 export function mapResponseSelection(selection: Selection | null): MappedSelection | undefined {
   if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return;
   const range = selection.getRangeAt(0).cloneRange();
-  const start = element(range.startContainer);
-  const root = start?.closest<HTMLElement>('[data-annotation-entry]');
-  // Chromium can anchor a drag from the blank reply footer at <time>, offset
-  // zero: no timestamp text is selected, but the endpoint is outside the body.
-  // Normalize only this reply's empty trailing chrome, never another message or
-  // selected footer text. Keep the native selection untouched for the browser.
-  const footer = root?.closest('.assistant-copy')?.querySelector(':scope > .response-actions');
-  if (root && footer?.contains(range.endContainer)) {
-    const trailing = range.cloneRange();
-    trailing.setStartAfter(root);
-    const contents = trailing.cloneContents();
-    if (contents.textContent?.trim()
-      || contents.querySelector('[data-annotation-entry],[data-annotation-exclude],iframe,input,textarea,[contenteditable="true"]')) return;
-    range.setEnd(root, root.childNodes.length);
+  const startRoot = element(range.startContainer)?.closest<HTMLElement>('[data-annotation-entry]');
+  const endRoot = element(range.endContainer)?.closest<HTMLElement>('[data-annotation-entry]');
+  if (startRoot && endRoot && startRoot !== endRoot) return;
+  let root = startRoot ?? endRoot;
+  if (!root) {
+    const common = element(range.commonAncestorContainer);
+    const owner = common?.closest('.conversation-run') ?? common?.closest('.assistant-turn') ?? common?.closest('.assistant-copy');
+    const candidates = [...owner?.querySelectorAll<HTMLElement>('[data-annotation-entry]') ?? []]
+      .filter(node => intersects(range, node));
+    if (candidates.length !== 1) return;
+    root = candidates[0];
   }
+  if (!root) return;
+  // Blank margins above and below a reply can place native endpoints on the
+  // process toggle, heading or footer. Validate both boundary slices within the
+  // same reply owner, then trim them symmetrically without changing Selection.
+  if (!startRoot || !endRoot) {
+    const owner = root.closest('.conversation-run') ?? root.closest('.assistant-turn') ?? root.closest('.assistant-copy');
+    if (!owner?.contains(range.startContainer) || !owner.contains(range.endContainer)) return;
+    if (!startRoot) {
+      const leading = range.cloneRange(); leading.setEndBefore(root);
+      if (!emptyResponseBoundary(leading)) return;
+      range.setStart(root, 0);
+    }
+    if (!endRoot) {
+      const trailing = range.cloneRange(); trailing.setStartAfter(root);
+      if (!emptyResponseBoundary(trailing)) return;
+      range.setEnd(root, root.childNodes.length);
+    }
+  }
+  const start = element(range.startContainer);
   const end = element(range.endContainer);
-  if (!root || root !== end?.closest('[data-annotation-entry]')) return;
   if (start?.closest('input,textarea,[contenteditable="true"],[data-source-decoration]')
     && end?.closest('input,textarea,[contenteditable="true"],[data-source-decoration]') === start.closest('input,textarea,[contenteditable="true"],[data-source-decoration]')) return;
   const body = bodies.get(root);

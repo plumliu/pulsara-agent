@@ -19,6 +19,37 @@ function mount(body: string) {
 }
 
 describe('canonical response selection', () => {
+  it('clips leading, trailing and enclosing blank boundaries but rejects selected process text', () => {
+    const body = '第一段。\n\n最后一段。';
+    const { container } = render(<section className="conversation-run">
+      <header className="assistant-heading">Pulsara</header>
+      <button className="conversation-run__toggle"><span>处理过程</span><svg /></button>
+      <div className="conversation-run__disclosure" inert />
+      <article className="assistant-turn"><div className="assistant-copy">
+        <AnnotationBody entryId="entry:a" body={body}>
+          <MarkdownBody annotationSource body={body} onNotify={() => {}} />
+        </AnnotationBody>
+        <div className="response-actions"><button><svg /></button><time>15:18</time></div>
+      </div></article>
+    </section>);
+    const toggleText = container.querySelector('.conversation-run__toggle span')!.firstChild!;
+    const text = container.querySelector('[data-source-text]')!.firstChild!;
+    const time = container.querySelector('time')!;
+    expect(select(toggleText, 4, text, 2)).toEqual({ type: 'annotation', quote: '第一',
+      source: { entry_id: 'entry:a', start: 0, end: 2 } });
+    const mapped = mapResponseSelection(window.getSelection())!;
+    expect(mapped.root.contains(mapped.range.startContainer)).toBe(true);
+    expect(window.getSelection()!.getRangeAt(0).startContainer).toBe(toggleText);
+    expect(select(toggleText, 4, time, 0)).toEqual({ type: 'annotation', quote: body,
+      source: { entry_id: 'entry:a', start: 0, end: body.length } });
+    expect(select(toggleText, 3, text, 2)).toBeUndefined();
+    expect(select(toggleText, 4, time.firstChild!, 1)).toBeUndefined();
+    const excluded = document.createElement('div');
+    excluded.dataset.annotationExclude = '';
+    container.querySelector('.conversation-run__toggle')!.after(excluded);
+    expect(select(toggleText, 4, text, 2)).toBeUndefined();
+  });
+
   it('maps a blank footer endpoint to the same reply without including its timestamp', () => {
     const body = '第一段。\n\n最后一段。';
     const { container } = render(<div className="assistant-copy">

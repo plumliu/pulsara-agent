@@ -35,6 +35,24 @@ beforeEach(() => {
 afterEach(() => { cleanup(); store.destroy(); window.getSelection()?.removeAllRanges(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('draft annotation UI', () => {
+  it.each([false, true])('offers an annotation from the upper margin, reverse=%s', async reverse => {
+    const { container } = render(<ResponseAnnotations sessionId="one" store={store} canAnnotate onNotify={() => {}}>
+      <div className="thread-scroll"><section className="conversation-run">
+        <button className="conversation-run__toggle"><span>处理过程</span><svg /></button>
+        <AnnotationBody entryId="entry:a" body={body}>
+          <MarkdownBody annotationSource body={body} onNotify={() => {}} />
+        </AnnotationBody>
+      </section></div>
+    </ResponseAnnotations>);
+    const toggle = container.querySelector('.conversation-run__toggle span')!.firstChild!;
+    const text = container.querySelector('[data-source-text]')!.firstChild!;
+    const selection = window.getSelection()!;
+    selection.setBaseAndExtent(reverse ? text : toggle, reverse ? 8 : 4, reverse ? toggle : text, reverse ? 4 : 8);
+    fireEvent.pointerUp(reverse ? toggle.parentElement! : text.parentElement!);
+    fireEvent.click(await screen.findByRole('button', { name: '添加注释' }));
+    expect(store.annotations('one')[0].value).toEqual(first);
+  });
+
   it('offers and creates an exact annotation when a reverse drag starts in the blank footer', async () => {
     const { container } = render(<ResponseAnnotations sessionId="one" store={store} canAnnotate onNotify={() => {}}>
       <div className="thread-scroll"><div className="assistant-copy">
