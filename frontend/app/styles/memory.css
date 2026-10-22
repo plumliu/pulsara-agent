@@ -3,7 +3,7 @@
 .memory-layout { display: flex; align-items: flex-start; gap: 22px; max-width: 1100px; padding: 0 32px; margin: 24px auto; }
 .memory-layout.has-detail { max-width: 1320px; }
 .memory-reconnect { margin-top: 20px; }
-.memory-main { flex: 1; min-width: 0; }
+.memory-main { flex: 1; min-width: 0; view-transition-name: memory-collection; }
 .memory-view button, .memory-view input, .memory-view select { font-size: 14px; }
 .memory-view button { transition: background .15s ease, border-color .15s ease, color .15s ease; }
 .memory-view button:disabled { opacity: .5; cursor: default; }
@@ -38,30 +38,39 @@
 .memory-filters button { min-height: 30px; padding: 4px 10px; border-radius: 6px; }
 
 .memory-list { padding: 5px 10px; }
-.memory-row { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr) 16px; align-items: start; gap: 12px; width: 100%; padding: 19px 12px; text-align: left; color: var(--ink); background: transparent; border-bottom: 1px solid var(--line); }
+.memory-row { position: relative; display: grid; grid-template-columns: 30px minmax(0, 1fr) 16px; align-items: start; gap: 10px; width: 100%; padding: 13px 12px; text-align: left; color: var(--ink); background: transparent; border-bottom: 1px solid var(--line); }
 .memory-row:last-child { border-bottom: 0; }
 .memory-row:hover { background: color-mix(in srgb, var(--paper-deep) 55%, transparent); border-radius: 9px; }
 .memory-row.is-selected { background: color-mix(in srgb, var(--amber-soft) 46%, var(--paper-raised)); border-radius: 9px; }
-.memory-row.is-selected::before { content: ''; position: absolute; inset: 20px auto 20px 0; width: 2px; border-radius: 2px; background: var(--amber); }
-.memory-row-icon { display: grid; place-items: center; width: 34px; height: 34px; margin-top: 2px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: var(--paper-deep); }
+.memory-row.is-selected::before { content: ''; position: absolute; inset: 14px auto 14px 0; width: 2px; border-radius: 2px; background: var(--amber); }
+.memory-row-icon { display: grid; place-items: center; align-self: start; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: var(--paper-deep); }
+.memory-row-icon { transition: background .18s ease, border-color .18s ease, color .18s ease; }
 .memory-row.is-selected .memory-row-icon { color: var(--amber); background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber) 18%, var(--line)); }
-.memory-row-chevron { align-self: center; color: var(--faint); }
+.memory-row-chevron { align-self: start; margin-top: 5.2px; color: var(--faint); transition: transform .2s cubic-bezier(.2,.8,.2,1), color .18s ease; }
+.memory-row:is(:hover, :focus-visible) .memory-row-chevron { transform: translateX(2px); color: var(--amber); }
+.memory-row:active:not(:disabled) .memory-row-chevron { transform: translateX(3px); }
+.memory-list, .memory-empty, .memory-editor, .memory-feedback { animation: memory-content-in .18s ease-out; }
 .memory-row-copy { min-width: 0; }
+.memory-row-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; margin-bottom: 5px; }
+.memory-row .memory-statement { margin: 0; line-height: 1.65; }
+.memory-row-heading time { color: var(--faint); font-size: 12px; line-height: 26.4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .memory-statement { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 16px; line-height: 1.8; margin: 0 0 10px; }
 .memory-metadata { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; line-height: 1.6; color: var(--muted); }
 .memory-kind { padding: 2px 6px; border-radius: 5px; background: var(--paper-deep); color: var(--ink-soft); }
 .memory-metadata time { margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
-.memory-usage { display: flex; align-items: center; gap: 5px; margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.memory-usage { display: flex; align-items: center; gap: 5px; margin: 5px 0 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.memory-usage.is-preference { color: var(--blue); }
+.memory-usage > svg { flex: none; }
 .memory-usage.is-conflicted { color: var(--amber); }
 .memory-empty, .memory-loading { display: grid; justify-items: center; align-content: center; min-height: 330px; padding: 44px 28px; text-align: center; color: var(--muted); }
 .memory-empty-icon { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 17px; background: var(--paper-deep); color: var(--amber); }
 .memory-empty h2 { margin: 0; font-family: var(--serif); color: var(--ink); font-size: 22px; font-weight: 500; }
 .memory-empty p, .memory-loading p { max-width: 370px; margin: 12px 0 0; font-size: 14px; line-height: 1.9; }
-.memory-more, .memory-source { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); }
+.memory-more { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); }
 .memory-more { display: flex; margin: 16px auto 0; }
-.memory-more:hover, .memory-source:hover { border-color: var(--line-strong); color: var(--ink); }
+.memory-more:hover { border-color: var(--line-strong); color: var(--ink); }
 
-.memory-detail { width: min(40%, 460px); min-width: 320px; overflow: hidden; font-size: 14px; line-height: 1.8; }
+.memory-detail { width: min(40%, 460px); min-width: 320px; overflow: hidden; font-size: 14px; line-height: 1.8; view-transition-name: memory-detail; }
 .memory-detail > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .memory-detail-heading { display: flex; align-items: center; gap: 10px; }
 .memory-detail-loading { margin-left: auto; color: var(--muted); font-size: 12px; }
@@ -69,13 +78,12 @@
 .memory-detail h2 { margin: 0; font-family: var(--serif); font-size: 21px; font-weight: 500; }
 .memory-detail header button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: transparent; color: var(--muted); }
 .memory-detail header button:hover { background: var(--paper-deep); color: var(--ink); }
-.memory-detail-body { padding: 22px; }
+.memory-detail-body { padding: 20px 22px 18px; animation: memory-content-in .2s ease-out; }
 .memory-detail-body > .memory-statement { font-family: var(--serif); font-size: 18px; line-height: 1.9; }
-.memory-detail h3 { margin: 24px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 14px; font-weight: 600; color: var(--ink); }
 .memory-detail p { overflow-wrap: anywhere; white-space: pre-wrap; }
 .memory-detail-body > p:not(.memory-statement) { color: var(--muted); }
 .memory-detail-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-.memory-detail-actions .memory-source, .memory-detail-actions .memory-delete { margin-top: 0; }
+.memory-detail-actions .memory-delete { margin-top: 0; }
 .memory-edit { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--ink-soft); }
 .memory-edit:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
 .memory-edit:disabled { opacity: .5; cursor: default; }
@@ -90,9 +98,7 @@
 .memory-editor-actions button:last-child { background: var(--ink); color: var(--paper); }
 .memory-editor-actions button:disabled { opacity: .5; cursor: default; }
 .memory-edited-note { margin-top: 10px; }
-.memory-detail-unavailable { color: var(--faint); font-size: 12px; }
-.memory-graph { margin-top: 24px; }
-.memory-graph h3 { margin: 0 0 15px; padding-top: 16px; }
+.memory-graph { margin-top: 16px; }
 .memory-graph-current, .memory-graph-node { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); text-align: left; }
 .memory-graph-current { border-color: color-mix(in srgb, var(--amber) 42%, var(--line)); background: color-mix(in srgb, var(--amber-soft) 22%, var(--paper)); }
 .memory-graph-caption { color: var(--muted); font-size: 11px; line-height: 1.5; }
@@ -106,9 +112,8 @@
 .memory-graph-edge svg { color: var(--amber); }
 .memory-graph-node { margin-top: 3px; cursor: pointer; }
 .memory-graph-node:hover:not(:disabled) { border-color: var(--amber); background: var(--paper-raised); }
-.memory-graph-origin { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 7px; padding: 5px 2px 8px; color: var(--faint); font-size: 11px; line-height: 1.5; }
-.memory-graph-origin button { display: inline-flex; align-items: center; gap: 2px; padding: 0; background: transparent; color: var(--muted); font-size: 11px; }
-.memory-graph-origin button:hover { color: var(--ink); text-decoration: underline; }
+.memory-view .memory-graph-node { transition: background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease; }
+.memory-graph-node:active:not(:disabled) { transform: translateY(1px); }
 .memory-graph-empty { margin: 12px 0 0; color: var(--faint); font-size: 12px; }
 .memory-graph-more { margin: 9px 0 0 40px; padding: 5px 0; background: transparent; color: var(--muted); font-size: 12px; }
 .memory-delete { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; margin-top: 22px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--red) 22%, var(--line)); border-radius: 8px; color: var(--red); background: transparent; }
@@ -119,8 +124,8 @@
 .memory-feedback > svg { flex: none; margin-top: 3px; }
 .memory-error.memory-feedback { background: color-mix(in srgb, var(--red-soft) 45%, transparent); }
 .memory-notice > svg { color: var(--green); }
-.memory-delete-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 20px; background: rgba(18,17,14,.3); backdrop-filter: blur(3px); }
-.memory-delete-dialog { display: flex; flex-direction: column; width: min(680px,100%); max-height: calc(100dvh - 40px); min-height: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--paper-solid); box-shadow: var(--shadow-lg); color: var(--ink); font-family: var(--sans); }
+.memory-delete-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 20px; background: rgba(18,17,14,.3); backdrop-filter: blur(3px); animation: fade-in .15s ease-out; }
+.memory-delete-dialog { display: flex; flex-direction: column; width: min(680px,100%); max-height: calc(100dvh - 40px); min-height: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--paper-solid); box-shadow: var(--shadow-lg); color: var(--ink); font-family: var(--sans); animation: dialog-in .2s cubic-bezier(.2,.8,.2,1); }
 .memory-delete-dialog :is(button, input, summary):focus-visible { outline: 2px solid var(--ink-soft); outline-offset: 2px; }
 .memory-delete-dialog button { font-size: 14px; }
 .memory-delete-dialog button:disabled { opacity: .48; cursor: default; }
@@ -173,11 +178,29 @@
 .memory-delete-dialog > footer .memory-delete-confirm { border-color: color-mix(in srgb, var(--red) 40%, var(--line)); background: var(--red); color: white; }
 .memory-delete-dialog > footer .memory-delete-confirm:not(:disabled):hover { filter: brightness(.94); }
 
+/* Only the collection and detail take part; the rest of the app stays still.
+   Native snapshots animate removal without keeping stale controls mounted. */
+:root:active-view-transition-type(memory-detail)::view-transition { pointer-events: none; }
+:root:active-view-transition-type(memory-detail)::view-transition-group(root) { animation: none; }
+:root:active-view-transition-type(memory-detail)::view-transition-old(root),
+:root:active-view-transition-type(memory-detail)::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+:root:active-view-transition-type(memory-detail)::view-transition-group(memory-collection),
+:root:active-view-transition-type(memory-detail)::view-transition-group(memory-detail) { animation-duration: .24s; animation-timing-function: cubic-bezier(.2,.8,.2,1); }
+:root:active-view-transition-type(memory-detail)::view-transition-group(memory-collection) { overflow: clip; }
+:root:active-view-transition-type(memory-detail)::view-transition-new(memory-detail):only-child { animation: memory-detail-in .24s cubic-bezier(.2,.8,.2,1); }
+:root:active-view-transition-type(memory-detail)::view-transition-old(memory-detail):only-child { animation: memory-detail-out .18s ease-in both; }
+@keyframes memory-content-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes memory-detail-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+@keyframes memory-detail-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(8px); } }
+
 @media (max-width: 1000px) {
   .memory-layout { flex-direction: column; max-width: 850px; }
   .memory-main, .memory-detail { width: 100%; min-width: 0; }
   .memory-layout.has-detail { max-width: 850px; }
+  :root:active-view-transition-type(memory-detail)::view-transition-new(memory-detail):only-child { animation-name: memory-content-in; }
+  :root:active-view-transition-type(memory-detail)::view-transition-old(memory-detail):only-child { animation-name: memory-content-out; }
 }
+@keyframes memory-content-out { to { opacity: 0; transform: translateY(4px); } }
 @media (max-width: 600px) {
   .memory-layout { padding: 0 16px; margin-top: 18px; }
   .memory-scope-header { grid-template-columns: minmax(0, 1fr); }
@@ -187,12 +210,12 @@
   .memory-state-select { margin-left: auto; }
   .memory-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .memory-filters button { padding: 5px 4px; font-size: 12px; }
-  .memory-row { grid-template-columns: 30px minmax(0, 1fr); padding: 16px 6px; gap: 10px; }
-  .memory-row-icon { width: 28px; height: 30px; }
-  .memory-row-chevron { display: none; }
+  .memory-row { padding: 12px 6px; gap: 8px; }
+  .memory-row-heading { gap: 8px; }
+  .memory-row-heading time { font-size: 11px; }
   .memory-metadata time { flex-basis: 100%; margin-left: 0; }
   .memory-empty { min-height: 300px; padding: 36px 22px; }
-  .memory-detail-body { padding: 18px; }
+  .memory-detail-body { padding: 16px 18px; }
   .memory-feedback { margin: 12px 14px; }
   .memory-delete-overlay { padding: 10px; }
   .memory-delete-dialog { max-height: calc(100dvh - 20px); }

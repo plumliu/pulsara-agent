@@ -132,19 +132,13 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                     deadline_monotonic=monotonic() + 30,
                 ) as database:
                     observed_facts = database.execute(
-                        "SELECT f.id, f.statement, s.workspace_id, b.tool_name "
-                        "FROM pulsara_v3.memory_facts f "
-                        "JOIN pulsara_v3.tool_results tr "
-                        "ON tr.id=f.created_by_tool_result_id "
-                        "JOIN pulsara_v3.sessions s "
-                        "ON s.id=tr.session_id "
-                        "AND s.memory_domain_id=f.memory_domain_id "
-                        "JOIN pulsara_v3.assistant_message_blocks b "
-                        "ON b.session_id=tr.session_id "
-                        "AND b.assistant_entry_id=tr.tool_call_entry_id "
-                        "AND b.tool_call_id=tr.tool_call_id "
-                        "WHERE tr.session_id=%s AND f.fact_kind='FACT' "
-                        "AND f.context_id<>'ctx:global' ORDER BY f.accepted_at",
+                        "SELECT f.id, f.statement, f.context_id FROM pulsara_v3.memory_facts f "
+                        "WHERE f.id IN (SELECT r.model_visible_memory_fact_ids[1] "
+                        "FROM pulsara_v3.tool_results r JOIN pulsara_v3.assistant_message_blocks b "
+                        "ON b.session_id=r.session_id AND b.assistant_entry_id=r.tool_call_entry_id "
+                        "AND b.tool_call_id=r.tool_call_id WHERE r.session_id=%s "
+                        "AND r.result_state='SUCCESS' AND b.tool_name='remember') "
+                        "AND f.fact_kind='FACT' AND f.context_id<>'ctx:global' ORDER BY f.accepted_at",
                         (session_id,),
                     ).fetchall()
                     observed_tool_calls = database.execute(
@@ -156,10 +150,6 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                     item[0] == "read_file" for item in observed_tool_calls
                 ):
                     raise RuntimeError("real model did not read the file and save one project FACT")
-                if str(observed_facts[0][3]) != "remember":
-                    raise RuntimeError(
-                        "project FACT was not owned by its canonical remember ToolResult"
-                    )
                 project_source_id = str(observed_facts[0][0])
                 project_workspace_id = str(observed_facts[0][2])
                 if marker not in str(observed_facts[0][1]) or "A 楼" not in str(observed_facts[0][1]):
@@ -200,20 +190,19 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                     deadline_monotonic=monotonic() + 30,
                 ) as database:
                     facts = database.execute(
-                        "SELECT f.id, f.lifecycle, f.fact_kind, f.statement "
-                        "FROM pulsara_v3.memory_facts f "
-                        "JOIN pulsara_v3.tool_results tr "
-                        "ON tr.id=f.created_by_tool_result_id "
-                        "WHERE tr.session_id=%s ORDER BY f.accepted_at, f.id",
+                        "SELECT f.id, f.lifecycle, f.fact_kind, f.statement FROM pulsara_v3.memory_facts f "
+                        "WHERE f.id IN (SELECT r.model_visible_memory_fact_ids[1] "
+                        "FROM pulsara_v3.tool_results r JOIN pulsara_v3.assistant_message_blocks b "
+                        "ON b.session_id=r.session_id AND b.assistant_entry_id=r.tool_call_entry_id "
+                        "AND b.tool_call_id=r.tool_call_id WHERE r.session_id=%s "
+                        "AND r.result_state='SUCCESS' AND b.tool_name='remember') ORDER BY f.accepted_at, f.id",
                         (session_id,),
                     ).fetchall()
                     relations = database.execute(
                         "SELECT mr.relation_kind, mr.source_fact_id, "
                         "mr.target_fact_id FROM pulsara_v3.memory_relations mr "
-                        "JOIN pulsara_v3.tool_results tr "
-                        "ON tr.id=mr.created_by_tool_result_id "
-                        "WHERE tr.session_id=%s",
-                        (session_id,),
+                        "WHERE mr.source_fact_id=ANY(%s) AND mr.target_fact_id=ANY(%s)",
+                        ([str(row[0]) for row in facts], [str(row[0]) for row in facts]),
                     ).fetchall()
                     q4_remember = database.execute(
                         """

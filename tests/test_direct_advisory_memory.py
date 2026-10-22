@@ -4,6 +4,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import asyncio
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
@@ -13,7 +14,7 @@ from time import monotonic
 
 import psycopg
 import pytest
-from psycopg.errors import CheckViolation, ForeignKeyViolation, InsufficientPrivilege
+from psycopg.errors import CheckViolation, InsufficientPrivilege
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.memory.contracts import (
@@ -95,10 +96,11 @@ def _open_direct_memory_session(repository, *, workspace_root: str | None = None
         deadline_monotonic=monotonic() + 30,
     )
 
-    def invoke(name: str, arguments: dict, mutation):
+    def invoke(name: str, arguments: dict, mutation, *, active_turn_id: str | None = None):
         deadline = monotonic() + 30
+        invocation_turn_id = active_turn_id or turn_id
         cut = repository.prepare_provider_input_cut(
-            lease.guard, turn_id=turn_id, deadline_monotonic=deadline
+            lease.guard, turn_id=invocation_turn_id, deadline_monotonic=deadline
         )
         assistant_entry_id = _name("entry")
         call_id = _name("call")
@@ -136,7 +138,7 @@ def _open_direct_memory_session(repository, *, workspace_root: str | None = None
             workspace_id=workspace_id,
             result_id=_name("result"),
             result_entry_id=_name("entry"),
-            turn_id=turn_id,
+            turn_id=invocation_turn_id,
             assistant_entry_id=assistant_entry_id,
             tool_call_id=call_id,
             attempt_id=attempt.attempt_id,
@@ -269,13 +271,11 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
     assert changed["fact"]["updated_at"] != before["fact"]["updated_at"]
     after = detail(current["memory_id"])
     assert after["user_edited_at"] == changed["user_edited_at"]
-    assert after["source"] == before["source"]
     assert [r["relation_id"] for r in after["relations"]] == [
         r["relation_id"] for r in before["relations"]
     ]
-    assert [r["owner"] for r in after["relations"]] == [
-        r["owner"] for r in before["relations"]
-    ]
+    assert [(r["relative_role"], r["recorded_at"], r["companion"]) for r in after["relations"]] == [
+        (r["relative_role"], r["recorded_at"], r["companion"]) for r in before["relations"]]
     assert after["fact"]["lifecycle"] == "ACTIVE"
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -398,54 +398,27 @@ def test_user_text_edit_obeys_original_scope_and_kind_limits(direct_memory_sessi
     assert after["user_edited_at"] is None
 
 
-def test_memory_page_projects_fact_creator_and_relation_owner(
-    direct_memory_session,
-):
-    repository, lease, invoke, remember = direct_memory_session
-    _, original, _ = remember("The delivery date is Friday.")
-    _, revised, _ = remember("The delivery date is Monday.")
-    invoke(
-        "mark_memory_relation",
-        {
-            "source_memory_id": revised["memory_id"],
-            "target_memory_id": original["memory_id"],
-            "relation_kind": "SUPERSEDES",
-        },
-        PreparedMemoryRelationWrite(
-            memory_domain_id="u_local",
-            source_memory_id=revised["memory_id"],
-            target_memory_id=original["memory_id"],
-            relation_kind=MemoryRelationKind.SUPERSEDES,
-        ),
-    )
-    detail = repository.memory_management_detail(
-        memory_domain_id="u_local",
-        selection=MemoryManagementSelection(),
-        fact_id=revised["memory_id"],
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert "supporting_results" not in detail
-    owner = detail["relations"][0]["owner"]
-    assert owner["write_tool"] == "mark_memory_relation"
-    assert owner["source"]["availability"] == "OPEN"
-    assert owner["source"]["locator"]["session_id"] == lease.guard.session_id
-    assert (
-        owner["source"]["locator"]["entry_id"]
-        != detail["source"]["locator"]["entry_id"]
-    )
-
-    _, dependent, _ = remember(
-        "The timeline depends on the revised delivery date.",
-        based_on=(revised["memory_id"],),
-    )
-    basis_detail = repository.memory_management_detail(
-        memory_domain_id="u_local",
-        selection=MemoryManagementSelection(),
-        fact_id=dependent["memory_id"],
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert basis_detail["relations"][0]["owner"]["write_tool"] == "remember"
-    assert basis_detail["relations"][0]["owner"]["source"] == basis_detail["source"]
+def test_memory_page_returns_facts_and_relations_without_creation_metadata(direct_memory_session):
+    repository, _lease, invoke, remember = direct_memory_session
+    _, old, _ = remember("The delivery date is Friday.")
+    _, current, _ = remember("The delivery date is Monday.")
+    _, relation, _ = invoke("mark_memory_relation", {
+        "source_memory_id": current["memory_id"], "target_memory_id": old["memory_id"],
+        "relation_kind": "SUPERSEDES",
+    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["memory_id"],
+        target_memory_id=old["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
+    _, dependent, _ = remember("Prepare against the revised delivery date.", based_on=(current["memory_id"],))
+    for fact_id in (current["memory_id"], dependent["memory_id"]):
+        detail = repository.memory_management_detail(memory_domain_id="u_local",
+            selection=MemoryManagementSelection(), fact_id=fact_id, deadline_monotonic=monotonic()+30)
+        assert set(detail) == {"fact", "user_edited_at", "relations", "next_cursor"}
+        assert detail["fact"]["fact_id"] == fact_id
+        assert detail["relations"]
+        assert all(set(item) == {"relation_id", "subject", "companion", "relative_role", "recorded_at"}
+                   for item in detail["relations"])
+    assert relation["relation_id"] in {r["relation_id"] for r in repository.memory_management_detail(
+        memory_domain_id="u_local", selection=MemoryManagementSelection(), fact_id=current["memory_id"],
+        deadline_monotonic=monotonic()+30)["relations"]}
 
 
 def test_memory_project_list_contains_only_projects_with_persisted_facts(
@@ -490,8 +463,7 @@ def test_memory_project_list_contains_only_projects_with_persisted_facts(
         fact_id=project_fact["memory_id"],
         deadline_monotonic=deadline(),
     )
-    assert detail["source"]["availability"] == "OPEN"
-    assert detail["source"]["locator"]["session_id"] == lease.guard.session_id
+    assert "source" not in detail
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local",
         selection=selection,
@@ -538,11 +510,11 @@ def test_project_memory_directory_survives_zero_sessions_and_pages_stably(
             ([item[0] for item in created],),
         ).fetchone() == (0,)
         rows = connection.execute(
-            "SELECT id,created_by_tool_result_id FROM pulsara_v3.memory_facts "
+            "SELECT id FROM pulsara_v3.memory_facts "
             "WHERE id=ANY(%s) ORDER BY id",
             ([item[2] for item in created],),
         ).fetchall()
-    assert rows == sorted((item[2], None) for item in created)
+    assert rows == sorted((item[2],) for item in created)
 
     first = repository.memory_management_projects(
         memory_domain_id="u_local", limit=1,
@@ -596,10 +568,7 @@ def test_direct_save_duplicate_relation_and_deleted_ack(direct_memory_session):
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         rows = connection.execute(
-            "SELECT f.id,f.lifecycle,r.session_id,f.created_by_tool_result_id "
-            "FROM pulsara_v3.memory_facts AS f "
-            "JOIN pulsara_v3.tool_results AS r "
-            "ON r.id=f.created_by_tool_result_id "
+            "SELECT f.id,f.lifecycle FROM pulsara_v3.memory_facts AS f "
             "WHERE f.id=ANY(%s::text[]) ORDER BY f.id",
             ([first["memory_id"], updated["memory_id"]],),
         ).fetchall()
@@ -607,179 +576,53 @@ def test_direct_save_duplicate_relation_and_deleted_ack(direct_memory_session):
         first["memory_id"]: "SUPERSEDED",
         updated["memory_id"]: "ACTIVE",
     }
-    assert all(str(row[2]) == lease.guard.session_id for row in rows)
 
 
-def test_owner_is_immutable_until_tool_result_deletion_then_projects_deleted_source(
-    direct_memory_session,
-    stage2_migrated_postgres_database,
-    tmp_path,
+def test_memory_rows_survive_tool_history_deletion_and_remain_editable(
+    direct_memory_session, stage2_migrated_postgres_database,
 ):
-    repository, lease, invoke, remember = direct_memory_session
-    _, old, old_candidate = remember("The launch room is A.")
-    _, current, current_candidate = remember("The launch room is B.")
-    _, relation, relation_candidate = invoke(
-        "mark_memory_relation",
-        {
-            "source_memory_id": current["memory_id"],
-            "target_memory_id": old["memory_id"],
-            "relation_kind": "SUPERSEDES",
-        },
-        PreparedMemoryRelationWrite(
-            memory_domain_id="u_local",
-            source_memory_id=current["memory_id"],
-            target_memory_id=old["memory_id"],
-            relation_kind=MemoryRelationKind.SUPERSEDES,
-        ),
-    )
-
-    with pytest.raises(CheckViolation, match="owner cannot be cleared"):
-        with repository.connection_provider.connection(
-            lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
-            deadline_monotonic=monotonic() + 30,
-        ) as connection:
-            connection.execute(
-                "UPDATE pulsara_v3.memory_facts "
-                "SET created_by_tool_result_id=NULL WHERE id=%s",
-                (current["memory_id"],),
-            )
-            connection.execute("SET CONSTRAINTS ALL IMMEDIATE")
-
-    with pytest.raises(CheckViolation, match="immutable fields"):
-        with repository.connection_provider.connection(
-            lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
-            deadline_monotonic=monotonic() + 30,
-        ) as connection:
-            connection.execute(
-                "UPDATE pulsara_v3.memory_facts "
-                "SET created_by_tool_result_id=%s WHERE id=%s",
-                (old_candidate.result_id, current["memory_id"]),
-            )
-
-    with pytest.raises(InsufficientPrivilege):
-        with repository.connection_provider.connection(
-            lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
-            deadline_monotonic=monotonic() + 30,
-        ) as connection:
-            connection.execute(
-                "UPDATE pulsara_v3.memory_relations SET ordinal=0 WHERE id=%s",
-                (relation["relation_id"],),
-            )
-
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-        connection.execute(
-            "DELETE FROM pulsara_v3.tool_results WHERE id=ANY(%s::text[])",
-            ([current_candidate.result_id, relation_candidate.result_id],),
-        )
-
-    detail = repository.memory_management_detail(
-        memory_domain_id="u_local",
-        selection=MemoryManagementSelection(),
-        fact_id=current["memory_id"],
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert detail["source"] == {"availability": "DELETED", "locator": None}
-    assert detail["relations"][0]["owner"] == {
-        "write_tool": "mark_memory_relation",
-        "source": {"availability": "DELETED", "locator": None},
-    }
-
-    with pytest.raises(CheckViolation, match="immutable fields"):
-        with psycopg.connect(
-            stage2_migrated_postgres_database.admin_dsn
-        ) as connection:
-            connection.execute(
-                "UPDATE pulsara_v3.memory_facts "
-                "SET created_by_tool_result_id=%s WHERE id=%s",
-                (old_candidate.result_id, current["memory_id"]),
-            )
-
-    before_edit = detail["fact"]["updated_at"]
-    edited = repository.memory_management_edit_statement(
-        memory_domain_id="u_local",
-        selection=MemoryManagementSelection(),
-        fact_id=current["memory_id"],
-        statement="The launch room is B after source deletion.",
-        expected_updated_at=before_edit,
-        deadline_monotonic=monotonic() + 30,
-    )
+    repository, _lease, invoke, remember = direct_memory_session
+    _, old, old_call = remember("The launch room is A.")
+    accepted, current, current_call = remember("The launch room is B.")
+    _, relation, relation_call = invoke("mark_memory_relation", {
+        "source_memory_id": current["memory_id"], "target_memory_id": old["memory_id"],
+        "relation_kind": "SUPERSEDES",
+    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["memory_id"],
+        target_memory_id=old["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
+    ids = [old["memory_id"], current["memory_id"]]
+    def rows():
+        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
+            return (c.execute("SELECT * FROM pulsara_v3.memory_facts WHERE id=ANY(%s) ORDER BY id", (ids,)).fetchall(),
+                    c.execute("SELECT * FROM pulsara_v3.memory_relations WHERE id=%s", (relation["relation_id"],)).fetchall())
+    before = rows()
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
+        c.execute("DELETE FROM pulsara_v3.tool_results WHERE id=ANY(%s)",
+                  ([old_call.result_id, current_call.result_id, relation_call.result_id],))
+    assert rows() == before
+    detail = repository.memory_management_detail(memory_domain_id="u_local", selection=MemoryManagementSelection(),
+        fact_id=current["memory_id"], deadline_monotonic=monotonic()+30)
+    assert set(detail) == {"fact", "relations", "user_edited_at", "next_cursor"}
+    edited = repository.memory_management_edit_statement(memory_domain_id="u_local", selection=MemoryManagementSelection(),
+        fact_id=current["memory_id"], statement="The launch room is B after history deletion.",
+        expected_updated_at=detail["fact"]["updated_at"], deadline_monotonic=monotonic()+30)
     assert edited["changed"] is True
-    assert edited["fact"]["statement"].endswith("source deletion.")
-
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        workspace_id = connection.execute(
-            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
-            (lease.guard.session_id,),
-        ).fetchone()[0]
-    binding = freeze_memory_read_context_binding(
-        domain=MemoryDomainContext("u_local", "project", stable_project_key="test"),
-        host_workspace_id=str(workspace_id),
-    )
-
-    async def read_memory_after_source_deletion():
-        io = KernelSessionIO()
-        port = KernelMemoryToolPort(
-            repository=repository,
-            session_id=lease.guard.session_id,
-            read_binding=binding,
-            embedding_config=EmbeddingBackendConfig(),
-            io_owner=io,
-            settings=LocalSettingsStore(tmp_path / "settings.yaml"),
-        )
-        try:
-            return json.loads(
-                (await port._get({"memory_id": current["memory_id"]})).content
-            )
-        finally:
-            await port.aclose()
-            await io.aclose(deadline_monotonic=monotonic() + 10)
-
-    memory = asyncio.run(read_memory_after_source_deletion())
-    assert memory["statement"] == edited["fact"]["statement"]
-    assert memory["lifecycle"] == "ACTIVE"
-    assert memory["relations"][0]["relation_id"] == relation["relation_id"]
-    assert "provenance" not in memory
-
-    _, repeated, _ = invoke(
-        "mark_memory_relation",
-        {
-            "source_memory_id": current["memory_id"],
-            "target_memory_id": old["memory_id"],
-            "relation_kind": "SUPERSEDES",
-        },
-        PreparedMemoryRelationWrite(
-            memory_domain_id="u_local",
-            source_memory_id=current["memory_id"],
-            target_memory_id=old["memory_id"],
-            relation_kind=MemoryRelationKind.SUPERSEDES,
-        ),
-    )
+    _, repeated, _ = invoke("mark_memory_relation", {
+        "source_memory_id": current["memory_id"], "target_memory_id": old["memory_id"],
+        "relation_kind": "SUPERSEDES",
+    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["memory_id"],
+        target_memory_id=old["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
     assert repeated["status"] == "ALREADY_PRESENT"
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        assert connection.execute(
-            "SELECT created_by_tool_result_id FROM pulsara_v3.memory_relations "
-            "WHERE id=%s",
-            (relation["relation_id"],),
-        ).fetchone() == (None,)
-
+    assert repeated["relation_id"] == relation["relation_id"]
+    with pytest.raises(InsufficientPrivilege):
+        with repository.connection_provider.connection(lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
+                deadline_monotonic=monotonic()+30) as c:
+            c.execute("UPDATE pulsara_v3.memory_relations SET ordinal=0 WHERE id=%s", (relation["relation_id"],))
     with pytest.raises(CheckViolation, match="immutable fields"):
-        with psycopg.connect(
-            stage2_migrated_postgres_database.admin_dsn
-        ) as connection:
-            connection.execute(
-                "UPDATE pulsara_v3.memory_relations "
-                "SET relation_kind='CONTRADICTS' WHERE id=%s",
-                (relation["relation_id"],),
-            )
+        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
+            c.execute("UPDATE pulsara_v3.memory_relations SET relation_kind=relation_kind WHERE id=%s", (relation["relation_id"],))
 
 
-def test_deleted_contradiction_owner_keeps_unordered_identity(
+def test_contradiction_identity_survives_tool_history_deletion(
     direct_memory_session,
     stage2_migrated_postgres_database,
 ):
@@ -829,68 +672,21 @@ def test_deleted_contradiction_owner_keeps_unordered_identity(
     }
 
 
-@pytest.mark.parametrize(
-    "bad_arguments",
-    [
-        {"relation_kind": "CONTRADICTS"},
-        {
-            "relation_kind": "CONTRADICTS",
-            "source_memory_id": None,
-            "target_memory_id": None,
-        },
-    ],
-)
-def test_contradiction_owner_requires_non_null_exact_endpoints(
-    direct_memory_session,
-    stage2_migrated_postgres_database,
-    bad_arguments,
+@pytest.mark.parametrize("endpoint_kind", ["DECISION", "USER_PROFILE"])
+def test_relation_endpoint_kinds_must_match_canonical_facts(
+    direct_memory_session, stage2_migrated_postgres_database, endpoint_kind,
 ):
-    _repository, _lease, invoke, remember = direct_memory_session
+    _repository, _lease, _invoke, remember = direct_memory_session
     _, first, _ = remember("The deployment window is Monday.")
     _, second, _ = remember("The deployment window is Tuesday.")
-    _, third, _ = remember("The rollback window is Wednesday.")
-    _, fourth, _ = remember("The rollback window is Thursday.")
-    _, _relation, candidate = invoke(
-        "mark_memory_relation",
-        {
-            "source_memory_id": first["memory_id"],
-            "target_memory_id": second["memory_id"],
-            "relation_kind": "CONTRADICTS",
-        },
-        PreparedMemoryRelationWrite(
-            memory_domain_id="u_local",
-            source_memory_id=first["memory_id"],
-            target_memory_id=second["memory_id"],
-            relation_kind=MemoryRelationKind.CONTRADICTS,
-        ),
-    )
-
-    with pytest.raises(CheckViolation, match="contradiction owner endpoints drifted"):
-        with psycopg.connect(
-            stage2_migrated_postgres_database.admin_dsn
-        ) as connection:
-            connection.execute(
-                "UPDATE pulsara_v3.assistant_message_blocks b "
-                "SET tool_arguments=%s::jsonb FROM pulsara_v3.tool_results r "
-                "WHERE r.id=%s AND b.session_id=r.session_id "
-                "AND b.assistant_entry_id=r.tool_call_entry_id "
-                "AND b.tool_call_id=r.tool_call_id",
-                (json.dumps(bad_arguments), candidate.result_id),
-            )
-            connection.execute(
-                "INSERT INTO pulsara_v3.memory_relations "
-                "(id,memory_domain_id,created_by_tool_result_id,"
-                "source_context_id,source_fact_id,source_fact_kind,relation_kind,"
-                "target_context_id,target_fact_id,target_fact_kind) "
-                "VALUES (%s,'u_local',%s,'ctx:global',%s,'FACT','CONTRADICTS',"
-                "'ctx:global',%s,'FACT')",
-                (
-                    _name("relation"),
-                    candidate.result_id,
-                    third["memory_id"],
-                    fourth["memory_id"],
-                ),
-            )
+    with pytest.raises(CheckViolation, match="endpoint identity drifted"):
+        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
+            c.execute("""INSERT INTO pulsara_v3.memory_relations
+                (id,memory_domain_id,source_context_id,source_fact_id,source_fact_kind,relation_kind,
+                 target_context_id,target_fact_id,target_fact_kind)
+                VALUES (%s,'u_local','ctx:global',%s,%s,'CONTRADICTS','ctx:global',%s,%s)""",
+                (_name("relation"), first["memory_id"], endpoint_kind, second["memory_id"], endpoint_kind))
+            c.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
 
 def test_project_relation_requires_current_workspace_but_global_is_domain_scoped(
@@ -1380,43 +1176,122 @@ def test_direct_writer_rejects_a_memory_body_not_owned_by_the_tool_call(
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.memory_facts AS f "
-            "JOIN pulsara_v3.tool_results AS r "
-            "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s",
-            (lease.guard.session_id,),
+            "SELECT count(*) FROM pulsara_v3.memory_facts WHERE statement=%s",
+            (mutation.statement,),
         ).fetchone() == (0,)
 
 
-def test_memory_insert_cannot_commit_without_its_final_tool_result(
-    direct_memory_session,
-):
+@pytest.mark.parametrize("mismatch", ["domain", "workspace", "call", "kind", "context", "failed_attempt", "absent_attempt"])
+def test_direct_memory_admission_rejects_inconsistent_candidate(direct_memory_session, monkeypatch, mismatch):
+    repository, _lease, _invoke, remember = direct_memory_session
+    accept = repository.accept_tool_result
+    observed = []
+
+    def reject_inconsistent(guard, *, candidate, deadline_monotonic):
+        observed.append(candidate.result_id)
+        mutation = candidate.side_branch.mutation
+        if mismatch == "domain":
+            candidate = replace(candidate, side_branch=replace(candidate.side_branch, mutation=replace(mutation, memory_domain_id="other-domain")))
+        elif mismatch == "workspace":
+            candidate = replace(candidate, workspace_id=_name("workspace"))
+        elif mismatch == "call":
+            candidate = replace(candidate, assistant_entry_id=_name("entry"))
+        elif mismatch in {"kind", "context"}:
+            values = {"kind": MemoryFactKind.DECISION} if mismatch == "kind" else {"context_id": candidate.workspace_id}
+            candidate = replace(candidate, side_branch=replace(candidate.side_branch, mutation=replace(mutation, **values)))
+        elif mismatch == "failed_attempt":
+            candidate = replace(candidate, result_state="SYSTEM_ERROR", tool_result_occurrence=replace(candidate.tool_result_occurrence, payload=freeze_json({"tool_call_id":candidate.tool_call_id, "result_state":"SYSTEM_ERROR"})))
+        else:
+            candidate = replace(candidate, attempt_id=None)
+        return accept(guard, candidate=candidate, deadline_monotonic=deadline_monotonic)
+
+    monkeypatch.setattr(repository, "accept_tool_result", reject_inconsistent)
+    expected = ValueError if mismatch in {"failed_attempt", "absent_attempt"} else ConversationKernelConflict
+    with pytest.raises(expected):
+        remember("An inconsistent candidate cannot save this fact.")
+    assert len(observed) == 1
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as c:
+        assert c.execute("SELECT id FROM pulsara_v3.tool_results WHERE id=%s", (observed[0],)).fetchone() is None
+        assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s", ("An inconsistent candidate cannot save this fact.",)).fetchone() is None
+
+
+def test_direct_memory_writer_rejects_subagent_tool_call(direct_memory_session):
+    from tests.support.subagents import accept_active_subagent_fixture
+
+    repository, lease, invoke, _remember = direct_memory_session
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as c:
+        parent = c.execute("SELECT id FROM pulsara_v3.turns WHERE session_id=%s AND conversation_scope_kind='ROOT'", (lease.guard.session_id,)).fetchone()[0]
+    task = accept_active_subagent_fixture(repository, lease, parent_turn_id=parent, objective="Verify root-only memory writes.")
+    launch = task.launch
+    repository.start_subagent_turn(
+        lease.guard, task_id=task, turn_id=launch.child_turn_id,
+        entry_id=_name("entry"), context_binding_revision_id=_name("binding"),
+        task_start_event_id=launch.task_start.event_id,
+        expected_parent_permission_snapshot=launch.parent_permission_snapshot,
+        content=InlineContent.from_bytes(b"Verify root-only memory writes."),
+        occurred_at=datetime.now(timezone.utc), actor_id=task,
+        deadline_monotonic=monotonic()+30,
+    )
+    mutation = PreparedRememberWrite(memory_domain_id="u_local", context_id=CTX_GLOBAL,
+        kind=MemoryFactKind.FACT, statement="A worker must not save this fact.",
+        basis_refs=(), related=(), retrieval_summary=freeze_json({"status":"COMPLETE"}))
+    with pytest.raises(ConversationKernelConflict, match="root tool call"):
+        invoke("remember", {"statement":mutation.statement, "kind":"FACT", "context_target":"GLOBAL"}, mutation, active_turn_id=launch.child_turn_id)
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as c:
+        assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s", (mutation.statement,)).fetchone() is None
+        assert c.execute("SELECT r.id FROM pulsara_v3.tool_results r JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id AND e.id=r.tool_call_entry_id WHERE e.session_id=%s AND e.turn_id=%s", (lease.guard.session_id,launch.child_turn_id)).fetchall() == []
+
+
+def test_clean_memory_schema_has_no_creation_source(direct_memory_session):
     repository, _lease, _invoke, _remember = direct_memory_session
-    fact_id = _name("memory")
-    missing_result_id = _name("result")
-    with pytest.raises((CheckViolation, ForeignKeyViolation)):
-        with repository.connection_provider.connection(
-            lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
-            deadline_monotonic=monotonic() + 30,
-        ) as connection:
-            connection.execute(
-                "INSERT INTO pulsara_v3.memory_facts "
-                "(id,memory_domain_id,context_id,created_by_tool_result_id,"
-                "lifecycle,fact_kind,statement,fact_semantic_digest) "
-                "VALUES (%s,'u_local','ctx:global',%s,'ACTIVE','FACT',%s,%s)",
-                (
-                    fact_id,
-                    missing_result_id,
-                    "This row has no final ToolResult.",
-                    "sha256:" + "1" * 64,
-                ),
-            )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        assert connection.execute(
-            "SELECT 1 FROM pulsara_v3.memory_facts WHERE id=%s", (fact_id,)
-        ).fetchone() is None
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as c:
+        assert c.execute("""SELECT column_name FROM information_schema.columns
+            WHERE table_schema='pulsara_v3' AND table_name IN ('memory_facts','memory_relations')
+              AND column_name='created_by_tool_result_id'""").fetchall() == []
+        assert c.execute("""SELECT t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='pulsara_v3'
+            AND t.tgname LIKE '%%memory%%lineage%%'""").fetchall() == []
+        assert c.execute("SELECT to_regprocedure('pulsara_v3.enforce_direct_memory_lineage()')").fetchone() == (None,)
+
+
+@pytest.mark.parametrize("operation", ["remember", "relation"])
+def test_memory_mutation_rolls_back_if_tool_result_publication_fails(direct_memory_session, monkeypatch, operation):
+    repository, _lease, invoke, remember = direct_memory_session
+    _, first, _ = remember("Rollback reference A.")
+    _, second, _ = remember("Rollback reference B.")
+    def snapshot():
+        with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                deadline_monotonic=monotonic()+30) as c:
+            return (c.execute("SELECT * FROM pulsara_v3.memory_facts ORDER BY id").fetchall(),
+                    c.execute("SELECT * FROM pulsara_v3.memory_relations ORDER BY id").fetchall())
+    before = snapshot()
+    insert = repository._insert_entry
+    unpublished = []
+    def reject(connection, **kwargs):
+        if str(kwargs["entry_kind"]) == "TOOL_RESULT":
+            unpublished.append(kwargs["entry_id"])
+            # Observe the side effect inside the actual acceptance transaction.
+            if operation == "remember":
+                assert connection.execute("SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s", ("This write must roll back.",)).fetchone()
+            else:
+                assert connection.execute("SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s", (first["memory_id"],)).fetchone()["lifecycle"] == "SUPERSEDED"
+            raise ConversationKernelConflict("injected result publication failure")
+        return insert(connection, **kwargs)
+    monkeypatch.setattr(repository, "_insert_entry", reject)
+    with pytest.raises(ConversationKernelConflict, match="injected result publication failure"):
+        if operation == "remember":
+            remember("This write must roll back.")
+        else:
+            invoke("mark_memory_relation", {"source_memory_id":second["memory_id"],
+                "target_memory_id":first["memory_id"], "relation_kind":"SUPERSEDES"},
+                PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=second["memory_id"],
+                    target_memory_id=first["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
+    assert snapshot() == before
+    assert len(unpublished) == 1
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic()+30) as c:
+        assert c.execute("SELECT id FROM pulsara_v3.transcript_entries WHERE id=%s", (unpublished[0],)).fetchone() is None
+        assert c.execute("SELECT id FROM pulsara_v3.tool_results WHERE result_entry_id=%s", (unpublished[0],)).fetchone() is None
 
 
 def test_relation_repeats_and_late_relation_failure_do_not_undo_saved_fact(
@@ -1508,11 +1383,8 @@ def test_preferences_remain_storable_beyond_projection_head_and_conflicts_are_ex
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         count = connection.execute(
-            "SELECT count(*) FROM pulsara_v3.memory_facts AS f "
-            "JOIN pulsara_v3.tool_results AS r "
-            "ON r.id=f.created_by_tool_result_id "
-            "WHERE r.session_id=%s AND f.fact_kind='RESPONSE_PREFERENCE'",
-            (lease.guard.session_id,),
+            "SELECT count(*) FROM pulsara_v3.memory_facts WHERE id=ANY(%s) AND fact_kind='RESPONSE_PREFERENCE'",
+            (ids,),
         ).fetchone()[0]
     assert count == 20
 
@@ -1605,8 +1477,7 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
         fact_id=saved["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
-    assert page_detail["source"]["availability"] == "OPEN"
-    assert page_detail["source"]["locator"]["session_id"] == lease.guard.session_id
+    assert "source" not in page_detail
 
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30,
@@ -1627,70 +1498,29 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
         fact_id=saved["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
-    assert closed_page["source"] == {
-        "availability": "ARCHIVED",
-        "locator": None,
-    }
+    assert closed_page == page_detail
 
 
-def test_memory_page_rejects_fact_and_relation_owners_from_another_domain(
-    direct_memory_session,
-    stage2_migrated_postgres_database,
-):
-    repository, _lease, _invoke, remember = direct_memory_session
-    _, left, _ = remember("The support window starts on Monday.")
-    _, right, _ = remember("The support window starts on Tuesday.")
-
-    other_workspace_root = uuid4().hex
-    other_workspace_id = workspace_context_id(other_workspace_root)
-    other_lease, other_invoke, other_remember = _open_direct_memory_session(
-        repository,
-        workspace_root=other_workspace_root,
-    )
-    _, other_fact, _ = other_remember("The escalation owner is the release lead.")
-    _, relation, _ = other_invoke(
-        "mark_memory_relation",
-        {
-            "source_memory_id": left["memory_id"],
-            "target_memory_id": right["memory_id"],
-            "relation_kind": "CONTRADICTS",
-        },
-        PreparedMemoryRelationWrite(
-            memory_domain_id="u_local",
-            source_memory_id=left["memory_id"],
-            target_memory_id=right["memory_id"],
-            relation_kind=MemoryRelationKind.CONTRADICTS,
-        ),
-    )
-    def page_detail(memory_id):
-        return repository.memory_management_detail(
-            memory_domain_id="u_local",
-            selection=MemoryManagementSelection(),
-            fact_id=memory_id,
-            deadline_monotonic=monotonic() + 30,
-        )
-
-    assert page_detail(other_fact["memory_id"])["source"]["availability"] == "OPEN"
-    assert page_detail(left["memory_id"])["relations"][0]["relation_id"] == relation["relation_id"]
-
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-        connection.execute(
-            "INSERT INTO pulsara_v3.workspaces "
-            "(memory_domain_id,id,workspace_kind,workspace_root,workspace_label) "
-            "SELECT 'u_other',id,workspace_kind,workspace_root,workspace_label "
-            "FROM pulsara_v3.workspaces "
-            "WHERE memory_domain_id='u_local' AND id=%s",
-            (other_workspace_id,),
-        )
-        connection.execute(
-            "UPDATE pulsara_v3.sessions SET memory_domain_id='u_other' WHERE id=%s",
-            (other_lease.guard.session_id,),
-        )
-
-    with pytest.raises(RuntimeError, match="memory owner lineage is broken"):
-        page_detail(other_fact["memory_id"])
-    with pytest.raises(RuntimeError, match="memory owner lineage is broken"):
-        page_detail(left["memory_id"])
+def test_memory_management_domain_is_independent_of_creation_session(direct_memory_session, stage2_migrated_postgres_database):
+    repository, lease, invoke, remember = direct_memory_session
+    _, first, _ = remember("The review starts at noon.")
+    _, second, _ = remember("The review starts at midnight.")
+    invoke("mark_memory_relation", {"source_memory_id":first["memory_id"], "target_memory_id":second["memory_id"],
+        "relation_kind":"CONTRADICTS"}, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=first["memory_id"],
+        target_memory_id=second["memory_id"], relation_kind=MemoryRelationKind.CONTRADICTS))
+    def detail(domain):
+        return repository.memory_management_detail(memory_domain_id=domain, selection=MemoryManagementSelection(),
+            fact_id=first["memory_id"], deadline_monotonic=monotonic()+30)
+    before = detail("u_local")
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
+        c.execute("""INSERT INTO pulsara_v3.workspaces (memory_domain_id,id,workspace_kind,workspace_root,workspace_label)
+            SELECT 'u_other',id,workspace_kind,workspace_root,workspace_label FROM pulsara_v3.workspaces
+            WHERE memory_domain_id='u_local' AND id=(SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s)""", (lease.guard.session_id,))
+        c.execute("UPDATE pulsara_v3.sessions SET memory_domain_id='u_other' WHERE id=%s", (lease.guard.session_id,))
+    assert detail("u_local") == before
+    with pytest.raises(MemoryManagementError) as error:
+        detail("u_other")
+    assert error.value.status == 404
 
 
 def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(
@@ -1726,20 +1556,32 @@ def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         rows = connection.execute(
-            "SELECT f.id FROM pulsara_v3.memory_facts AS f "
-            "JOIN pulsara_v3.tool_results AS r "
-            "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s",
-            (lease.guard.session_id,),
+            "SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s",
+            (statement,),
         ).fetchall()
     assert rows == [(original["memory_id"],)]
 
 
-def test_exact_tool_result_confirmation_survives_memory_page_deletion(
+def test_exact_tool_result_confirmation_survives_memory_page_edit_and_deletion(
     direct_memory_session,
 ):
     repository, lease, _invoke, remember = direct_memory_session
     accepted, body, candidate = remember("The release note draft is approved.")
     selection = MemoryManagementSelection()
+    detail = repository.memory_management_detail(
+        memory_domain_id="u_local", selection=selection, fact_id=body["memory_id"],
+        deadline_monotonic=monotonic() + 30,
+    )
+    changed = repository.memory_management_edit_statement(
+        memory_domain_id="u_local", selection=selection, fact_id=body["memory_id"],
+        statement="The user has revised the release note draft.",
+        expected_updated_at=detail["fact"]["updated_at"],
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert changed["changed"]
+    assert repository.confirm_tool_result_winner(
+        lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30,
+    ) == accepted
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local",
         selection=selection,

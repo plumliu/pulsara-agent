@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:273ccc187276fc47dad26b51c68011d1c6aebbceb5187be93e5939c2dc031136",
+  "observed_catalog_fingerprint": "sha256:812aaf3157354f2ce2b0b2765ae07128c31a01579cadac3cf3ae4e3d08f80f42",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -56,7 +56,7 @@
   "required_functions": [
     "pulsara_v3.enforce_conversation_kernel_invariants",
     "pulsara_v3.enforce_imported_history_invariants",
-    "pulsara_v3.enforce_direct_memory_lineage",
+    "pulsara_v3.enforce_memory_relation_endpoints",
     "pulsara_v3.seal_memory_fact",
     "pulsara_v3.seal_memory_relation"
   ]

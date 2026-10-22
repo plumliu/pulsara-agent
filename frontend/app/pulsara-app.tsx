@@ -264,7 +264,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const [focusScheduledTaskId, setFocusScheduledTaskId] = useState<string>();
   // Selection feedback is local UI state; only a connected runtime becomes active.
   const [openingSessionId, setOpeningSessionId] = useState('');
-  const [focusSourceEntry, setFocusSourceEntry] = useState<{ sessionId: string; entryId: string }>();
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
   const [taskInventory, setTaskInventory] = useState<AgentTask[]>([]);
   const [taskGroups, setTaskGroups] = useState<AgentTaskGroup[]>([]);
@@ -882,7 +881,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     }
     toolDecisionsRef.current = toolDecisionsRef.current.filter(item => item.sessionId !== sessionId);
     setToolDecisions(toolDecisionsRef.current);
-    setFocusSourceEntry(current => current?.sessionId === sessionId ? undefined : current);
     if (readSavedSessionId() === sessionId) saveSessionId('');
     if (requestedSession.current !== sessionId) return;
     historyReadAbort.current.abort();
@@ -1794,6 +1792,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [activeSessionId, activeView, databaseState, projection.isRunning, runtimeStatus, scheduledApi]);
 
   const navigate = (view: AppView, settingsSection?: SettingsSection, highlightHome = false) => {
+    if (view === 'capabilities') setCapabilityTab('plugins');
     if (view === 'settings') {
       setSettingsInitialSection(settingsSection);
       setSettingsHighlightHome(highlightHome);
@@ -2908,16 +2907,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
   }, [ownsHistoryReader, publishProjection]);
 
-  const locateSourceEntry = useCallback(async (entryId: string, signal: AbortSignal) => {
-    const active = connectionRef.current ?? historyRef.current;
-    if (!active?.locateEntry) throw new Error('本地服务未连接。');
-    const readSignal = AbortSignal.any([signal, historyReadAbort.current.signal]);
-    const next = await active.locateEntry(entryId, readSignal);
-    readSignal.throwIfAborted();
-    if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
-    publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
-  }, [ownsHistoryReader, publishProjection]);
-
   const loadHistory = useCallback(async (windowId?: string, direction?: 'older' | 'newer') => {
     const active = connectionRef.current ?? historyRef.current;
     if (!active?.readHistory) throw new Error('本地服务未连接。');
@@ -3137,7 +3126,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             (skill) => skill.enabled && skill.effective,
           )}
           focusTaskId={undefined}
-          focusSourceEntry={focusSourceEntry}
           focusTaskRevision={0}
           focusTaskHighlighted={false}
           onReconnect={reconnect}
@@ -3163,7 +3151,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onReadToolArtifact={readToolArtifact}
           onReadPromptImage={readPromptImage}
           onLocateAnnotation={locateAnnotationSource}
-          onLocateEntry={locateSourceEntry}
           onReadVisualization={readVisualization}
           onReadVisualizationThumbnail={readVisualizationThumbnail}
           promptDraftStore={promptDraftStore}
@@ -3261,13 +3248,13 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             await reconnectProjectMcp(server);
           }}
           onPickDirectory={() => adapter.pickWorkspaceDirectory()}
-          onOpenUserCapabilities={kind => { setCapabilityTab(kind ?? 'plugins'); navigate('capabilities'); }}
+          onOpenUserCapabilities={kind => { navigate('capabilities'); setCapabilityTab(kind ?? 'plugins'); }}
           onShowProjectScopeNotice={kind => {
             const label = kind === 'skills' ? '技能' : 'MCP';
             notify(`这里添加的${label}仅会应用到当前目录中`, {
               before: `如果需要添加用户级${label}，请在`, label: '能力页', after: '添加',
               href: `#capabilities/${kind}`,
-              onClick: () => { setCapabilityTab(kind); navigate('capabilities'); },
+              onClick: () => { navigate('capabilities'); setCapabilityTab(kind); },
             });
           }}
           onOpenHomeSettings={() => navigate('settings', 'general', true)}
@@ -3338,8 +3325,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         />
       )}
 
-      {activeView === 'scheduled' && <ScheduledTasksView onNotify={notify} focusTaskId={focusScheduledTaskId} modelCatalogLoading={bootstrap?.model_catalog_loading} modelConfigurations={bootstrap?.model_configurations ?? []} onCreateSession={createScheduledSession} api={scheduledApi} sessions={sessionList} ready={databaseState === 'ready' && userServiceStatus === 'online'} onOpenSettings={() => navigate('settings')} onOpenSession={(id, entryId) => { if (entryId) setFocusSourceEntry({ sessionId: id, entryId }); openSession(id); }} />}
-      {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={userServiceStatus} onReconnect={reconnectUserService} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusSourceEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
+      {activeView === 'scheduled' && <ScheduledTasksView onNotify={notify} focusTaskId={focusScheduledTaskId} modelCatalogLoading={bootstrap?.model_catalog_loading} modelConfigurations={bootstrap?.model_configurations ?? []} onCreateSession={createScheduledSession} api={scheduledApi} sessions={sessionList} ready={databaseState === 'ready' && userServiceStatus === 'online'} onOpenSettings={() => navigate('settings')} onOpenSession={openSession} />}
+      {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={userServiceStatus} onReconnect={reconnectUserService} onOpenSettings={() => navigate('settings')} />}
 
       {searchOpen && <SessionSearchDialog adapter={adapter} available={databaseState === 'ready' && Boolean(bootstrap)}
         onClose={() => setSearchOpen(false)} onOpen={session => {

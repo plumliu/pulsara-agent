@@ -162,7 +162,7 @@
     "enforce_imported_history_invariants()": [
       "EXECUTE"
     ],
-    "enforce_direct_memory_lineage()": [
+    "enforce_memory_relation_endpoints()": [
       "EXECUTE"
     ],
     "seal_memory_fact()": [

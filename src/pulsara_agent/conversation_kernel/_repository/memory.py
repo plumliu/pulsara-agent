@@ -240,11 +240,10 @@ class _MemoryOperations(_MemoryManagementOperations):
                 """
                 INSERT INTO pulsara_v3.memory_facts (
                     id, memory_domain_id, context_id,
-                    created_by_tool_result_id,
                     lifecycle, fact_kind, statement, fact_semantic_digest,
                     accepted_at, updated_at
                 ) VALUES (
-                    %s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s
+                    %s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s
                 )
                 ON CONFLICT (memory_domain_id, context_id, fact_semantic_digest)
                     WHERE lifecycle='ACTIVE' DO NOTHING
@@ -254,7 +253,6 @@ class _MemoryOperations(_MemoryManagementOperations):
                     new_id,
                     write.memory_domain_id,
                     write.context_id,
-                    candidate.result_id,
                     write.kind.value,
                     write.statement,
                     write.semantic_digest,
@@ -312,16 +310,15 @@ class _MemoryOperations(_MemoryManagementOperations):
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.memory_relations (
-                        id, memory_domain_id, created_by_tool_result_id,
+                        id, memory_domain_id,
                         source_context_id, source_fact_id, source_fact_kind,
                         relation_kind, target_context_id, target_fact_id,
                         target_fact_kind, supersede_mode, ordinal, accepted_at
-                    ) VALUES (%s,%s,%s,%s,%s,%s,'BASED_ON',%s,%s,%s,NULL,%s,%s)
+                    ) VALUES (%s,%s,%s,%s,%s,'BASED_ON',%s,%s,%s,NULL,%s,%s)
                     """,
                     (
                         relation_id,
                         write.memory_domain_id,
-                        candidate.result_id,
                         write.context_id,
                         memory_id,
                         write.kind.value,
@@ -360,56 +357,6 @@ class _MemoryOperations(_MemoryManagementOperations):
             write.target_memory_id,
             write.relation_kind,
         )
-
-        def require_existing_owner(existing):
-            owner_id = existing["created_by_tool_result_id"]
-            if owner_id is None:
-                return
-            owner = connection.execute(
-                """
-                SELECT r.result_record_kind, r.result_state,
-                       b.tool_name, b.tool_arguments
-                FROM pulsara_v3.tool_results AS r
-                JOIN pulsara_v3.assistant_message_blocks AS b
-                  ON b.session_id=r.session_id
-                 AND b.assistant_entry_id=r.tool_call_entry_id
-                 AND b.tool_call_id=r.tool_call_id
-                WHERE r.id=%s
-                """,
-                (owner_id,),
-            ).fetchone()
-            arguments = None if owner is None else owner["tool_arguments"]
-            owner_source = (
-                None
-                if not isinstance(arguments, dict)
-                else arguments.get("source_memory_id")
-            )
-            owner_target = (
-                None
-                if not isinstance(arguments, dict)
-                else arguments.get("target_memory_id")
-            )
-            owner_endpoints_match = (
-                {owner_source, owner_target}
-                == {str(existing["source_fact_id"]), str(existing["target_fact_id"])}
-                if kind is MemoryRelationKind.CONTRADICTS
-                else (
-                    owner_source == existing["source_fact_id"]
-                    and owner_target == existing["target_fact_id"]
-                )
-            )
-            if (
-                owner is None
-                or owner["result_record_kind"] != "EXECUTED"
-                or owner["result_state"] != "SUCCESS"
-                or owner["tool_name"] != "mark_memory_relation"
-                or not isinstance(arguments, dict)
-                or not owner_endpoints_match
-                or arguments.get("relation_kind") != kind.value
-            ):
-                raise ConversationKernelConflict(
-                    "existing memory relation owner drifted"
-                )
 
         def existing_relation():
             if kind is MemoryRelationKind.CONTRADICTS:
@@ -489,7 +436,6 @@ class _MemoryOperations(_MemoryManagementOperations):
         )
         existing = existing_relation()
         if existing is not None:
-            require_existing_owner(existing)
             if kind is MemoryRelationKind.SUPERSEDES and (
                 target is None or str(target["lifecycle"]) != "SUPERSEDED"
             ):
@@ -529,16 +475,15 @@ class _MemoryOperations(_MemoryManagementOperations):
         connection.execute(
             """
             INSERT INTO pulsara_v3.memory_relations (
-                id, memory_domain_id, created_by_tool_result_id,
+                id, memory_domain_id,
                 source_context_id, source_fact_id, source_fact_kind, relation_kind,
                 target_context_id, target_fact_id, target_fact_kind,
                 supersede_mode, ordinal, accepted_at
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s)
             """,
             (
                 relation_id,
                 write.memory_domain_id,
-                candidate.result_id,
                 str(source["context_id"]),
                 source_id,
                 str(source["fact_kind"]),

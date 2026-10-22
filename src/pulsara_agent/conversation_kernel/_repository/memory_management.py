@@ -288,51 +288,15 @@ class _MemoryManagementOperations:
             if key is not None:
                 require_id(key[-1], "relation")
             row = c.execute(
-                f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation,
-                owner_result.id AS owner_result_id,
-                owner_result.session_id AS origin_session_id,
-                r.tool_call_entry_id AS producer_entry_id,
-                e.turn_id, s.lifecycle AS source_session_lifecycle
+                f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation
                 FROM pulsara_v3.memory_facts f
-                LEFT JOIN pulsara_v3.tool_results owner_result
-                  ON owner_result.id=f.created_by_tool_result_id
-                LEFT JOIN pulsara_v3.tool_results r
-                  ON r.id=owner_result.id
-                LEFT JOIN pulsara_v3.transcript_entries e
-                  ON e.entry_owner_kind='EXECUTED_TURN'
-                 AND e.id=r.tool_call_entry_id AND e.session_id=r.session_id
-                LEFT JOIN pulsara_v3.sessions s
-                  ON s.id=owner_result.session_id
-                 AND s.memory_domain_id=f.memory_domain_id
                 WHERE f.memory_domain_id=%s AND f.context_id=%s AND f.id=%s""",
                 (memory_domain_id, context, fact_id),
             ).fetchone()
             if row is None:
                 raise MemoryManagementError("MEMORY_NOT_FOUND", 404, "这条记忆已不存在")
-            fact_source = self._management_source(
-                created_by_tool_result_id=row["created_by_tool_result_id"],
-                owner_result_id=row["owner_result_id"],
-                session_id=row["origin_session_id"],
-                session_lifecycle=row["source_session_lifecycle"],
-                turn_id=row["turn_id"],
-                entry_id=row["producer_entry_id"],
-            )
             relations = c.execute(
-                """SELECT r.*, owner_result.id AS owner_result_id,
-                       owner_result.session_id AS owner_source_session_id,
-                       owner_result.tool_call_entry_id AS owner_entry_id,
-                       owner_entry.turn_id AS owner_turn_id,
-                       owner_session.lifecycle AS owner_session_lifecycle
-                FROM pulsara_v3.memory_relations r
-                LEFT JOIN pulsara_v3.tool_results owner_result
-                  ON owner_result.id=r.created_by_tool_result_id
-                LEFT JOIN pulsara_v3.sessions owner_session
-                  ON owner_session.id=owner_result.session_id
-                 AND owner_session.memory_domain_id=r.memory_domain_id
-                LEFT JOIN pulsara_v3.transcript_entries owner_entry
-                  ON owner_entry.session_id=owner_result.session_id
-                 AND owner_entry.id=owner_result.tool_call_entry_id
-                 AND owner_entry.entry_owner_kind='EXECUTED_TURN'
+                """SELECT r.* FROM pulsara_v3.memory_relations r
                 WHERE r.memory_domain_id=%s AND (r.source_fact_id=%s OR r.target_fact_id=%s)
                   AND (%s::text IS NULL OR (r.relation_kind,r.accepted_at,r.id)>(%s,%s::timestamptz,%s))
                 ORDER BY r.relation_kind,r.accepted_at,r.id LIMIT %s""",
@@ -368,12 +332,10 @@ class _MemoryManagementOperations:
                     "needs_confirmation": row["needs_confirmation"],
                     "context_label": labels.get(context, "项目记忆"),
                 },
-                "formation": "由对话中的 Pulsara 直接保存；请按需核对内容",
                 "user_edited_at": (
                     row["user_edited_at"].isoformat()
                     if row["user_edited_at"] is not None else None
                 ),
-                "source": fact_source,
                 "relations": [
                     self._management_relation(
                         r,
@@ -482,31 +444,6 @@ class _MemoryManagementOperations:
             ) from exc
 
     @staticmethod
-    def _management_source(
-        *, created_by_tool_result_id, owner_result_id, session_id,
-        session_lifecycle, turn_id, entry_id,
-    ):
-        if created_by_tool_result_id is None:
-            return {"availability": "DELETED", "locator": None}
-        if (
-            owner_result_id is None
-            or session_id is None
-            or session_lifecycle is None
-        ):
-            raise RuntimeError("memory owner lineage is broken")
-        availability = str(session_lifecycle)
-        locator = None
-        if availability == "OPEN":
-            if turn_id is None or entry_id is None:
-                raise RuntimeError("open memory owner locator is broken")
-            locator = {
-                "session_id": session_id,
-                "turn_id": turn_id,
-                "entry_id": entry_id,
-            }
-        return {"availability": availability, "locator": locator}
-
-    @staticmethod
     def _management_relation(relation, subject, companion):
         projected = {
             "relation_id": relation["id"],
@@ -518,21 +455,6 @@ class _MemoryManagementOperations:
             ).value,
             "recorded_at": canonical_memory_recorded_at(relation["accepted_at"]),
         }
-        if "owner_result_id" in relation:
-            projected["owner"] = {
-                "write_tool": (
-                    "remember" if relation["relation_kind"] == "BASED_ON"
-                    else "mark_memory_relation"
-                ),
-                "source": _MemoryManagementOperations._management_source(
-                    created_by_tool_result_id=relation["created_by_tool_result_id"],
-                    owner_result_id=relation["owner_result_id"],
-                    session_id=relation["owner_source_session_id"],
-                    session_lifecycle=relation["owner_session_lifecycle"],
-                    turn_id=relation["owner_turn_id"],
-                    entry_id=relation["owner_entry_id"],
-                ),
-            }
         return projected
 
     def memory_deletion_preview(

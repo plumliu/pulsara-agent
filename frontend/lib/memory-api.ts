@@ -7,17 +7,14 @@ export interface MemoryFact {
 }
 export interface MemoryProject { workspace_id: string; label: string; root: string; last_activity_at: string }
 export interface MemoryPage<T> { items: T[]; next_cursor: string | null }
-export interface MemorySource { session_id: string; turn_id: string; entry_id: string }
-export interface MemorySourceProjection { availability: 'OPEN' | 'ARCHIVED' | 'DELETED'; locator: MemorySource | null }
 export interface MemoryRelation {
   relation_id: string; subject: MemoryFact; companion: MemoryFact;
   relative_role: 'BASED_ON' | 'BASIS_FOR' | 'UPDATES' | 'UPDATED_BY' | 'CONFLICTS_WITH';
-  recorded_at: string; owner: { write_tool: 'remember' | 'mark_memory_relation'; source: MemorySourceProjection };
+  recorded_at: string;
 }
 export interface MemoryDetail {
-  fact: MemoryFact; formation: string;
+  fact: MemoryFact;
   user_edited_at?: string | null;
-  source: MemorySourceProjection;
   relations: MemoryRelation[]; next_cursor: string | null;
 }
 export type MemoryRecord =
@@ -25,7 +22,7 @@ export type MemoryRecord =
   | { type: 'ADDITIONAL_ROOT'; fact_id: string }
   | { type: 'FACT_DELETE'; fact: MemoryFact }
   | { type: 'FACT_RESTORE'; fact: MemoryFact; planned_lifecycle: 'ACTIVE' }
-  | ({ type: 'RELATION_EFFECT'; effect: 'REMOVED' | 'BECOMES_ACTIVE_CONFLICT' } & Omit<MemoryRelation, 'owner'>)
+  | ({ type: 'RELATION_EFFECT'; effect: 'REMOVED' | 'BECOMES_ACTIVE_CONFLICT' } & MemoryRelation)
   | { type: 'RESTORATION_CONFLICT'; subject: MemoryFact; companion: MemoryFact | null; reason: string; group: string }
   | { type: 'END'; counts: Record<string, number> };
 

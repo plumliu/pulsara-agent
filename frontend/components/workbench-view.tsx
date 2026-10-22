@@ -126,6 +126,8 @@ export interface WorkbenchHistory {
   }>;
 }
 
+interface LocatedEntry { sessionId: string; entryId: string }
+
 interface WorkbenchViewProps {
   history?: WorkbenchHistory;
   onLoadHistory?: (windowId?: string, direction?: 'older' | 'newer') => Promise<void>;
@@ -133,10 +135,8 @@ interface WorkbenchViewProps {
   onReadLatestHistory?: (signal: AbortSignal) => Promise<void>;
   onReadProcessEnd?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onRetainHistory?: (interest: import('../lib/runtime-adapter').HistoryResidence) => void;
-  onLocateEntry?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onCompletePaths?: import('../lib/file-reference').CompleteWorkspacePaths;
-  focusSourceEntry?: { sessionId: string; entryId: string };
   workspace: Workspace;
   session: SessionSummary;
   messages: Message[];
@@ -1444,7 +1444,7 @@ export function ConversationMessages({
   focusTaskId,
   focusTaskRevision = 0,
   focusTaskHighlighted = false,
-  focusSourceEntry,
+  focusedEntry,
 }: {
   history?: WorkbenchHistory;
   revealEarlierProcess?: ProcessReadingControls['revealEarlierProcess'];
@@ -1474,7 +1474,7 @@ export function ConversationMessages({
   focusTaskId?: string;
   focusTaskRevision?: number;
   focusTaskHighlighted?: boolean;
-  focusSourceEntry?: WorkbenchViewProps['focusSourceEntry'];
+  focusedEntry?: LocatedEntry;
 }) {
   const toolChainConnections = useMemo(
     () => findToolChainConnections(messages), [messages],
@@ -1521,15 +1521,15 @@ export function ConversationMessages({
   const interruptionBoundaries = new Map<string, string>();
   const flush = () => {
     if (!run.length) return;
-    const sourceInProcess = focusSourceEntry && run.some(message => {
+    const sourceInProcess = focusedEntry && run.some(message => {
       // The accepted answer's body is always mounted outside the disclosure.
       // Its tool-result aliases and tasks still belong to the process.
-      if (message.id === focusSourceEntry.entryId) return !isCompleteAnswer(message, taskFinalAnswerId);
-      return message.sourceEntryIds?.includes(focusSourceEntry.entryId)
-        || message.traces?.some(trace => trace.resultEntryId === focusSourceEntry.entryId);
+      if (message.id === focusedEntry.entryId) return !isCompleteAnswer(message, taskFinalAnswerId);
+      return message.sourceEntryIds?.includes(focusedEntry.entryId)
+        || message.traces?.some(trace => trace.resultEntryId === focusedEntry.entryId);
     });
     const focused = sourceInProcess
-      ? focusSourceEntry
+      ? focusedEntry
       : focusTaskHighlighted && run.some(message => message.subagentRuns?.some(task => task.id === focusTaskId))
         ? focusTaskRevision : undefined;
     const runIds = new Set(run.map(message => message.id));
@@ -1864,8 +1864,7 @@ function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
 const LATEST_FOLLOW_DISTANCE = 20;
 
 export function WorkbenchView({
-  history, onLoadHistory, onReadLatestHistory, onReadProcessEnd, onHydrateEntries, onRetainHistory, onLocateEntry,
-  focusSourceEntry,
+  history, onLoadHistory, onReadLatestHistory, onReadProcessEnd, onHydrateEntries, onRetainHistory,
   workspace,
   session,
   messages,
@@ -2222,7 +2221,7 @@ export function WorkbenchView({
   }, [addOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen]);
   // Page context provides exact marker hosts. A latest control summary alone
   // cannot place a boundary inside a partially loaded history window.
-  const [locatedFocus, setLocatedFocus] = useState<WorkbenchViewProps['focusSourceEntry']>();
+  const [locatedFocus, setLocatedFocus] = useState<LocatedEntry>();
   const currentSessionRef = useRef(session.id);
   const currentHistory = useRef(history); currentHistory.current = history;
   const atLatestHistory = history?.atLatest !== false;
@@ -2295,9 +2294,6 @@ export function WorkbenchView({
       if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
     };
   }, [session.id]);
-  useLayoutEffect(() => {
-    if (focusSourceEntry?.sessionId === session.id) followLatestRef.current = false;
-  }, [focusSourceEntry, session.id]);
   const loadHistory = useCallback((windowId?: string, direction: 'older' | 'newer' = 'older'): Promise<void> => {
     if (!onLoadHistory) return Promise.resolve();
     // Reveal only the resident slice at the top, without navigating back to
@@ -2329,7 +2325,7 @@ export function WorkbenchView({
     loadRequests.current.set(key, request);
     return request;
   }, [onLoadHistory, resetReading, session.id]);
-  const locateEntry = useCallback(async (entryId: string, signal: AbortSignal, annotation = false) => {
+  const locateAnnotation = useCallback(async (entryId: string, signal: AbortSignal) => {
     if (signal.aborted || currentSessionRef.current !== session.id) throw new DOMException('定位已取消', 'AbortError');
     locateRequest.current?.abort();
     setJumpingToLatest(false);
@@ -2343,8 +2339,7 @@ export function WorkbenchView({
     locatingEntry.current = entryId;
     resetReading();
     try {
-      const read = annotation ? onLocateAnnotation : onLocateEntry;
-      if (read) await read(entryId, request.signal);
+      if (onLocateAnnotation) await onLocateAnnotation(entryId, request.signal);
       if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
       readingAnchor.current = undefined;
       setLocatedFocus({ sessionId: owner, entryId });
@@ -2361,16 +2356,7 @@ export function WorkbenchView({
       if (locateRequest.current === request) locatingEntry.current = undefined;
       signal.removeEventListener('abort', abort);
     }
-  }, [onLocateAnnotation, onLocateEntry, resetReading, session.id]);
-  const locateAnnotation = useCallback((entryId: string, signal: AbortSignal) => locateEntry(entryId, signal, true), [locateEntry]);
-  useEffect(() => {
-    if (!focusSourceEntry || focusSourceEntry.sessionId !== session.id) return;
-    const request = new AbortController();
-    void Promise.resolve().then(() => locateEntry(focusSourceEntry.entryId, request.signal)).catch(error => {
-      if (!request.signal.aborted) onNotify('无法定位来源', error instanceof Error ? error.message : '读取失败', 'warning');
-    });
-    return () => request.abort();
-  }, [focusSourceEntry, session.id, locateEntry, onNotify]);
+  }, [onLocateAnnotation, resetReading, session.id]);
 
   const restoreReadingPosition = useCallback((): void => {
     const thread = threadRef.current;
@@ -2912,7 +2898,7 @@ export function WorkbenchView({
             onNotify={onNotify} onFork={onFork} canFork={canControl}
             contextCompactionInProgress={atLatestHistory && contextCompactionInProgress}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
-            focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={locatedFocus?.sessionId === session.id ? locatedFocus : focusSourceEntry} />
+            focusTaskHighlighted={focusTaskHighlighted} focusedEntry={locatedFocus?.sessionId === session.id ? locatedFocus : undefined} />
           {atLatestHistory && conversationSubmissions.map(item => (
             <div key={item.commandId} data-pending-message={item.commandId}
               aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>

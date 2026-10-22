@@ -1539,7 +1539,6 @@ CREATE TABLE pulsara_v3.memory_facts (
     project_workspace_id text GENERATED ALWAYS AS (
         CASE WHEN context_id = 'ctx:global' THEN NULL ELSE context_id END
     ) STORED,
-    created_by_tool_result_id text,
     lifecycle text NOT NULL CHECK (lifecycle IN ('ACTIVE', 'SUPERSEDED')),
     fact_kind text NOT NULL CHECK (fact_kind IN (
         'USER_PROFILE', 'RESPONSE_PREFERENCE', 'FACT', 'DECISION'
@@ -1558,14 +1557,8 @@ CREATE TABLE pulsara_v3.memory_facts (
     FOREIGN KEY (memory_domain_id, project_workspace_id)
         REFERENCES pulsara_v3.workspaces (memory_domain_id, id)
         ON DELETE RESTRICT,
-    FOREIGN KEY (created_by_tool_result_id)
-        REFERENCES pulsara_v3.tool_results (id)
-        ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,
     CHECK (fact_kind <> 'RESPONSE_PREFERENCE' OR octet_length(statement) <= 2048)
 );
-CREATE UNIQUE INDEX uq_pulsara_v3_memory_fact_created_by_result
-    ON pulsara_v3.memory_facts (created_by_tool_result_id)
-    WHERE created_by_tool_result_id IS NOT NULL;
 CREATE INDEX idx_pulsara_v3_memory_fact_project_workspace_fk
     ON pulsara_v3.memory_facts (memory_domain_id, project_workspace_id)
     WHERE project_workspace_id IS NOT NULL;
@@ -1580,7 +1573,6 @@ CREATE INDEX idx_pulsara_v3_memory_bm25 ON pulsara_v3.memory_facts USING bm25
 CREATE TABLE pulsara_v3.memory_relations (
     id text CHECK (id ~ '^relation:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     memory_domain_id text NOT NULL,
-    created_by_tool_result_id text,
     source_context_id text NOT NULL,
     source_fact_id text NOT NULL,
     source_fact_kind text NOT NULL CHECK (source_fact_kind IN (
@@ -1603,9 +1595,6 @@ CREATE TABLE pulsara_v3.memory_relations (
         memory_domain_id, source_context_id, source_fact_id,
         relation_kind, target_context_id, target_fact_id
     ),
-    FOREIGN KEY (created_by_tool_result_id)
-        REFERENCES pulsara_v3.tool_results (id)
-        ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (memory_domain_id, source_context_id, source_fact_id)
         REFERENCES pulsara_v3.memory_facts (
             memory_domain_id, context_id, id
@@ -1637,9 +1626,6 @@ CREATE TABLE pulsara_v3.memory_relations (
             AND source_fact_kind = target_fact_kind)
     )
 );
-CREATE INDEX idx_pulsara_v3_memory_relation_created_by_result_fk
-    ON pulsara_v3.memory_relations (created_by_tool_result_id)
-    WHERE created_by_tool_result_id IS NOT NULL;
 CREATE INDEX idx_pulsara_v3_memory_relation_incoming
     ON pulsara_v3.memory_relations (
         memory_domain_id, target_context_id,
@@ -1677,13 +1663,6 @@ BEGIN
     IF TG_OP = 'UPDATE' AND (
         OLD.memory_domain_id IS DISTINCT FROM NEW.memory_domain_id OR
         OLD.context_id IS DISTINCT FROM NEW.context_id OR
-        (
-            OLD.created_by_tool_result_id IS DISTINCT FROM NEW.created_by_tool_result_id
-            AND NOT (
-                OLD.created_by_tool_result_id IS NOT NULL
-                AND NEW.created_by_tool_result_id IS NULL
-            )
-        ) OR
         OLD.fact_kind IS DISTINCT FROM NEW.fact_kind OR
         (OLD.statement IS DISTINCT FROM NEW.statement AND (
             NEW.user_edited_at IS NULL OR
@@ -1711,104 +1690,23 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
-    IF NOT (
-        OLD.created_by_tool_result_id IS NOT NULL
-        AND NEW.created_by_tool_result_id IS NULL
-        AND OLD.id IS NOT DISTINCT FROM NEW.id
-        AND OLD.memory_domain_id IS NOT DISTINCT FROM NEW.memory_domain_id
-        AND OLD.source_context_id IS NOT DISTINCT FROM NEW.source_context_id
-        AND OLD.source_fact_id IS NOT DISTINCT FROM NEW.source_fact_id
-        AND OLD.source_fact_kind IS NOT DISTINCT FROM NEW.source_fact_kind
-        AND OLD.relation_kind IS NOT DISTINCT FROM NEW.relation_kind
-        AND OLD.target_context_id IS NOT DISTINCT FROM NEW.target_context_id
-        AND OLD.target_fact_id IS NOT DISTINCT FROM NEW.target_fact_id
-        AND OLD.target_fact_kind IS NOT DISTINCT FROM NEW.target_fact_kind
-        AND OLD.supersede_mode IS NOT DISTINCT FROM NEW.supersede_mode
-        AND OLD.ordinal IS NOT DISTINCT FROM NEW.ordinal
-        AND OLD.accepted_at IS NOT DISTINCT FROM NEW.accepted_at
-    ) THEN
-        RAISE EXCEPTION 'memory relation immutable fields changed'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
+    RAISE EXCEPTION 'memory relation immutable fields changed' USING ERRCODE = '23514';
 END;
 $$;
 CREATE TRIGGER trg_pulsara_v3_memory_relation_seal
 BEFORE UPDATE ON pulsara_v3.memory_relations
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_memory_relation();
 
-CREATE FUNCTION pulsara_v3.enforce_direct_memory_lineage()
+-- Relations own their endpoints independently of any conversation history.
+CREATE FUNCTION pulsara_v3.enforce_memory_relation_endpoints()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-    owner_result pulsara_v3.tool_results%ROWTYPE;
-    owner_session pulsara_v3.sessions%ROWTYPE;
-    owner_call pulsara_v3.assistant_message_blocks%ROWTYPE;
     source_fact pulsara_v3.memory_facts%ROWTYPE;
     target_fact pulsara_v3.memory_facts%ROWTYPE;
 BEGIN
-    IF TG_OP = 'UPDATE' THEN
-        IF TG_TABLE_NAME = 'memory_facts'
-           AND OLD.created_by_tool_result_id IS NOT DISTINCT FROM NEW.created_by_tool_result_id THEN
-            RETURN NEW;
-        END IF;
-        IF OLD.created_by_tool_result_id IS NOT NULL
-           AND NEW.created_by_tool_result_id IS NULL THEN
-            PERFORM 1 FROM pulsara_v3.tool_results
-            WHERE id=OLD.created_by_tool_result_id;
-            IF FOUND THEN
-                RAISE EXCEPTION 'memory owner cannot be cleared while ToolResult exists'
-                    USING ERRCODE = '23514';
-            END IF;
-            RETURN NEW;
-        END IF;
-        RAISE EXCEPTION 'memory owner transition is invalid' USING ERRCODE = '23514';
-    END IF;
-
-    IF NEW.created_by_tool_result_id IS NULL THEN
-        RAISE EXCEPTION 'new memory rows require a canonical ToolResult owner'
-            USING ERRCODE = '23514';
-    END IF;
-    IF TG_TABLE_NAME = 'memory_facts' THEN
-        SELECT * INTO owner_result FROM pulsara_v3.tool_results
-        WHERE id=NEW.created_by_tool_result_id;
-    ELSE
-        SELECT * INTO owner_result FROM pulsara_v3.tool_results
-        WHERE id=NEW.created_by_tool_result_id;
-    END IF;
-    IF owner_result.id IS NULL
-       OR owner_result.result_record_kind <> 'EXECUTED'
-       OR owner_result.result_state <> 'SUCCESS' THEN
-        RAISE EXCEPTION 'memory owner must be a successful executed ToolResult'
-            USING ERRCODE = '23514';
-    END IF;
-    SELECT * INTO owner_session FROM pulsara_v3.sessions
-    WHERE id=owner_result.session_id;
-    SELECT * INTO owner_call FROM pulsara_v3.assistant_message_blocks
-    WHERE session_id=owner_result.session_id
-      AND assistant_entry_id=owner_result.tool_call_entry_id
-      AND tool_call_id=owner_result.tool_call_id;
-    IF owner_session.memory_domain_id IS DISTINCT FROM NEW.memory_domain_id
-       OR owner_call.block_kind IS DISTINCT FROM 'TOOL_CALL' THEN
-        RAISE EXCEPTION 'memory owner domain or tool call drifted'
-            USING ERRCODE = '23514';
-    END IF;
-    IF TG_TABLE_NAME = 'memory_facts' THEN
-        IF owner_call.tool_name IS DISTINCT FROM 'remember'
-           OR owner_call.tool_arguments->>'kind' IS DISTINCT FROM NEW.fact_kind
-           OR owner_call.tool_arguments->>'context_target' IS DISTINCT FROM
-              (CASE WHEN NEW.context_id='ctx:global' THEN 'GLOBAL'
-                    ELSE 'CURRENT_PROJECT' END)
-           OR (NEW.context_id <> 'ctx:global'
-               AND (
-                   NEW.context_id IS DISTINCT FROM owner_session.workspace_id
-               )) THEN
-            RAISE EXCEPTION 'memory fact does not exact-join remember owner'
-                USING ERRCODE = '23514';
-        END IF;
-        RETURN NEW;
-    END IF;
     SELECT * INTO source_fact FROM pulsara_v3.memory_facts
     WHERE memory_domain_id=NEW.memory_domain_id AND id=NEW.source_fact_id;
     SELECT * INTO target_fact FROM pulsara_v3.memory_facts
@@ -1818,65 +1716,18 @@ BEGIN
        OR source_fact.fact_kind IS DISTINCT FROM NEW.source_fact_kind
        OR target_fact.context_id IS DISTINCT FROM NEW.target_context_id
        OR target_fact.fact_kind IS DISTINCT FROM NEW.target_fact_kind THEN
-        RAISE EXCEPTION 'memory relation endpoint identity drifted'
-            USING ERRCODE = '23514';
-    END IF;
-    IF NEW.relation_kind='BASED_ON' THEN
-        IF owner_call.tool_name IS DISTINCT FROM 'remember'
-           OR source_fact.created_by_tool_result_id IS DISTINCT FROM owner_result.id
-           OR NOT COALESCE(
-               owner_call.tool_arguments->'based_on_memory_ids'
-                   @> jsonb_build_array(NEW.target_fact_id), false
-           ) THEN
-            RAISE EXCEPTION 'memory basis owner does not exact-join remember'
-                USING ERRCODE = '23514';
-        END IF;
-    ELSE
-        IF owner_call.tool_name IS DISTINCT FROM 'mark_memory_relation'
-           OR owner_call.tool_arguments->>'relation_kind' IS DISTINCT FROM NEW.relation_kind THEN
-            RAISE EXCEPTION 'memory relation owner does not exact-join tool call'
-                USING ERRCODE = '23514';
-        END IF;
-        IF NEW.relation_kind='CONTRADICTS' THEN
-            IF NOT (
-                (owner_call.tool_arguments->>'source_memory_id'
-                    IS NOT DISTINCT FROM NEW.source_fact_id
-                 AND owner_call.tool_arguments->>'target_memory_id'
-                    IS NOT DISTINCT FROM NEW.target_fact_id)
-                OR
-                (owner_call.tool_arguments->>'source_memory_id'
-                    IS NOT DISTINCT FROM NEW.target_fact_id
-                 AND owner_call.tool_arguments->>'target_memory_id'
-                    IS NOT DISTINCT FROM NEW.source_fact_id)
-            ) THEN
-                RAISE EXCEPTION 'memory contradiction owner endpoints drifted'
-                    USING ERRCODE = '23514';
-            END IF;
-        ELSIF owner_call.tool_arguments->>'source_memory_id' IS DISTINCT FROM NEW.source_fact_id
-           OR owner_call.tool_arguments->>'target_memory_id' IS DISTINCT FROM NEW.target_fact_id THEN
-            RAISE EXCEPTION 'memory relation owner does not exact-join tool call'
-                USING ERRCODE = '23514';
-        END IF;
-    END IF;
-    IF NEW.source_context_id <> 'ctx:global'
-       AND owner_session.workspace_id IS DISTINCT FROM NEW.source_context_id THEN
-        RAISE EXCEPTION 'project memory relation owner workspace drifted'
-            USING ERRCODE = '23514';
+        RAISE EXCEPTION 'memory relation endpoint identity drifted' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
 END;
 $$;
 REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_fact() FROM PUBLIC;
 REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_relation() FROM PUBLIC;
-REVOKE ALL ON FUNCTION pulsara_v3.enforce_direct_memory_lineage() FROM PUBLIC;
-CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_fact_lineage
-AFTER INSERT OR UPDATE ON pulsara_v3.memory_facts
+REVOKE ALL ON FUNCTION pulsara_v3.enforce_memory_relation_endpoints() FROM PUBLIC;
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_relation_endpoints
+AFTER INSERT ON pulsara_v3.memory_relations
 DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_direct_memory_lineage();
-CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_relation_lineage
-AFTER INSERT OR UPDATE ON pulsara_v3.memory_relations
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_direct_memory_lineage();
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_memory_relation_endpoints();
 CREATE TABLE pulsara_v3.agent_events (
     event_id text CHECK (event_id ~ '^event:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     workspace_id text NOT NULL,

@@ -6614,10 +6614,8 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
         ).fetchall() == [("COMPLETED",), ("COMPLETED",)]
         assert (
             c.execute(
-                "SELECT count(*) FROM pulsara_v3.memory_facts AS f "
-                "JOIN pulsara_v3.tool_results AS r "
-                "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s",
-                (session_id,),
+                "SELECT count(*) FROM pulsara_v3.memory_facts WHERE memory_domain_id='test' AND statement=%s",
+                ("Test memory",),
             ).fetchone()[0]
             == 0
         )
@@ -6750,7 +6748,7 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
         rows = connection.execute(
             "SELECT f.id, f.statement FROM pulsara_v3.memory_facts AS f "
             "JOIN pulsara_v3.tool_results AS r "
-            "ON r.id=f.created_by_tool_result_id "
+            "ON f.id=r.model_visible_memory_fact_ids[1] "
             "WHERE r.session_id=%s ORDER BY f.statement",
             (session_id,),
         ).fetchall()
@@ -6760,7 +6758,7 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
             "AND source_fact_id IN ("
             "SELECT f.id FROM pulsara_v3.memory_facts AS f "
             "JOIN pulsara_v3.tool_results AS r "
-            "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s) "
+            "ON f.id=r.model_visible_memory_fact_ids[1] WHERE r.session_id=%s) "
             "ORDER BY source_fact_id",
             (session_id,),
         ).fetchall()

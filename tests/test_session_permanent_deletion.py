@@ -14,6 +14,7 @@ from pulsara_agent.conversation_kernel.memory.management import (
     MemoryManagementSelection,
 )
 from pulsara_agent.conversation_kernel.memory.writes import PreparedMemoryRelationWrite
+from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from tests.test_conversation_fork import (
     repo as repo,
@@ -130,13 +131,13 @@ def test_unarchive_waiting_for_condition_delete_cannot_resurrect(repo, monkeypat
     sid = lease.guard.session_id
     archive(repo, lease)
     locked, release = Event(), Event()
-    original = deletion._sources
-    def pause_after_lock(connection, session_id, domain, workspace):
-        if session_id == sid:
-            locked.set()
-            assert release.wait(10)
-        return original(connection, session_id, domain, workspace)
-    monkeypatch.setattr(deletion, '_sources', pause_after_lock)
+    original = deletion.lock_canonical_identities
+    def pause_after_lock(connection, **kwargs):
+        result = original(connection, **kwargs)
+        locked.set()
+        assert release.wait(10)
+        return result
+    monkeypatch.setattr(deletion, 'lock_canonical_identities', pause_after_lock)
     with ThreadPoolExecutor(max_workers=2) as pool:
         deleting = pool.submit(delete, repo, sid, required_lifecycle='ARCHIVED')
         assert locked.wait(5)
@@ -152,38 +153,39 @@ def test_unarchive_waiting_for_condition_delete_cannot_resurrect(repo, monkeypat
     assert not exists(repo, sid)
 
 
-def test_condition_replan_checks_new_lifecycle(repo, monkeypatch):
+def test_condition_retry_checks_new_lifecycle(repo, monkeypatch):
     from contextlib import contextmanager
     from tests.test_session_archive import archive
     import pulsara_agent.conversation_kernel._repository.deletion as deletion
-    from dataclasses import replace
     lease = new_session(repo)
     sid = lease.guard.session_id
     archive(repo, lease)
-    source_reads = 0
-    original_sources = deletion._sources
+    original_lock = deletion.lock_canonical_identities
     original_connection = repo.connection_provider.connection
-    def drift(*args):
-        nonlocal source_reads
-        source_reads += 1
-        plan = original_sources(*args)
-        return replace(plan, workspace_ids=()) if source_reads == 2 else plan
+    retry_pending = False
+    attempts = 0
+    def transient_failure(connection, **kwargs):
+        nonlocal retry_pending, attempts
+        attempts += 1
+        if attempts == 1:
+            retry_pending = True
+            raise psycopg.errors.SerializationFailure('injected transaction retry')
+        return original_lock(connection, **kwargs)
     @contextmanager
     def connection(**kwargs):
-        with original_connection(**kwargs) as current:
-            yield current
-        if source_reads == 2:
-            repo.unarchive_session(session_id=sid, memory_domain_id='u_local', deadline_monotonic=monotonic()+30)
-    monkeypatch.setattr(deletion, '_sources', drift)
-    # Unarchive uses the same provider, so only install the replan callback once.
-    @contextmanager
-    def once_connection(**kwargs):
-        with connection(**kwargs) as current:
-            monkeypatch.setattr(repo.connection_provider, 'connection', original_connection)
-            yield current
-    monkeypatch.setattr(repo.connection_provider, 'connection', once_connection)
+        nonlocal retry_pending
+        try:
+            with original_connection(**kwargs) as current:
+                yield current
+        finally:
+            if retry_pending:
+                retry_pending = False
+                monkeypatch.setattr(repo.connection_provider, 'connection', original_connection)
+                repo.unarchive_session(session_id=sid, memory_domain_id='u_local', deadline_monotonic=monotonic()+30)
+    monkeypatch.setattr(deletion, 'lock_canonical_identities', transient_failure)
+    monkeypatch.setattr(repo.connection_provider, 'connection', connection)
     assert delete(repo, sid, required_lifecycle='ARCHIVED') == 'NOT_ARCHIVED'
-    assert source_reads == 2 and exists(repo, sid)
+    assert attempts == 1 and exists(repo, sid)
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
@@ -240,12 +242,9 @@ def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
                 True,
                 True,
             ), f
-        elif child in {"memory_facts", "memory_relations"} and parent == "tool_results":
-            assert (f["action"], f["deferred"], f["initially_deferred"]) == (
-                "n",
-                True,
-                True,
-            ), f
+    assert not any(f["child"] in {"pulsara_v3.memory_facts", "pulsara_v3.memory_relations"}
+                   and f["parent"] in {"pulsara_v3.tool_results", "pulsara_v3.sessions", "pulsara_v3.turns"}
+                   for f in fks)
     assert set(owned) == DIRECT | INDIRECT.keys()
     assert rows(
         repo,
@@ -313,7 +312,7 @@ def test_cold_domain_lease_closed_existence_and_exact_release(
 
 
 @pytest.mark.parametrize('archived_only', [False, True])
-def test_memory_graph_sources_and_project_survive_with_user_edit(repo, tmp_path, archived_only):
+def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_path, archived_only):
     project = tmp_path / "preserved-project"
     project.mkdir()
     lease, invoke, remember = _open_direct_memory_session(
@@ -351,6 +350,19 @@ def test_memory_graph_sources_and_project_survive_with_user_edit(repo, tmp_path,
         "SELECT * FROM pulsara_v3.memory_relations WHERE source_fact_id=ANY(%s) ORDER BY id",
         (ids,),
     )
+    with repo.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30,
+    ) as connection:
+        connection.execute(
+            """INSERT INTO pulsara_v3.memory_embeddings
+               (memory_domain_id,fact_id,fact_semantic_digest,
+                embedding_contract_id,embedding_contract_version,embedding)
+               SELECT memory_domain_id,id,fact_semantic_digest,'deletion-test',1,
+                      ('[' || repeat('0,',1023) || '0]')::public.vector
+               FROM pulsara_v3.memory_facts WHERE id=ANY(%s)""", (ids,),
+        )
+    embeddings = rows(repo, "SELECT * FROM pulsara_v3.memory_embeddings WHERE fact_id=ANY(%s) ORDER BY fact_id", (ids,))
+    assert len(embeddings) == 3
     if archived_only:
         from tests.test_session_archive import archive
         from datetime import datetime, timezone
@@ -382,13 +394,13 @@ def test_memory_graph_sources_and_project_survive_with_user_edit(repo, tmp_path,
         "SELECT * FROM pulsara_v3.memory_facts WHERE id=ANY(%s) ORDER BY id",
         (ids,),
     )
-    for a, b in zip(after, before, strict=True):
-        assert a == {**b, "created_by_tool_result_id": None}
+    assert after == before
+    assert rows(repo, "SELECT * FROM pulsara_v3.memory_embeddings WHERE fact_id=ANY(%s) ORDER BY fact_id", (ids,)) == embeddings
     assert rows(
         repo,
         "SELECT * FROM pulsara_v3.memory_relations WHERE source_fact_id=ANY(%s) ORDER BY id",
         (ids,),
-    ) == [{**r, "created_by_tool_result_id": None} for r in relations]
+    ) == relations
     assert project.is_dir()
     workspace = after[0]["context_id"]
     assert rows(repo, "SELECT id FROM pulsara_v3.workspaces WHERE id=%s", (workspace,))
@@ -488,52 +500,40 @@ def test_fork_waiting_for_deleted_source_never_copies_cached_history(
         assert not pending.result(timeout=30).created
 
 
-def test_replan_revalidates_writer_after_takeover(repo, monkeypatch):
+def test_retry_revalidates_writer_after_takeover(repo, monkeypatch):
     from contextlib import contextmanager
-    from dataclasses import replace
     from pulsara_agent.conversation_kernel._repository import deletion
-
     lease = new_session(repo)
     sid = lease.guard.session_id
-    workspace = rows(
-        repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (sid,)
-    )[0]["workspace_id"]
-    original_sources = deletion._sources
+    workspace = rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (sid,))[0]["workspace_id"]
+    original_lock = deletion.lock_canonical_identities
     original_connection = repo.connection_provider.connection
-    reads = 0
-    takeover_pending = False
+    retry_pending = False
     replacement = None
-
-    def drift(*args):
-        nonlocal reads, takeover_pending
-        plan = original_sources(*args)
-        reads += 1
-        if reads == 2:
-            takeover_pending = True
-            return replace(plan, relation_ids=("changed-between-statements",))
-        return plan
-
+    attempts = 0
+    def transient_failure(connection, **kwargs):
+        nonlocal retry_pending, attempts
+        attempts += 1
+        if attempts == 1:
+            retry_pending = True
+            raise psycopg.errors.SerializationFailure('injected transaction retry')
+        return original_lock(connection, **kwargs)
     @contextmanager
     def connection(**kwargs):
-        nonlocal takeover_pending, replacement
-        with original_connection(**kwargs) as current:
-            yield current
-        if takeover_pending:
-            takeover_pending = False
-            replacement = repo.acquire_host_writer(
-                intent="EXISTING",
-                session_id=sid,
-                workspace_id=workspace,
-                writer_owner_id='host:6sddnxpwvxb4nxp77ymevcqaxq',
-                lease_seconds=30,
-                deadline_monotonic=monotonic() + 30,
-            )
-
-    monkeypatch.setattr(deletion, "_sources", drift)
-    monkeypatch.setattr(repo.connection_provider, "connection", connection)
-    with pytest.raises(SessionDeletionBusy, match="writer changed"):
+        nonlocal retry_pending, replacement
+        try:
+            with original_connection(**kwargs) as current:
+                yield current
+        finally:
+            if retry_pending:
+                retry_pending = False
+                monkeypatch.setattr(repo.connection_provider, 'connection', original_connection)
+                replacement = repo.acquire_host_writer(intent='EXISTING', session_id=sid, workspace_id=workspace,
+                    writer_owner_id=identity('host'), lease_seconds=30, deadline_monotonic=monotonic()+30)
+    monkeypatch.setattr(deletion, 'lock_canonical_identities', transient_failure)
+    monkeypatch.setattr(repo.connection_provider, 'connection', connection)
+    with pytest.raises(SessionDeletionBusy, match='writer changed'):
         delete(repo, sid, lease.guard)
-    assert reads == 2  # The next attempt rejects before using any memory plan.
-    assert replacement is not None and exists(repo, sid)
-    repo.release_host_writer(lease.guard, deadline_monotonic=monotonic() + 30)
-    repo.validate_host_writer(replacement.guard, deadline_monotonic=monotonic() + 30)
+    assert attempts == 1 and replacement is not None and exists(repo, sid)
+    repo.release_host_writer(lease.guard, deadline_monotonic=monotonic()+30)
+    repo.validate_host_writer(replacement.guard, deadline_monotonic=monotonic()+30)

@@ -1254,7 +1254,7 @@ describe('completed reply process disclosure', () => {
     expect(screen.getAllByRole('button', { name: '展开处理过程' })).toHaveLength(1);
     expect(screen.getByText(final.body).closest('[hidden]')).toBeNull();
     view.rerender(<ConversationMessages {...common}
-      focusSourceEntry={{ sessionId: 'session-one', entryId: progress.id }} />);
+      focusedEntry={{ sessionId: 'session-one', entryId: progress.id }} />);
     expect(hiddenProgress()).toBe(false);
     expect(screen.getByRole('separator', { name: '上下文已压缩' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '展开工具详情：read_file' })).toBeTruthy();
@@ -1763,22 +1763,27 @@ describe('bounded history reading and DOM locations', () => {
     expect(screen.queryByText('中间步骤')).toBeNull();
   });
 
-  it('waits for a committed source host after the reader completes, and cancels an older location', async () => {
+  it('waits for the annotation source after the reader completes, and cancels an older location', async () => {
     const scroll = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true });
     const read = vi.fn(async () => {});
-    const target = { sessionId: 'session-one', entryId: 'old' };
-    const base = props({ isRunning: false, messages: [answer('answer')], onLocateEntry: read });
-    const view = render(<WorkbenchView {...base} focusSourceEntry={target} />);
+    const references = { id: 'references', role: 'user' as const, time: '', body: '', promptContent: { parts: [
+      { type: 'annotation' as const, quote: '正文 old', source: { entry_id: 'old', start: 0, end: 6 } },
+      { type: 'annotation' as const, quote: '正文 newer', source: { entry_id: 'newer', start: 0, end: 8 } },
+    ] } };
+    const base = props({ isRunning: false, messages: [answer('answer'), references], onLocateAnnotation: read });
+    const view = render(<WorkbenchView {...base} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看批注 1' }));
+    fireEvent.click(await screen.findByRole('button', { name: '引用回复', hidden: true }));
     await waitFor(() => expect(read).toHaveBeenCalledWith('old', expect.any(AbortSignal)));
     expect(scroll).not.toHaveBeenCalled();
-    const newerTarget = { sessionId: 'session-one', entryId: 'newer' };
-    view.rerender(<WorkbenchView {...base} focusSourceEntry={newerTarget} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看批注 2' }));
+    fireEvent.click(await screen.findByRole('button', { name: '引用回复', hidden: true }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    view.rerender(<WorkbenchView {...base} focusSourceEntry={newerTarget} messages={[answer('old', 'old-root'), answer('newer', 'newer-root'), answer('answer')]} />);
-    await waitFor(() => expect(scroll).toHaveBeenCalledOnce());
-    const scrolled = scroll.mock.instances[0] as HTMLElement;
-    expect(scrolled.textContent).toContain('正文 newer');
+    view.rerender(<WorkbenchView {...base} messages={[answer('old', 'old-root'), answer('newer', 'newer-root'), answer('answer'), references]} />);
+    // The history locator centers the entry, then the annotation centers its quote.
+    await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+    for (const scrolled of scroll.mock.instances as HTMLElement[]) expect(scrolled.textContent).toContain('正文 newer');
     expect(read.mock.calls[0][1].aborted).toBe(true);
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
@@ -2011,11 +2016,17 @@ describe('source location disclosure demand', () => {
     const read = vi.fn(async () => {});
     const scroll = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true });
-    const view = render(<WorkbenchView {...props({ isRunning: false, messages: [process, final], onHydrateEntries: hydrate,
-      onLocateEntry: read, focusSourceEntry: { sessionId: 'session-one', entryId: 'final' } })} />);
-    await waitFor(() => expect(scroll).toHaveBeenCalledOnce());
+    const reference = { id: 'reference', role: 'user' as const, time: '', body: '', promptContent: { parts: [
+      { type: 'annotation' as const, quote: final.body, source: { entry_id: 'final', start: 0, end: final.body.length } },
+    ] } };
+    const view = render(<WorkbenchView {...props({ isRunning: false, messages: [process, final, reference], onHydrateEntries: hydrate, onLocateAnnotation: read })} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看批注 1' }));
+    fireEvent.click(await screen.findByRole('button', { name: '引用回复', hidden: true }));
+    // Entry-level and exact-quote centering both target the final answer.
+    await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+    for (const scrolled of scroll.mock.instances as HTMLElement[]) expect(scrolled.textContent).toContain(final.body);
     expect(read).toHaveBeenCalledWith('final', expect.any(AbortSignal));
-    expect(screen.getByText('最终回复正文')).toBeTruthy();
+    expect(screen.getByText('最终回复正文', { selector: '[data-source-text]' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '展开处理过程' })).toBeTruthy();
     expect(view.container.querySelector('[data-source-entry="process"]')).toBeNull();
     expect(view.container.querySelector('[data-source-entry="final:process"]')).toBeNull();
@@ -2027,10 +2038,10 @@ describe('source location disclosure demand', () => {
   it('still expands the process for an exact tool-result alias and preserves that choice when locating the final body', () => {
     const base = { messages: [{ ...process, contentState: 'ready' as const }, { ...final, reasoningContentState: 'ready' as const }],
       artifactOwnerKey: 'one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
-    const view = render(<ConversationMessages {...base} focusSourceEntry={{ sessionId: 'one', entryId: 'tool-result' }} />);
+    const view = render(<ConversationMessages {...base} focusedEntry={{ sessionId: 'one', entryId: 'tool-result' }} />);
     expect(screen.getByRole('button', { name: '收起处理过程' })).toBeTruthy();
     expect(view.container.querySelector('[data-result-entry="tool-result"]')).toBeTruthy();
-    view.rerender(<ConversationMessages {...base} focusSourceEntry={{ sessionId: 'one', entryId: 'final' }} />);
+    view.rerender(<ConversationMessages {...base} focusedEntry={{ sessionId: 'one', entryId: 'final' }} />);
     expect(screen.getByRole('button', { name: '收起处理过程' })).toBeTruthy();
   });
 

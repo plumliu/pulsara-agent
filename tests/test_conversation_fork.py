@@ -1034,6 +1034,7 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
     lease = new_session(repo)
     _, _, anchor = turn(repo, lease.guard, "first prompt", answer="first final")
     turn(repo, lease.guard, "future secret", answer="future final")
+    memory_before = rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id")
     created = fork(repo, lease.guard.session_id, anchor)
     assert created.created, created.public_code
     child = created.child_session_id
@@ -1067,13 +1068,7 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
             )
             == []
         )
-    assert rows(
-        repo,
-        "SELECT 1 FROM pulsara_v3.memory_facts AS f "
-        "JOIN pulsara_v3.tool_results AS r "
-        "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s",
-        (child,),
-    ) == []
+    assert rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id") == memory_before
     source = rows(
         repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (child,)
     )[0]
@@ -1135,6 +1130,7 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
         (lease.guard.session_id,),
     )[0]["id"]
     anchor = final(repo, lease.guard, str(active_turn), "Memory saved.")
+    memory_before = rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id")
     created = fork(repo, lease.guard.session_id, anchor)
     assert created.created, created.public_code
 
@@ -1155,14 +1151,7 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
         for row in workspace_rows
     } == {(workspace_root, workspace_root.rsplit("/", 1)[-1])}
 
-    owners = rows(
-        repo,
-        "SELECT r.session_id FROM pulsara_v3.memory_facts f "
-        "JOIN pulsara_v3.tool_results r ON r.id=f.created_by_tool_result_id "
-        "WHERE f.id=%s",
-        (saved["memory_id"],),
-    )
-    assert [row["session_id"] for row in owners] == [lease.guard.session_id]
+    assert rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id") == memory_before
     read_binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext(
             "u_local", "project", stable_project_key=workspace_root
@@ -1181,9 +1170,22 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
         fact_id=saved["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
-    assert detail["source"]["availability"] == "OPEN"
-    assert detail["source"]["locator"]["session_id"] == lease.guard.session_id
-    assert detail["source"]["locator"]["session_id"] != created.child_session_id
+    assert detail["fact"]["fact_id"] == saved["memory_id"]
+    assert set(detail) == {"fact", "user_edited_at", "relations", "next_cursor"}
+    assert_session_aggregate_deleted(repo, lease.guard)
+    assert rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id") == memory_before
+    assert rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (created.child_session_id,))[0]["workspace_id"] == workspace_id
+    assert memory_query.get(
+        read_binding=read_binding,
+        fact_id=saved["memory_id"],
+        deadline_monotonic=monotonic() + 30,
+    ) is not None
+    assert repo.memory_management_detail(
+        memory_domain_id="u_local",
+        selection=MemoryManagementSelection("project", workspace_id),
+        fact_id=saved["memory_id"],
+        deadline_monotonic=monotonic() + 30,
+    ) == detail
 
 
 def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(repo):
