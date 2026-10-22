@@ -39,7 +39,11 @@ PostgreSQL拥有事务、MVCC、advisory/row锁、FK及BM25。Pulsara复用lock_
 
 每题一次RR中捕获真实session entry head C，所有Q1、同owner A、原始第一条后继Q2读取受C约束。
 executed/imported owner和entry cut覆盖fork(entry>0,event=0)。不按event head证明正文覆盖。
-两种tools模式各构建一次，从完整QA派生QAQ，不再四遍重读同题。坏Q1/A使整组构建失败并保旧；
+助手blocks/blob、final标记及visualization元数据按本次cut已选定的entry集合批量读取，
+复用原正文/展示项校验owner。一次构建内两种tools模式共享TEXT校验与解码，分别组装字段坐标，
+从完整QA派生QAQ。raw预取不提前校验后续entry、被跳过的工具或空消息展示项；按原entry顺序延迟校验，
+不改变损坏归属。批量来源和解析结果仅属本次构建，不跨事务或首次/二次回读保留。
+坏Q1/A使整组构建失败并保旧；
 坏或scheduled Q2只使QAQ不适用，保QA。合法零文档与构建失败用typed进程内结果区分。
 SQL/IO错误不得伪装合法零结果。session已不存在可返回合法不存在结果，不能伪造domain。
 

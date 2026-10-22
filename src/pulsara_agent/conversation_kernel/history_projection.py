@@ -24,7 +24,86 @@ from pulsara_agent.llm.input import (
 )
 
 
-def canonical_history_message(connection, entry, *, include_tools=False):
+class _AssistantHistoryBatch:
+    """One build's canonical relations; never survives its read transaction.
+
+    Read only the already cut-qualified entries. Validation stays lazy and in
+    entry order, so skipped tools/empty messages cannot introduce new failures.
+    Both tools views share source decoding, not mutable rendered messages.
+    """
+
+    def __init__(self, connection, session_id, entries, *, include_tools):
+        self.connection = connection
+        self.blocks = {}
+        self.finals = set()
+        self.visualization_rows = {}
+        self._text = {}
+        self._visualizations = {}
+        assistants = [entry for entry in entries if entry["entry_kind"] in {
+            "ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST",
+        }]
+        if not assistants:
+            return
+        ids = [entry["id"] for entry in assistants]
+        self.blocks = {entry_id: [] for entry_id in ids}
+        rows = connection.execute(
+            """SELECT a.id,a.assistant_entry_id,a.block_kind,a.tool_name,a.tool_arguments,
+               COALESCE(a.inline_content,b.body) AS content,
+               a.content_size AS size,a.content_digest AS digest,'assistant' AS kind
+               FROM pulsara_v3.assistant_message_blocks a
+               LEFT JOIN pulsara_v3.blobs b
+                 ON b.id=a.blob_id AND b.workspace_id=a.workspace_id
+               WHERE a.session_id=%s AND a.assistant_entry_id=ANY(%s::text[])
+                 AND (a.block_kind='TEXT' OR (%s AND a.block_kind='TOOL_CALL'))
+               ORDER BY a.assistant_entry_id,a.block_ordinal""",
+            (session_id, ids, include_tools),
+        ).fetchall()
+        for row in rows:
+            self.blocks[row["assistant_entry_id"]].append(row)
+        self.finals = {row["final_entry_id"] for row in connection.execute(
+            """SELECT final_entry_id FROM pulsara_v3.turns
+               WHERE session_id=%s AND final_entry_id=ANY(%s::text[])
+               UNION ALL SELECT final_entry_id FROM pulsara_v3.imported_history_groups
+               WHERE session_id=%s AND final_entry_id=ANY(%s::text[])""",
+            (session_id, ids, session_id, ids),
+        ).fetchall()}
+        from pulsara_agent.conversation_kernel.visualization import load_visualization_rows
+
+        self.visualization_rows = load_visualization_rows(
+            connection, session_id,
+            [entry["id"] for entry in assistants if entry["entry_kind"] == "ASSISTANT_MESSAGE"],
+        )
+
+    def block_text(self, block):
+        key = block["id"]
+        if key not in self._text:
+            if block["block_kind"] == "TEXT":
+                text = decode_saved_text(block)
+                # The verified immutable text serves both views. Do not retain
+                # all raw payload bytes alongside it for the rest of the build.
+                block["content"] = None
+            else:
+                import json
+
+                text = block["tool_name"] + "\n" + json.dumps(
+                    block["tool_arguments"], ensure_ascii=False
+                )
+            self._text[key] = text
+        return self._text[key]
+
+    def visualizations(self, entry_id):
+        if entry_id not in self._visualizations:
+            from pulsara_agent.conversation_kernel.visualization import visualization_metadata_rows
+
+            self._visualizations[entry_id] = visualization_metadata_rows(
+                self.visualization_rows.get(entry_id, ())
+            )
+        return self._visualizations[entry_id]
+
+
+def canonical_history_message(
+    connection, entry, *, include_tools=False, assistant_content=None,
+):
     """Keep field coordinates and full annotations; quote never enters the index."""
     kind = entry["entry_kind"]
     atomic_ranges = []
@@ -165,28 +244,25 @@ def canonical_history_message(connection, entry, *, include_tools=False):
             ]
             annotated = False
         else:
-            blocks = connection.execute(
-                "SELECT a.*,COALESCE(a.inline_content,b.body) AS content,a.content_size AS size,a.content_digest AS digest,'assistant' AS kind FROM pulsara_v3.assistant_message_blocks a LEFT JOIN pulsara_v3.blobs b ON b.id=a.blob_id AND b.workspace_id=a.workspace_id WHERE a.session_id=%s AND a.assistant_entry_id=%s AND (a.block_kind='TEXT' OR (%s AND a.block_kind='TOOL_CALL')) ORDER BY a.block_ordinal",
-                (entry["session_id"], entry["id"], include_tools),
-            ).fetchall()
+            if assistant_content is None:
+                assistant_content = _AssistantHistoryBatch(
+                    connection, entry["session_id"], (entry,), include_tools=include_tools,
+                )
+            elif assistant_content.connection is not connection:
+                raise RuntimeError("history source batch belongs to another connection")
+            blocks = assistant_content.blocks[entry["id"]]
             shown, fields, offset = [], [], 0
             for block in blocks:
-                if block["block_kind"] == "TEXT":
-                    text = decode_saved_text(block)
-                else:
-                    import json
-
+                if block["block_kind"] != "TEXT":
+                    if not include_tools:
+                        continue
                     if block["tool_name"] in {
                         "search_sessions",
                         "search_session_content",
                         "read_session_content",
                     }:
                         continue
-                    text = (
-                        block["tool_name"]
-                        + "\n"
-                        + json.dumps(block["tool_arguments"], ensure_ascii=False)
-                    )
+                text = assistant_content.block_text(block)
                 if shown:
                     offset += 1
                 fields.append(
@@ -205,13 +281,13 @@ def canonical_history_message(connection, entry, *, include_tools=False):
             if not shown:
                 return None
             role, annotated = "assistant", False
-            final = connection.execute(
-                "SELECT 1 FROM pulsara_v3.turns WHERE session_id=%s AND final_entry_id=%s UNION ALL SELECT 1 FROM pulsara_v3.imported_history_groups WHERE session_id=%s AND final_entry_id=%s",
-                (entry["session_id"], entry["id"], entry["session_id"], entry["id"]),
-            ).fetchone()
-            label = "助手回答" if final is not None else "助手进展"
+            label = "助手回答" if entry["id"] in assistant_content.finals else "助手进展"
     from pulsara_agent.conversation_kernel.session_text import visualization_history_text
-    descriptions = visualization_history_text(connection, entry, image_references=None)
+    descriptions = visualization_history_text(
+        connection, entry, image_references=None,
+        visualizations=(assistant_content.visualizations(entry["id"])
+                        if entry["entry_kind"] == "ASSISTANT_MESSAGE" else None),
+    )
     if descriptions:
         if body_ranges is None:
             body_ranges = [[0, len("\n".join(shown))]]
@@ -360,16 +436,21 @@ def _build_history_group(
             q1["turn_id"], q1["imported_history_group_id"],
         ),
     ).fetchall()
+    assistant_content = _AssistantHistoryBatch(
+        connection, session_id, rows, include_tools=any(tool_modes),
+    )
     messages_by_tools = {tools: [] for tools in tool_modes}
     for entry in rows:
         # User content has the same qualification/rendering in both modes.
-        # Other entries decode once per requested mode; QAQ reuses the QA result.
+        # Assistant source decoding is shared across modes within this build;
+        # each rendered view still owns its fields/offsets and QAQ reuses QA.
         shared_user = entry["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}
         modes = (tool_modes[0],) if shared_user else tool_modes
         for tools in modes:
             try:
                 message = canonical_history_message(
-                    connection, entry, include_tools=tools
+                    connection, entry, include_tools=tools,
+                    assistant_content=assistant_content,
                 )
             except RuntimeError as error:
                 return HistoryBuildFailure(

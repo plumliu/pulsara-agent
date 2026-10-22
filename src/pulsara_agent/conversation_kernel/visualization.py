@@ -429,21 +429,44 @@ def visualization_metadata(row: Mapping[str, object]) -> dict:
     return result
 
 
-def saved_visualizations(
-    connection, session_id: str, entry_id: str
-) -> tuple[dict, ...]:
+def load_visualization_rows(
+    connection, session_id: str, entry_ids: Iterable[str]
+) -> dict[str, list[Mapping[str, object]]]:
+    """Read owner-qualified metadata; callers choose each entry's validation point."""
+    grouped: dict[str, list[Mapping[str, object]]] = {
+        entry_id: [] for entry_id in entry_ids
+    }
+    if not grouped:
+        return grouped
     rows = connection.execute(
         """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec
            FROM pulsara_v3.assistant_visualizations v
            JOIN pulsara_v3.transcript_entries e ON e.session_id=v.session_id
              AND e.workspace_id=v.workspace_id AND e.id=v.assistant_entry_id AND e.entry_kind='ASSISTANT_MESSAGE'
            LEFT JOIN pulsara_v3.blobs b ON b.id=v.blob_id AND b.workspace_id=v.workspace_id
-           WHERE v.session_id=%s AND v.assistant_entry_id=%s ORDER BY v.ordinal""",
-        (session_id, entry_id),
+           WHERE v.session_id=%s AND v.assistant_entry_id=ANY(%s::text[])
+           ORDER BY v.assistant_entry_id,v.ordinal""",
+        (session_id, list(grouped)),
     ).fetchall()
+    for row in rows:
+        grouped[row["assistant_entry_id"]].append(row)
+    return grouped
+
+
+def visualization_metadata_rows(
+    rows: Iterable[Mapping[str, object]],
+) -> tuple[dict, ...]:
+    """Validate one entry's ordered occurrences without reading image payloads."""
     result = []
     for ordinal, row in enumerate(rows):
         if row["ordinal"] != ordinal:
             raise ConversationKernelConflict("visualization ordinals drifted")
         result.append(visualization_metadata(row))
     return tuple(result)
+
+
+def saved_visualizations(
+    connection, session_id: str, entry_id: str
+) -> tuple[dict, ...]:
+    rows = load_visualization_rows(connection, session_id, (entry_id,))
+    return visualization_metadata_rows(rows[entry_id])

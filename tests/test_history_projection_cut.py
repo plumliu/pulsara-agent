@@ -121,7 +121,7 @@ def test_cut_freezes_Q1_A_and_first_Q2_without_using_projection(repo):
                 assert body[position["start"]:position["end"]] == field["text"].encode()
 
 
-def test_group_restores_each_mode_once_and_derives_QAQ_without_rescan(repo, monkeypatch):
+def test_group_shares_source_decode_and_derives_QAQ_without_rescan(repo, monkeypatch):
     guard = new_session(repo).guard
     owner, q1 = question(repo, guard)
     a1, _ = append(repo, guard, owner, "one")
@@ -131,11 +131,23 @@ def test_group_restores_each_mode_once_and_derives_QAQ_without_rescan(repo, monk
     restored = []
     original = history_projection.canonical_history_message
 
-    def restore(connection, entry, *, include_tools=False):
+    def restore(connection, entry, *, include_tools=False, assistant_content=None):
         restored.append((entry["id"], include_tools))
-        return original(connection, entry, include_tools=include_tools)
+        return original(
+            connection, entry, include_tools=include_tools,
+            assistant_content=assistant_content,
+        )
 
     monkeypatch.setattr(history_projection, "canonical_history_message", restore)
+    decoded = []
+    decode = history_projection.decode_saved_text
+
+    def observe_decode(row):
+        if row["kind"] == "assistant":
+            decoded.append(row["assistant_entry_id"])
+        return decode(row)
+
+    monkeypatch.setattr(history_projection, "decode_saved_text", observe_decode)
     queries = []
 
     class ObservedConnection:
@@ -166,8 +178,9 @@ def test_group_restores_each_mode_once_and_derives_QAQ_without_rescan(repo, monk
     })
     assert sum("COALESCE(turn_id,imported_history_group_id)" in q for q in queries) == 1
     assert sum("ORDER BY entry_sequence LIMIT 1" in q for q in queries) == 1
-    # Four materialized variants use two canonical tool modes, not four parses.
-    assert sum("FROM pulsara_v3.assistant_message_blocks a" in q for q in queries) == 4
+    # Each TEXT is verified/decoded once for all four rendered variants.
+    assert Counter(decoded) == Counter({a1: 1, a2: 1})
+    assert sum("FROM pulsara_v3.assistant_message_blocks a" in q for q in queries) == 1
     assert not any("history_search_documents" in q for q in queries)
 
 

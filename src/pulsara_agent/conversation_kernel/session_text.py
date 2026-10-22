@@ -125,13 +125,17 @@ def match_position(patterns, segments):
     return min(positions) if positions else 0
 
 
-def visualization_history_text(connection, entry, *, image_references):
+def visualization_history_text(
+    connection, entry, *, image_references, visualizations=None,
+):
     """Metadata-only, neutral image recovery for existing message owners."""
     from pulsara_agent.conversation_kernel.visualization import saved_visualizations
     if entry["entry_kind"] != "ASSISTANT_MESSAGE":
         return ()
     result = []
-    for item in saved_visualizations(connection, entry["session_id"], entry["id"]):
+    if visualizations is None:
+        visualizations = saved_visualizations(connection, entry["session_id"], entry["id"])
+    for item in visualizations:
         if "image_ref" not in item:
             continue
         descriptor = CanonicalPromptImageDescriptor(item["image_ref"], item["content_digest"], item["content_size"], item["media_type"], item["width"], item["height"])
