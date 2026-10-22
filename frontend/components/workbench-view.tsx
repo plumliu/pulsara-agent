@@ -1263,9 +1263,11 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const choiceKey = `process:${processIdentity(messages[0])}`;
   const revealRequest = revealEarlierProcess?.key === choiceKey ? revealEarlierProcess : undefined;
   const [disclosure, setDisclosure] = useState({
+    motionEdge: 'bottom' as 'top' | 'bottom',
     revealRequest, focusRequest, expanded: Boolean(focusRequest || revealRequest) || (choices?.get(choiceKey) ?? (active && !complete)),
   });
   const [busy, setBusy] = useState(false);
+  const runRef = useRef<HTMLElement>(null);
   const request = useRef<AbortController | undefined>(undefined);
   const wasComplete = useRef(complete);
   const laidOutExpanded = useRef(disclosure.expanded);
@@ -1284,12 +1286,15 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     setDisclosure(previous => ({ ...previous, revealRequest, expanded: revealRequest ? true : previous.expanded }));
   }
   useEffect(() => { if (revealRequest) choices?.set(choiceKey, true); }, [revealRequest, choices, choiceKey]);
-  const changeDisclosure = (expanded: boolean, automatic = false) => {
+  const changeDisclosure = (expanded: boolean, automatic = false, edge: 'top' | 'bottom' = 'bottom') => {
     request.current?.abort();
     const finalId = answer?.id ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
     const commit = () => {
       choices?.set(choiceKey, expanded);
-      setDisclosure(previous => ({ ...previous, expanded }));
+      // Reverse an unfinished exit from its current clip edge. A fresh open
+      // starts at the bottom; each close uses the control that was clicked.
+      const reversing = expanded && Boolean(runRef.current?.querySelector('.conversation-run__drawer-body'));
+      setDisclosure(previous => ({ ...previous, expanded, motionEdge: expanded ? (reversing ? previous.motionEdge : 'bottom') : edge }));
     };
     if (!onReadProcessEnd || !finalId) { commit(); return; }
     const operation = new AbortController(); request.current = operation;
@@ -1343,7 +1348,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
         if (edge === 'top' && event.currentTarget === event.currentTarget.ownerDocument.activeElement) {
           event.currentTarget.closest('.conversation-run')?.querySelector<HTMLButtonElement>('[data-process-edge="bottom"]')?.focus({ preventScroll: true });
         }
-        changeDisclosure(!disclosure.expanded);
+        changeDisclosure(!disclosure.expanded, false, edge);
       }}>
       <span>{busy ? '正在读取…' : disclosure.expanded ? '收起处理过程' : '处理过程'}</span><ChevronRight size={13} />
     </button>);
@@ -1377,7 +1382,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   if (compactSlots.has(process.length)) folding.push(<Fragment key="last-compaction">{compactAt(process.length)}</Fragment>);
   if (compactionInProgress) folding.push(<ContextCompactionDivider key="compacting" inProgress />);
   flushDrawer();
-  return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
+  return <section ref={runRef} className="conversation-run" data-process-expanded={disclosure.expanded} data-process-motion-edge={disclosure.motionEdge}>
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
     {processRows}
     {toggle('bottom')}

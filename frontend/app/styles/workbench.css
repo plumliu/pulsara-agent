@@ -651,6 +651,7 @@
 .conversation-run__toggle:hover { color: var(--ink); }
 .conversation-run__toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; border-radius: 3px; }
 .conversation-run__toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.conversation-run__toggle--bottom[aria-expanded="true"] svg { transform: rotate(-90deg); }
 .conversation-run .assistant-turn { margin-top: 0; margin-bottom: 8px; }
 .conversation-run__step .reasoning-disclosure { margin-block: 0; }
 .conversation-run__step .assistant-copy { margin-block: 8px 12px; }
@@ -667,6 +668,10 @@
    Keep text opaque so the motion reads as a drawer, rather than a crossfade. */
 .conversation-run__drawer.animated-disclosure { opacity: 1; visibility: visible; overflow: clip; align-content: end; transition: grid-template-rows .26s cubic-bezier(.2,.7,.2,1); }
 .conversation-run__drawer > .animated-disclosure__content { display: flex; flex-direction: column; justify-content: flex-end; overflow: visible; }
+/* Top control keeps the upper content fixed and removes the lower edge.
+   Bottom control keeps the lower content fixed and removes the upper edge. */
+.conversation-run[data-process-motion-edge="top"] .conversation-run__drawer { align-content: start; }
+.conversation-run[data-process-motion-edge="top"] .conversation-run__drawer > .animated-disclosure__content { justify-content: flex-start; }
 .conversation-run__drawer-body { flex: none; }
 .conversation-run__step { display: grid; grid-template-rows: 1fr; }
 .conversation-run__toggle svg { transition: transform .2s ease; }

@@ -2821,6 +2821,7 @@ it('keeps the original disclosure button at the process bottom and shares state 
   expect(original.compareDocumentPosition(screen.getByText('答案内容'))&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.click(original);
   await screen.findByRole('button',{name:'展开处理过程'});
+  expect(original.closest('.conversation-run')?.getAttribute('data-process-motion-edge')).toBe('bottom');
   expect(screen.getByRole('button',{name:'展开处理过程'})).toBe(original);
   expect(screen.queryByRole('button',{name:'从顶部收起处理过程'})).toBeNull();
   fireEvent.click(original);
@@ -2828,7 +2829,8 @@ it('keeps the original disclosure button at the process bottom and shares state 
   topAgain.focus();
   fireEvent.click(topAgain);
   await screen.findByRole('button',{name:'展开处理过程'});
-  expect(view.container.querySelectorAll('.conversation-run__step')).toHaveLength(0);
+  expect(original.closest('.conversation-run')?.getAttribute('data-process-motion-edge')).toBe('top');
+  await waitFor(()=>expect(view.container.querySelectorAll('.conversation-run__step')).toHaveLength(0));
   expect(document.activeElement).toBe(original);
 });
 
