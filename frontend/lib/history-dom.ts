@@ -4,6 +4,7 @@ export interface HistoryReadingAnchor {
   traceId?: string;
   sourceOffset?: number;
   header?: boolean;
+  processEdge?: string;
   top: number;
 }
 
@@ -87,13 +88,13 @@ export function captureHistoryAnchor(root: HTMLElement): HistoryReadingAnchor | 
       if (!entryId) continue;
       const mapping = candidate.dataset.sourceText && JSON.parse(candidate.dataset.sourceText) as number[][];
       return { entryId, traceId: candidate.dataset.resultEntry, sourceOffset: mapping ? mapping[0]?.[0] : undefined,
-        ...(candidate.dataset.historyEntry ? {header: true} : {}), top: rect.top - viewport.top };
+        ...(candidate.dataset.historyEntry ? {header: true, processEdge: candidate.dataset.processEdge} : {}), top: rect.top - viewport.top };
     }
   }
 }
 
 export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAnchor): number | undefined {
-  const headers = anchor.header ? [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].filter(node => !node.closest('[hidden], [inert]')) : [];
+  const headers = anchor.header ? [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].filter(node => !node.closest('[hidden], [inert]') && (!anchor.processEdge || node.dataset.processEdge === anchor.processEdge)) : [];
   let node = anchor.header ? headers.find(node => node.dataset.historyEntry === anchor.entryId)
     ?? headers.find(node => node.dataset.historyEntryAliases?.split(' ').includes(anchor.entryId))
     : findHistoryEntry(root, anchor.traceId ?? anchor.entryId);

@@ -1229,8 +1229,9 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
 }
 
 type ProcessReadingControls = {
+  revealEarlierProcess?: { key: string };
   canAutoCollapse?: () => boolean;
-  onReadProcessEnd?: (entryId: string, signal: AbortSignal, automatic: boolean, expanding: boolean) => Promise<void>;
+  onReadProcessEnd?: (entryId: string, signal: AbortSignal, automatic: boolean) => Promise<void>;
   onProcessLayout?: () => void;
 };
 
@@ -1242,7 +1243,7 @@ function processIdentity(message: Message): string {
 }
 
 function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId,
-  compactions = [], compactionInProgress = false, canAutoCollapse, onReadProcessEnd, onProcessLayout, onNotify, earlierProcess = false,
+  compactions = [], compactionInProgress = false, canAutoCollapse, onReadProcessEnd, onProcessLayout, onNotify, earlierProcess = false, revealEarlierProcess,
 }: {
   messages: Message[];
   renderMessage: (message: Message, startsRun: boolean, visible?: boolean) => ReactNode;
@@ -1260,8 +1261,9 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const complete = completed || Boolean(answer);
   const choices = useContext(HistoryDisclosureContext);
   const choiceKey = `process:${processIdentity(messages[0])}`;
+  const revealRequest = revealEarlierProcess?.key === choiceKey ? revealEarlierProcess : undefined;
   const [disclosure, setDisclosure] = useState({
-    focusRequest, expanded: Boolean(focusRequest) || (choices?.get(choiceKey) ?? (active && !complete)),
+    revealRequest, focusRequest, expanded: Boolean(focusRequest || revealRequest) || (choices?.get(choiceKey) ?? (active && !complete)),
   });
   const [busy, setBusy] = useState(false);
   const request = useRef<AbortController | undefined>(undefined);
@@ -1276,8 +1278,12 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   }, [disclosure.expanded, onProcessLayout]);
   useEffect(() => () => request.current?.abort(), []);
   if (disclosure.focusRequest !== focusRequest) {
-    setDisclosure({ focusRequest, expanded: focusRequest ? true : disclosure.expanded });
+    setDisclosure(previous => ({ ...previous, focusRequest, expanded: focusRequest ? true : previous.expanded }));
   }
+  if (disclosure.revealRequest !== revealRequest) {
+    setDisclosure(previous => ({ ...previous, revealRequest, expanded: revealRequest ? true : previous.expanded }));
+  }
+  useEffect(() => { if (revealRequest) choices?.set(choiceKey, true); }, [revealRequest, choices, choiceKey]);
   const changeDisclosure = (expanded: boolean, automatic = false) => {
     request.current?.abort();
     const finalId = answer?.id ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
@@ -1288,7 +1294,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     if (!onReadProcessEnd || !finalId) { commit(); return; }
     const operation = new AbortController(); request.current = operation;
     setBusy(true);
-    void onReadProcessEnd(finalId, operation.signal, automatic, expanded).then(() => {
+    void onReadProcessEnd(finalId, operation.signal, automatic).then(() => {
       if (!operation.signal.aborted && request.current === operation) commit();
     }).catch(error => {
       const cancelled = typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
@@ -1328,8 +1334,21 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   // One drawer per continuous foldable span, not one animation shell per
   // record. User messages and visualizations stay visible in chronological
   // order. Only the resident reading window survives until the exit finishes.
+  const toggle = (edge: 'top' | 'bottom') => (<button type="button" className={`conversation-run__toggle conversation-run__toggle--${edge}`} data-process-toggle="" data-process-key={choiceKey} data-process-edge={edge} data-process-earlier={earlierProcess || undefined}
+      data-history-entry={edge === 'top' ? messages[0].id : answer?.id ?? messages[0].id}
+      data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
+      data-thread-disclosure="" aria-expanded={disclosure.expanded} aria-busy={busy} disabled={busy}
+      aria-label={edge === 'top' ? '从顶部收起处理过程' : disclosure.expanded ? '收起处理过程' : '展开处理过程'}
+      onClick={event => {
+        if (edge === 'top' && event.currentTarget === event.currentTarget.ownerDocument.activeElement) {
+          event.currentTarget.closest('.conversation-run')?.querySelector<HTMLButtonElement>('[data-process-edge="bottom"]')?.focus({ preventScroll: true });
+        }
+        changeDisclosure(!disclosure.expanded);
+      }}>
+      <span>{busy ? '正在读取…' : disclosure.expanded ? '收起处理过程' : '处理过程'}</span><ChevronRight size={13} />
+    </button>);
   const processRows: ReactNode[] = [];
-  let folding: ReactNode[] = [];
+  let folding: ReactNode[] = [<Fragment key="top-toggle">{toggle('top')}</Fragment>];
   let drawerKey = 'start';
   const flushDrawer = () => {
     if (!folding.length) return;
@@ -1360,15 +1379,8 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   flushDrawer();
   return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
-    <button type="button" className="conversation-run__toggle" data-process-toggle="" data-process-key={choiceKey} data-process-earlier={earlierProcess || undefined}
-      data-history-entry={answer?.id ?? messages[0].id}
-      data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
-      data-thread-disclosure="" aria-expanded={disclosure.expanded} aria-busy={busy} disabled={busy}
-      aria-label={disclosure.expanded ? '收起处理过程' : '展开处理过程'}
-      onClick={() => changeDisclosure(!disclosure.expanded)}>
-      <span>{busy ? '正在读取…' : '处理过程'}</span><ChevronRight size={13} />
-    </button>
     {processRows}
+    {toggle('bottom')}
     {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined,
       pendingAssistant: answer.pendingAssistant ? { body: answer.pendingAssistant.body } : undefined }, false)}
     {answer && compactAt(process.length + 1)}
@@ -1406,7 +1418,7 @@ function findToolChainConnections(messages: Message[]): {
 }
 
 export function ConversationMessages({
-  history, onLoadHistory, localSubmissions = [], activeTurnId, canAutoCollapse, onReadProcessEnd, onProcessLayout,
+  history, onLoadHistory, localSubmissions = [], activeTurnId, canAutoCollapse, onReadProcessEnd, onProcessLayout, revealEarlierProcess,
   messages,
   interruptionNotices = [],
   skills = [],
@@ -1430,6 +1442,7 @@ export function ConversationMessages({
   focusSourceEntry,
 }: {
   history?: WorkbenchHistory;
+  revealEarlierProcess?: ProcessReadingControls['revealEarlierProcess'];
   canAutoCollapse?: ProcessReadingControls['canAutoCollapse'];
   onReadProcessEnd?: ProcessReadingControls['onReadProcessEnd'];
   onProcessLayout?: ProcessReadingControls['onProcessLayout'];
@@ -1518,7 +1531,7 @@ export function ConversationMessages({
     content.push(<ConversationRun key={`${artifactOwnerKey}:${processIdentity(run[0])}:${interruptionBoundaries.get(run[0].turnId ?? '') ?? 'start'}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel} taskFinalAnswerId={taskFinalAnswerId}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
-      canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd} onProcessLayout={onProcessLayout} onNotify={onNotify}
+      revealEarlierProcess={revealEarlierProcess} canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd} onProcessLayout={onProcessLayout} onNotify={onNotify}
       earlierProcess={Boolean(run.some(message => isCompleteAnswer(message, taskFinalAnswerId)
         && message.historyInitialEntryId && !messages.some(candidate => candidate.id === message.historyInitialEntryId)))}
       compactions={history?.compactions?.filter(marker => runIds.has(marker.displayBeforeEntryId ?? marker.displayAfterEntryId ?? ''))}
@@ -2213,7 +2226,7 @@ export function WorkbenchView({
   const readingAnchor = useRef<HistoryReadingAnchor | undefined>(undefined);
   // A manual disclosure owns its button's viewport position until the reader
   // scrolls or explicitly navigates. Tail-follow must not move it during resize.
-  const disclosureAnchor = useRef<{ element: HTMLElement; top: number; processKey?: string; collapsing?: boolean } | undefined>(undefined);
+  const disclosureAnchor = useRef<{ element: HTMLElement; top: number; processKey?: string; edge?: string; collapsing?: boolean } | undefined>(undefined);
   const programmaticTop = useRef<number | undefined>(undefined);
   const previousScrollTop = useRef<number | undefined>(undefined);
   const userScrollPending = useRef(false);
@@ -2221,6 +2234,10 @@ export function WorkbenchView({
   const locateRequest = useRef<AbortController | undefined>(undefined);
   const automaticProcessRead = useRef<{ request: AbortController; turnId?: string } | undefined>(undefined);
   const loadRequests = useRef(new Map<string, Promise<void>>());
+  const [revealEarlierProcess, setRevealEarlierProcess] = useState<{ key: string }>();
+  const olderReadIntent = useRef(false);
+  const olderAutoRequest = useRef<{ owner?: object; windowId?: string; firstEntryId?: string } | undefined>(undefined);
+  const checkOlderBoundary = useRef<() => void>(() => {});
   const resetReading = useCallback(() => {
     disclosureAnchor.current = undefined;
     followLatestRef.current = false;
@@ -2232,6 +2249,8 @@ export function WorkbenchView({
     locateRequest.current?.abort();
     setJumpingToLatest(false);
     userScrollPending.current = true;
+    olderReadIntent.current = !towardLatest;
+    olderAutoRequest.current = undefined;
     // User input takes ownership before the browser moves the viewport. Even a
     // subpixel move away from the bottom must not turn following back on.
     resetReading();
@@ -2249,6 +2268,7 @@ export function WorkbenchView({
         readingAnchor.current = undefined;
         programmaticTop.current = undefined;
       } else if (!followLatestRef.current && thread) readingAnchor.current = captureHistoryAnchor(thread);
+      checkOlderBoundary.current();
     });
   }, [resetReading]);
   useLayoutEffect(() => {
@@ -2262,6 +2282,9 @@ export function WorkbenchView({
     programmaticTop.current = undefined;
     previousScrollTop.current = undefined;
     loadRequests.current.clear();
+    olderReadIntent.current = false;
+    olderAutoRequest.current = undefined;
+    setRevealEarlierProcess(undefined);
     return () => {
       locateRequest.current?.abort();
       if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
@@ -2272,18 +2295,31 @@ export function WorkbenchView({
   }, [focusSourceEntry, session.id]);
   const loadHistory = useCallback((windowId?: string, direction: 'older' | 'newer' = 'older'): Promise<void> => {
     if (!onLoadHistory) return Promise.resolve();
-    // A clipped, closed turn must become readable before loading more of its
-    // hidden process. Otherwise reaching the top repeatedly downloads silence.
-    const closed = threadRef.current?.querySelector<HTMLButtonElement>('[data-process-earlier="true"][aria-expanded="false"]');
-    if (direction === 'older' && closed) { closed.click(); return Promise.resolve(); }
+    // Reveal only the resident slice at the top, without navigating back to
+    // its final. Then normal paging exposes earlier steps instead of silently
+    // draining an arbitrarily long folded turn from the database.
+    const closed = threadRef.current?.querySelector<HTMLButtonElement>('[data-process-edge="bottom"][data-process-earlier="true"][aria-expanded="false"]');
+    if (direction === 'older' && closed?.dataset.processKey) {
+      olderReadIntent.current = true;
+      resetReading();
+      readingAnchor.current = undefined;
+      setRevealEarlierProcess({ key: closed.dataset.processKey });
+      return Promise.resolve();
+    }
     const key = `${session.id}:${windowId ?? ''}:${direction}`;
     const existing = loadRequests.current.get(key);
     if (existing) return existing;
     userScrollPending.current = false;
     if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
     resetReading();
+    const before = currentHistory.current?.windows[0]?.firstEntryId;
+    const owner = currentHistory.current?.readingOwner;
     const request = Promise.resolve().then(() => onLoadHistory(windowId, direction)).finally(() => {
       if (loadRequests.current.get(key) === request) loadRequests.current.delete(key);
+      // A synchronous page/context publication can precede promise settlement.
+      // Resume only after actual edge progress; errors remain explicit retries.
+      if (currentSessionRef.current === session.id && currentHistory.current?.readingOwner === owner && direction === 'older'
+        && currentHistory.current?.windows[0]?.firstEntryId !== before) checkOlderBoundary.current();
     });
     loadRequests.current.set(key, request);
     return request;
@@ -2297,6 +2333,8 @@ export function WorkbenchView({
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) request.abort();
     const owner = session.id;
+    olderReadIntent.current = false;
+    setRevealEarlierProcess(undefined);
     locatingEntry.current = entryId;
     resetReading();
     try {
@@ -2335,11 +2373,12 @@ export function WorkbenchView({
     const clicked = disclosureAnchor.current;
     // Rewindowing can replace the header's DOM node without changing the turn.
     if (clicked?.processKey && !thread.contains(clicked.element)) {
-      const replacement = [...thread.querySelectorAll<HTMLElement>('[data-process-key]')]
-        .find(element => element.dataset.processKey === clicked.processKey);
+      const controls = [...thread.querySelectorAll<HTMLElement>('[data-process-key]')].filter(element => element.dataset.processKey === clicked.processKey);
+      const replacement = controls.find(element => element.dataset.processEdge === clicked.edge)
+        ?? (clicked.collapsing ? controls.find(element => element.dataset.processEdge === 'bottom' && element.getAttribute('aria-expanded') === 'false') : undefined);
       if (replacement) clicked.element = replacement;
     }
-    if (clicked && thread.contains(clicked.element) && !clicked.element.closest('[inert]')) {
+    if (clicked && thread.contains(clicked.element) && (!clicked.element.closest('[inert]') || (clicked.collapsing && clicked.processKey))) {
       const delta = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top - clicked.top;
       if (Math.abs(delta) > .5) thread.scrollTop += delta;
       programmaticTop.current = thread.scrollTop;
@@ -2364,8 +2403,30 @@ export function WorkbenchView({
     previousScrollTop.current = thread.scrollTop;
   }, []);
   useLayoutEffect(restoreReadingPosition);
+  const loadOlderAtBoundary = useCallback(() => {
+    const thread = threadRef.current, current = currentHistory.current;
+    if (!olderReadIntent.current || !thread || thread.clientHeight <= 0 || thread.scrollTop >= 160
+      || followLatestRef.current || disclosureAnchor.current || locatingEntry.current || locatingTaskRef.current || loadRequests.current.size > 0
+      || !current?.hasOlder || current.loading || current.error || current.windows.some(window => window.contextState && window.contextState !== 'ready')) return;
+    const edge = { owner: current.readingOwner, windowId: current.windows[0]?.id, firstEntryId: current.windows[0]?.firstEntryId };
+    const previous = olderAutoRequest.current;
+    if (previous && previous.owner === edge.owner && previous.windowId === edge.windowId && previous.firstEntryId === edge.firstEntryId) return;
+    if (!thread.querySelector('[data-process-edge="bottom"][data-process-earlier="true"][aria-expanded="false"]')) olderAutoRequest.current = edge;
+    void loadHistory(edge.windowId).catch(() => {});
+  }, [loadHistory]);
+  useLayoutEffect(() => { checkOlderBoundary.current = loadOlderAtBoundary; loadOlderAtBoundary(); });
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => checkOlderBoundary.current());
+    observer.observe(thread);
+    if (thread.firstElementChild) observer.observe(thread.firstElementChild);
+    return () => observer.disconnect();
+  }, [session.id]);
 
   const jumpToLatest = useCallback(async () => {
+    olderReadIntent.current = false;
+    setRevealEarlierProcess(undefined);
     locateRequest.current?.abort();
     locatingEntry.current = undefined;
     const request = new AbortController(); locateRequest.current = request;
@@ -2406,7 +2467,7 @@ export function WorkbenchView({
     document.addEventListener('selectionchange', selected);
     return () => document.removeEventListener('selectionchange', selected);
   }, [resetReading]);
-  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean, expanding: boolean) => {
+  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean) => {
     if (!onReadProcessEnd) return;
     signal.throwIfAborted();
     if (automatic && !canAutoCollapse()) throw new DOMException('阅读位置已改变', 'AbortError');
@@ -2417,7 +2478,7 @@ export function WorkbenchView({
     signal.addEventListener('abort', abort, { once: true });
     const thread = threadRef.current;
     const owner = session.id;
-    const collapsingAnchor = !automatic && !expanding ? disclosureAnchor.current : undefined;
+    const clickedAnchor = !automatic ? disclosureAnchor.current : undefined;
     const answer = thread && findHistoryEntry(thread, entryId);
     const top = answer && thread ? answer.getBoundingClientRect().top - thread.getBoundingClientRect().top : undefined;
     const cancelForSelection = () => {
@@ -2430,14 +2491,14 @@ export function WorkbenchView({
       await onReadProcessEnd(entryId, request.signal);
       request.signal.throwIfAborted();
       if (currentSessionRef.current !== owner) throw new DOMException('会话已切换', 'AbortError');
-      disclosureAnchor.current = collapsingAnchor;
+      disclosureAnchor.current = clickedAnchor;
       if (!automatic) {
         followLatestRef.current = false;
         setAtBottom(false);
       }
-      // Expansion reads backward from the answer; manual collapse holds the
-      // clicked header steady through both rewindowing and content removal.
-      readingAnchor.current = automatic || collapsingAnchor ? undefined : { entryId, top: top ?? Math.max(0, (thread?.clientHeight ?? 0) * .65) };
+      // The persistent bottom control stays under the pointer while its
+      // drawer grows upward; either collapse control keeps its own position.
+      readingAnchor.current = automatic || clickedAnchor ? undefined : { entryId, top: top ?? Math.max(0, (thread?.clientHeight ?? 0) * .65) };
       if (thread) {
         await waitForHistoryEntry(thread, entryId, request.signal);
         restoreReadingPosition();
@@ -2768,9 +2829,11 @@ export function WorkbenchView({
           const button = (event.target as HTMLElement).closest<HTMLElement>('button[data-thread-disclosure]');
           if (!button || !event.currentTarget.contains(button)) return;
           resetReading();
+          olderReadIntent.current = false;
+          setRevealEarlierProcess(undefined);
           userScrollPending.current = false;
           disclosureAnchor.current = { element: button, top: button.getBoundingClientRect().top - event.currentTarget.getBoundingClientRect().top,
-            processKey: button.dataset.processKey,
+            processKey: button.dataset.processKey, edge: button.dataset.processEdge,
             collapsing: button.hasAttribute('data-process-toggle') && button.getAttribute('aria-expanded') === 'true' };
         }}
         onWheel={event => {
@@ -2798,7 +2861,14 @@ export function WorkbenchView({
           if (!userScrollPending.current && programmaticTop.current !== undefined
             && element.scrollTop === programmaticTop.current) { programmaticTop.current = undefined; return; }
           if (locatingTaskRef.current) return;
-          if (disclosureAnchor.current && !userScrollPending.current) return;
+          // Native scrollbar drags can arrive without a DOM pointerdown.
+          // Only our exact programmed position is suppressed above.
+          if (disclosureAnchor.current && (movedAway || movedTowardLatest)) {
+            disclosureAnchor.current = undefined;
+            locateRequest.current?.abort();
+          }
+          if (movedAway) olderReadIntent.current = true;
+          else if (movedTowardLatest) olderReadIntent.current = false;
           userScrollPending.current = false;
           // The small return zone applies only while moving toward the tail;
           // it must never recapture an upward gesture, even a fractional one.
@@ -2808,10 +2878,7 @@ export function WorkbenchView({
           followLatestRef.current = nextAtBottom;
           setAtBottom(nextAtBottom);
           readingAnchor.current = nextAtBottom ? undefined : captureHistoryAnchor(element);
-          if (!nextAtBottom && element.scrollTop < 160 && history?.hasOlder && !history.loading && !history.error
-            && !element.querySelector('[data-process-earlier="true"][aria-expanded="false"]')) {
-            void loadHistory(history.windows[0]?.id).catch(() => {});
-          }
+          checkOlderBoundary.current();
         }}
       >
         <div className="thread-column conversation-transcript">
@@ -2833,7 +2900,7 @@ export function WorkbenchView({
             {onLoadHistory && !history.windows.length && (history.hasOlder || history.error) && <button type="button" disabled={history.loading} onClick={() => { void loadHistory(history.windows[0]?.id).catch(() => {}); }}>{history.error ? '重试' : '加载更早记录'}</button>}
           </div>}
           <ConversationMessages key={session.id} history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
-            canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd ? readProcessEnd : undefined} onProcessLayout={restoreReadingPosition}
+            revealEarlierProcess={revealEarlierProcess} canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd ? readProcessEnd : undefined} onProcessLayout={restoreReadingPosition}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}

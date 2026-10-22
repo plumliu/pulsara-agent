@@ -348,3 +348,95 @@ it('extends an aperture with adjacent live tail but never inserts that tail into
   head=22;await reader.observe();await flush();
   expect(reader.current().messages.map(message=>message.id)).toEqual(['final']);
 });
+
+it('reuses complete short turns across pages and compactions without narrowing a longer conversation or requesting the database', async () => {
+  // frzaaaxz-shaped regression: total history exceeds a window, each turn fits.
+  const range = Array.from({length:184},(_,i)=>entry(`short:${i+1}`,i+1,{turn_id:`turn:${Math.floor(i/23)}`,
+    root_final:(i+1)%23===0,fork_eligible:(i+1)%23===0}));
+  const calls=fixture((url,body)=>{
+    if(url.endsWith('/context'))return context(body,{
+      groups:Array.from({length:8},(_,i)=>({owner_kind:'EXECUTED_TURN',owner_id:`turn:${i}`,initial_entry_id:`short:${i*23+1}`,final_entry_id:`short:${(i+1)*23}`})),
+      entry_contexts:body.entry_ids.map((id:string)=>{const n=Number(id.split(':')[1]), owner=`turn:${Math.floor((n-1)/23)}`;return{entry_id:id,owner_id:owner,owner_kind:'EXECUTED_TURN',root_owner_id:owner,segment_id:`epoch:${Math.floor(n/7)}`,segment_start_entry_id:`short:${Math.floor((n-1)/23)*23+1}`};}),
+    });
+    throw Error(`Unexpected read: ${url}`);
+  });
+  const reader=new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},snapshot(range,undefined,'184'));
+  await reader.initialize();await flush();
+  const reads=calls.length;
+  for(const id of ['short:184','short:69','short:138','short:69','short:184']) {
+    await reader.readProcessEnd(id,new AbortController().signal);
+    expect(reader.current().history!.windows[0].entryIds).toEqual(range.map(item=>item.entry_id));
+    expect(reader.current().history!.hasOlder).toBe(false);
+  }
+  expect(calls).toHaveLength(reads);
+});
+
+it.each(['missing start','over byte budget'] as const)('does not reuse a process with %s as a complete short turn',async mode=>{
+  const entries=[entry('start',1,{root_final:false,fork_eligible:false,blocks:[{block_id:'start-text',block_kind:'TEXT',content:inline(mode==='over byte budget'?'x'.repeat(2<<20):'start')}]}),entry('final',2)];
+  const calls=fixture((url,body)=>{
+    if(url.endsWith('/context'))return context(body,{groups:[{owner_id:'turn:root',owner_kind:'EXECUTED_TURN',initial_entry_id:'start',final_entry_id:'final'}]});
+    if(url.endsWith('/window'))return{session_id:'session:test',cut_sequence:'2',event_sequence_cut:'30',entries:[entry('final',2)],older_cursor:{...cursor,cut_sequence:'2',entry_sequence:'2',direction:'older'}};
+    throw Error(url);
+  });
+  const reader=new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},snapshot(mode==='missing start'?entries.slice(1):entries,undefined,'2'));
+  await reader.initialize();await flush();
+  await reader.readProcessEnd('final',new AbortController().signal);
+  expect(calls.filter(call=>call.url.endsWith('/window'))).toHaveLength(1);
+  expect(reader.current().history!.hasOlder).toBe(true);
+});
+
+it.each(['current band','selected aperture'] as const)('keeps delayed older paging attached during cached short-turn toggles in a %s', async mode => {
+  const pending = deferred<unknown>();
+  const range = (first: number, last: number) => Array.from({length:last-first+1},(_,index)=>{
+    const n=first+index;
+    return entry(`e:${n}`,n,{turn_id:n<7?'turn:previous':'turn:short',root_final:n===6||n===8,fork_eligible:n===6||n===8});
+  });
+  const edge = (n: number) => ({...cursor,cut_sequence:'8',entry_sequence:String(n)});
+  const olderPage = (first: number, last: number, window: boolean) => window
+    ? {session_id:'session:test',cut_sequence:'8',event_sequence_cut:'30',entries:range(first,last),
+      older_cursor:first>1?{...edge(first),direction:'older'}:undefined}
+    : {history_page:{entries:range(first,last),has_more:first>1,older_history_cursor:first>1?edge(first):undefined}};
+  const calls=fixture((url,body)=>{
+    if(url.endsWith('/context'))return context(body,{
+      groups:[
+        {owner_kind:'EXECUTED_TURN',owner_id:'turn:previous',initial_entry_id:'e:1',final_entry_id:'e:6'},
+        {owner_kind:'EXECUTED_TURN',owner_id:'turn:short',initial_entry_id:'e:7',final_entry_id:'e:8'},
+      ],
+      entry_contexts:body.entry_ids.map((id:string)=>{
+        const previous=Number(id.slice(2))<7,owner=previous?'turn:previous':'turn:short';
+        return {entry_id:id,owner_id:owner,owner_kind:'EXECUTED_TURN',root_owner_id:owner,
+          segment_id:`${owner}:initial`,segment_start_entry_id:previous?'e:1':'e:7'};
+      }),
+    });
+    if(url.endsWith('/window')&&body.anchor_entry_id)return olderPage(5,8,true);
+    if(url.endsWith('/history')||url.endsWith('/window')) {
+      if(body.cursor.entry_sequence==='5')return pending.promise;
+      if(body.cursor.entry_sequence==='3')return olderPage(1,2,url.endsWith('/window'));
+    }
+    throw Error(`Unexpected read: ${url}`);
+  });
+  const reader=new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},
+    snapshot(mode==='selected aperture'?range(8,8):range(5,8),edge(mode==='selected aperture'?8:5),'8'));
+  await reader.initialize();await flush();
+  if(mode==='selected aperture')await reader.readProcessEnd('e:8',new AbortController().signal);
+  const owner=reader.current().history!.readingOwner;
+  const reading=reader.readHistory(undefined,'older');
+  await flush();
+  expect(reader.current().history!.loading).toBe(true);
+  const reads=calls.length;
+  for(let toggle=0;toggle<2;toggle++) {
+    await reader.readProcessEnd('e:8',new AbortController().signal);
+    expect(reader.current().history!.readingOwner).toBe(owner);
+    expect(reader.current().messages.map(message=>message.id)).toEqual(range(5,8).map(item=>item.entry_id));
+  }
+  expect(calls).toHaveLength(reads);
+  pending.resolve(olderPage(3,4,mode==='selected aperture'));
+  await reading;await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(range(3,8).map(item=>item.entry_id));
+  expect(reader.current().history!.readingOwner).toBe(owner);
+  expect(reader.current().history!.hasOlder).toBe(true);
+  await reader.readHistory(undefined,'older');await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(range(1,8).map(item=>item.entry_id));
+  expect(reader.current().history!.hasOlder).toBe(false);
+  expect(calls.filter(call=>call.body.cursor).map(call=>call.body.cursor.entry_sequence)).toEqual(['5','3']);
+});

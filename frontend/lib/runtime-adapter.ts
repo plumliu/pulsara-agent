@@ -2341,12 +2341,38 @@ abstract class CanonicalHistoryReader {
 
   async readProcessEnd(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
     signal.throwIfAborted();
-    this.readingAperture ??= this.readingCluster();
+    if (this.readerClosed) throw new DOMException('Reader closed', 'AbortError');
     const navigation = {}; this.navigation = navigation;
     this.locatingEntries.add(entryId);
     try {
-      // Always ask for one physically admitted window, including when this
-      // final is already cached in a much larger connected history range.
+      // A complete short turn already inside the reading interval needs no
+      // navigation. Reuse canonical page context and the existing admission
+      // budget; a large connected cache alone is never permission to expand
+      // an unbounded turn. Bodies remain under normal viewport hydration.
+      const reading = this.readingCluster();
+      const ids = this.readingIds();
+      const cachedFinal = this.entries.get(entryId);
+      const group = reading.flatMap(page => page.contextState === 'ready' && !page.needsFreshContext
+        && page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) >= 0
+        ? page.context.groups : []).find(group => group.final_entry_id === entryId);
+      const initial = group && ids.has(group.initial_entry_id) ? this.entries.get(group.initial_entry_id) : undefined;
+      if (initial && cachedFinal && ids.has(entryId) && cachedFinal.entry_kind === 'ASSISTANT_MESSAGE'
+        && (cachedFinal.root_final || cachedFinal.fork_eligible) && this.entryContentState(entryId) === 'ready') {
+        const span = [...ids].map(id => this.entries.get(id)!).filter(entry =>
+          compareSequence(entry.entry_sequence, initial.entry_sequence) >= 0
+          && compareSequence(entry.entry_sequence, cachedFinal.entry_sequence) <= 0);
+        const complete = BigInt(span.length) === BigInt(decimal(cachedFinal.entry_sequence)) - BigInt(decimal(initial.entry_sequence)) + BigInt(1);
+        if (complete && span.length <= 128 && span.reduce((bytes, entry) => bytes + (this.entryWindowBytes.get(entry) ?? Infinity), 0) <= (2 << 20)
+          && span.every(entry => reading.some(page => page.contextState === 'ready' && !page.needsFreshContext
+            && page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) >= 0
+            && page.entryIds.includes(entry.entry_id)))) {
+          // No navigation took place. Keep ownership so in-flight edge
+          // reads still attach to this same continuous interval.
+          return this.project();
+        }
+      }
+      // Missing or long processes still select one server-admitted window.
+      this.readingAperture ??= this.readingCluster();
       const window = await this.historyPost<BrowserWindow>('window', {
         anchor_entry_id: entryId, maximum_entries: 128, maximum_serialized_bytes: 2 << 20,
       }, signal);

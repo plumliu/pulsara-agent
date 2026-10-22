@@ -114,3 +114,17 @@ it('does not anchor or locate a closed disclosure while its exit animation retai
   root.querySelector('section')!.removeAttribute('inert');
   expect((await ready).textContent).toBe('hidden body');
 });
+
+it('restores the bottom process control without confusing it with the top control of the same canonical entry',()=>{
+  const root=document.createElement('div');document.body.append(root);
+  root.innerHTML='<button data-history-entry="answer" data-process-edge="top">顶部</button><button data-history-entry="answer" data-process-edge="bottom">底部</button>';
+  vi.spyOn(root,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,500));
+  const [top,bottom]=root.querySelectorAll('button');
+  vi.spyOn(top,'getBoundingClientRect').mockReturnValue(new DOMRect(0,-1000,100,24));
+  const position=vi.spyOn(bottom,'getBoundingClientRect').mockReturnValue(new DOMRect(0,100,100,24));
+  const anchor=captureHistoryAnchor(root)!;
+  expect(anchor).toMatchObject({entryId:'answer',processEdge:'bottom',top:100});
+  position.mockReturnValue(new DOMRect(0,180,100,24));
+  restoreHistoryAnchor(root,anchor);
+  expect(root.scrollTop).toBe(80);
+});

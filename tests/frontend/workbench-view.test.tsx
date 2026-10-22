@@ -1227,7 +1227,8 @@ describe('completed reply process disclosure', () => {
       { id: 'next-user', turnId: 'turn-two', role: 'user', userKind: 'prompt', time: '13:04', body: '接着做' },
       { ...progress, id: 'next-progress', turnId: 'turn-two', body: '正在处理第二轮。' },
     ] })} />);
-    expect(screen.getAllByText('处理过程')).toHaveLength(2);
+    expect(screen.getByRole('button', {name:'展开处理过程'})).toBeTruthy();
+    expect(screen.getByRole('button', {name:'收起处理过程'})).toBeTruthy();
     expect(hiddenProgress()).toBe(true);
     expect(screen.getByText('正在处理第二轮。').closest('.conversation-run__step')?.hasAttribute('inert')).toBe(false);
   });
@@ -2613,18 +2614,16 @@ describe('long turn process reading', () => {
     expect(screen.getByText('过程 500').compareDocumentPosition(separators[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('does not auto-fetch hidden pages at the top of a closed long turn', async () => {
+  it('reveals the resident clipped process at the top and loads older history without a manual click or a final-window jump', async () => {
     const read = vi.fn(async () => {}), load = vi.fn(async () => {});
     const history = { atLatest: true, hasOlder: true, loading: false, windows: [{ id: 'band', hasOlder: true, hasNewer: false, loading: false }] };
     const view = render(<WorkbenchView {...props({ isRunning: false, messages: [{ ...step(999), historyInitialEntryId: 'initial' }, { ...final, historyInitialEntryId: 'initial' }], history, onLoadHistory: load, onReadProcessEnd: read })} />);
     const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
     Object.defineProperties(thread, { scrollHeight: { value: 1500 }, clientHeight: { value: 400 }, scrollTop: { value: 0, writable: true } });
     fireEvent.wheel(thread, { deltaY: -100 }); fireEvent.scroll(thread);
-    expect(load).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '加载更早记录' }));
     await waitFor(() => expect(screen.getByRole('button', { name: '收起处理过程' })).toBeTruthy());
-    expect(read).toHaveBeenCalledWith(final.id, expect.any(AbortSignal));
-    fireEvent.click(screen.getByRole('button', { name: '加载更早记录' }));
+    expect(screen.getByText('过程 999')).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
     await waitFor(() => expect(load).toHaveBeenCalledWith('band', 'older'));
   });
 });
@@ -2803,4 +2802,104 @@ it('defers residence reporting during the drawer and ignores its completion afte
   await waitFor(() => expect(nextRetain).toHaveBeenCalled());
   await act(async () => finish());
   expect(retain).not.toHaveBeenCalled();
+});
+
+it('keeps the original disclosure button at the process bottom and shares state with the top collapse control', async () => {
+  const messages: ComponentProps<typeof WorkbenchView>['messages'] = [
+    {id:'dual-process',turnId:'dual-turn',role:'assistant',assistantKind:'progress',time:'',body:'过程内容'},
+    {id:'dual-final',turnId:'dual-turn',role:'assistant',assistantKind:'terminal',rootFinal:true,time:'',body:'答案内容'},
+  ];
+  const view=render(<WorkbenchView {...props({isRunning:false,messages,onReadProcessEnd:vi.fn(async()=>{})})}/>);
+  const original=screen.getByRole('button',{name:'展开处理过程'});
+  fireEvent.click(original);
+  await screen.findByRole('button',{name:'收起处理过程'});
+  expect(screen.getByRole('button',{name:'收起处理过程'})).toBe(original);
+  const top=screen.getByRole('button',{name:'从顶部收起处理过程'});
+  const content=screen.getByText('过程内容');
+  expect(top.compareDocumentPosition(content)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(content.compareDocumentPosition(original)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(original.compareDocumentPosition(screen.getByText('答案内容'))&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(original);
+  await screen.findByRole('button',{name:'展开处理过程'});
+  expect(screen.getByRole('button',{name:'展开处理过程'})).toBe(original);
+  expect(screen.queryByRole('button',{name:'从顶部收起处理过程'})).toBeNull();
+  fireEvent.click(original);
+  const topAgain=await screen.findByRole('button',{name:'从顶部收起处理过程'});
+  topAgain.focus();
+  fireEvent.click(topAgain);
+  await screen.findByRole('button',{name:'展开处理过程'});
+  expect(view.container.querySelectorAll('.conversation-run__step')).toHaveLength(0);
+  expect(document.activeElement).toBe(original);
+});
+
+it('loads older history after opening several processes and dragging a native scrollbar directly to the top', async () => {
+  const load=vi.fn(async()=>{});
+  const messages: ComponentProps<typeof WorkbenchView>['messages']=Array.from({length:3},(_,i)=>[
+    {id:`drag-step:${i}`,turnId:`drag-turn:${i}`,role:'assistant' as const,assistantKind:'progress' as const,time:'',body:`步骤 ${i}`},
+    {id:`drag-final:${i}`,turnId:`drag-turn:${i}`,role:'assistant' as const,assistantKind:'terminal' as const,rootFinal:true,time:'',body:`答案 ${i}`},
+  ]).flat();
+  const history={atLatest:true,hasOlder:true,loading:false,windows:[{id:'drag-band',hasOlder:true,hasNewer:false,loading:false}]};
+  const view=render(<WorkbenchView {...props({isRunning:false,messages,history,onLoadHistory:load,onReadProcessEnd:vi.fn(async()=>{})})}/>);
+  const thread=view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  let top=1000;
+  Object.defineProperties(thread,{scrollHeight:{value:2000},clientHeight:{value:400},scrollTop:{get:()=>top,set:value=>{top=Math.max(0,Math.min(1600,value));}}});
+  for(const button of screen.getAllByRole('button',{name:'展开处理过程'})){
+    fireEvent.click(button);
+    await waitFor(()=>expect(button.getAttribute('aria-expanded')).toBe('true'));
+  }
+  // Native scrollbars need not emit DOM pointerdown/wheel events.
+  top=0;fireEvent.scroll(thread);
+  await waitFor(()=>expect(load).toHaveBeenCalledWith('drag-band','older'));
+});
+
+it('continues loading at the top when a pending page settles without another scroll, and stops on error',async()=>{
+  const load=vi.fn(async()=>{});
+  const history={atLatest:true,hasOlder:true,loading:true,windows:[{id:'first',firstEntryId:'e:100',hasOlder:true,hasNewer:false,loading:true}]};
+  const base=props({isRunning:false,history,onLoadHistory:load,messages:[{id:'read',role:'assistant',time:'',body:'正在阅读'}]});
+  const view=render(<WorkbenchView {...base}/>);
+  const thread=view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  Object.defineProperties(thread,{scrollHeight:{value:1500},clientHeight:{value:400},scrollTop:{value:0,writable:true}});
+  fireEvent.wheel(thread,{deltaY:-500});fireEvent.scroll(thread);
+  expect(load).not.toHaveBeenCalled();
+  view.rerender(<WorkbenchView {...base} history={{...history,loading:false,windows:[{...history.windows[0],loading:false}]}}/>);
+  await waitFor(()=>expect(load).toHaveBeenCalledOnce());
+  view.rerender(<WorkbenchView {...base} history={{...history,loading:false,error:'offline',windows:[{...history.windows[0],loading:false,error:'offline'}]}}/>);
+  fireEvent.wheel(thread,{deltaY:-10});fireEvent.scroll(thread);
+  await act(async()=>{await new Promise(resolve=>requestAnimationFrame(resolve));});
+  expect(load).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button',{name:'重试'}));
+  await waitFor(()=>expect(load).toHaveBeenCalledTimes(2));
+});
+
+it('rechecks the older boundary after its deduplicated request settles when the advanced projection arrived first', async () => {
+  const releases: Array<() => void> = [];
+  const load = vi.fn(() => new Promise<void>(resolve => { releases.push(resolve); }));
+  const history = { atLatest: true, hasOlder: true, loading: false,
+    windows: [{ id: 'settlement-band', firstEntryId: 'entry:100', hasOlder: true, hasNewer: false, loading: false }] };
+  const base = props({ isRunning: false, history, onLoadHistory: load,
+    messages: [{ id: 'settlement-reader', role: 'assistant', time: '', body: '保持当前阅读位置' }] });
+  const view = render(<WorkbenchView {...base} />);
+  const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  Object.defineProperties(thread, {
+    scrollHeight: { value: 1500 }, clientHeight: { value: 400 }, scrollTop: { value: 0, writable: true },
+  });
+  fireEvent.wheel(thread, { deltaY: -100 });
+  fireEvent.scroll(thread);
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+
+  // The page/context publisher commits before the load promise returns. This
+  // layout check still encounters the first request's deduplication entry.
+  view.rerender(<WorkbenchView {...base} history={{ ...history,
+    windows: [{ ...history.windows[0], firstEntryId: 'entry:80' }],
+  }} />);
+  expect(load).toHaveBeenCalledTimes(1);
+  await act(async () => { releases[0](); });
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  expect(load.mock.calls).toEqual([['settlement-band', 'older'], ['settlement-band', 'older']]);
+  expect(thread.scrollTop).toBe(0);
+
+  // No scroll/resize is emitted after the first gesture. A result without
+  // further edge progress must not turn the settlement recheck into a loop.
+  await act(async () => { releases[1](); });
+  expect(load).toHaveBeenCalledTimes(2);
 });
