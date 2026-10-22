@@ -1231,18 +1231,20 @@ describe('completed reply process disclosure', () => {
     expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
   });
 
-  it('keeps compaction visible and opens a collapsed process for an explicit history location', () => {
+  it('keeps compaction inside its process and opens it for an explicit history location', () => {
     const common = {
       messages: [{ ...progress, historyGroupId: 'before-adoption' }, { ...steer, historyGroupId: 'before-adoption' }, { ...final, historyGroupId: 'after-adoption' }], artifactOwnerKey: 'session-one',
       onReadToolArtifact: vi.fn(), onNotify: vi.fn(), history: { hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 3, displayAfterEntryId: 'steer' }] },
     };
     const view = renderWithRawResults(<ConversationMessages {...common} />);
     expect(hiddenProgress()).toBe(true);
-    expect(screen.getByRole('separator', { name: '上下文已压缩' })).toBeTruthy();
+    expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
+    expect(screen.getAllByRole('button', { name: '展开中间过程' })).toHaveLength(1);
     expect(screen.getByText(final.body).closest('[hidden]')).toBeNull();
     view.rerender(<ConversationMessages {...common}
       focusSourceEntry={{ sessionId: 'session-one', entryId: progress.id }} />);
     expect(hiddenProgress()).toBe(false);
+    expect(screen.getByRole('separator', { name: '上下文已压缩' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '展开工具详情：read_file' })).toBeTruthy();
   });
 
@@ -1855,6 +1857,8 @@ describe('bounded history reading and DOM locations', () => {
     const view = render(<WorkbenchView {...base} />);
     expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
     view.rerender(<WorkbenchView {...base} history={{ ...history, compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 2, displayBeforeEntryId: 'answer' }] }} />);
+    expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     expect(screen.getAllByRole('separator', { name: '上下文已压缩' })).toHaveLength(1);
   });
 });
@@ -2276,7 +2280,7 @@ it('keeps manual process and tool expansion at the clicked position, then resume
   expect(top).toBe(1700);
 });
 
-it('retains the same process content through exit without starting hidden hydration', async () => {
+it('unmounts a closed process immediately without retaining per-entry animation shells or hydrating hidden bodies', () => {
   const observed: Array<{node:Element,notify:IntersectionObserverCallback}>=[];
   vi.stubGlobal('IntersectionObserver',class {
     constructor(private notify:IntersectionObserverCallback) {}
@@ -2289,18 +2293,12 @@ it('retains the same process content through exit without starting hidden hydrat
   ]})}/>);
   fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
   const host=view.container.querySelector('[data-source-entry="reasoning"]')!;
-  const closing=host.closest('.animated-disclosure')!;
-  let settle!:()=>void;
-  const finished=new Promise<void>(resolve=>{settle=resolve;});
-  Object.defineProperty(closing,'getAnimations',{value:()=>[{finished}]});
   expect(host.textContent).toContain('已保存，正文读取中');
   fireEvent.click(screen.getByRole('button',{name:'收起中间过程'}));
-  expect(host.isConnected).toBe(true);
-  expect(host.textContent).toContain('已保存，正文读取中');
+  expect(host.isConnected).toBe(false);
+  expect(view.container.querySelector('.conversation-run__disclosure')).toBeNull();
   act(()=>observed.forEach(item=>item.notify([{target:item.node,isIntersecting:true}] as IntersectionObserverEntry[],{} as IntersectionObserver)));
   expect(hydrate).not.toHaveBeenCalled();
-  await act(async()=>settle());
-  expect(host.isConnected).toBe(false);
   expect(screen.getByText('最终正文')).toBeTruthy();
 });
 
@@ -2449,4 +2447,165 @@ it('preserves the selected response DOM when cache-page identity changes around 
   expect(screen.getByText('选中的正文保持不变。')).toBe(element);
   expect(window.getSelection()!.toString()).toBe('选中的正文保持不变。');
   window.getSelection()!.removeAllRanges();
+});
+
+
+describe('long turn process reading', () => {
+  const step = (n: number): ComponentProps<typeof WorkbenchView>['messages'][number] => ({
+    id: `step:${n}`, turnId: 'long-turn', historyGroupId: `epoch:${Math.floor(n / 100)}`,
+    historyWindowId: 'band', entryOwnerKind: 'EXECUTED_TURN', role: 'assistant',
+    assistantKind: 'terminal', time: '', body: `过程 ${n}`, entrySequence: n,
+  });
+  const final = { ...step(1001), id: 'long-final', rootFinal: true, body: '长任务最终答案' };
+  const common = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+
+  it('keeps a thousand-step turn across several compactions in one fold, with no hidden per-entry shells', () => {
+    const messages = [...Array.from({ length: 1000 }, (_, i) => step(i + 1)), final];
+    const compactions = [100, 500, 900].map(n => ({ eventId: `compact:${n}`, adoptedAfterEntrySequence: n, displayAfterEntryId: `step:${n}` }));
+    const view = render(<ConversationMessages {...common} messages={messages} history={{ hasOlder: false, loading: false, windows: [], compactions }} />);
+    expect(screen.getAllByRole('button', { name: '展开中间过程' })).toHaveLength(1);
+    expect(view.container.querySelectorAll('.conversation-run__step, .conversation-run__disclosure')).toHaveLength(0);
+    expect(screen.queryByText('过程 1')).toBeNull();
+    expect(screen.getByText(final.body)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(screen.getAllByRole('separator', { name: '上下文已压缩' })).toHaveLength(3);
+    const text = view.container.textContent!;
+    expect(text.indexOf('过程 100')).toBeLessThan(text.indexOf('上下文已压缩'));
+    expect(text.indexOf('上下文已压缩')).toBeLessThan(text.indexOf('过程 101'));
+  });
+
+  it.each(['scroll', 'selection', 'offscreen-final'] as const)('keeps the middle process open on completion after %s', mode => {
+    const base = props({ activeTurnId: 'long-turn', messages: [step(500), step(501)] });
+    const view = render(<WorkbenchView {...base} />);
+    const process = view.container.querySelector('.conversation-run');
+    const text = screen.getByText('过程 500');
+    const thread = view.container.querySelector('.thread-scroll')!;
+    if (mode === 'selection') {
+      const range = document.createRange(); range.selectNodeContents(text);
+      const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+      fireEvent(document, new Event('selectionchange'));
+    } else fireEvent.wheel(thread, { deltaY: -100 });
+    view.rerender(<WorkbenchView {...base} isRunning={false} messages={mode === 'offscreen-final' ? [step(500), step(501)] : [step(500), step(501), final]} />);
+    expect(view.container.querySelector('.conversation-run')).toBe(process);
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+    expect(screen.getByText('过程 500')).toBe(text);
+    if (mode === 'selection') {
+      expect(document.getSelection()?.toString()).toBe('过程 500');
+      document.getSelection()?.removeAllRanges();
+    }
+  });
+
+  it('does not collapse merely because execution stops without a final', () => {
+    const base = props({ activeTurnId: 'long-turn', messages: [step(500)] });
+    const view = render(<WorkbenchView {...base} />);
+    view.rerender(<WorkbenchView {...base} isRunning={false} />);
+    expect(screen.getByText('过程 500')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+  });
+
+  it('opens only after the final-window read succeeds and preserves the closed process on failure', async () => {
+    let resolve!: () => void, reject!: (error: Error) => void;
+    const read = vi.fn(() => new Promise<void>((done, fail) => { resolve = done; reject = fail; }));
+    const notify = vi.fn();
+    const base = props({ isRunning: false, messages: [step(900), final], onReadProcessEnd: read, onNotify: notify });
+    const view = render(<WorkbenchView {...base} />);
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(read).toHaveBeenCalledWith(final.id, expect.any(AbortSignal));
+    expect(screen.queryByText('过程 900')).toBeNull();
+    await act(async () => reject(new Error('窗口读取失败')));
+    expect(notify).toHaveBeenCalledWith('无法读取处理过程', '窗口读取失败', 'warning');
+    expect(screen.getByRole('button', { name: '展开中间过程' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    view.rerender(<WorkbenchView {...base} messages={[step(999), final]} />);
+    await act(async () => resolve());
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+    expect(screen.getByText('过程 999')).toBeTruthy();
+    expect(screen.queryByText('过程 900')).toBeNull();
+  });
+
+  it('keeps a completed turn mounted when navigation retires an earlier turn interruption', async () => {
+    let resolve!: () => void;
+    const read = vi.fn(() => new Promise<void>(done => { resolve = done; }));
+    const stopped = { ...step(1), id: 'stopped', turnId: 'previous-turn', body: '之前的任务' };
+    const notice = { ownerKind: 'EXECUTED_TURN' as const, ownerId: 'previous-turn', reason: 'USER_STOPPED',
+      terminalAtUtc: '2026-10-22T00:00:00Z', displayAfterEntrySequence: 1, displayAfterEntryId: 'stopped', displayAfterMessageId: 'stopped' };
+    const base = props({ isRunning: false, messages: [stopped, step(900), final], interruptionNotices: [notice], onReadProcessEnd: read });
+    const view = render(<WorkbenchView {...base} />);
+    const button = screen.getAllByRole('button', { name: '展开中间过程' }).at(-1)!;
+    const run = button.closest('.conversation-run');
+    fireEvent.click(button);
+    view.rerender(<WorkbenchView {...base} messages={[step(999), final]} interruptionNotices={[]} />);
+    await act(async () => resolve());
+    expect(screen.getByRole('button', { name: '收起中间过程' }).closest('.conversation-run')).toBe(run);
+    expect(screen.getByText('过程 999')).toBeTruthy();
+  });
+
+  it('cancels a pending automatic collapse when the reader scrolls, even if the read resolves late', async () => {
+    let resolve!: () => void;
+    const read = vi.fn(() => new Promise<void>(done => { resolve = done; }));
+    const notify = vi.fn();
+    const base = props({ activeTurnId: 'long-turn', messages: [step(999)], onReadProcessEnd: read, onNotify: notify });
+    const view = render(<WorkbenchView {...base} />);
+    view.rerender(<WorkbenchView {...base} isRunning={false} messages={[step(999), final]} />);
+    expect(read).toHaveBeenCalledOnce();
+    fireEvent.wheel(view.container.querySelector('.thread-scroll')!, { deltaY: -100 });
+    expect(read.mock.calls[0][1].aborted).toBe(true);
+    await act(async () => resolve());
+    expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy();
+    expect(screen.getByText('过程 999')).toBeTruthy();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('cancels automatic collapse when a new turn starts before its window finishes', async () => {
+    let resolve!: () => void;
+    const read = vi.fn(() => new Promise<void>(done => { resolve = done; }));
+    const base = props({ activeTurnId: 'long-turn', messages: [step(999)], onReadProcessEnd: read });
+    const view = render(<WorkbenchView {...base} />);
+    view.rerender(<WorkbenchView {...base} isRunning={false} messages={[step(999), final]} />);
+    expect(read).toHaveBeenCalledOnce();
+    const next = { ...step(1002), turnId: 'next-turn', body: '新任务正在执行' };
+    view.rerender(<WorkbenchView {...base} activeTurnId="next-turn" messages={[step(999), final, next]} />);
+    expect(read.mock.calls[0][1].aborted).toBe(true);
+    await act(async () => resolve());
+    expect(screen.getByText(next.body)).toBeTruthy();
+    expect(screen.getByText('过程 999')).toBeTruthy();
+  });
+
+  it('keeps post-answer compactions after a standalone final without inventing an empty process', () => {
+    render(<ConversationMessages {...common} messages={[final]} history={{ hasOlder: false, loading: false, windows: [],
+      compactions: [1, 2].map(n => ({ eventId: `after-final:${n}`, adoptedAfterEntrySequence: 1001, displayAfterEntryId: final.id })) }} />);
+    expect(screen.queryByRole('button', { name: '展开中间过程' })).toBeNull();
+    const divider = screen.getByRole('separator', { name: '上下文已压缩 · 2 次' });
+    expect(screen.getByText(final.body).compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each(['same-edge', 'adjacent-slots', 'duplicate-event', 'separate-content'] as const)('groups compactions by visual slot: %s', kind => {
+    const first = { eventId: 'compact-a', adoptedAfterEntrySequence: 500, displayAfterEntryId: 'step:500' };
+    const second = kind === 'duplicate-event' ? first : kind === 'adjacent-slots'
+      ? { eventId: 'compact-b', adoptedAfterEntrySequence: 500, displayBeforeEntryId: 'step:501' }
+      : { eventId: 'compact-b', adoptedAfterEntrySequence: kind === 'separate-content' ? 501 : 500, displayAfterEntryId: kind === 'separate-content' ? 'step:501' : 'step:500' };
+    const view = render(<ConversationMessages {...common} messages={[step(500), step(501)]} activeTurnId="long-turn" isRunning
+      history={{ hasOlder: false, loading: false, windows: [], compactions: [first, second] }} />);
+    const separators = screen.getAllByRole('separator', { name: /上下文已压缩/ });
+    expect(separators).toHaveLength(kind === 'separate-content' ? 2 : 1);
+    if (kind === 'same-edge' || kind === 'adjacent-slots') expect(separators[0].textContent).toBe('上下文已压缩 · 2 次');
+    if (kind === 'duplicate-event') expect(separators[0].textContent).toBe('上下文已压缩');
+    expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
+    expect(screen.getByText('过程 500').compareDocumentPosition(separators[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('does not auto-fetch hidden pages at the top of a closed long turn', async () => {
+    const read = vi.fn(async () => {}), load = vi.fn(async () => {});
+    const history = { atLatest: true, hasOlder: true, loading: false, windows: [{ id: 'band', hasOlder: true, hasNewer: false, loading: false }] };
+    const view = render(<WorkbenchView {...props({ isRunning: false, messages: [{ ...step(999), historyInitialEntryId: 'initial' }, { ...final, historyInitialEntryId: 'initial' }], history, onLoadHistory: load, onReadProcessEnd: read })} />);
+    const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+    Object.defineProperties(thread, { scrollHeight: { value: 1500 }, clientHeight: { value: 400 }, scrollTop: { value: 0, writable: true } });
+    fireEvent.wheel(thread, { deltaY: -100 }); fireEvent.scroll(thread);
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '加载更早记录' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '收起中间过程' })).toBeTruthy());
+    expect(read).toHaveBeenCalledWith(final.id, expect.any(AbortSignal));
+    fireEvent.click(screen.getByRole('button', { name: '加载更早记录' }));
+    await waitFor(() => expect(load).toHaveBeenCalledWith('band', 'older'));
+  });
 });

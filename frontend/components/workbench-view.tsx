@@ -3,7 +3,7 @@ import { parsePresentationResult } from '../lib/presentation-targets';
 import { PresentationResult } from './presentation-result';
 import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 
-import { captureHistoryAnchor, collectHistoryResidence, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
+import { captureHistoryAnchor, collectHistoryResidence, findHistoryEntry, hasHistorySelection, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
 import { splitSkillReferences } from '../lib/skill-reference';
 
 import { createPortal } from 'react-dom';
@@ -130,6 +130,7 @@ interface WorkbenchViewProps {
   onLoadHistory?: (windowId?: string, direction?: 'older' | 'newer') => Promise<void>;
   onHydrateEntries?: (entryIds: string[], includeReasoning?: boolean) => Promise<void>;
   onReadLatestHistory?: (signal: AbortSignal) => Promise<void>;
+  onReadProcessEnd?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onRetainHistory?: (interest: import('../lib/runtime-adapter').HistoryResidence) => void;
   onLocateEntry?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
@@ -1205,7 +1206,7 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
       return;
     }
     const observer = new IntersectionObserver(entries => {
-      if (!host.closest('[inert]') && entries.some(entry => entry.isIntersecting)) { observer.disconnect(); read(); }
+      if (host.isConnected && !host.closest('[inert]') && entries.some(entry => entry.isIntersecting)) { observer.disconnect(); read(); }
     }, { root: host.closest('.thread-scroll'), rootMargin: '200px' });
     observer.observe(host);
     return () => observer.disconnect();
@@ -1226,7 +1227,21 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   </div>;
 }
 
-function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId }: {
+type ProcessReadingControls = {
+  canAutoCollapse?: () => boolean;
+  onReadProcessEnd?: (entryId: string, signal: AbortSignal, automatic: boolean) => Promise<void>;
+};
+
+function processIdentity(message: Message): string {
+  // Imported interrupted groups retain their canonical segments. Executed
+  // turns keep one disclosure through every provider compaction epoch.
+  return message.entryOwnerKind !== 'IMPORTED_HISTORY' && message.turnId
+    ? `turn:${message.turnId}` : message.historyGroupId ?? message.id;
+}
+
+function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId,
+  compactions = [], compactionInProgress = false, canAutoCollapse, onReadProcessEnd, onNotify, earlierProcess = false,
+}: {
   messages: Message[];
   renderMessage: (message: Message, startsRun: boolean, visible?: boolean) => ReactNode;
   focusRequest?: object | number;
@@ -1234,48 +1249,93 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   completed: boolean;
   active: boolean;
   assistantLabel: string;
-}) {
+  compactions?: NonNullable<WorkbenchHistory['compactions']>;
+  compactionInProgress?: boolean;
+  earlierProcess?: boolean;
+  onNotify: MarkdownNotify;
+} & ProcessReadingControls) {
   const answer = messages.find(message => isCompleteAnswer(message, taskFinalAnswerId));
   const complete = completed || Boolean(answer);
   const choices = useContext(HistoryDisclosureContext);
-  const choiceKey = `process:${messages[0].historyGroupId ?? messages[0].turnId ?? messages[0].id}`;
+  const choiceKey = `process:${processIdentity(messages[0])}`;
   const [disclosure, setDisclosure] = useState({
-    complete, active, focusRequest, expanded: Boolean(focusRequest) || (choices?.get(choiceKey) ?? (active && !complete)),
+    focusRequest, expanded: Boolean(focusRequest) || (choices?.get(choiceKey) ?? (active && !complete)),
   });
-  // A completed answer closes the live process once. Later rerenders preserve
-  // the reader's choice; explicit navigation reveals its target again.
-  if (disclosure.complete !== complete || disclosure.active !== active || disclosure.focusRequest !== focusRequest) {
-    setDisclosure({ complete, active, focusRequest, expanded: disclosure.focusRequest !== focusRequest && Boolean(focusRequest)
-      ? true : disclosure.complete !== complete || disclosure.active !== active ? active && !complete : disclosure.expanded });
+  const [busy, setBusy] = useState(false);
+  const request = useRef<AbortController | undefined>(undefined);
+  const wasComplete = useRef(complete);
+  useEffect(() => () => request.current?.abort(), []);
+  if (disclosure.focusRequest !== focusRequest) {
+    setDisclosure({ focusRequest, expanded: focusRequest ? true : disclosure.expanded });
   }
+  const changeDisclosure = (expanded: boolean, automatic = false) => {
+    request.current?.abort();
+    const finalId = answer?.id ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
+    const commit = () => {
+      choices?.set(choiceKey, expanded);
+      setDisclosure(previous => ({ ...previous, expanded }));
+    };
+    if (!onReadProcessEnd || !finalId) { commit(); return; }
+    const operation = new AbortController(); request.current = operation;
+    setBusy(true);
+    void onReadProcessEnd(finalId, operation.signal, automatic).then(() => {
+      if (!operation.signal.aborted && request.current === operation) commit();
+    }).catch(error => {
+      const cancelled = typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
+      if (!operation.signal.aborted && !cancelled) onNotify('无法读取处理过程', error instanceof Error ? error.message : '请重试。', 'warning');
+    }).finally(() => { if (request.current === operation) { request.current = undefined; setBusy(false); } });
+  };
+  useEffect(() => {
+    const justCompleted = complete && !wasComplete.current;
+    wasComplete.current = complete;
+    if (justCompleted && disclosure.expanded && (canAutoCollapse?.() ?? true)) changeDisclosure(false, true);
+  });
   const process = messages.flatMap((message) => {
     if (message !== answer) return [message];
     return message.reasoning?.length || (message.reasoningContentState && message.reasoningContentState !== 'ready') || message.traces?.length || message.subagentRuns?.length
       ? [{ ...message, id: `${message.id}:process`, sourceEntryIds: message.sourceEntryIds ?? [message.id], body: '', forkEligible: false, visualizations: undefined,
           pendingAssistant: message.pendingAssistant ? { ...message.pendingAssistant, body: '' } : undefined }] : [];
   });
-  const hasProcess = process.some((message) => message.role === 'assistant' || message.userKind === 'subagent-completion');
-  if (!hasProcess) return renderMessage(answer!, true);
+  const afterFinalEvents = new Set(compactions.filter(marker => answer && !marker.displayBeforeEntryId && marker.displayAfterEntryId === answer.id).map(marker => marker.eventId));
+  const hasProcess = earlierProcess || compactions.some(marker => !afterFinalEvents.has(marker.eventId)) || compactionInProgress
+    || process.some((message) => message.role === 'assistant' || message.userKind === 'subagent-completion');
+  if (!hasProcess) return <>{renderMessage(answer!, true)}{afterFinalEvents.size > 0 && <ContextCompactionDivider count={afterFinalEvents.size} />}</>;
+  const visibleProcess = process.map((message, index) => ({ message, index })).filter(({message}) => disclosure.expanded || message.visualizations?.length
+    || (message.role === 'user' && message.userKind !== 'subagent-completion'));
+  // Different accepted compactions can share a canonical edge, or map from
+  // separate tool results to one visible host. Group the *visual insertion
+  // slot*, retaining event identity/count rather than erasing real events.
+  const orderedHosts = [...process.map(message => message.id === `${answer?.id}:process` ? answer!.id : message.id), ...(answer ? [answer.id] : [])];
+  const compactSlots = new Map<number, Set<string>>();
+  for (const marker of compactions) {
+    const host = marker.displayBeforeEntryId ?? marker.displayAfterEntryId;
+    if (!host) continue;
+    const index = marker.displayBeforeEntryId ? orderedHosts.indexOf(host) : orderedHosts.lastIndexOf(host);
+    if (index < 0) continue;
+    const slot = index + (marker.displayBeforeEntryId ? 0 : 1);
+    const events = compactSlots.get(slot) ?? new Set<string>();
+    events.add(marker.eventId); compactSlots.set(slot, events);
+  }
+  const compactAt = (slot: number) => compactSlots.has(slot) ? <ContextCompactionDivider count={compactSlots.get(slot)!.size} /> : null;
   return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
-    <button type="button" className="conversation-run__toggle"
-      data-history-entry={messages[0].id}
+    <button type="button" className="conversation-run__toggle" data-process-toggle="" data-process-earlier={earlierProcess || undefined}
+      data-history-entry={answer?.id ?? messages[0].id}
       data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
-      data-thread-disclosure="" aria-expanded={disclosure.expanded}
+      data-thread-disclosure="" aria-expanded={disclosure.expanded} aria-busy={busy} disabled={busy}
       aria-label={disclosure.expanded ? '收起中间过程' : '展开中间过程'}
-      onClick={() => { choices?.set(choiceKey, !disclosure.expanded); setDisclosure({ ...disclosure, expanded: !disclosure.expanded }); }}>
-      <span>{complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
+      onClick={() => changeDisclosure(!disclosure.expanded)}>
+      <span>{busy ? '正在读取…' : complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
     </button>
-    {process.map((message) => {
-      // User guidance stays visible; tool-result notifications belong to the process.
-      const hidden = !disclosure.expanded && !message.visualizations?.length
-        && (message.role === 'assistant' || message.userKind === 'subagent-completion');
-      return <AnimatedDisclosure key={message.id} open={!hidden} unmountOnClose className="conversation-run__disclosure" contentClassName="conversation-run__step-content">
-        <div className="conversation-run__step">{renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded || hidden }, false, !hidden)}</div>
-      </AnimatedDisclosure>;
-    })}
+    {visibleProcess.map(({message, index}) => <div key={message.id} className="conversation-run__step">
+      {disclosure.expanded && compactAt(index)}
+      {renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded }, false)}
+    </div>)}
+    {disclosure.expanded && compactAt(process.length)}
+    {disclosure.expanded && compactionInProgress && <ContextCompactionDivider inProgress />}
     {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined, subagentRuns: undefined,
       pendingAssistant: answer.pendingAssistant ? { body: answer.pendingAssistant.body } : undefined }, false)}
+    {answer && compactAt(process.length + 1)}
   </section>;
 }
 
@@ -1310,7 +1370,7 @@ function findToolChainConnections(messages: Message[]): {
 }
 
 export function ConversationMessages({
-  history, onLoadHistory, localSubmissions = [], activeTurnId,
+  history, onLoadHistory, localSubmissions = [], activeTurnId, canAutoCollapse, onReadProcessEnd,
   messages,
   interruptionNotices = [],
   skills = [],
@@ -1334,6 +1394,8 @@ export function ConversationMessages({
   focusSourceEntry,
 }: {
   history?: WorkbenchHistory;
+  canAutoCollapse?: ProcessReadingControls['canAutoCollapse'];
+  onReadProcessEnd?: ProcessReadingControls['onReadProcessEnd'];
   onLoadHistory?: WorkbenchViewProps['onLoadHistory'];
   localSubmissions?: LocalPromptSubmission[];
   activeTurnId?: string;
@@ -1401,7 +1463,7 @@ export function ConversationMessages({
     </div>);
   }
   let run: Message[] = [];
-  let segmentBoundary = 'start';
+  const interruptionBoundaries = new Map<string, string>();
   const flush = () => {
     if (!run.length) return;
     const sourceInProcess = focusSourceEntry && run.some(message => {
@@ -1415,9 +1477,15 @@ export function ConversationMessages({
       ? focusSourceEntry
       : focusTaskHighlighted && run.some(message => message.subagentRuns?.some(task => task.id === focusTaskId))
         ? focusTaskRevision : undefined;
-    content.push(<ConversationRun key={`${artifactOwnerKey}:${run[0].historyGroupId ?? `${run[0].entryOwnerKind ?? 'owner'}:${run[0].turnId ?? run[0].id}`}:${run[0].historyGroupId ? '' : segmentBoundary}`} messages={run}
+    const runIds = new Set(run.map(message => message.id));
+    content.push(<ConversationRun key={`${artifactOwnerKey}:${processIdentity(run[0])}:${interruptionBoundaries.get(run[0].turnId ?? '') ?? 'start'}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel} taskFinalAnswerId={taskFinalAnswerId}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
+      canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd} onNotify={onNotify}
+      earlierProcess={Boolean(run.some(message => isCompleteAnswer(message, taskFinalAnswerId)
+        && message.historyInitialEntryId && !messages.some(candidate => candidate.id === message.historyInitialEntryId)))}
+      compactions={history?.compactions?.filter(marker => runIds.has(marker.displayBeforeEntryId ?? marker.displayAfterEntryId ?? ''))}
+      compactionInProgress={contextCompactionInProgress && isRunning && run[0].turnId === activeTurnId}
       active={isRunning && run[0].turnId === activeTurnId} />);
     run = [];
   };
@@ -1445,7 +1513,7 @@ export function ConversationMessages({
     content.push(<div key={`${notice.ownerKind}:${notice.ownerId}`} data-source-entry={independent ? notice.displayAfterEntryId : undefined}>
       <TurnInterruptionHistoryNotice notice={notice} />
     </div>);
-    segmentBoundary = `${notice.ownerKind}:${notice.ownerId}`;
+    interruptionBoundaries.set(notice.ownerId, `${notice.ownerKind}:${notice.ownerId}`);
   };
   if (readingWindow) {
     const window = readingWindow;
@@ -1469,8 +1537,9 @@ export function ConversationMessages({
     if ('notice' in item) emitNotice(item.notice, true);
     else {
       const message = item.message;
-      for (const marker of history?.compactions ?? []) if (marker.displayBeforeEntryId === message.id) {
-        flush(); content.push(<ContextCompactionDivider key={marker.eventId} />); segmentBoundary = marker.eventId;
+      const beforeMarkers = (history?.compactions ?? []).filter(marker => marker.displayBeforeEntryId === message.id);
+      if (beforeMarkers.length && !run.length && message.role === 'user' && message.userKind !== 'subagent-completion') {
+        content.push(<ContextCompactionDivider key={`before:${message.id}`} count={new Set(beforeMarkers.map(marker => marker.eventId)).size} />);
       }
       if ((message.historyContextState === 'loading' && !message.pendingAssistant) || message.historyContextState === 'error') {
         flush(); content.push(renderMessage(message, false));
@@ -1490,13 +1559,16 @@ export function ConversationMessages({
         const continuesHandoff = message.historyContextState === 'loading' && Boolean(message.pendingAssistant)
           && Boolean(message.turnId) && run[0]?.turnId === message.turnId && run[0]?.entryOwnerKind !== 'IMPORTED_HISTORY'
           && (!run[0]?.historyWindowId || run[0].historyWindowId === message.historyWindowId);
-        if (newInput || (run.length && !continuesLiveRun && !continuesHandoff && (run[0].historyGroupId !== message.historyGroupId || run[0].historyWindowId !== message.historyWindowId || run[0].turnId !== message.turnId))) flush();
+        const sameProcess = run[0]?.turnId && run[0].entryOwnerKind !== 'IMPORTED_HISTORY' && message.entryOwnerKind !== 'IMPORTED_HISTORY'
+          ? run[0].turnId === message.turnId : run[0]?.historyGroupId === message.historyGroupId && run[0]?.turnId === message.turnId;
+        if (newInput || (run.length && !continuesLiveRun && !continuesHandoff && (!sameProcess || run[0].historyWindowId !== message.historyWindowId))) flush();
         if (message.role === 'user' && message.userKind !== 'subagent-completion' && !run.length) content.push(renderMessage(message, false));
         else run.push(message);
         if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
       }
-      for (const marker of history?.compactions ?? []) if (!marker.displayBeforeEntryId && marker.displayAfterEntryId === message.id) {
-        flush(); content.push(<ContextCompactionDivider key={marker.eventId} />); segmentBoundary = marker.eventId;
+      const afterMarkers = (history?.compactions ?? []).filter(marker => !marker.displayBeforeEntryId && marker.displayAfterEntryId === message.id);
+      if (afterMarkers.length && !run.length && message.role === 'user' && message.userKind !== 'subagent-completion') {
+        content.push(<ContextCompactionDivider key={`after:${message.id}`} count={new Set(afterMarkers.map(marker => marker.eventId)).size} />);
       }
       for (const notice of interruptionNotices.filter(n => n.displayAfterMessageId === message.id)) emitNotice(notice);
     }
@@ -1509,7 +1581,7 @@ export function ConversationMessages({
       {onLoadHistory && <button type="button" disabled={readingWindow.loading} onClick={() => { void onLoadHistory(readingWindow.id, 'newer').catch(() => {}); }}>{readingWindow.boundaryDirection === 'newer' && readingWindow.error ? '重试' : '继续向后阅读'}</button>}
     </>}
   </div>);
-  if (contextCompactionInProgress) content.push(<ContextCompactionDivider key="compaction-progress" inProgress />);
+  if (contextCompactionInProgress && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && isRunning)) content.push(<ContextCompactionDivider key="compaction-progress" inProgress />);
   return content;
 }
 
@@ -1675,8 +1747,8 @@ function InteractionCard({
   );
 }
 
-function ContextCompactionDivider({ inherited = false, inProgress = false }: { inherited?: boolean; inProgress?: boolean }) {
-  const label = inProgress ? '上下文正在压缩' : inherited ? '已保留分叉点的有效上下文，压缩前记录请在原会话查看' : '上下文已压缩';
+function ContextCompactionDivider({ inherited = false, inProgress = false, count = 1 }: { inherited?: boolean; inProgress?: boolean; count?: number }) {
+  const label = inProgress ? '上下文正在压缩' : inherited ? '已保留分叉点的有效上下文，压缩前记录请在原会话查看' : `上下文已压缩${count > 1 ? ` · ${count} 次` : ''}`;
   return (
     <div
       className="context-compaction-divider"
@@ -1733,7 +1805,7 @@ function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
 }
 
 export function WorkbenchView({
-  history, onLoadHistory, onReadLatestHistory, onHydrateEntries, onRetainHistory, onLocateEntry,
+  history, onLoadHistory, onReadLatestHistory, onReadProcessEnd, onHydrateEntries, onRetainHistory, onLocateEntry,
   focusSourceEntry,
   workspace,
   session,
@@ -2106,6 +2178,7 @@ export function WorkbenchView({
   const userScrollPending = useRef(false);
   const userScrollFrame = useRef<number | undefined>(undefined);
   const locateRequest = useRef<AbortController | undefined>(undefined);
+  const automaticProcessRead = useRef<{ request: AbortController; turnId?: string } | undefined>(undefined);
   const loadRequests = useRef(new Map<string, Promise<void>>());
   const resetReading = useCallback(() => {
     disclosureAnchor.current = undefined;
@@ -2153,6 +2226,10 @@ export function WorkbenchView({
   }, [focusSourceEntry, session.id]);
   const loadHistory = useCallback((windowId?: string, direction: 'older' | 'newer' = 'older'): Promise<void> => {
     if (!onLoadHistory) return Promise.resolve();
+    // A clipped, closed turn must become readable before loading more of its
+    // hidden process. Otherwise reaching the top repeatedly downloads silence.
+    const closed = threadRef.current?.querySelector<HTMLButtonElement>('[data-process-earlier="true"][aria-expanded="false"]');
+    if (direction === 'older' && closed) { closed.click(); return Promise.resolve(); }
     const key = `${session.id}:${windowId ?? ''}:${direction}`;
     const existing = loadRequests.current.get(key);
     if (existing) return existing;
@@ -2250,6 +2327,68 @@ export function WorkbenchView({
     } finally { if (locateRequest.current === request) setJumpingToLatest(false); }
   }, [onReadLatestHistory, onNotify, restoreReadingPosition, session.id]);
 
+  const canAutoCollapse = useCallback(() => {
+    const thread = threadRef.current;
+    const selecting = thread && hasHistorySelection(thread);
+    return followLatestRef.current && currentHistory.current?.atLatest !== false && !userScrollPending.current && !selecting;
+  }, []);
+  useLayoutEffect(() => {
+    const pending = automaticProcessRead.current;
+    const latestTurn = activeTurnId ?? messages.at(-1)?.turnId;
+    if (pending && latestTurn && latestTurn !== pending.turnId) pending.request.abort();
+  }, [activeTurnId, messages]);
+  useEffect(() => {
+    const selected = () => {
+      const thread = threadRef.current;
+      if (!thread || !hasHistorySelection(thread)) return;
+      locateRequest.current?.abort();
+      resetReading();
+    };
+    document.addEventListener('selectionchange', selected);
+    return () => document.removeEventListener('selectionchange', selected);
+  }, [resetReading]);
+  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean) => {
+    if (!onReadProcessEnd) return;
+    signal.throwIfAborted();
+    if (automatic && !canAutoCollapse()) throw new DOMException('阅读位置已改变', 'AbortError');
+    locateRequest.current?.abort();
+    const request = new AbortController(); locateRequest.current = request;
+    if (automatic) automaticProcessRead.current = { request, turnId: messages.find(message => message.id === entryId)?.turnId };
+    const abort = () => request.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    const thread = threadRef.current;
+    const owner = session.id;
+    const answer = thread && findHistoryEntry(thread, entryId);
+    const top = answer && thread ? answer.getBoundingClientRect().top - thread.getBoundingClientRect().top : undefined;
+    const cancelForSelection = () => {
+      if (automatic && !canAutoCollapse()) request.abort();
+    };
+    thread?.ownerDocument.addEventListener('selectionchange', cancelForSelection);
+    // Do not let old DOM interests repopulate an aperture during its handoff.
+    locatingEntry.current = entryId;
+    try {
+      await onReadProcessEnd(entryId, request.signal);
+      request.signal.throwIfAborted();
+      if (currentSessionRef.current !== owner) throw new DOMException('会话已切换', 'AbortError');
+      disclosureAnchor.current = undefined;
+      if (!automatic) {
+        followLatestRef.current = false;
+        setAtBottom(false);
+      }
+      // Preserve the answer near the click, not the process header above it.
+      readingAnchor.current = automatic ? undefined : { entryId, top: top ?? Math.max(0, (thread?.clientHeight ?? 0) * .65) };
+      if (thread) {
+        await waitForHistoryEntry(thread, entryId, request.signal);
+        restoreReadingPosition();
+      }
+    } finally {
+      signal.removeEventListener('abort', abort);
+      thread?.ownerDocument.removeEventListener('selectionchange', cancelForSelection);
+      if (automaticProcessRead.current?.request === request) automaticProcessRead.current = undefined;
+      if (locateRequest.current === request) { locatingEntry.current = undefined; locateRequest.current = undefined; }
+    }
+  }, [onReadProcessEnd, canAutoCollapse, session.id, restoreReadingPosition, messages]);
+
   const disclosureChoices = useMemo(() => ({sessionId: session.id, choices: new Map<string, boolean>()}), [session.id]).choices;
   const locatingEntry = useRef<string | undefined>(undefined);
   const residenceFrame = useRef<number | undefined>(undefined);
@@ -2259,6 +2398,7 @@ export function WorkbenchView({
       residenceFrame.current = undefined;
       const thread = threadRef.current;
       if (!thread) return;
+      if (locatingEntry.current) return;
       const interest: import('../lib/runtime-adapter').HistoryResidence = collectHistoryResidence(thread);
       if (currentHistory.current?.readingOwner !== readingOwner) return;
       interest.readingOwner = readingOwner;
@@ -2590,7 +2730,8 @@ export function WorkbenchView({
           followLatestRef.current = nextAtBottom;
           setAtBottom(nextAtBottom);
           readingAnchor.current = nextAtBottom ? undefined : captureHistoryAnchor(element);
-          if (!nextAtBottom && element.scrollTop < 160 && history?.hasOlder && !history.loading && !history.error) {
+          if (!nextAtBottom && element.scrollTop < 160 && history?.hasOlder && !history.loading && !history.error
+            && !element.querySelector('[data-process-earlier="true"][aria-expanded="false"]')) {
             void loadHistory(history.windows[0]?.id).catch(() => {});
           }
         }}
@@ -2614,6 +2755,7 @@ export function WorkbenchView({
             {onLoadHistory && !history.windows.length && (history.hasOlder || history.error) && <button type="button" disabled={history.loading} onClick={() => { void loadHistory(history.windows[0]?.id).catch(() => {}); }}>{history.error ? '重试' : '加载更早记录'}</button>}
           </div>}
           <ConversationMessages key={session.id} history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
+            canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd ? readProcessEnd : undefined}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}

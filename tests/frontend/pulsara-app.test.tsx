@@ -1241,7 +1241,7 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.conversation-run > .assistant-heading--run-start')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
-    expect(screen.getByLabelText('reader 的结果已加入本轮对话')).toBeTruthy();
+    expect(await screen.findByLabelText('reader 的结果已加入本轮对话')).toBeTruthy();
     expect(screen.getByText('读取文件')).toBeTruthy();
     expect(screen.getByRole('button', { name: '展开思考摘要' })).toBeTruthy();
 
@@ -4557,6 +4557,8 @@ it('passes an explicit process reasoning read through the active session reader'
     const active = adapter.lastConnection!;
     expect(active.hydrateEntries).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button',{name:'展开中间过程'}));
+    await waitFor(() => expect(active.readProcessEnd).toHaveBeenCalledWith('assistant-1', expect.any(AbortSignal)));
+    await screen.findByRole('button', { name: '收起中间过程' });
     const thought = observed.find(item => item.node.getAttribute('data-reasoning-entry') === 'assistant-1') ?? observed[0];
     expect(thought).toBeTruthy();
     act(() => thought.notify([{target:thought.node,isIntersecting:true}] as IntersectionObserverEntry[],{} as IntersectionObserver));

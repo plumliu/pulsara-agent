@@ -215,7 +215,7 @@ it('uses the documented byte buffer before the entry-count buffer for large admi
   expect(p.history!.atLatest).toBe(false);
   const latest = await reader.readLatestHistory!();
   expect(latest.messages.map(m => m.id)).toEqual(['e:11','e:12']);
-});
+}, 15_000); // UTF-8/base64 accounting of twelve 512 KiB entries under full-suite contention.
 
 it.each(['cancel', 'failure'])('keeps the old reading owner when return-latest ends in %s', async mode => {
   const delayed = deferred<unknown>(); let pendingBody:any; let observing = false;
@@ -240,4 +240,111 @@ it.each(['cancel', 'failure'])('keeps the old reading owner when return-latest e
   await rejected; await flush();
   expect(reader.current().history!.readingOwner).toBe(owner);
   expect(reader.current().messages.map(m=>m.id)).toEqual(['old']);
+});
+
+it('selects a bounded process-end aperture even with 10,000 adjacent cached entries, then pages continuously', async () => {
+  const range = (a: number, b: number) => Array.from({length:b-a+1}, (_,i) => entry(`e:${a+i}`, a+i,
+    {root_final:a+i===10000,fork_eligible:a+i===10000}));
+  const calls = fixture((url, body) => {
+    if (url.endsWith('/context')) return context(body, {groups:[{owner_id:'turn:root',owner_kind:'EXECUTED_TURN',initial_entry_id:'e:1',final_entry_id:'e:10000'}]});
+    if (url.endsWith('/window')) {
+      const end = body.cursor ? Number(body.cursor.entry_sequence)+(body.cursor.direction==='newer'?128:-1) : 10000;
+      const start = end-127;
+      return {session_id:'session:test',cut_sequence:'10000',event_sequence_cut:'30',entries:range(start,end),
+        older_cursor:{...cursor,cut_sequence:'10000',entry_sequence:String(start),direction:'older'},
+        newer_cursor:end<10000?{...cursor,cut_sequence:'10000',entry_sequence:String(end),direction:'newer'}:undefined};
+    }
+    throw Error(url);
+  });
+  // The admission is deliberately preloaded here: the regression is selecting
+  // a small view independently of already-connected cached canonical entries.
+  const reader = new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},snapshot(range(1,10000),undefined,'10000'));
+  await reader.initialize(); await flush();
+  const oldOwner = reader.current().history!.readingOwner;
+  const end = await reader.readProcessEnd('e:10000',new AbortController().signal);
+  expect(end.messages.map(message=>message.id)).toEqual(range(9873,10000).map(item=>item.entry_id));
+  expect(end.history!.readingOwner).not.toBe(oldOwner);
+  expect(end.history!.atLatest).toBe(true);
+  expect(end.messages[0]).toMatchObject({historyFinalEntryId:'e:10000',historyInitialEntryId:'e:1'});
+  expect(calls.find(call=>call.url.endsWith('/window'))?.body).toEqual({anchor_entry_id:'e:10000',maximum_entries:128,maximum_serialized_bytes:2<<20});
+  reader.retainHistory({readingOwner:oldOwner,visibleEntryIds:['e:1'],pinnedEntryIds:[]});
+  expect(reader.current().messages).toHaveLength(128);
+  await reader.readHistory(end.history!.windows[0].id,'older'); await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(range(9745,10000).map(item=>item.entry_id));
+  await reader.readHistory(undefined,'older'); await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(range(9617,10000).map(item=>item.entry_id));
+  await reader.readProcessEnd('e:10000',new AbortController().signal);
+  expect(reader.current().messages).toHaveLength(128);
+  expect(reader.current().history!.hasOlder).toBe(true);
+  await reader.readHistory(undefined,'older'); await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(range(9745,10000).map(item=>item.entry_id));
+  expect(reader.current().history!.hasOlder).toBe(true);
+  expect(calls.filter(call=>call.url.endsWith('/window') && call.body.anchor_entry_id)).toHaveLength(2);
+  for(let i=0;i<6;i++){await reader.readHistory(undefined,'older');await flush();}
+  reader.retainHistory({visibleEntryIds:['e:9200'],pinnedEntryIds:[],anchorEntryId:'e:9200'});
+  const middle=reader.current();
+  const first=Number(middle.messages[0].id.slice(2));
+  const last=Number(middle.messages.at(-1)!.id.slice(2));
+  expect(middle.messages.map(message=>message.id)).toEqual(range(first,last).map(item=>item.entry_id));
+  expect(last).toBeLessThan(10000);
+  expect(middle.history!.atLatest).toBe(false);
+  expect(middle.history!.windows[0].hasNewer).toBe(true);
+  await reader.readHistory(middle.history!.windows[0].id,'newer');await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(range(first,last+128).map(item=>item.entry_id));
+}, 20_000);
+
+it.each(['cancel','superseded','context failure','not final'] as const)('keeps the old aperture when process-end navigation ends in %s', async mode => {
+  const pending = deferred<unknown>(); let contextBody:any;
+  const calls = fixture((url,body)=>{
+    if(url.endsWith('/connections'))return payload([entry('old',1)]);
+    if(url.endsWith('/window'))return{session_id:'session:test',cut_sequence:'3',event_sequence_cut:'30',entries:[entry('next',2),entry('final',3,{root_final:mode!=='not final',fork_eligible:false})]};
+    if(url.endsWith('/context')){
+      if(body.entry_ids.includes('final')){contextBody=body;return mode==='context failure'?new Response('offline',{status:503}):pending.promise;}
+      return context(body);
+    }
+    throw Error(url);
+  });
+  const reader=await connect();await flush();
+  const owner=reader.current().history!.readingOwner;
+  const controller=new AbortController();
+  const operation=reader.readProcessEnd!('final',controller.signal);
+  const rejected=expect(operation).rejects.toThrow();
+  await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(['old']);
+  if(mode==='cancel')controller.abort();
+  if(mode==='superseded')await reader.locateEntry!('old',new AbortController().signal);
+  if(contextBody)pending.resolve(context(contextBody));
+  await rejected;await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(['old']);
+  if(mode!=='superseded')expect(reader.current().history!.readingOwner).toBe(owner);
+  expect(calls.filter(call=>call.url.endsWith('/window'))).toHaveLength(1);
+});
+
+it('does not infer completion from a context final target after the page cut', async()=>{
+  fixture((url,body)=>{
+    if(url.endsWith('/connections'))return payload([entry('progress',1,{root_final:false,fork_eligible:false})]);
+    if(url.endsWith('/context'))return context(body,{groups:[{owner_id:'turn:root',owner_kind:'EXECUTED_TURN',initial_entry_id:'start',final_entry_id:'future-final'}]});
+    throw Error(url);
+  });
+  const reader=await connect();await flush();
+  expect(reader.current().messages[0]).toMatchObject({historyFinalEntryId:'future-final',rootFinal:false,forkEligible:false});
+});
+
+it('extends an aperture with adjacent live tail but never inserts that tail into an old selected aperture',async()=>{
+  let head=20;
+  fixture((url,body)=>{
+    if(url.endsWith('/connections'))return payload([entry('final',20)]);
+    if(url.endsWith('/context'))return context(body,{cut_sequence:String(head),event_sequence_cut:String(head+100)});
+    if(url.endsWith('/window'))return{session_id:'session:test',cut_sequence:'20',event_sequence_cut:'120',entries:[entry('final',20)]};
+    if(url.endsWith('/observe'))return{observation:{through_event_sequence:String(head+100),committed:[{projection_kind:'IMMUTABLE_ENTRY',entry:entry(`e:${head}`,head)}]}};
+    throw Error(url);
+  });
+  const reader=await connect();await flush();
+  await reader.readProcessEnd!('final',new AbortController().signal);
+  head=21;await reader.observe();await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(['final','e:21']);
+  await reader.readProcessEnd!('final',new AbortController().signal);
+  expect(reader.current().history!.atLatest).toBe(false);
+  head=22;await reader.observe();await flush();
+  expect(reader.current().messages.map(message=>message.id)).toEqual(['final']);
 });

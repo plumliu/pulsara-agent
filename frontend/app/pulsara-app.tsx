@@ -2937,6 +2937,16 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
   }, [ownsHistoryReader, publishProjection]);
 
+  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal) => {
+    const active = connectionRef.current ?? historyRef.current;
+    if (!active?.readProcessEnd) throw new Error('本地服务未连接。');
+    const readSignal = AbortSignal.any([historyReadAbort.current.signal, signal]);
+    const next = await active.readProcessEnd(entryId, readSignal);
+    readSignal.throwIfAborted();
+    if (!ownsHistoryReader(active)) throw new Error('会话已经切换。');
+    publishProjection(next, active instanceof CanonicalHistoryView ? undefined : active);
+  }, [ownsHistoryReader, publishProjection]);
+
   const hydrateEntries = useCallback(async (ids: string[], includeReasoning = false) => {
     const active = connectionRef.current ?? historyRef.current;
     if (!active?.hydrateEntries) throw new Error('本地服务未连接。');
@@ -3077,6 +3087,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           history={projection.history}
           onLoadHistory={loadHistory}
           onReadLatestHistory={readLatestHistory}
+          onReadProcessEnd={readProcessEnd}
           onHydrateEntries={hydrateEntries}
           onRetainHistory={retainHistory}
           interruptionNotices={mergedProjection.interruptionNotices}

@@ -396,6 +396,9 @@ export interface SubagentRun {
 export interface Message {
   sourceEntryIds?: string[];
   historyGroupId?: string;
+  /** Navigation hint only: page context may name a final beyond its cut. */
+  historyFinalEntryId?: string;
+  historyInitialEntryId?: string;
   historyWindowId?: string;
   historyEarlierUnloaded?: boolean;
   historyContextState?: 'loading' | 'ready' | 'error';

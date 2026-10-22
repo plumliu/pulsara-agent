@@ -7,6 +7,15 @@ export interface HistoryReadingAnchor {
   top: number;
 }
 
+export function hasHistorySelection(root: HTMLElement): boolean {
+  const selection = root.ownerDocument.getSelection();
+  if (!selection || selection.isCollapsed) return false;
+  for (let index = 0; index < selection.rangeCount; index++) {
+    if (selection.getRangeAt(index).intersectsNode(root)) return true;
+  }
+  return false;
+}
+
 /** Same 200px preparation margin as immutable-body hydration. Selection and
  * focus are browser-owned interactions and may temporarily span many pages. */
 export function collectHistoryResidence(root: HTMLElement): {visibleEntryIds: string[]; pinnedEntryIds: string[]} {
@@ -19,13 +28,13 @@ export function collectHistoryResidence(root: HTMLElement): {visibleEntryIds: st
     if (node.closest('[hidden], [inert]')) continue;
     const rect = node.getBoundingClientRect();
     if (rect.height && rect.bottom >= viewport.top - 200 && rect.top <= viewport.bottom + 200) for (const id of ids(node)) visible.add(id);
-    if (node.contains(root.ownerDocument.activeElement)) for (const id of ids(node)) pinned.add(id);
+    if (!node.hasAttribute('data-process-toggle') && node.contains(root.ownerDocument.activeElement)) for (const id of ids(node)) pinned.add(id);
     if (selection && !selection.isCollapsed) for (let index = 0; index < selection.rangeCount; index++) {
       if (selection.getRangeAt(index).intersectsNode(node)) for (const id of ids(node)) pinned.add(id);
     }
   }
   const focused = root.ownerDocument.activeElement;
-  if (focused instanceof HTMLElement && root.contains(focused) && !focused.closest('[hidden], [inert]')) {
+  if (focused instanceof HTMLElement && root.contains(focused) && !focused.closest('[hidden], [inert], [data-process-toggle]')) {
     // The run's own disclosure precedes its message hosts. Keep its semantic
     // first host while focused, rather than every entry in an expanded run.
     const host = focused.closest<HTMLElement>('[data-source-entry]')

@@ -946,6 +946,7 @@ export interface RuntimeConnection {
   readHistory?: (windowId?: string, direction?: 'older' | 'newer', signal?: AbortSignal) => Promise<RuntimeProjection>;
   hydrateEntries?: (ids: string[], signal?: AbortSignal, includeReasoning?: boolean) => Promise<RuntimeProjection>;
   readLatestHistory?: (signal?: AbortSignal) => Promise<RuntimeProjection>;
+  readProcessEnd?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   retainHistory?: (interest: HistoryResidence) => RuntimeProjection | undefined;
   locateEntry?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   subscribe?: (listener: () => void) => () => void;
@@ -1297,7 +1298,7 @@ interface BrowserWindow {
 }
 interface BrowserPageContext {
   session_id: string; cut_sequence: string; event_sequence_cut: string; entry_ids: string[];
-  groups: Array<{owner_kind: string; owner_id: string; initial_entry_id: string; previous_root_owner_id?: string; next_root_owner_id?: string}>;
+  groups: Array<{owner_kind: string; owner_id: string; initial_entry_id: string; final_entry_id?: string; previous_root_owner_id?: string; next_root_owner_id?: string}>;
   entry_contexts: Array<{entry_id: string; owner_kind: string; owner_id: string; root_owner_id?: string; parent_turn_id?: string; segment_id: string; segment_start_entry_id: string; previous_entry_id?: string; next_entry_id?: string}>;
   tasks: Array<{task_id: string; parent_turn_id: string; parent_initial_entry_id: string; batch_id?: string}>;
   batches: Array<{batch_id: string; parent_turn_id: string; creator_entry_id: string; creator_tool_call_id: string; task_count: string}>;
@@ -2301,14 +2302,19 @@ abstract class CanonicalHistoryReader {
   private readingEntryId?: string;
   private navigation?: object;
   private readingOwner: object = {};
+  // An explicit process-end navigation selects admitted pages, independently
+  // of adjacent cached pages. This is a single continuous reading aperture,
+  // not another history cache or a folded gap in the timeline.
+  private readingAperture?: BrowserHistoryPage[];
   private entryWindowBytes = new WeakMap<ProtocolEntry, number>();
 
-  private readingCluster(clusters = this.connectedWindows()): BrowserHistoryPage[] {
+  private readingCluster(): BrowserHistoryPage[] {
+    const clusters = this.connectedWindows(this.readingAperture ?? this.pages);
     if (this.readingEntryId) return clusters.find(cluster => cluster.some(page => page.entryIds.includes(this.readingEntryId!))) ?? [];
     return clusters.find(cluster => this.tailPage && cluster.includes(this.tailPage)) ?? clusters.at(-1) ?? [];
   }
   private readingIds(): Set<string> { return new Set(this.readingCluster().flatMap(page => page.entryIds)); }
-  private readingAtLatest(): boolean { return !this.tailPage || this.readingCluster().includes(this.tailPage); }
+  private readingAtLatest(): boolean { return !this.tailPage || this.readingIds().has(this.tailPage.entryIds.at(-1)!); }
   protected readingMessages(messages: Message[]): Message[] {
     const ids = this.readingIds(), atLatest = this.readingAtLatest();
     return messages.filter(message => this.entries.has(message.id) ? ids.has(message.id) : atLatest).map(message => ({
@@ -2328,8 +2334,56 @@ abstract class CanonicalHistoryReader {
     const latest = this.connectedWindows().find(cluster => this.tailPage && cluster.includes(this.tailPage));
     if (target && (target.contextState !== 'ready' || !latest?.includes(target))) throw new Error('最新消息暂时无法读取，请重试。');
     this.readingEntryId = undefined;
+    this.readingAperture = undefined;
     this.readingOwner = navigation;
     return this.project();
+  }
+
+  async readProcessEnd(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    signal.throwIfAborted();
+    this.readingAperture ??= this.readingCluster();
+    const navigation = {}; this.navigation = navigation;
+    this.locatingEntries.add(entryId);
+    try {
+      // Always ask for one physically admitted window, including when this
+      // final is already cached in a much larger connected history range.
+      const window = await this.historyPost<BrowserWindow>('window', {
+        anchor_entry_id: entryId, maximum_entries: 128, maximum_serialized_bytes: 2 << 20,
+      }, signal);
+      signal.throwIfAborted();
+      if (this.readerClosed || this.navigation !== navigation) throw new DOMException('Navigation superseded', 'AbortError');
+      const final = window.entries.find(entry => entry.entry_id === entryId);
+      if (window.session_id !== this.sessionId || !final || final.entry_kind !== 'ASSISTANT_MESSAGE'
+        || !(final.root_final || final.fork_eligible)) throw new RuntimeApiError('HISTORY_FINAL_MISSING', '找不到这轮的最终回复。', false);
+      decimal(window.cut_sequence); decimal(window.event_sequence_cut);
+      if (window.entries.some((entry, index) => compareSequence(entry.entry_sequence, window.cut_sequence) > 0
+        || (index > 0 && BigInt(decimal(entry.entry_sequence)) !== BigInt(decimal(window.entries[index - 1].entry_sequence)) + BigInt(1)))) {
+        throw new Error('处理过程窗口不连续。');
+      }
+      for (const cursor of [window.older_cursor, window.newer_cursor]) if (cursor && (cursor.session_id !== this.sessionId
+        || compareSequence(cursor.cut_sequence, window.cut_sequence) !== 0
+        || compareSequence(cursor.event_sequence_cut ?? '0', window.event_sequence_cut) !== 0)) {
+        throw new Error('处理过程窗口游标身份不一致。');
+      }
+      this.mergeEntries(window.entries);
+      const page = this.installPage(window.entries, window, window.older_cursor, window.newer_cursor, false, true)!;
+      await waitForRead(this.loadPageContext(page), signal);
+      if (page.contextState !== 'ready') throw new RuntimeApiError('HISTORY_CONTEXT_UNAVAILABLE', '处理过程暂时无法读取，请重试。', true);
+      await this.hydrateEntries([entryId], signal);
+      if (this.entryContentState(entryId) !== 'ready') throw new RuntimeApiError('HISTORY_CONTENT_UNAVAILABLE', '最终回复暂时无法读取，请重试。', true);
+      signal.throwIfAborted();
+      if (this.readerClosed || this.navigation !== navigation) throw new DOMException('Navigation superseded', 'AbortError');
+      this.readingEntryId = entryId;
+      this.readingAperture = [page];
+      this.readingOwner = navigation;
+      // Reopening may admit the exact same entries with fresh boundary cursors.
+      // Keep physical read/tail owners, but do not accumulate settled duplicate
+      // pages for repeated disclosure clicks.
+      this.pages = this.pages.filter(candidate => candidate === page || candidate === this.tailPage || candidate === this.pairedTailPage
+        || candidate.read || candidate.contextRead || candidate.entryIds.length !== page.entryIds.length
+        || candidate.entryIds.some((id, index) => id !== page.entryIds[index]));
+      return this.project();
+    } finally { this.locatingEntries.delete(entryId); }
   }
 
   protected transientHistoryEntries(): string[] { return []; }
@@ -2426,6 +2480,7 @@ abstract class CanonicalHistoryReader {
     }
     const ids = new Set(retained.flatMap(page => page.entryIds));
     this.pages = this.pages.filter(page => keep.has(page));
+    if (this.readingAperture) this.readingAperture = this.readingAperture.filter(page => keep.has(page));
     for (const [id, entry] of this.entries) {
       if (!ids.has(id)) { this.entries.delete(id); changed = true; continue; }
       if (bodies.has(id)) continue;
@@ -2475,14 +2530,24 @@ abstract class CanonicalHistoryReader {
       this.entries.set(entry.entry_id, entry);
     }
   }
-  protected installPage(entries: ProtocolEntry[], cut?: {cut_sequence: string | number; event_sequence_cut?: string | number}, older?: ProtocolHistoryCursor | BrowserWindowCursor, newer?: BrowserWindowCursor, tail = false): BrowserHistoryPage | undefined {
+  protected installPage(entries: ProtocolEntry[], cut?: {cut_sequence: string | number; event_sequence_cut?: string | number}, older?: ProtocolHistoryCursor | BrowserWindowCursor, newer?: BrowserWindowCursor, tail = false, independentAperture = false): BrowserHistoryPage | undefined {
     if (!entries.length) return;
+    const previousTail = this.tailPage?.entryIds.at(-1);
     // A refreshed snapshot can lead the ordered observation cursor. Replaying
     // its older acceptance batches must not replace the actual retained tail.
     tail = tail && (!this.tailPage || compareSequence(entries.at(-1)!.entry_sequence,
       this.entries.get(this.tailPage.entryIds.at(-1)!)!.entry_sequence) >= 0);
+    const appendToAperture = tail && this.readingAperture && previousTail
+      && this.readingIds().has(previousTail)
+      && BigInt(decimal(entries[0].entry_sequence)) <= BigInt(decimal(this.entries.get(previousTail)!.entry_sequence)) + BigInt(1);
     const ids = entries.map(entry => entry.entry_id);
-    const same = this.pages.find(page => page.entryIds.length === ids.length && page.entryIds.every((id, index) => id === ids[index]));
+    if (independentAperture) this.pages = this.pages.filter(page => page === this.tailPage || page === this.pairedTailPage
+      || this.readingAperture?.includes(page) || page.read || page.contextRead || page.entryIds.length !== ids.length
+      || page.entryIds.some((id, index) => id !== ids[index]));
+    // A newly selected aperture needs the response's original boundary cursors.
+    // Reusing a cached page whose edge was already consumed would hide older
+    // history, or require mutating another in-flight page owner's cursor.
+    const same = !independentAperture && this.pages.find(page => page.entryIds.length === ids.length && page.entryIds.every((id, index) => id === ids[index]));
     if (same) {
       if (tail) { this.tailPage = same; if (same.cut) this.pairedTailPage = same; }
       return same;
@@ -2491,6 +2556,7 @@ abstract class CanonicalHistoryReader {
       cut: cut && cut.event_sequence_cut !== undefined ? {cut_sequence: decimal(cut.cut_sequence), event_sequence_cut: decimal(cut.event_sequence_cut)} : undefined,
       older, newer, loading: false, contextState: 'loading'};
     this.pages.push(page);
+    if (appendToAperture) this.readingAperture!.push(page);
     if (tail) { this.tailPage = page; if (page.cut) this.pairedTailPage = page; }
     void this.loadPageContext(page);
     return page;
@@ -2573,8 +2639,8 @@ abstract class CanonicalHistoryReader {
       if (!this.boundaryError && this.pendingBoundaryEvents.size) this.refreshBoundaryOccurrences([]);
     });
   }
-  private connectedWindows(): BrowserHistoryPage[][] {
-    const ordered = this.pages.filter(page => page.entryIds.length).sort((a,b) => compareSequence(this.entries.get(a.entryIds[0])!.entry_sequence, this.entries.get(b.entryIds[0])!.entry_sequence));
+  private connectedWindows(pages = this.pages): BrowserHistoryPage[][] {
+    const ordered = pages.filter(page => page.entryIds.length).sort((a,b) => compareSequence(this.entries.get(a.entryIds[0])!.entry_sequence, this.entries.get(b.entryIds[0])!.entry_sequence));
     const clusters: BrowserHistoryPage[][] = [];
     let lastSequence = BigInt(0);
     for (const page of ordered) {
@@ -2611,7 +2677,10 @@ abstract class CanonicalHistoryReader {
   async readHistory(windowId?: string, direction: 'older' | 'newer' = 'older', signal?: AbortSignal): Promise<RuntimeProjection> {
     signal?.throwIfAborted();
     if (this.boundaryError) { this.refreshBoundaryOccurrences([]); await this.boundaryRead; return this.project(); }
-    const cluster = this.connectedWindows().find(pages => pages.some(page => page.id === windowId)) ?? this.readingCluster();
+    const cluster = this.readingAperture ? this.readingCluster()
+      : this.connectedWindows().find(pages => pages.some(page => page.id === windowId)) ?? this.readingCluster();
+    const readingOwner = this.readingOwner;
+    if (this.readingAperture && windowId && !cluster.some(page => page.id === windowId)) return this.project();
     if (!cluster?.length) return this.project();
     const pendingContext = cluster.filter(page => page.contextRead || page.contextState !== 'ready');
     if (pendingContext.length) {
@@ -2655,7 +2724,16 @@ abstract class CanonicalHistoryReader {
         if (this.readerClosed || !this.pages.includes(page)) return;
         if (direction === 'older' ? page.older !== cursor : page.newer !== cursor) return;
         this.mergeEntries(entries);
-        this.installPage(entries, cursor, older, newer);
+        const admitted = this.installPage(entries, cursor, older, newer, false,
+          Boolean(this.readingAperture?.includes(page) && this.readingOwner === readingOwner));
+        if (admitted && this.readingAperture?.includes(page) && this.readingOwner === readingOwner) {
+          const edge = this.entries.get(direction === 'older' ? page.entryIds[0] : page.entryIds.at(-1)!)!;
+          const neighbour = this.entries.get(direction === 'older' ? admitted.entryIds.at(-1)! : admitted.entryIds[0])!;
+          if (BigInt(decimal(neighbour.entry_sequence)) !== BigInt(decimal(edge.entry_sequence)) + BigInt(direction === 'older' ? -1 : 1)) {
+            throw new Error('历史窗口不连续。');
+          }
+          if (!this.readingAperture.includes(admitted)) this.readingAperture.push(admitted);
+        }
         if (direction === 'older') page.older = undefined; else page.newer = undefined;
       } catch (error) {
         if (!signal?.aborted && !this.readerClosed) page.error = error instanceof Error ? error.message : '历史暂时无法加载。';
@@ -2679,7 +2757,9 @@ abstract class CanonicalHistoryReader {
       if (this.entryContentState(entryId) !== 'ready') throw new RuntimeApiError('HISTORY_CONTENT_UNAVAILABLE', this.contentErrors.get(entryId) ?? '来源正文暂时无法读取，请重试。', true);
       signal.throwIfAborted();
       if (this.readerClosed || this.navigation !== navigation) throw new DOMException('Navigation superseded', 'AbortError');
+      const withinAperture = this.readingAperture && this.readingIds().has(entryId);
       this.readingEntryId = entryId;
+      if (!withinAperture) this.readingAperture = undefined;
       this.readingOwner = navigation;
       return this.project();
     }
@@ -2705,7 +2785,8 @@ abstract class CanonicalHistoryReader {
     // A result may render inside its request, and an expanded process also
     // needs reasoning. Read that actual host before switching: waiting for an
     // offscreen IntersectionObserver would deadlock source navigation.
-    const cluster = this.connectedWindows().find(pages => pages.some(page => page.entryIds.includes(entryId)))!;
+    const cluster = this.readingAperture && this.readingIds().has(entryId) ? this.readingCluster()
+      : this.connectedWindows().find(pages => pages.some(page => page.entryIds.includes(entryId)))!;
     const ids = new Set(cluster.flatMap(page => page.entryIds));
     const entries = [...this.entries.values()].filter(entry => ids.has(entry.entry_id))
       .sort((a, b) => compareSequence(a.entry_sequence, b.entry_sequence));
@@ -2775,7 +2856,9 @@ abstract class CanonicalHistoryReader {
   protected windowJoinPredicate(): (a: string, b: string) => boolean {
     const membership = new Map<string, number>();
     this.connectedWindows().forEach((cluster, index) => { for (const page of cluster) for (const id of page.entryIds) membership.set(id, index); });
-    return (a,b) => membership.has(a) && membership.get(a) === membership.get(b);
+    const reading = this.readingAperture && this.readingIds();
+    return (a,b) => (!reading || (!reading.has(a) && !reading.has(b)) || (reading.has(a) && reading.has(b)))
+      && membership.has(a) && membership.get(a) === membership.get(b);
   }
   protected decorateSubagentRuns(runs: SubagentRun[]) {
     const tasks = this.pages.flatMap(page => page.context?.tasks ?? []);
@@ -2811,6 +2894,12 @@ abstract class CanonicalHistoryReader {
       const context = contexts.get(message.id);
       const page = context?.page ?? this.pages.find(page => page.entryIds.includes(message.id));
       message.historyGroupId = context?.entry.segment_id;
+      // Context may name a final after its historical cut. This is only an
+      // explicit navigation target, never evidence that this slice completed.
+      message.historyFinalEntryId = context?.page.context?.groups.find(group =>
+        group.owner_kind === context.entry.owner_kind && group.owner_id === context.entry.owner_id)?.final_entry_id;
+      message.historyInitialEntryId = context?.page.context?.groups.find(group =>
+        group.owner_kind === context.entry.owner_kind && group.owner_id === context.entry.owner_id)?.initial_entry_id;
       // Installed exact-entry context remains usable while its page refreshes.
       // The page/window owns refresh loading and errors; new entries without
       // installed context still wait before receiving a semantic group.

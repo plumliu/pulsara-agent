@@ -329,6 +329,10 @@ class FakeConnection implements RuntimeConnection {
   locateEntry = vi.fn(async (_entryId: string, _signal?: AbortSignal) => {
     void _entryId; void _signal; return this.value;
   });
+  readProcessEnd = vi.fn(async (_entryId: string, signal: AbortSignal) => {
+    signal.throwIfAborted();
+    return this.current();
+  });
   locateAnnotationSource = vi.fn(async (_entryId: string, _signal?: AbortSignal) => {
     void _entryId; void _signal; return this.value;
   });

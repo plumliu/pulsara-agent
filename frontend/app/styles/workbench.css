@@ -655,7 +655,7 @@
 .conversation-run .assistant-turn { margin-top: 0; margin-bottom: 8px; }
 .conversation-run__step .reasoning-disclosure { margin-block: 0; }
 .conversation-run__step .assistant-copy { margin-block: 8px 12px; }
-.conversation-run__toggle + .conversation-run__disclosure .conversation-run__step > .assistant-turn > .assistant-copy:first-child { margin-top: 0; }
+.conversation-run__toggle + .conversation-run__step > .assistant-turn > .assistant-copy:first-child { margin-top: 0; }
 .conversation-run__step .execution-rail { margin-top: 8px; }
 .conversation-run__step .assistant-turn--operational > .execution-rail:first-child { margin-top: 0; }
 .conversation-run__step .trace-node:last-child { margin-bottom: 0; }
@@ -664,7 +664,6 @@
 
 /* Collapsed process bodies are unmounted; only visible steps have layout. */
 .conversation-run__step { display: grid; grid-template-rows: 1fr; }
-.conversation-run__step-content { min-height: 0; overflow: hidden; }
 .conversation-run__toggle svg { transition: transform .2s ease; }
 
 /* The dock is bottom anchored: growing a new row lifts existing rows smoothly. */
