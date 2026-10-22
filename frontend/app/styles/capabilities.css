@@ -178,7 +178,13 @@
 .capability-dialog-body .capability-field > span { font-size: var(--type-control); }
 .capability-dialog-body .capability-field small { font-size: var(--type-small); line-height: 1.6; color: var(--muted); }
 .capability-dialog-body :is(input:not([type="checkbox"]):not([type="radio"]),select,textarea) { font-size: var(--type-control); }
-.capability-dialog-body input[type="file"] { height: auto; padding: 9px 11px; }
+.capability-dialog-body .capability-field input[type="file"] { height: auto; padding: 9px 11px; font: var(--type-small)/1.6 var(--sans); }
+.capability-directory-picker { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink-soft); text-align: left; font: inherit; transition: border-color .18s ease, background .18s ease; }
+.capability-directory-picker:hover { border-color: var(--line-strong); background: var(--paper-raised); }
+.capability-directory-picker svg { flex: none; color: var(--muted); }
+.capability-directory-picker span { overflow-wrap: anywhere; }
+.capability-add-panel--skill > section > header { padding-bottom: 16px; }
+.capability-add-panel--skill .capability-dialog-body { padding-top: 16px; }
 .capability-dialog-body input::file-selector-button { margin-right: 12px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); color: var(--ink-soft); font: inherit; cursor: pointer; }
 .capability-dialog-body > .secondary-action, .capability-dialog-body .secondary-ghost, .capability-dialog-body .danger-ghost, .capability-dialog-body .capability-detail-actions .secondary-action { display: inline-flex; align-items: center; justify-content: center; gap: 7px; width: fit-content; min-height: 36px; padding: 6px 11px; border: 1px solid var(--line); border-radius: 8px; font-size: var(--type-small); line-height: 1.4; }
 .capability-dialog-body > .secondary-action { align-self: flex-start; background: var(--paper-raised); color: var(--ink-soft); }

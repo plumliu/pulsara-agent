@@ -45,10 +45,13 @@ import type {
   UserSkillCapability,
 } from '../lib/pulsara-types';
 
-type CapabilityTab = 'plugins' | 'mcp' | 'skills' | 'hooks';
+export type CapabilityTab = 'plugins' | 'mcp' | 'skills' | 'hooks';
 type AddKind = 'plugin' | 'mcp' | 'skill' | 'mcp-import';
 
 interface CapabilityViewProps {
+  tab: CapabilityTab;
+  onTabChange: (tab: CapabilityTab) => void;
+  onPickDirectory: () => Promise<string | null>;
   hooks: UserHooksApi;
   onNotify: MarkdownNotify;
   snapshot?: UserCapabilitySnapshot;
@@ -123,6 +126,9 @@ function CapabilityDrawer({ open, children }: { open: boolean; children: React.R
 
 
 export function CapabilityView({
+  tab,
+  onTabChange: setTab,
+  onPickDirectory,
   hooks,
   onNotify,
   snapshot,
@@ -150,7 +156,6 @@ export function CapabilityView({
   onEditPluginConnection,
   onPluginMcpAuthorization,
 }: CapabilityViewProps) {
-  const [tab, setTab] = useState<CapabilityTab>('plugins');
   const [hooksRefresh, setHooksRefresh] = useState(0);
   const [hookCount, setHookCount] = useState<number>();
   const [query, setQuery] = useState('');
@@ -356,7 +361,7 @@ export function CapabilityView({
         </section>
       </div>}
       {editingPluginConnection && <PluginConnectionEditor plugin={editingPluginConnection.plugin} connection={editingPluginConnection.connection} onClose={() => setEditingPluginConnection(undefined)} onSave={(input) => onEditPluginConnection(editingPluginConnection.plugin, editingPluginConnection.connection, input)} onAuthorization={(action) => onPluginMcpAuthorization(editingPluginConnection.plugin, editingPluginConnection.connection, action)} />}
-      {addKind === 'skill' && <SkillImporter onClose={() => setAddKind(undefined)} onInstall={onInstallSkill} onPreview={onPreviewSkills} />}
+      {addKind === 'skill' && <SkillImporter onClose={() => setAddKind(undefined)} onInstall={onInstallSkill} onPreview={onPreviewSkills} onPickDirectory={onPickDirectory} />}
       {addKind === 'mcp' && <McpEditor onClose={() => setAddKind(undefined)} onSave={onCreateMcp} onTest={onTestMcp} onNotify={onNotify} />}
       {addKind === 'mcp-import' && <McpImporter onClose={() => setAddKind(undefined)} onPreview={onPreviewMcpImport} onImport={onImportMcp} />}
       {editingMcp && <McpEditor server={editingMcp} authorizationKey={mcpAuthorizationKey('device', editingMcp.id, editingMcp.currentIdentity)} onAuthorization={action => onMcpAuthorization(editingMcp, action)} onClose={() => setEditingMcp(undefined)} onSave={(input) => onEditMcp(editingMcp, input)} onTest={onTestMcp} onNotify={onNotify} />}

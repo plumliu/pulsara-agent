@@ -11,7 +11,7 @@ import { UserAvatarProvider } from '../components/user-avatar';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
-import { CapabilityView } from '../components/capability-view';
+import { CapabilityView, type CapabilityTab } from '../components/capability-view';
 import { DatabaseSetupGuide } from '../components/database-setup-guide';
 import { LocalScheduledTasksApi } from '../lib/scheduled-tasks-api';
 import { ScheduledTasksView } from '../components/scheduled-tasks-view';
@@ -222,6 +222,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const [promptDraftStore] = useState(() => new PromptDraftStore());
   const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
   const [activeView, setActiveView] = useState<AppView>('overview');
+  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>('plugins');
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>();
   const [settingsHighlightHome, setSettingsHighlightHome] = useState(false);
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
@@ -413,7 +414,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
 
   const notify = useCallback((
     title: string,
-    detail?: string,
+    detail?: ToastMessage['detail'],
     tone: ToastMessage['tone'] = 'neutral',
   ) => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -3259,7 +3260,16 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             if (!active || active.sessionId !== activeSessionId || active.current().hostSessionId !== projection.hostSessionId) { notify('连接实例已改变', '请重新打开当前连接后操作。', 'warning'); return; }
             await reconnectProjectMcp(server);
           }}
-          onOpenUserCapabilities={() => setActiveView('capabilities')}
+          onPickDirectory={() => adapter.pickWorkspaceDirectory()}
+          onOpenUserCapabilities={kind => { setCapabilityTab(kind ?? 'plugins'); navigate('capabilities'); }}
+          onShowProjectScopeNotice={kind => {
+            const label = kind === 'skills' ? '技能' : 'MCP';
+            notify(`这里添加的${label}仅会应用到当前目录中`, {
+              before: `如果需要添加用户级${label}，请在`, label: '能力页', after: '添加',
+              href: `#capabilities/${kind}`,
+              onClick: () => { setCapabilityTab(kind); navigate('capabilities'); },
+            });
+          }}
           onOpenHomeSettings={() => navigate('settings', 'general', true)}
           onNotify={notify}
           onClose={() => setInspectorOpen(false)}
@@ -3277,6 +3287,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       )}
       {activeView === 'capabilities' && (
         <CapabilityView
+          tab={capabilityTab}
+          onTabChange={setCapabilityTab}
+          onPickDirectory={() => adapter.pickWorkspaceDirectory()}
           hooks={adapter.hooks}
           onNotify={notify}
           snapshot={userCapabilities}

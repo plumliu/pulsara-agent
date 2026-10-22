@@ -20,7 +20,7 @@ def browser():
         browser.close()
 
 
-def desktop_page(browser, *, width, platform, sidebar, workspace, surface=False):
+def desktop_page(browser, *, width, platform, sidebar, workspace, surface=False, motion=False):
     page = browser.new_page(viewport={"width": width, "height": 800})
     classes = "pulsara-shell desktop-shell " + ("is-surface" if surface else "is-workbench")
     if sidebar:
@@ -54,8 +54,76 @@ def desktop_page(browser, *, width, platform, sidebar, workspace, surface=False)
     for name in ("base", "shell", "workbench", "responsive", "desktop"):
         page.add_style_tag(content=(STYLES / f"{name}.css").read_text())
     # Finish the production sidebar/workspace transition before measuring it.
-    page.add_style_tag(content="* { transition: none !important; }")
+    if not motion:
+        page.add_style_tag(content="* { transition: none !important; }")
     return page
+
+
+@pytest.mark.parametrize("width", [1000, 1440])
+@pytest.mark.parametrize("sidebar", [False, True])
+def test_entering_conversation_restores_sidebar_without_replaying_motion(browser, width, sidebar):
+    page = desktop_page(browser, width=width, platform="darwin", sidebar=sidebar,
+                        workspace=0, surface=True, motion=True)
+    try:
+        result = page.evaluate('''async () => {
+            const shell = document.querySelector('.desktop-shell');
+            const navigation = document.querySelector('.desktop-navigation');
+            const frame = () => new Promise(requestAnimationFrame);
+            const samples = [];
+            for (let visit = 0; visit < 2; visit++) {
+                await frame(); await frame();
+                shell.classList.replace('is-surface', 'is-workbench');
+                navigation.innerHTML = '<aside class="session-sidebar">会话</aside>';
+                for (let i = 0; i < 4; i++) {
+                    samples.push({ width: navigation.getBoundingClientRect().width,
+                        animations: shell.getAnimations({subtree: true}).length });
+                    await frame();
+                }
+                shell.classList.replace('is-workbench', 'is-surface');
+                navigation.replaceChildren();
+            }
+            return samples;
+        }''')
+        expected = 314 if width > 1150 and sidebar else 62
+        assert all(sample["width"] == expected for sample in result), result
+        assert all(sample["animations"] == 0 for sample in result), result
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("width", [1000, 1440])
+def test_manual_sidebar_toggles_keep_their_transition(browser, width):
+    page = desktop_page(browser, width=width, platform="darwin", sidebar=False,
+                        workspace=0, motion=True)
+    try:
+        result = page.evaluate('''async () => {
+            const shell = document.querySelector('.desktop-shell');
+            const navigation = document.querySelector('.desktop-navigation');
+            navigation.innerHTML = '<aside class="session-sidebar">会话</aside>';
+            const sidebar = navigation.firstElementChild;
+            const frame = () => new Promise(requestAnimationFrame);
+            await frame(); await frame();
+            const samples = [];
+            for (const open of [true, false]) {
+                shell.classList.toggle('sidebar-visible', open);
+                getComputedStyle(sidebar).transform;
+                const property = innerWidth > 1150 ? '--desktop-navigation-width' : 'transform';
+                const motion = shell.getAnimations({subtree: true})
+                    .find(animation => animation.transitionProperty === property);
+                if (!motion) throw new Error('Missing sidebar transition: ' + property);
+                motion.pause();
+                motion.currentTime = motion.effect.getTiming().duration / 2;
+                samples.push(innerWidth > 1150 ? navigation.getBoundingClientRect().width
+                    : new DOMMatrix(getComputedStyle(sidebar).transform).m41);
+                for (const animation of shell.getAnimations({subtree: true})) animation.finish();
+                await frame(); await frame();
+            }
+            return samples;
+        }''')
+        lower, upper = (62, 314) if width > 1150 else (-252, 0)
+        assert all(lower < value < upper for value in result), result
+    finally:
+        page.close()
 
 
 @pytest.mark.parametrize("width", [760, 1000, 1440])

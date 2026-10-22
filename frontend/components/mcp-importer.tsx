@@ -49,9 +49,9 @@ export function McpImporter({ onPreview, onImport, onClose }: {
   const classified = item?.fields.every((field) => field.private || field.target === 'endpoint' || field.target.startsWith('oauth:') || classifications[field.target]);
   return <div className="capability-add-panel" role="dialog" aria-modal="true" aria-label="导入 MCP 配置">
     <div className="capability-add-panel__backdrop" onClick={busy ? undefined : onClose} />
-    <section><header><div><span>一次性转换 · 不运行安装脚本</span><h2>导入 MCP 配置</h2></div><button aria-label="关闭" disabled={busy} onClick={onClose}><X size={16} /></button></header>
+    <section><header><div><span>从 JSON / JSONC 导入 MCP</span><h2>导入 MCP 配置</h2></div><button aria-label="关闭" disabled={busy} onClick={onClose}><X size={16} /></button></header>
       <div className="capability-dialog-body">
-      <label className="capability-field"><span>读取配置文件</span><input type="file" accept=".json,.jsonc,application/json" disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; if (file.size > 1024 * 1024) { setError('文件超过 MCP 配置的 1 MiB 上限。'); return; } setBusy(true); void file.text().then((content) => changeSource({content}), () => setError('无法读取所选文件。')).finally(() => setBusy(false)); }} /><small>仅读取你选中的文件；内容只留在当前表单，不进入聊天或日志。</small></label>
+      <label className="capability-field"><span>读取配置文件</span><input type="file" accept=".json,.jsonc,application/json" disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; if (file.size > 1024 * 1024) { setError('文件超过 MCP 配置的 1 MiB 上限。'); return; } setBusy(true); void file.text().then((content) => changeSource({content}), () => setError('无法读取所选文件。')).finally(() => setBusy(false)); }} /></label>
       <label className="capability-field"><span>或粘贴 JSON / JSONC</span><textarea aria-label="配置内容" value={source.content} disabled={busy} rows={7} onChange={(event) => changeSource({content: event.target.value})} spellCheck={false} /></label>
       <div className="capability-form-grid"><label className="capability-field"><span>来源格式</span><select value={source.shape} disabled={busy} onChange={(event) => changeSource({shape: event.target.value as McpImportSource['shape']})}><option value="auto">自动识别（有歧义时提示）</option><option value="mcpServers">mcpServers</option><option value="opencode">OpenCode mcp</option><option value="map">裸服务列表</option><option value="server">单个服务</option></select></label><label className="capability-field"><span>单服务 ID（需要时填写）</span><input value={source.server_id ?? ''} disabled={busy} onChange={(event) => changeSource({server_id: event.target.value || undefined})} /></label></div>
       <button className="secondary-action" disabled={busy || !source.content.trim()} onClick={() => void preview()}><FileInput size={14} />读取预览</button>
@@ -78,7 +78,6 @@ export function McpImporter({ onPreview, onImport, onClose }: {
         </label>)}
       </div>}
       {error && <p role="alert">{error}</p>}
-      <p className="capability-detail-note">导入后按配置中的启用选择生效；本地命令可能被启动，请确认来源可信。保存不等于连接测试成功。</p>
       </div>
       <footer><button className="secondary-action" disabled={busy} onClick={onClose}>关闭</button><button className="capability-primary" disabled={busy || !item || Boolean(item.issues.length) || !classified || installed.has(selected)} onClick={() => void submit()}>{busy ? <LoaderCircle size={14} /> : <FileInput size={14} />}{installed.has(selected) ? '已导入' : '确认导入此服务'}</button></footer>
     </section>

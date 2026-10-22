@@ -652,6 +652,45 @@ describe('PulsaraApp', () => {
     await waitFor(() => expect(document.activeElement).toBe(addButton));
   });
 
+  it.each([
+    ['skills', '添加', '导入技能', '技能'],
+    ['mcp', '添加', '添加 MCP 服务', 'MCP'],
+    ['mcp', '导入 MCP', '导入 MCP 配置', 'MCP'],
+  ])('opens %s / %s with a scope notice linking to the matching user capability tab', async (kind, action, dialogName, label) => {
+    const adapter = new FakeAdapter();
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('会话标签工作区');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    if (kind === 'mcp') fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
+    fireEvent.click(await within(inspector).findByRole('button', { name: action, exact: true }));
+    await screen.findByRole('dialog', { name: dialogName });
+    expect(screen.getByText(`这里添加的${label}仅会应用到当前目录中`)).toBeTruthy();
+    const link = screen.getByRole('link', { name: '能力页' });
+    expect(link.parentElement?.textContent).toBe(`如果需要添加用户级${label}，请在能力页添加`);
+    expect(link.closest('button')).toBeNull();
+    fireEvent.click(link);
+    await screen.findByRole('heading', { name: '能力' });
+    const selected = screen.getByRole('tab', { name: new RegExp(`^${label} `) });
+    expect(selected.getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByRole('dialog', { name: dialogName })).toBeNull();
+    expect(Boolean(document.querySelector<HTMLElement>('main.pulsara-shell')?.inert)).toBe(false);
+    await waitFor(() => expect(adapter.inspectUserCapabilities).toHaveBeenCalled());
+  });
+
+  it('retargets the scope notice link after the user has already opened another capability tab', async () => {
+    renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
+    const inspector = await screen.findByLabelText('会话标签工作区');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(await within(inspector).findByRole('button', { name: '添加', exact: true }));
+    await screen.findByRole('dialog', { name: '导入技能' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: '能力', exact: true }));
+    await screen.findByRole('heading', { name: '能力' });
+    fireEvent.click(screen.getByRole('tab', { name: /^MCP / }));
+    fireEvent.click(screen.getByRole('link', { name: '能力页' }));
+    expect(screen.getByRole('tab', { name: /^技能 / }).getAttribute('aria-selected')).toBe('true');
+  });
+
   it('keeps the project capability dialog open while its mutation is saving', async () => {
     const adapter = new FakeAdapter();
     adapter.previewSkillImport.mockResolvedValue([{sourcePath: '/tmp/market-skill', name: 'market-skill', description: 'A portable skill', valid: true, details: []}]);
@@ -667,11 +706,11 @@ describe('PulsaraApp', () => {
     const addButton = await within(inspector).findByRole('button', { name: '添加' });
     fireEvent.click(addButton);
     const dialog = await screen.findByRole('dialog', { name: '导入技能' });
-    fireEvent.change(within(dialog).getByLabelText('来源目录'), {
-      target: { value: '/tmp/market-skill' },
-    });
+    adapter.pickWorkspaceDirectory.mockResolvedValueOnce('/tmp/market-skill');
+    fireEvent.click(within(dialog).getByRole('button', { name: '来源目录 选择目录' }));
+    await within(dialog).findByRole('button', { name: '来源目录 /tmp/market-skill' });
     fireEvent.click(within(dialog).getByRole('button', { name: '读取预览' }));
-    await within(dialog).findByText('/tmp/market-skill');
+    await within(dialog).findByLabelText('安装名称');
     fireEvent.click(within(dialog).getByRole('button', { name: '安装所选技能' }));
 
     await waitFor(() => expect(dialog.getAttribute('aria-busy')).toBe('true'));

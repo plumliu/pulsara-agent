@@ -227,7 +227,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
   const card = (fact: MemoryFact) => <><p className="memory-statement">{fact.statement}</p><span className="memory-metadata"><span className="memory-kind">{memoryKindLabels[fact.kind]}</span><span>{label(fact)}</span><time dateTime={fact.updated_at}>{date(fact.updated_at)}</time></span></>;
   const filtered = Boolean(search || kind);
   const emptyTitle = view === 'project' && !workspace ? '选择一个项目' : filtered ? '没有找到匹配的记忆' : lifecycle === 'updated' ? '暂无已被替代的记忆' : view === 'global' ? '还没有全局记忆' : '这个项目还没有记忆';
-  const emptyCopy = view === 'project' && !workspace ? '同一个目录下的会话，共享这里的项目记忆。' : filtered ? '试试其他关键词，或切换记忆类别。' : lifecycle === 'updated' ? '被新内容替代的记忆，会保留在这里供你查看。' : '在对话中告诉 Pulsara 值得记住的背景或偏好，保存后会出现在这里。';
+  const emptyCopy = view === 'project' && !workspace ? '同一个目录下的会话，共享这里的项目记忆。' : filtered ? '试试其他关键词，或切换记忆类别。' : lifecycle === 'updated' ? '被新内容替代的记忆，会保留在这里供你查看。' : '在对话中告诉 Pulsara 值得记住的背景或偏好。';
   const detailBusy = busy || Boolean(pendingDetail);
   return <div className={`memory-layout${detail || pendingDetail ? ' has-detail' : ''}`}>
     <div className="memory-main">

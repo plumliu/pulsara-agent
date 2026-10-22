@@ -191,7 +191,7 @@
 .project-capability-group__toggle { min-width: 0; color: var(--faint); }
 .project-capability-group__toggle small { min-width: 17px; padding: 1px 4px; border-radius: 999px; background: var(--paper-deep); color: var(--muted); font-family: var(--mono); text-align: center; }
 .project-capability-group__toggle svg:last-child { transition: transform .15s ease; }
-.project-capability-group--inherited.is-expanded .project-capability-group__toggle svg:last-child { transform: rotate(180deg); }
+.project-capability-group--inherited.is-expanded .project-capability-group__toggle svg:last-child { transform: rotate(90deg); }
 .project-capability-group__manage { margin-left: auto; color: var(--violet); }
 .project-capability-group__items { display: grid; gap: 6px; }
 .project-capability-row { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb,var(--paper-solid) 91%,transparent); box-shadow: var(--shadow-sm); }

@@ -1,8 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { CapabilityView } from '../../frontend/components/capability-view';
+import { CapabilityView as ControlledCapabilityView, type CapabilityTab } from '../../frontend/components/capability-view';
+import { useState, type ComponentProps } from 'react';
 import type { UserCapabilitySnapshot, UserMcpServerCapability } from '../../frontend/lib/pulsara-types';
 import type {HookSource} from '../../frontend/lib/hooks-api';
+
+function CapabilityView(props: Omit<ComponentProps<typeof ControlledCapabilityView>, 'tab' | 'onTabChange'>) {
+  const [tab, setTab] = useState<CapabilityTab>('plugins');
+  return <ControlledCapabilityView {...props} tab={tab} onTabChange={setTab} />;
+}
 
 afterEach(cleanup);
 
@@ -18,7 +24,7 @@ const snapshot: UserCapabilitySnapshot = {
 };
 const callbacks = {
   hooks: {list: vi.fn().mockResolvedValue({sources: [], details: []}), config: vi.fn(), save: vi.fn(), review: vi.fn(), trust: vi.fn()},
-  onNotify: vi.fn(), onRefresh: vi.fn(), onOpenRoot: vi.fn(), onInstallSkill: vi.fn(),
+  onPickDirectory: vi.fn(), onNotify: vi.fn(), onRefresh: vi.fn(), onOpenRoot: vi.fn(), onInstallSkill: vi.fn(),
   onPreviewSkills: vi.fn(), onInstallPlugin: vi.fn(), onPreviewPlugin: vi.fn(),
   onCreateMcp: vi.fn(), onTestMcp: vi.fn(), onPreviewMcpImport: vi.fn(), onImportMcp: vi.fn(),
   onEditMcp: vi.fn(), onRemoveMcp: vi.fn(), onMcpAuthorization: vi.fn(),

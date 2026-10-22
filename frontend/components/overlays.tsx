@@ -116,25 +116,25 @@ function Toast({ toast, exiting, onDismiss, onExitComplete }: {
   toast: ToastMessage; exiting: boolean;
   onDismiss: (id: number) => void; onExitComplete: (id: number) => void;
 }) {
-  const button = useRef<HTMLButtonElement>(null);
+  const button = useRef<HTMLElement | null>(null);
   const entrance = useRef<Animation | undefined>(undefined);
   const drag = useRef<{ pointerId: number; x: number; y: number; width: number } | undefined>(undefined);
   const suppressClick = useRef(false);
   const [offset, setOffset] = useState(0);
   const cancelEntrance = useCallback(() => { entrance.current?.cancel(); entrance.current = undefined; }, []);
-  const releaseDrag = useCallback((target: HTMLButtonElement) => {
+  const releaseDrag = useCallback((target: HTMLElement) => {
     const current = drag.current;
     drag.current = undefined;
     if (current && target.hasPointerCapture(current.pointerId)) target.releasePointerCapture(current.pointerId);
   }, []);
-  const startDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (exiting || event.button !== 0 || event.isPrimary === false || drag.current) return;
     suppressClick.current = false;
     drag.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY,
       width: event.currentTarget.getBoundingClientRect().width };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
-  const moveDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const current = drag.current;
     if (exiting || !current || current.pointerId !== event.pointerId) return;
     const x = event.clientX - current.x;
@@ -148,7 +148,7 @@ function Toast({ toast, exiting, onDismiss, onExitComplete }: {
       onDismiss(toast.id);
     }
   };
-  const finishDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const finishDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const current = drag.current;
     if (exiting || !current || current.pointerId !== event.pointerId) return;
     const x = event.clientX - current.x;
@@ -160,7 +160,7 @@ function Toast({ toast, exiting, onDismiss, onExitComplete }: {
       onDismiss(toast.id);
     } else setOffset(0);
   };
-  const cancelDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const cancelDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (drag.current?.pointerId !== event.pointerId) return;
     releaseDrag(event.currentTarget);
     if (!exiting) setOffset(0);
@@ -192,15 +192,19 @@ function Toast({ toast, exiting, onDismiss, onExitComplete }: {
     void animation.finished.then(() => { if (current) onExitComplete(toast.id); }, () => {});
     return () => { current = false; animation.cancel(); };
   }, [exiting, offset, onExitComplete, toast.id, cancelEntrance, releaseDrag]);
-  return <button ref={button} className={`toast toast--${toast.tone ?? 'neutral'}${offset > 0 && !exiting ? ' is-dragging' : ''}${exiting ? ' is-exiting' : ''}`}
-    style={{ translate: `${offset}px 0` }} disabled={exiting}
+  const detail = toast.detail;
+  const linked = typeof detail === 'object';
+  const Container = linked ? 'div' : 'button';
+  return <Container ref={(element: HTMLButtonElement | HTMLDivElement | null) => { button.current = element; }} className={`toast toast--${toast.tone ?? 'neutral'}${offset > 0 && !exiting ? ' is-dragging' : ''}${exiting ? ' is-exiting' : ''}`}
+    style={{ translate: `${offset}px 0` }} {...(linked ? { 'aria-disabled': exiting } : { disabled: exiting })}
     onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={finishDrag}
     onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}
     onClick={event => {
+      if (linked) return;
       // A captured drag can still produce a click. Keyboard activation remains.
       if (suppressClick.current && event.detail !== 0) { event.preventDefault(); return; }
       (toast.onClick ?? (() => onDismiss(toast.id)))();
-    }}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span>{toast.onClick ? <ChevronRight size={11} aria-hidden="true" /> : <X size={11} />}</button>;
+    }}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{detail && <small>{linked ? <>{detail.before}<a href={detail.href} onPointerDown={event => event.stopPropagation()} onClick={event => { event.preventDefault(); detail.onClick(); onDismiss(toast.id); }}>{detail.label}</a>{detail.after}</> : detail}</small>}</span>{linked ? <button className="toast-close" aria-label="关闭提示" disabled={exiting} onPointerDown={event => event.stopPropagation()} onClick={() => onDismiss(toast.id)}><X size={11} /></button> : toast.onClick ? <ChevronRight size={11} aria-hidden="true" /> : <X size={11} />}</Container>;
 }
 
 export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDismiss: (id: number) => void }) {

@@ -1,7 +1,8 @@
 /* Chromium owns the interpolation; these are disposable layout values only. */
 @property --desktop-navigation-width { syntax: '<length>'; inherits: true; initial-value: 314px; }
-.desktop-shell { grid-template-rows: 44px minmax(0, 1fr); min-height: 420px; }
-.desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { --desktop-navigation-width: 314px; grid-template-columns: var(--desktop-navigation-width) minmax(360px, 1fr) auto; transition: --desktop-navigation-width .22s cubic-bezier(.2,.7,.2,1); }
+/* Keep the saved width on every page so entering a conversation is not a toggle. */
+.desktop-shell { --desktop-navigation-width: 314px; grid-template-rows: 44px minmax(0, 1fr); min-height: 420px; }
+.desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { grid-template-columns: var(--desktop-navigation-width) minmax(360px, 1fr) auto; transition: --desktop-navigation-width .22s cubic-bezier(.2,.7,.2,1); }
 .desktop-shell.is-surface { grid-template-columns: 62px minmax(0, 1fr); }
 .desktop-titlebar { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; user-select: none; }
 .desktop-titlebar.is-macos { padding-left: 82px; }
@@ -82,13 +83,14 @@
 .desktop-shell.is-surface .desktop-navigation { grid-template-columns: 62px; }
 .desktop-shell .workbench, .desktop-shell .surface-view, .desktop-shell .session-opening-view { grid-column: 2; }
 @media (min-width: 1151px) {
-  .desktop-shell:not(.sidebar-visible).is-workbench { --desktop-navigation-width: 62px; }
+  .desktop-shell:not(.sidebar-visible) { --desktop-navigation-width: 62px; }
   .desktop-navigation { overflow: clip; }
   .desktop-navigation > .session-sidebar { width: 252px; transition: opacity .22s ease, visibility 0s; }
   .desktop-shell:not(.sidebar-visible) .session-sidebar { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .22s ease, visibility 0s .22s; }
 }
 @media (max-width: 1150px) {
-  .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { --desktop-navigation-width: 62px; grid-template-columns: 62px minmax(360px, 1fr) auto; }
+  .desktop-shell { --desktop-navigation-width: 62px; }
+  .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { grid-template-columns: 62px minmax(360px, 1fr) auto; }
   .desktop-navigation { grid-template-columns: 62px; }
   /* The sliding drawer passes behind the permanent rail, including its shadow. */
   .desktop-navigation > .activity-rail { z-index: 81; }

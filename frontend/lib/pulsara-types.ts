@@ -509,7 +509,7 @@ export interface AgentTaskResult {
 export interface ToastMessage {
   id: number;
   title: string;
-  detail?: string;
+  detail?: string | { before: string; label: string; after: string; href: string; onClick: () => void };
   tone?: 'neutral' | 'success' | 'warning';
   onClick?: () => void;
 }

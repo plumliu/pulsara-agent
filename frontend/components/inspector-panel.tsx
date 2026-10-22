@@ -3,7 +3,7 @@ import {
   AlertTriangle,
   Blocks,
   Bot,
-  ChevronDown,
+  ChevronRight,
   ExternalLink,
   FolderCog,
   Globe,
@@ -105,7 +105,9 @@ interface InspectorPanelProps {
   onToggleProjectMcp: (server: McpServerCapability, enabled: boolean) => Promise<void>;
   onRemoveProjectMcp: (server: McpServerCapability) => Promise<void>;
   onReconnectProjectMcp: (server: McpServerCapability) => Promise<void>;
-  onOpenUserCapabilities: () => void;
+  onOpenUserCapabilities: (kind?: ProjectCapabilityKind) => void;
+  onShowProjectScopeNotice: (kind: ProjectCapabilityKind) => void;
+  onPickDirectory: () => Promise<string | null>;
   onOpenHomeSettings: () => void;
   onNotify: MarkdownNotify;
   onClose: () => void;
@@ -220,6 +222,7 @@ function CapabilitySwitch({
 function ProjectCapabilityDialog({
   onNotify,
   initialKind,
+  onPickDirectory,
   returnFocusTo,
   onClose,
   onPreviewSkills,
@@ -231,6 +234,7 @@ function ProjectCapabilityDialog({
   onNotify: MarkdownNotify;
   mcpForms: ProjectMcpForms;
   initialKind: ProjectCapabilityKind;
+  onPickDirectory: () => Promise<string | null>;
   returnFocusTo?: HTMLElement | null;
   onClose: () => void;
   onPreviewSkills: (sourcePath: string) => Promise<SkillImportCandidate[]>;
@@ -251,7 +255,7 @@ function ProjectCapabilityDialog({
   }, [returnFocusTo]);
 
   if (initialKind === 'mcp') return createPortal(<McpEditor credentialScopeKey={credentialScopeKey} onClose={onClose} onTest={mcpForms.test} onNotify={onNotify} onSave={async (input) => { await onCreateMcp(input); return true; }} />, document.body);
-  return createPortal(<SkillImporter scopeLabel="应用到这个目录的所有会话" onPreview={onPreviewSkills} onInstall={async (input) => {await onInstallSkill(input); return true;}} onClose={onClose} />, document.body);
+  return createPortal(<SkillImporter onPickDirectory={onPickDirectory} scopeLabel="应用到这个目录的所有会话" onPreview={onPreviewSkills} onInstall={async (input) => {await onInstallSkill(input); return true;}} onClose={onClose} />, document.body);
 
 }
 
@@ -278,6 +282,8 @@ function ProjectCapabilityPanel({
   onRemoveMcp,
   onReconnectMcp,
   onOpenUserCapabilities,
+  onShowProjectScopeNotice,
+  onPickDirectory,
   onOpenHomeSettings,
 }: {
   onNotify: MarkdownNotify;
@@ -300,7 +306,9 @@ function ProjectCapabilityPanel({
   onToggleMcp: (server: McpServerCapability, enabled: boolean) => Promise<void>;
   onRemoveMcp: (server: McpServerCapability) => Promise<void>;
   onReconnectMcp: (server: McpServerCapability) => Promise<void>;
-  onOpenUserCapabilities: () => void;
+  onOpenUserCapabilities: (kind?: ProjectCapabilityKind) => void;
+  onShowProjectScopeNotice: (kind: ProjectCapabilityKind) => void;
+  onPickDirectory: () => Promise<string | null>;
   onOpenHomeSettings: () => void;
   onRemoveSkill: (skill: SkillCapability) => Promise<void>;
 }) {
@@ -435,7 +443,7 @@ function ProjectCapabilityPanel({
             <button role="tab" aria-selected={kind === 'mcp'} className={kind === 'mcp' ? 'is-active' : ''} onClick={() => { setKind('mcp'); setInheritedExpanded(false); }}>MCP <span>{servers.length}</span></button>
           </div>
           <div className="project-capability-actions" role="group" aria-label="能力操作">
-            {kind === 'mcp' && <button className="project-capability-action" type="button" disabled={!canControl || Boolean(busy)} onClick={() => setImportingMcp(true)}>导入 MCP</button>}
+            {kind === 'mcp' && <button className="project-capability-action" type="button" disabled={!canControl || Boolean(busy)} onClick={() => { setImportingMcp(true); onShowProjectScopeNotice('mcp'); }}>导入 MCP</button>}
             <button
               className="project-capability-action"
               type="button"
@@ -443,6 +451,7 @@ function ProjectCapabilityPanel({
               onClick={(event) => {
                 setDialogOpener(event.currentTarget);
                 setDialogKind(kind);
+                onShowProjectScopeNotice(kind);
               }}
             ><Plus size={12} /> 添加</button>
           </div>
@@ -470,9 +479,9 @@ function ProjectCapabilityPanel({
             <div className={`project-capability-group project-capability-group--inherited${inheritedExpanded ? ' is-expanded' : ''}`}>
               <header>
                 <button className="project-capability-group__toggle" type="button" aria-expanded={inheritedExpanded} onClick={() => setInheritedExpanded((value) => !value)}>
-                  <Blocks size={11} /><span>继承的能力</span><small>{kind === 'skills' ? inheritedSkills.length : inheritedMcp.length}</small><ChevronDown size={11} />
+                  <Blocks size={11} /><span>继承的能力</span><small>{kind === 'skills' ? inheritedSkills.length : inheritedMcp.length}</small><ChevronRight size={11} />
                 </button>
-                <button className="project-capability-group__manage" type="button" onClick={onOpenUserCapabilities}>管理 <ExternalLink size={10} /></button>
+                <button className="project-capability-group__manage" type="button" onClick={() => onOpenUserCapabilities(kind)}>管理 <ExternalLink size={10} /></button>
               </header>
               <AnimatedDisclosure
                 open={inheritedExpanded}
@@ -486,7 +495,7 @@ function ProjectCapabilityPanel({
         </section>
       )}
       {busy && <div className="project-capability-busy"><LoaderCircle size={12} /> {busy}</div>}
-      {canControl && dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
+      {canControl && dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onPickDirectory={onPickDirectory} onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
       {canControl && editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor authorizationKey={mcpForms.authorizationKey?.(editingMcp)} credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
       {canControl && importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
     </div>
@@ -541,6 +550,8 @@ export function InspectorPanel({
   onRemoveProjectMcp,
   onReconnectProjectMcp,
   onOpenUserCapabilities,
+  onShowProjectScopeNotice,
+  onPickDirectory,
   onOpenHomeSettings,
   onNotify,
   onClose,
@@ -599,6 +610,8 @@ export function InspectorPanel({
             onRemoveMcp={onRemoveProjectMcp}
             onReconnectMcp={onReconnectProjectMcp}
             onOpenUserCapabilities={onOpenUserCapabilities}
+            onShowProjectScopeNotice={onShowProjectScopeNotice}
+            onPickDirectory={onPickDirectory}
             onOpenHomeSettings={onOpenHomeSettings}
           />;
   };

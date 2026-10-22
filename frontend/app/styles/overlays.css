@@ -103,3 +103,7 @@
 .toast:disabled { cursor: default; pointer-events: none; opacity: 1; }
 .toast.is-dragging { cursor: grabbing; }
 .toast.is-dragging, .toast.is-exiting { transition: none; }
+.toast[aria-disabled="true"] { pointer-events: none; }
+.toast small a { color: var(--amber); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.toast small a:hover { color: var(--ink); }
+.toast-close { display: grid; place-items: center; padding: 0; color: var(--faint); background: transparent; cursor: pointer; }
