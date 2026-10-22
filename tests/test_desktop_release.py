@@ -24,39 +24,42 @@ def release_root(tmp_path):
 
 
 def test_versions_match_real_committed_metadata_and_tag(release_root):
-    assert release.check_versions(release_root, "v0.1.0-alpha.2") == "0.1.0-alpha.2"
+    version = json.loads((release_root / "desktop/package.json").read_text())["version"]
+    assert release.check_versions(release_root, f"v{version}") == version
     with pytest.raises(ValueError, match="Tag"):
-        release.check_versions(release_root, "v0.1.0-alpha.3")
+        release.check_versions(release_root, "v0.0.0-alpha.0")
     path = release_root / "src/pulsara_agent/__init__.py"
-    path.write_text('__version__ = "0.1.0a3"\n')
+    path.write_text('__version__ = "0.0.0a0"\n')
     with pytest.raises(ValueError, match="CLI/runtime"):
         release.check_versions(release_root)
 
 
 def test_assembly_requires_and_copies_exactly_three_installers(release_root, tmp_path):
     source, output = tmp_path / "artifacts", tmp_path / "output"
-    names = release.installer_names("0.1.0-alpha.2")
+    version = json.loads((release_root / "desktop/package.json").read_text())["version"]
+    tag = f"v{version}"
+    names = release.installer_names(version)
     for index, name in enumerate(names):
         path = source / f"runner-{index}" / name
         path.parent.mkdir(parents=True)
         path.write_bytes(f"installer {index}".encode())
-    files = release.assemble(release_root, source, output, "v0.1.0-alpha.2", "plumliu/pulsara-agent")
+    files = release.assemble(release_root, source, output, tag, "plumliu/pulsara-agent")
     assert [path.name for path in files] == list(names)
     assert sorted(path.name for path in output.iterdir()) == sorted([*names, "release-notes.md"])
     for index, name in enumerate(names):
         assert (output / name).read_bytes() == f"installer {index}".encode()
     notes = (output / "release-notes.md").read_text()
     assert "{{" not in notes
-    assert all(f"/releases/download/v0.1.0-alpha.2/{name}" in notes for name in names)
-    assert "仍待人工验收" in notes
+    assert all(f"/releases/download/{tag}/{name}" in notes for name in names)
+    assert "自动化检查不代替完整图形桌面验收" in notes
     extra = source / "unsupported.AppImage"
     extra.write_bytes(b"unexpected")
     with pytest.raises(ValueError, match="exactly"):
-        release.assemble(release_root, source, output, "v0.1.0-alpha.2", "plumliu/pulsara-agent")
+        release.assemble(release_root, source, output, tag, "plumliu/pulsara-agent")
     extra.unlink()
     (source / "runner-2" / names[2]).unlink()
     with pytest.raises(ValueError, match="exactly"):
-        release.assemble(release_root, source, output, "v0.1.0-alpha.2", "plumliu/pulsara-agent")
+        release.assemble(release_root, source, output, tag, "plumliu/pulsara-agent")
 
 
 @pytest.mark.parametrize("existing", [None, True, False])
