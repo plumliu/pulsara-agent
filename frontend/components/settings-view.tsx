@@ -1,3 +1,4 @@
+import { ModelIdInput } from './model-id-input';
 import { CliSettings } from './cli-settings';
 import {
   Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, House,
@@ -213,8 +214,8 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [catalogReasoningProfile, setCatalogReasoningProfile] = useState<ReasoningWireProfile>('catalog_standard');
   const [customReasoning, setCustomReasoning] = useState<CustomReasoningKind>('provider_default');
   const [effortValues, setEffortValues] = useState('low, medium, high');
-  const [keyPresent, setKeyPresent] = useState(false);
-  const modelKey = useRef<HTMLInputElement>(null);
+  const [modelApiKey, setModelApiKey] = useState('');
+  const keyPresent = Boolean(modelApiKey);
   const [savingModel, setSavingModel] = useState(false);
   const [testingModel, setTestingModel] = useState(false);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string>();
@@ -276,6 +277,12 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const draftEndpoint = configurationSource === 'models_dev' ? selectedWire?.endpoint : baseUrl.trim();
   const canKeepModelKey = Boolean(editingConfiguration?.credential_configured && draftEndpoint
     && draftEndpoint.replace(/\/+$/, '') === editingConfiguration.base_url.replace(/\/+$/, ''));
+  const editingId = editingConfiguration?.id ?? null;
+  const discoveryInput = useMemo(() => ({
+    base_url: baseUrl.trim(), authentication,
+    api_key: authentication === 'none' ? null : modelApiKey || null,
+    connection_id: editingId,
+  }), [baseUrl, authentication, modelApiKey, editingId]);
   const incompatibleCustomProfile = wireApi === 'openai_responses' && chatOnlyReasoningProfiles.has(customReasoning);
 
   const changeModelPage = (page: number) => {
@@ -284,8 +291,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   };
 
   const resetModelDraft = () => {
-    if (modelKey.current) modelKey.current.value = '';
-    setKeyPresent(false);
+    setModelApiKey('');
     setRouteId(''); setModelId(''); setWireApi('');
     setConfigurationName(''); setBaseUrl('');
     setAuthentication('bearer_api_key');
@@ -328,7 +334,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   };
 
   const modelDraft = (): ModelConfigurationInput | undefined => {
-    const apiKey = modelKey.current?.value || null;
+    const apiKey = modelApiKey || null;
     if (configurationSource === 'models_dev') {
       if (!routeId || !modelId || !wireApi || !catalogAllowanceReady || (!apiKey && !canKeepModelKey) || !selectedWire?.executable
         || !selectedWire.reasoning_wire_profiles?.includes(catalogReasoningProfile)) return undefined;
@@ -557,7 +563,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
                 <label><span>API 协议</span><select value={wireApi} disabled={!selectedModel || !hasExecutableWire} onChange={(event) => { setWireApi(event.target.value as typeof wireApi); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Chat 或 Responses</option>{selectedModel?.wire_apis.map((wire) => <option key={wire.wire_api} value={wire.wire_api} disabled={!wire.executable}>{wireLabel(wire.wire_api)}{wire.recommended ? ' · models.dev 建议' : ''}{wire.executable ? '' : ' · 暂不支持'}</option>)}</select></label>
                 <label><span className="model-reasoning-heading"><span>Reasoning 请求形状</span>{catalogReasoningProfile !== 'catalog_standard' && <small className="model-reasoning-warning">其他映射可能导致调用失败，风险自负。</small>}</span><select aria-label="Reasoning 请求形状" value={catalogReasoningProfile} disabled={!selectedWire} onChange={(event) => setCatalogReasoningProfile(event.target.value as ReasoningWireProfile)}>{!selectedWire?.reasoning_wire_profiles?.includes(catalogReasoningProfile) && <option value={catalogReasoningProfile}>{wireApi ? `${reasoningProfileLabel(catalogReasoningProfile)} · 当前不可用` : '请先选择API协议'}</option>}{selectedWire?.reasoning_wire_profiles?.map((profile) => <option key={profile} value={profile}>{reasoningProfileLabel(profile)}</option>)}</select><small>{catalogReasoningProfileDescription(catalogReasoningProfile, selectedWire?.reasoning?.kind)}</small></label>
                 <label><span>上下文窗口大小</span><input aria-label="上下文窗口大小" type="number" min={minimumContextTokens} max={selectedModel?.context_tokens ?? undefined} step="1" disabled={!selectedModel} value={catalogContextTokens ?? (selectedModel?.context_tokens == null ? '' : String(selectedModel.context_tokens))} placeholder={String(selectedModel?.context_tokens ?? '')} onChange={(event) => setCatalogContextTokens(event.target.value)} /><small>256,000–{selectedModel?.context_tokens?.toLocaleString('zh-CN') ?? '目录上限'}；留空使用最大值。</small></label>
-                <label><span>API key</span><input ref={modelKey} aria-label="API key" type="password" autoComplete="new-password" placeholder={canKeepModelKey ? '留空保留现有密钥' : '保存到本机配置'} onChange={(event) => setKeyPresent(Boolean(event.target.value))} />{editingConfiguration && <small>{canKeepModelKey ? '留空保留现有密钥，填写则替换。' : '服务地址已改变或没有现有密钥，请重新填写。'}</small>}</label>
+                <label><span>API key</span><input value={modelApiKey} aria-label="API key" type="password" autoComplete="new-password" placeholder={canKeepModelKey ? '留空保留现有密钥' : '保存到本机配置'} onChange={(event) => setModelApiKey(event.target.value)} />{editingConfiguration && <small>{canKeepModelKey ? '留空保留现有密钥，填写则替换。' : '服务地址已改变或没有现有密钥，请重新填写。'}</small>}</label>
               </div>
               {selectedModel && !hasExecutableWire && <p className="inline-warning"><CircleAlert size={13} />该提供方没有声明 OpenAI-compatible 接口，无法使用通用 Chat / Responses adapter。</p>}
               {selectedModel && <div className="model-confirmation"><strong>确认连接</strong><dl><div><dt>提供方</dt><dd>{selectedRoute?.display_name}</dd></div><div><dt>模型</dt><dd>{selectedModel.model_id}</dd></div><div><dt>协议</dt><dd>{selectedWire ? wireLabel(selectedWire.wire_api) : '未选择'}</dd></div><div><dt>推理形状</dt><dd>{selectedWire ? reasoningProfileLabel(catalogReasoningProfile) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{selectedWire?.endpoint ?? '目录未提供'}</dd></div><div><dt>上下文</dt><dd>{formatTokens(selectedModel.context_tokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(selectedModel.input_modalities)}</dd></div><div><dt>输出模态</dt><dd>{formatModalities(selectedModel.output_modalities)}</dd></div></dl><p>模态与推理能力来自 models.dev；请求形状由你显式选择，Pulsara 不会根据服务商或模型名称猜测。</p>{selectedShapeWarning && <p className="inline-warning"><CircleAlert size={13} />所选协议与 models.dev 建议不同；仍可保存，调用失败时请返回这里添加另一配置。</p>}<p>Pulsara 当前只支持与 OpenAI Chat Completions 或 Responses 兼容的接口。模型出现在目录中不代表所选提供方一定支持你选择的 API 协议。</p><div className="form-actions"><button onClick={closeModelForm}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}{editingConfiguration ? '保存修改' : '保存配置'}</button></div></div>}
@@ -565,10 +571,10 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
               <div className="settings-form-grid">
                 <label><span>配置名称</span><input value={configurationName} onChange={(event) => setConfigurationName(event.target.value)} placeholder="例如：公司内网模型" /></label>
                 <label><span>Base URL</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://example.com/v1" /></label>
-                <label><span>Model ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="实际发送给 endpoint 的模型 ID" /></label>
                 <label><span>API 协议</span><select value={wireApi} onChange={(event) => { const value = event.target.value as typeof wireApi; setWireApi(value); if (value === 'openai_responses' && chatOnlyReasoningProfiles.has(customReasoning)) setCustomReasoning('provider_default'); }}><option value="">选择 Chat 或 Responses</option><option value="openai_chat_completions">Chat Completions</option><option value="openai_responses">Responses</option></select></label>
-                <label><span>认证方式</span><select value={authentication} onChange={(event) => { const value = event.target.value as typeof authentication; setAuthentication(value); if (value === 'none' && modelKey.current) { modelKey.current.value = ''; setKeyPresent(false); } }}><option value="bearer_api_key">Bearer API key</option><option value="none">无需认证</option></select></label>
-                {authentication === 'bearer_api_key' && <label><span>API key</span><input ref={modelKey} aria-label="API key" type="password" autoComplete="new-password" placeholder={canKeepModelKey ? '留空保留现有密钥' : '保存到本机配置'} onChange={(event) => setKeyPresent(Boolean(event.target.value))} />{editingConfiguration && <small>{canKeepModelKey ? '留空保留现有密钥，填写则替换。' : '服务地址或认证方式已改变，请填写密钥。'}</small>}</label>}
+                <label><span>认证方式</span><select value={authentication} onChange={(event) => { const value = event.target.value as typeof authentication; setAuthentication(value); if (value === 'none') setModelApiKey(''); }}><option value="bearer_api_key">Bearer API key</option><option value="none">无需认证</option></select></label>
+                {authentication === 'bearer_api_key' && <label><span>API key</span><input value={modelApiKey} aria-label="API key" type="password" autoComplete="new-password" placeholder={canKeepModelKey ? '留空保留现有密钥' : '保存到本机配置'} onChange={(event) => setModelApiKey(event.target.value)} />{editingConfiguration && <small>{canKeepModelKey ? '留空保留现有密钥，填写则替换。' : '服务地址或认证方式已改变，请填写密钥。'}</small>}</label>}
+                <ModelIdInput value={modelId} onChange={setModelId} input={discoveryInput} adapter={adapter} />
                 <label><span>上下文窗口大小</span><input type="number" min={minimumContextTokens} step="1" value={contextTokens} onChange={(event) => setContextTokens(event.target.value)} /></label>
                 <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={incompatibleCustomProfile ? '' : customReasoning} onChange={(event) => setCustomReasoning(event.target.value as CustomReasoningKind)}>{incompatibleCustomProfile && <option value="" disabled>原请求形状不支持此协议，请重新选择</option>}<option value="provider_default">由服务端决定</option><option value="effort">标准 effort</option><option value="toggle">推理开关</option>{wireApi !== 'openai_responses' && <><option value="enable_thinking">enable_thinking 开关</option><option value="thinking_type">thinking.type 开关</option><option value="thinking_effort">thinking.type + effort</option><option value="broad_compat">多字段兼容组合</option></>}</select><small>{reasoningProfileDescription(customReasoning)}</small></label>
                 {effortReasoningProfiles.has(customReasoning) && <label><span>Effort 列表</span><input value={effortValues} onChange={(event) => setEffortValues(event.target.value)} placeholder="low, medium, high" /></label>}

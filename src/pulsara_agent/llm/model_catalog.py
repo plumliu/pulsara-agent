@@ -225,12 +225,9 @@ class ModelCatalogInvalid(ValueError):
 
 
 def selectable_model(entry: ModelCatalogEntry) -> bool:
-    leaf = entry.key.model_id.rsplit("/", 1)[-1].removeprefix("~").casefold()
     return (
         entry.total_context_tokens is not None
         and entry.total_context_tokens >= MINIMUM_SELECTABLE_CONTEXT_TOKENS
-        and not leaf.startswith("claude")
-        and not leaf.startswith("gemini")
     )
 
 

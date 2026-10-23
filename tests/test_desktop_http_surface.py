@@ -2096,3 +2096,70 @@ def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path)
             await server.aclose()
 
     asyncio.run(exercise())
+
+
+def test_custom_model_discovery_is_user_level_and_never_saves_drafts(tmp_path, monkeypatch):
+    async def exercise():
+        (tmp_path / 'index.html').write_text('Pulsara', encoding='utf-8')
+        base = test_model_runtime()
+        settings = LocalSettingsStore(tmp_path / 'pulsara' / 'local-settings.yaml')
+        runtime = ModelRuntime(settings=settings, catalog=base.catalog, route_wires=base.route_wires)
+        discover = AsyncMock(return_value=['model-a', 'model-b'])
+        monkeypatch.setattr(http_server_module, 'discover_model_ids', discover)
+        dependencies = _model_server_dependencies_for_runtime(runtime)
+        dependencies['database_state'] = lambda: 'database_not_configured'
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(RendererBridge, _Bridge()), static_root=tmp_path,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **dependencies,
+        )
+        await server.start()
+        try:
+            # No session/connection headers, no live host, no database.
+            async with ClientSession(headers={'Origin': server.origin}) as client:
+                endpoint = f'{server.origin}/api/model-configurations/discover'
+                draft = {'base_url': 'https://custom.example/gateway/v1/', 'authentication': 'bearer_api_key', 'api_key': None, 'connection_id': None}
+                async with client.post(endpoint, json=draft) as response:
+                    assert response.status == 200
+                    assert await response.json() == {'model_ids': ['model-a', 'model-b']}
+                discover.assert_awaited_with(base_url='https://custom.example/gateway/v1', api_key=None)
+                assert not settings.path.exists()
+
+                async with client.post(f'{server.origin}/api/model-configurations', json={
+                    'source': 'user_declared', 'configuration_name': 'Custom',
+                    'base_url': draft['base_url'], 'model_id': 'model-a',
+                    'wire_api': 'openai_responses', 'authentication': 'bearer_api_key',
+                    'api_key': 'saved-discovery-secret', 'context_tokens': 300_000,
+                    'max_output_tokens': 8192, 'tool_call': True, 'input_modalities': ['text'],
+                    'reasoning': {'kind': 'provider_default'},
+                }) as response:
+                    assert response.status == 201
+                    saved_id = (await response.json())['model_configuration']['id']
+                original = settings.path.read_bytes()
+                draft['connection_id'] = saved_id
+                for changes, expected_key in [
+                    ({}, 'saved-discovery-secret'),
+                    ({'base_url': 'https://other.example/v1'}, None),
+                    ({'base_url': 'https://other.example/v1', 'api_key': 'new-discovery-secret'}, 'new-discovery-secret'),
+                    ({'authentication': 'none'}, None),
+                    ({'authentication': 'none', 'api_key': 'ignored-secret'}, None),
+                ]:
+                    query = {**draft, **changes}
+                    async with client.post(endpoint, json=query) as response:
+                        assert response.status == 200
+                        assert 'secret' not in await response.text()
+                    assert discover.await_args.kwargs['api_key'] == expected_key
+                    assert settings.path.read_bytes() == original
+                discover.side_effect = http_server_module.ModelDiscoveryFailure('HTTP 404: model listing unsupported')
+                async with client.post(endpoint, json=draft) as response:
+                    assert response.status == 502
+                    assert (await response.json())['error']['code'] == 'MODEL_DISCOVERY_FAILED'
+                assert settings.path.read_bytes() == original
+                for invalid in ({**draft, 'base_url': 'file:///tmp/models'}, {**draft, 'api_key': 123}, {**draft, 'authentication': 'other'}):
+                    async with client.post(endpoint, json=invalid) as response:
+                        assert response.status == 400
+        finally:
+            await server.aclose()
+
+    asyncio.run(exercise())

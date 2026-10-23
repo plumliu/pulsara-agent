@@ -50,6 +50,7 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     return { model_configuration: connection, wire_shape_warning: false };
   });
   const probeModel = vi.fn(async () => ({ status: 'ready' as const }));
+  const discoverModels = vi.fn(async () => ({ model_ids: ['alpha-model', 'beta-model', 'org/alpha-large'] }));
   const adapter = {
     localSettings: async () => settings,
     modelCatalog: async () => catalog,
@@ -60,9 +61,10 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     modelConfiguration: readModel,
     updateModelConfiguration: updateModel,
     testModelConfiguration: probeModel,
+    discoverModels,
   } as unknown as RuntimeAdapter;
   render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={notify} sessionRevision={0} onSessionsChanged={refresh} onDeleteSession={() => {}} />);
-  return { reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel };
+  return { reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel, discoverModels };
 }
 
 function customDetail(inputModalities: string[] | null = null): ModelConfigurationDetail {
@@ -323,4 +325,101 @@ it('shows the effective Pulsara Home beneath PostgreSQL in General', async () =>
   expect(within(serviceCard).getByText('PostgreSQL').closest('.setting-row')?.nextElementSibling).toBe(home);
   fireEvent.click(screen.getByRole('button', { name: '模型' }));
   expect(screen.queryByRole('region', { name: 'Pulsara 家目录' })).toBeNull();
+});
+
+async function openCustomForm() {
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  fireEvent.click(await screen.findByRole('button', { name: '添加配置' }));
+  const dialog = await screen.findByRole('dialog', { name: '添加模型配置' });
+  fireEvent.click(within(dialog).getByRole('button', { name: '自定义服务' }));
+  return dialog;
+}
+
+it('discovers with just a base URL and supports substring search, keyboard and mouse selection, and manual IDs', async () => {
+  const { discoverModels, addModel } = setup();
+  const dialog = await openCustomForm();
+  const fetch = within(dialog).getByRole('button', { name: '获取模型' });
+  const input = within(dialog).getByRole('combobox', { name: 'Model ID' });
+  expect(fetch).toHaveProperty('disabled', true);
+  fireEvent.change(within(dialog).getByLabelText('Base URL'), { target: { value: 'https://gateway.example/v1' } });
+  expect(fetch).toHaveProperty('disabled', false);
+  fireEvent.click(fetch);
+  await within(dialog).findByRole('option', { name: 'beta-model' });
+  expect(discoverModels).toHaveBeenCalledExactlyOnceWith({
+    base_url: 'https://gateway.example/v1', authentication: 'bearer_api_key', api_key: null, connection_id: null,
+  }, expect.any(AbortSignal));
+  expect(input).toHaveProperty('value', '');
+  fireEvent.change(input, { target: { value: 'ALPHA' } });
+  expect(within(within(dialog).getByRole('listbox', { name: '模型候选列表' })).getAllByRole('option')).toHaveLength(2);
+  fireEvent.keyDown(input, { key: 'ArrowDown' });
+  fireEvent.keyDown(input, { key: 'ArrowDown' });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  expect(input).toHaveProperty('value', 'org/alpha-large');
+  expect(input.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.change(input, { target: { value: 'beta' } });
+  fireEvent.click(within(dialog).getByRole('option', { name: 'beta-model' }));
+  expect(input).toHaveProperty('value', 'beta-model');
+  fireEvent.change(input, { target: { value: 'manual-unlisted' } });
+  expect(within(dialog).getByText('没有匹配的模型，可继续手动填写。')).toBeTruthy();
+  fireEvent.keyDown(input, { key: 'Escape' });
+  expect(dialog.hasAttribute('open')).toBe(true);
+  expect(input.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.change(within(dialog).getByLabelText('配置名称'), { target: { value: 'Custom' } });
+  fireEvent.change(within(dialog).getByLabelText('认证方式'), { target: { value: 'none' } });
+  fireEvent.change(within(dialog).getByLabelText('API 协议'), { target: { value: 'openai_responses' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(addModel).toHaveBeenCalledWith(expect.objectContaining({ model_id: 'manual-unlisted' })));
+});
+
+it.each(['error', 'empty', 'pending'])('allows manual saving with a %s discovery result', async (outcome) => {
+  const { discoverModels, addModel } = setup();
+  if (outcome === 'error') discoverModels.mockRejectedValueOnce(new Error('HTTP 401，请填写密钥。'));
+  if (outcome === 'empty') discoverModels.mockResolvedValueOnce({ model_ids: [] });
+  if (outcome === 'pending') discoverModels.mockImplementationOnce(() => new Promise(() => {}));
+  const dialog = await openCustomForm();
+  fireEvent.change(within(dialog).getByLabelText('Base URL'), { target: { value: 'https://gateway.example/v1' } });
+  fireEvent.change(within(dialog).getByLabelText('配置名称'), { target: { value: 'Custom' } });
+  fireEvent.change(within(dialog).getByLabelText('API 协议'), { target: { value: 'openai_responses' } });
+  fireEvent.change(within(dialog).getByLabelText('API key'), { target: { value: 'test-secret' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '获取模型' }));
+  if (outcome === 'error') await within(dialog).findByText(/HTTP 401.*仍可手动填写并保存/);
+  if (outcome === 'empty') await within(dialog).findByText('服务返回了空列表，可手动填写 Model ID。');
+  fireEvent.change(within(dialog).getByLabelText('Model ID'), { target: { value: 'typed-model' } });
+  expect(within(dialog).getByRole('button', { name: '保存配置' })).toHaveProperty('disabled', false);
+  fireEvent.click(within(dialog).getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(addModel).toHaveBeenCalledWith(expect.objectContaining({ model_id: 'typed-model', api_key: 'test-secret' })));
+  expect(discoverModels).toHaveBeenCalledWith(expect.objectContaining({ api_key: 'test-secret' }), expect.any(AbortSignal));
+});
+
+it.each(['Base URL', 'API key', '认证方式', 'close'])('discards an in-flight result after changing %s', async (field) => {
+  const { discoverModels } = setup();
+  let resolve!: (value: { model_ids: string[] }) => void;
+  discoverModels.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  const dialog = await openCustomForm();
+  fireEvent.change(within(dialog).getByLabelText('Base URL'), { target: { value: 'https://old.example/v1' } });
+  fireEvent.change(within(dialog).getByLabelText('API key'), { target: { value: 'old-secret' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '获取模型' }));
+  if (field === 'close') {
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭添加模型配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '添加配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义服务' }));
+  } else {
+    fireEvent.change(within(dialog).getByLabelText(field), { target: { value: field === '认证方式' ? 'none' : field === 'Base URL' ? 'https://new.example/v1' : 'new-secret' } });
+  }
+  const signal = (discoverModels.mock.calls[0] as unknown as [unknown, AbortSignal])[1];
+  expect(signal.aborted).toBe(true);
+  resolve({ model_ids: ['stale-model'] });
+  await waitFor(() => expect(screen.queryByRole('button', { name: '获取中…' })).toBeNull());
+  expect(screen.queryByRole('option', { name: 'stale-model' })).toBeNull();
+  expect(screen.queryByText(/已获取 1 个模型/)).toBeNull();
+});
+
+it('queries an edited connection without reading the saved key into the renderer', async () => {
+  const { discoverModels } = setup([modelConfiguration(1)], customDetail());
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  fireEvent.click(await screen.findByRole('button', { name: '修改模型配置 Test · Model 1' }));
+  const dialog = await screen.findByRole('dialog', { name: '修改模型配置' });
+  fireEvent.click(within(dialog).getByRole('button', { name: '获取模型' }));
+  await waitFor(() => expect(discoverModels).toHaveBeenCalledWith(expect.objectContaining({ api_key: null, connection_id: 'connection-1' }), expect.any(AbortSignal)));
+  expect(within(dialog).getByLabelText('API key')).toHaveProperty('value', '');
 });

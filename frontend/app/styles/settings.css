@@ -285,3 +285,15 @@
 .settings-cli-details dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
 .settings-cli-resolution { display: flex; align-items: baseline; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .settings-cli-resolution > span { flex: none; color: var(--muted); font-weight: 600; }
+
+.model-id-field { display: grid; gap: 7px; min-width: 0; grid-column: 1 / -1; }
+.model-id-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.model-id-control { position: relative; display: flex; align-items: center; }
+.model-id-heading label { color: var(--muted); font-size: var(--type-caption); font-weight: 700; }
+.model-id-control input { width: 100%; min-width: 0; padding-right: 32px; }
+.model-id-control > button { position: absolute; right: 6px; display: grid; place-items: center; padding: 5px; border: 0; background: transparent; color: var(--muted); }
+.model-id-options { max-height: 200px; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper-raised); }
+.model-id-options [role="option"] { padding: 8px 10px; overflow-wrap: anywhere; cursor: pointer; font-family: var(--mono); font-size: var(--type-caption); }
+.model-id-options [role="option"]:hover, .model-id-options .is-active { color: var(--blue); background: var(--blue-soft); }
+.model-id-empty, .model-id-field > small { color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
+.model-id-empty { padding: 10px; }

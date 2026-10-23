@@ -576,6 +576,13 @@ export interface SessionSearchItem {
 }
 export interface SessionSearchPage { items: SessionSearchItem[]; nextCursor: string | null }
 
+export interface ModelDiscoveryInput {
+  base_url: string;
+  authentication: 'bearer_api_key' | 'none';
+  api_key: string | null;
+  connection_id: string | null;
+}
+
 export interface RuntimeAdapter {
   userAvatar(): Promise<{ configured: boolean }>;
   uploadUserAvatar(file: File): Promise<{ configured: boolean }>;
@@ -587,6 +594,7 @@ export interface RuntimeAdapter {
   readonly hooks: UserHooksApi;
   bootstrap(): Promise<RuntimeBootstrap>;
   modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
+  discoverModels(input: ModelDiscoveryInput, signal?: AbortSignal): Promise<{ model_ids: string[] }>;
   localSettings(): Promise<LocalSettingsReadModel>;
   addModelConfiguration(input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
   modelConfiguration(connectionId: string): Promise<ModelConfigurationDetail>;
@@ -1550,6 +1558,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   async localSettings(): Promise<LocalSettingsReadModel> {
     return apiRequest<LocalSettingsReadModel>('/api/local-settings');
+  }
+
+  async discoverModels(input: ModelDiscoveryInput, signal?: AbortSignal) {
+    return apiRequest<{ model_ids: string[] }>('/api/model-configurations/discover', {
+      method: 'POST', body: JSON.stringify(input), signal,
+    });
   }
 
   async addModelConfiguration(input: ModelConfigurationInput) {

@@ -174,7 +174,7 @@ def test_models_dev_parser_preserves_route_identity_reasoning_combinations_and_h
         "provider/~GeMiNi-X",
     ),
 )
-def test_selectable_catalog_filters_exact_model_leafs(model_id: str) -> None:
+def test_selectable_catalog_keeps_claude_and_gemini_model_ids(model_id: str) -> None:
     fixture = catalog_fixture()
     models = fixture["zhipuai"]["models"]  # type: ignore[index]
     models[model_id] = {  # type: ignore[index]
@@ -182,16 +182,23 @@ def test_selectable_catalog_filters_exact_model_leafs(model_id: str) -> None:
         "limit": {"context": 256_000, "output": 8_192},
     }
     selected = selectable_catalog(parse_models_dev_catalog(fixture))
-    assert ModelCatalogEntryKey("zhipuai", model_id) not in selected.entries
+    assert ModelCatalogEntryKey("zhipuai", model_id) in selected.entries
 
 
 def test_selectable_catalog_uses_context_boundary_and_no_other_heuristic() -> None:
-    selected = selectable_catalog(parse_models_dev_catalog(catalog_fixture()))
+    snapshot = parse_models_dev_catalog(catalog_fixture())
+    selected = selectable_catalog(snapshot)
 
     assert ModelCatalogEntryKey("zhipuai", "glm-small") not in selected.entries
     assert ModelCatalogEntryKey("zhipuai", "glm-5.3") in selected.entries
     assert ModelCatalogEntryKey("openrouter", "~~claude-kept") in selected.entries
     assert ModelCatalogEntryKey("filtered", "ordinary-model") in selected.entries
+    for model_id in ("anthropic/claude-sonnet", "google/gemini-pro"):
+        key = ModelCatalogEntryKey("openrouter", model_id)
+        assert selected.entries[key] is snapshot.entries[key]
+        assert selected.entries[key] in next(
+            route.entries for route in selected.routes if route.route_id == "openrouter"
+        )
     assert {route.route_id for route in selected.routes} == {
         "zhipuai",
         "openrouter",

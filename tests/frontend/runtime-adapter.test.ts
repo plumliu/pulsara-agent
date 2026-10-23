@@ -3570,3 +3570,14 @@ it('keeps settled live reasoning until the exact canonical reasoning bytes are h
   expect(connection.current().messages[0].reasoning?.[0].body).toBe(text);
   expect(connection.current().messages[0]).not.toHaveProperty('pendingAssistant');
 });
+
+it('discovers custom model IDs with a cancellable user-level request', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({model_ids: ['a', 'b']}), {status: 200}));
+  vi.stubGlobal('fetch', fetchMock);
+  const controller = new AbortController();
+  const input = {base_url: 'https://gateway.example/v1', authentication: 'bearer_api_key' as const, api_key: null, connection_id: null};
+  const adapter = new LocalHttpRuntimeAdapter();
+  expect(await adapter.discoverModels(input, controller.signal)).toEqual({model_ids: ['a', 'b']});
+  expect(String(fetchMock.mock.calls[0][0])).toContain('/api/model-configurations/discover');
+  expect(fetchMock.mock.calls[0][1]).toMatchObject({method: 'POST', body: JSON.stringify(input), signal: controller.signal});
+});

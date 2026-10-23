@@ -47,6 +47,54 @@ async def prepare_openai_sdk() -> None:
         raise
 
 
+def bounded_json_response_hook(maximum_bytes: int):
+    """Bound decoded SDK JSON before buffering, including provider errors."""
+
+    async def inspect_response(response):
+        decoded = httpx2.Response(
+            response.status_code, headers=response.headers, stream=response.stream
+        )
+        response.headers.pop("content-encoding", None)
+        response.stream = _BoundedJSONStream(decoded, maximum_bytes)
+        try:
+            body = await response.aread()
+            if len(body) > maximum_bytes:
+                raise ValueError("provider response exceeds its byte bound")
+            if response.is_success:
+                json.loads(body, object_pairs_hook=_reject_duplicate_keys)
+        except BaseException:
+            await response.aclose()
+            raise
+
+    return inspect_response
+
+
+def _reject_duplicate_keys(pairs):
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("provider response contains duplicate JSON keys")
+        result[name] = value
+    return result
+
+
+class _BoundedJSONStream(httpx2.AsyncByteStream):
+    def __init__(self, response, maximum_bytes):
+        self.response = response
+        self.maximum_bytes = maximum_bytes
+
+    async def __aiter__(self):
+        size = 0
+        async for chunk in self.response.aiter_bytes():
+            size += len(chunk)
+            if size > self.maximum_bytes:
+                raise ValueError("provider response exceeds its byte bound")
+            yield chunk
+
+    async def aclose(self):
+        await self.response.aclose()
+
+
 @dataclass(frozen=True, slots=True)
 class OpenAITransportTimeoutPolicy:
     """Closed wire-timeout shape for one OpenAI-compatible transport."""
@@ -183,6 +231,7 @@ __all__ = [
     "OpenAITransportTimeoutPolicy",
     "admit_provider_request",
     "build_async_openai_client",
+    "bounded_json_response_hook",
     "prepare_openai_sdk",
     "openai_auth_request_options",
 ]

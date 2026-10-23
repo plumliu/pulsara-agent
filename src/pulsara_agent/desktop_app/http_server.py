@@ -52,6 +52,7 @@ from pulsara_agent.llm.model_connections import (
     user_declared_reasoning_from_dict,
 )
 from pulsara_agent.llm.model_target import (
+    canonicalize_endpoint,
     ResolvedModelConnection,
     compatible_reasoning_profiles,
     controls_supported_by_adapter,
@@ -64,6 +65,7 @@ from pulsara_agent.llm.connection_probe import (
     ModelConnectionProbeFailure,
     probe_model_connection,
 )
+from pulsara_agent.llm.model_discovery import ModelDiscoveryFailure, discover_model_ids
 from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
 from pulsara_agent.mcp_config import (
     McpConfiguredServerBoundExceeded,
@@ -422,6 +424,9 @@ class LocalHttpServer:
         )
         self._app.router.add_post(
             "/api/model-configurations", self._add_model_configuration
+        )
+        self._app.router.add_post(
+            "/api/model-configurations/discover", self._discover_models
         )
         self._app.router.add_delete(
             "/api/model-configurations/{connection_id}",
@@ -1071,6 +1076,38 @@ class LocalHttpServer:
                 resolved.target.target_facts.wire_shape_hint, resolved.config.target.wire_api,
             ),
         })
+
+    async def _discover_models(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"base_url", "authentication", "api_key", "connection_id"}:
+            raise ValueError("invalid model discovery input")
+        base_url, api_key, raw_id = body["base_url"], body["api_key"], body["connection_id"]
+        if (not isinstance(base_url, str)
+            or (api_key is not None and not isinstance(api_key, str))
+            or (raw_id is not None and not isinstance(raw_id, str))):
+            raise ValueError("invalid model discovery connection")
+        endpoint = canonicalize_endpoint(base_url.strip())
+        authentication = ModelConnectionAuthentication(body["authentication"])
+        if authentication is ModelConnectionAuthentication.NONE:
+            api_key = None
+        elif not api_key and raw_id is not None:
+            settings = self.settings.read()
+            previous = settings.connection(ModelConnectionId(raw_id))
+            if previous is None:
+                raise KeyError("model connection does not exist")
+            if previous.user_declared is None:
+                raise ValueError("model discovery requires a custom connection")
+            # Discovery may be anonymous even when inference requires a key.
+            # A saved credential is never lent to another endpoint.
+            if previous.requires_api_key and canonicalize_endpoint(previous.base_url) == endpoint:
+                api_key = settings.model_api_key(previous.id)
+        try:
+            ids = await discover_model_ids(base_url=endpoint, api_key=api_key or None)
+        except ModelDiscoveryFailure as exc:
+            raise HttpPublicError(
+                "MODEL_DISCOVERY_FAILED", str(exc), status=502, retryable=True,
+            ) from exc
+        return web.json_response({"model_ids": ids})
 
     async def _test_model_configuration(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
