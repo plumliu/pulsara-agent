@@ -1,3 +1,4 @@
+import { WorkspaceLoading } from './workspace-loading';
 import { McpAuthorizationStatus } from './mcp-authorization';
 import {
   AlertTriangle,
@@ -425,7 +426,7 @@ function ProjectCapabilityPanel({
   return (
     <div className="project-capability-panel" aria-busy={loading}>
       {!selectedMcpId && <section className="inspector-section project-capability-overview">
-        <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{kind === 'skills' && <SkillPrecedenceInfo onOpenHomeSettings={onOpenHomeSettings} />}{loading && !snapshot && <small><LoaderCircle size={10} /> 正在同步</small>}</div>
+        <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{kind === 'skills' && <SkillPrecedenceInfo onOpenHomeSettings={onOpenHomeSettings} />}</div>
         <p>这里的修改会应用到同一目录的所有会话。</p>
         {snapshot?.adoption.attention && !snapshot.adoption.pending && (
           <div className="task-inventory-notice task-inventory-notice--error">
@@ -465,7 +466,7 @@ function ProjectCapabilityPanel({
           <span><strong>有 {capabilityAttention.length} 项需要留意</strong><small>{capabilityAttention.join('；')}</small></span>
         </div>
       )}
-      {!error && loading && !snapshot && <div className="task-inventory-notice"><LoaderCircle size={15} /><span><strong>{selectedMcpId ? '正在读取 MCP 连接' : '正在读取项目能力'}</strong>{!selectedMcpId && <small>整理这个目录中的技能和连接…</small>}</span></div>}
+      {!error && loading && !snapshot && <WorkspaceLoading/>}
       {!loading && !error && selectedMcpId && !servers.length && <div className="inspector-empty" role="status">此 MCP 连接已不可用。标签保留原连接身份。</div>}
       {!selectedMcpId && (!loading || snapshot) && !error && rows === 0 && (kind !== 'skills' || snapshot?.skills.status !== 'attention') && <div className="inspector-empty"><Blocks size={18} /><span>这个目录还没有{kind === 'skills' ? '技能' : ' MCP'}</span></div>}
 
@@ -577,7 +578,7 @@ export function InspectorPanel({
       skills={(capabilities?.skills.items ?? []).filter(skill => skill.enabled && skill.effective)} artifactOwnerKey={taskArtifactOwnerKey}
       onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
       onOpenTask={task => open('task', task.label, task.id)} />;
-    if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} command={tab.title !== tab.entityId ? tab.title : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
+    if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
             ownerKey={backgroundOwnerKey}
             sessionId={session.id}
             hostSessionId={backgroundHostSessionId}
@@ -644,6 +645,6 @@ function WorkspaceTaskDetail({ tab, tasks, loadedGroupIds, onLoadGroup, ...props
   const selected = tab.kind === 'group' ? tasks.filter(task => task.batchId === tab.entityId) : local ? [local] : loaded ? [loaded] : [];
   if (error) return <div className="task-inventory-notice"><p role="alert">{error}</p><button onClick={() => setRetry(value => value + 1)}>重试</button></div>;
   if (!selected.length && tab.kind === 'group' && groupLoaded) return <div className="inspector-empty" role="status">这个任务组已没有可读取的任务。</div>;
-  if (!selected.length) return <div className="inspector-empty"><LoaderCircle className="is-spinning" size={18} />正在读取任务…</div>;
+  if (!selected.length) return <WorkspaceLoading/>;
   return <TaskGraphDetail {...props} viewState={tab.view} tasks={selected} initialTaskId={tab.kind === 'task' ? tab.entityId : tab.view?.taskId} />;
 }

@@ -220,7 +220,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
     const dialog = screen.getByRole('region', { name: '精确任务', exact: true });
     fireEvent.click(screen.getByRole('button', { name: '其他任务组依赖来源：先前审阅' }));
-    expect(screen.getByRole('status').textContent).toContain('正在读取任务');
+    expect(screen.getByRole('status').textContent).toContain('正在加载...');
     fireEvent.click(within(dialog).getByRole('button', { name: /精确任务/ }));
     await act(async () => { resolve(task({ id: 'prior', label: '先前审阅' })); });
     expect(screen.queryByRole('complementary', { name: '先前审阅 详情' })).toBeNull();

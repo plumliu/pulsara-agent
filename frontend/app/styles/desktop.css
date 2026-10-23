@@ -8,7 +8,9 @@
 .desktop-shell.is-workbench, .desktop-shell.is-workbench.has-inspector { grid-template-columns: var(--desktop-navigation-width) minmax(360px, 1fr) auto; transition: --desktop-navigation-width .22s cubic-bezier(.2,.7,.2,1); }
 .desktop-shell.is-surface { grid-template-columns: 62px minmax(0, 1fr); }
 .desktop-titlebar { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; user-select: none; }
-.desktop-titlebar.is-macos { padding-left: 82px; }
+/* Native traffic lights start at y=16 and have a 14px diameter (center y=23).
+   The 44px row has a 1px bottom border; 3px top padding aligns its controls. */
+.desktop-titlebar.is-macos { padding-left: 82px; padding-top: 3px; }
 .desktop-titlebar button, .desktop-window-controls button { -webkit-app-region: no-drag; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); background: transparent; border-radius: 6px; }
 .desktop-titlebar button:hover, .desktop-window-controls button:hover { background: var(--paper-deep); color: var(--ink); }
 .desktop-titlebar__title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font: 550 12px var(--sans); color: var(--muted); }
@@ -77,7 +79,7 @@
 
 .file-browser-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .file-browser-panel .file-preview-header { flex-wrap: nowrap; justify-content: flex-start; min-height: 38px; padding: 4px 8px; gap: 4px; overflow-x: auto; }.file-browser-panel .file-preview-header nav { gap: 3px; }.file-browser-panel .file-preview-header nav button { width: 28px; height: 28px; }.file-browser-panel .file-preview-body { flex: 1; min-height: 0; }.file-preview-error { padding: 20px; color: var(--red); }
-.frozen-visualization { height: 100%; display: flex; flex-direction: column; --visualization-height: calc(100dvh - 170px); }.frozen-visualization > header { display: flex; flex-direction: column; gap: 5px; padding: 14px; border-bottom: 1px solid var(--line); }.frozen-visualization > header strong { font-size: 13px; }.frozen-visualization > header small { color: var(--muted); font-size: 11px; }.frozen-visualization .inline-visualization__page { flex: 1; }
+.frozen-visualization { height: 100%; display: flex; flex-direction: column; --visualization-height: calc(100dvh - 170px); }.frozen-visualization .inline-visualization__page { flex: 1; min-height: 0; }.frozen-visualization .inline-visualization__viewport-probe { height: 100%; }
 
 /* Keep the original Pulsara rail and session column under the native titlebar. */
 .desktop-navigation { display: grid; grid-template-columns: 62px minmax(0, 1fr); grid-column: 1; grid-row: 2; min-height: 0; min-width: 0; }
@@ -110,11 +112,11 @@
 }
 
 /* One window-top row: native controls, session controls, and workspace categories. */
-.desktop-shell.is-workbench > .desktop-titlebar { grid-column: 1; min-width: 0; z-index: 40; }
+.desktop-shell.is-workbench > .desktop-titlebar { grid-column: 1; min-width: 0; z-index: 40; border-right: 1px solid var(--line); }
 .desktop-shell.is-workbench > .desktop-titlebar.is-macos { min-width: 124px; box-sizing: border-box; }
 .desktop-shell.is-workbench .workbench { grid-row: 1 / -1; grid-template-rows: 44px minmax(0, 1fr) auto; }
 .desktop-shell.is-workbench .workbench.session-opening { grid-template-rows: 44px minmax(0, 1fr); }
-.desktop-shell.is-workbench .workbench > .topbar { gap: 10px; padding-inline: 16px; border-left: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; }
+.desktop-shell.is-workbench .workbench > .topbar { gap: 10px; padding-inline: 16px; background: var(--paper-raised); -webkit-app-region: drag; }
 .desktop-shell.is-workbench .topbar button, .desktop-shell.is-workbench .topbar .menu-popover { -webkit-app-region: no-drag; }
 .desktop-shell.is-workbench .topbar .session-title { gap: 8px; }
 .desktop-shell.is-workbench .topbar .session-title p { display: none; }
@@ -165,3 +167,13 @@
 .browser-notice { padding: 7px 12px; font-size: 11px; color: var(--red); border-bottom: 1px solid var(--line); }.browser-notice button { background: transparent; color: var(--amber); }
 .toast-stack { right: var(--browser-toast-right, 18px); width: min(310px, calc(100vw - var(--browser-toast-right, 18px) - 18px)); }
 [role=tooltip] { max-width: min(360px, calc(100vw - var(--browser-toast-right, 18px) - 18px)); }
+
+.workspace-loading { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 14px; width: 100%; height: 100%; min-height: 0; padding: 24px; color: var(--muted); font-size: 13px; text-align: center; }
+.workspace-loading__spinner { flex: none; width: 28px; height: 28px; border: 2px solid color-mix(in srgb, var(--amber) 18%, transparent); border-top-color: var(--amber); border-radius: 50%; animation: workspace-loading-spin .8s linear infinite; }
+.workspace-loading--overlay { position: absolute; inset: 0; z-index: 1; background: var(--paper); }
+.file-browser-panel .file-preview-body, .file-browser-panel .file-preview-html, .file-browser-panel .file-preview-image { position: relative; }
+@keyframes workspace-loading-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workspace-loading__spinner { animation: none; } }
+
+.project-capability-panel:has(> .workspace-loading) { display: flex; flex-direction: column; height: 100%; }
+.project-capability-panel > .workspace-loading { height: auto; }

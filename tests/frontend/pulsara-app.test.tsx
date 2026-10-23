@@ -1136,7 +1136,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     fireEvent.click(await within(inspector).findByRole('button', { name: /继承的能力/ }));
     expect(await within(inspector).findByText('本地文档')).toBeTruthy();
-    await waitFor(() => expect(within(inspector).queryByText('正在读取项目能力')).toBeNull());
+    await waitFor(() => expect(within(inspector).queryByText('正在加载...')).toBeNull());
     expect(adapter.inspectCapabilities.mock.calls.filter(([sessionId]) => sessionId === 'session:bwpogagzox7onyn52iumyctnkq')).toHaveLength(1);
   });
 

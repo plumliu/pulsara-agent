@@ -733,3 +733,28 @@ it.each([
   fireEvent.click(screen.getByRole('link', {name:'看板'}));
   await waitFor(() => expect(reader.open).toHaveBeenCalledWith(expected, undefined, undefined));
 });
+
+it.each(['ready', 'error'] as const)('settles the shared HTML loader on %s without replacing the preview frame', async (outcome) => {
+  const reader = api();
+  vi.mocked(reader.open).mockResolvedValue({...file('plot.html'), kind: 'html', document_url: '/api/file-previews/preview/resources/plot.html'});
+  render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}><MarkdownBody body="[图表](plot.html)" onNotify={notify}/></FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('link', {name:'图表'}));
+  await screen.findByText('正在加载...');
+  const frame = document.querySelector('iframe[title="plot.html"]') as HTMLIFrameElement;
+  expect(frame).toBeTruthy();
+  act(() => window.dispatchEvent(new MessageEvent('message', {source: frame.contentWindow, data: {type: `pulsara-preview-${outcome}`}})));
+  expect(screen.queryByText('正在加载...')).toBeNull();
+  expect(document.querySelector('iframe[title="plot.html"]')).toBe(frame);
+  if (outcome === 'error') expect(screen.getByText(/页面跳转已阻止或部分内容无法加载/)).toBeTruthy();
+});
+
+it.each(['load', 'error'] as const)('settles the shared image loader on %s', async (outcome) => {
+  const reader = api();
+  vi.mocked(reader.open).mockResolvedValue({...file('plot.png'), kind:'image'});
+  render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}><MarkdownBody body="[图片](plot.png)" onNotify={notify}/></FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('link', {name:'图片'}));
+  await screen.findByText('正在加载...');
+  fireEvent[outcome](screen.getByRole('img', {name:'plot.png'}));
+  expect(screen.queryByText('正在加载...')).toBeNull();
+  if (outcome === 'error') expect(screen.getByText(/图片暂时无法解码/)).toBeTruthy();
+});

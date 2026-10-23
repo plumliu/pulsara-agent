@@ -682,3 +682,37 @@ def test_hidden_gallery_page_keeps_document_and_animation_without_extending_scro
             inner.wait_for_function('() => retainedAnimation.currentTime > 432')
         finally:
             browser.close()
+
+
+def test_visualization_starts_after_zero_area_workspace_edge_becomes_visible() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "frontend/components/inline-visualization.tsx"
+    ).read_text(encoding="utf-8")
+    # Run the production observer with native Chromium intersection delivery.
+    start = source.index("const intersection = new IntersectionObserver(")
+    end = source.index("\n    if (page.current)", start)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 800, "height": 600})
+            page.set_content("""<style>
+              #pane { position: absolute; top: 0; right: 0; width: 1px;
+                      height: 500px; overflow: clip; }
+              #surface { width: 320px; border-left: 1px solid; }
+              #preview { width: 319px; height: 500px; }
+            </style><aside id="pane"><div id="surface"><div id="preview"></div></div></aside>""")
+            page.evaluate("""() => {
+              let visible = false;
+              window.observations = [];
+              const update = () => window.observations.push(visible);
+            """ + source[start:end] + """
+              intersection.observe(document.querySelector('#preview'));
+            }""")
+            page.wait_for_function("window.observations.length > 0")
+            assert page.evaluate("window.observations.at(-1)") is False
+            page.locator("#pane").evaluate("pane => pane.style.width = '320px'")
+            page.wait_for_function("window.observations.at(-1) === true")
+            page.locator("#pane").evaluate("pane => pane.style.width = '1px'")
+            page.wait_for_function("window.observations.at(-1) === false")
+        finally:
+            browser.close()

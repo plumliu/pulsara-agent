@@ -20,7 +20,7 @@ const process: BackgroundProcess = {
 
 it('shows a standalone process with output, without list expand or open controls', async () => {
   const readLog = vi.fn(async (): Promise<BackgroundProcessLog> => ({ process, output: 'detail output', outputCursor: '9', retainedFromCursor: '0', gapBeforeOutput: false, truncatedByResponseBound: false, sourceCoverage: 'COMPLETE' }));
-  const view = render(<BackgroundTerminalPanel processId={process.processId} command={process.command} ownerKey="one" sessionId="one" hostSessionId="host" canControl={false}
+  const view = render(<BackgroundTerminalPanel processId={process.processId} ownerKey="one" sessionId="one" hostSessionId="host" canControl={false}
     loadProcesses={async () => ({ processes: [process] })} readLog={readLog} terminateProcess={vi.fn()} queryControl={vi.fn()} onOpenProcess={vi.fn()} />);
   expect(await screen.findByText('detail output', {}, { timeout: 2500 })).toBeTruthy();
   expect(view.container.querySelector('.process-detail')).toBeTruthy();

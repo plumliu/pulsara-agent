@@ -1,3 +1,4 @@
+import { WorkspaceLoading } from './workspace-loading';
 import {
   AlertTriangle,
   Ban,
@@ -608,7 +609,7 @@ export function TaskGraphDetail({
             <header><strong>{boundaryTasks.find(task => task.id === selectedId)?.label}</strong></header>
             <section>{externalRead?.id === selectedId && externalRead.error
               ? <><p role="alert">{externalRead.error}</p><button type="button" onClick={() => setExternalRetry(value => value + 1)}>重新读取</button></>
-              : <p role="status"><LoaderCircle size={14} className="is-spinning" /> 正在读取任务…</p>}</section>
+              : <WorkspaceLoading/>}</section>
           </aside>}
           {selected && (
             <aside className="task-node-detail" aria-label={`${selected.label} 详情`}>
@@ -737,7 +738,7 @@ export function TaskWorkspace({
 
   if (error) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>任务没有读完整</strong><small>{error}</small></span><button onClick={onRetry}>重试</button></div>;
   if (incomplete.length) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>任务批次数据不完整</strong><small>TASK_BATCH_DATA_INCOMPLETE：{incomplete.map((task) => task.id).join('、')}</small></span><button onClick={onRetry}>重试</button></div>;
-  if (loading && groups.length === 0) return <div className="task-inventory-notice"><LoaderCircle className="is-spinning" size={15} /><span><strong>正在读取任务组</strong><small>恢复任务和依赖关系…</small></span></div>;
+  if (loading && groups.length === 0) return <WorkspaceLoading/>;
   if (!groups.length) return <div className="task-workspace">{readCapacity && <TaskCapacitySummary readCapacity={readCapacity} />}<div className="inspector-empty"><Bot size={18} /><span>这个会话还没有任务</span></div></div>;
 
   return <div className="task-workspace">

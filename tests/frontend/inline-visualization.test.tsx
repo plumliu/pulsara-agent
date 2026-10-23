@@ -215,6 +215,30 @@ it('waits for positive-area visibility to read and mount, then retains the pause
   expect(read).toHaveBeenCalledTimes(1);
 });
 
+it('uses the latest visibility when the browser batches edge and visible entries', async () => {
+  const observed: Array<{target: Element; callback: IntersectionObserverCallback}> = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) { observed.push({target, callback: this.callback}); }
+    disconnect() {}
+  });
+  const read = vi.fn(async () => '<input value="retain">');
+  const view = render(<InlineVisualization entryId="a" items={[item]} onRead={read}/>);
+  const page = observed.find(value => value.target.classList.contains('inline-visualization__page'))!;
+  const edge = intersectionEntry(page.target, 0, 100);
+  const visible = intersectionEntry(page.target, 100, 100);
+  act(() => page.callback([edge, visible], {} as IntersectionObserver));
+  await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
+  const frame = view.container.querySelector('iframe')!;
+  const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+  act(() => page.callback([visible, edge], {} as IntersectionObserver));
+  expect(post).toHaveBeenLastCalledWith(expect.objectContaining({environment: expect.objectContaining({visible: false})}), '*');
+  act(() => page.callback([edge, visible], {} as IntersectionObserver));
+  expect(post).toHaveBeenLastCalledWith(expect.objectContaining({environment: expect.objectContaining({visible: true})}), '*');
+  expect(view.container.querySelector('iframe')).toBe(frame);
+  expect(read).toHaveBeenCalledTimes(1);
+});
+
 it('does not start HTML while the document is hidden and pauses existing documents without remounting', async () => {
   const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
   const read = vi.fn(async () => '<input>');
@@ -308,7 +332,6 @@ it('opens frozen occurrences as independent tabs despite equal filenames and con
   fireEvent.click(screen.getByRole('button',{name:'查看可视化 2'}));
   fireEvent.click(screen.getByRole('button',{name:'放大可视化'}));
   expect(screen.getAllByRole('tab',{name:'chart.html'})).toHaveLength(2);
-  expect(screen.getByText('发布时保存的内容')).toBeTruthy();
   expect(read.mock.calls.every(call => call[0] === 'entry-a')).toBe(true);
 });
 

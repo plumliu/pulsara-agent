@@ -1,3 +1,4 @@
+import { WorkspaceLoading } from './workspace-loading';
 import {
   AlertTriangle,
   ChevronDown,
@@ -80,7 +81,6 @@ const controlQueryMessage = (status: UserControlQueryResult['status']): string =
 
 export function BackgroundTerminalPanel({
   processId: selectedProcessId,
-  command,
   onOpenProcess,
   ownerKey,
   sessionId,
@@ -93,7 +93,6 @@ export function BackgroundTerminalPanel({
   queryControl,
 }: {
   processId?: string;
-  command?: string;
   onOpenProcess?: (process: BackgroundProcess) => void;
   ownerKey: string;
   sessionId: string;
@@ -343,9 +342,8 @@ export function BackgroundTerminalPanel({
     }).catch(() => undefined);
   };
 
-  if (selectedProcessId && loading && !items.size && command) return <div className="process-detail-panel"><article className="background-process process-detail"><header><ProcessIdentity command={command} status="正在读取…" /></header><div className="process-detail__body"><LoaderCircle className="is-spinning" size={16} /></div></article></div>;
 
-  if (loading && items.size === 0) return <div className="task-inventory-notice"><LoaderCircle className="is-spinning" size={15} /><span><strong>正在读取后台终端</strong><small>仅显示当前 Host 保留范围。</small></span></div>;
+  if (loading && items.size === 0) return <WorkspaceLoading/>;
   if (error && items.size === 0) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>后台终端不可用</strong><small>{error}</small></span><button onClick={() => void refresh()}><RefreshCw size={11} /> 重试</button></div>;
   if (!items.size) return <div className="inspector-empty"><TerminalSquare size={18} /><span>{selectedProcessId ? '原进程记录已不在当前保留范围。' : '当前没有已交付的后台命令'}</span></div>;
 

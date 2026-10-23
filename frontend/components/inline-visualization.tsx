@@ -1,3 +1,4 @@
+import { WorkspaceLoading } from './workspace-loading';
 import { Images, Maximize2, ImageOff, RotateCcw } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { VisualizationOccurrence } from '../lib/pulsara-types';
@@ -59,11 +60,14 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
       setEnvironment(next);
       if (next.visible) setReadStarted(true);
     };
+    // The default zero threshold does not notify when an edge-touching,
+    // zero-area intersection becomes visible during the workspace transition.
+    // Distinguish zero from positive area without adding a preload margin.
     const intersection = new IntersectionObserver(entries => {
-      const entry = entries[0];
+      const entry = entries.at(-1);
       visible = Boolean(entry?.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0);
       update();
-    });
+    }, {threshold: Number.EPSILON});
     if (page.current) intersection.observe(page.current);
     const mutation = new MutationObserver(update); mutation.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme', 'class', 'style']});
     document.addEventListener('visibilitychange', update); update();
@@ -94,7 +98,9 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
               {result.error && <button onClick={() => {setResult({}); setAttempt(v => v + 1);}}><RotateCcw size={14}/>重试</button>}
             </div>
           </div>
-          : result.html === undefined || !environment || !frameMounted ? <div role="status">正在加载可视化…</div>
+          : result.html === undefined || !environment || !frameMounted ? maximized
+            ? <WorkspaceLoading/>
+            : <div role="status">正在加载可视化…</div>
           : <div className="inline-visualization__crop" style={rect ? {height: cropHeight} : undefined}>
             <SandboxedHtmlPreview frameRef={frame} title={item.sourceFilename || '可视化'} source={{html: result.html, measure: true, allowTextSelection: false, environment}}
               style={{width: size.width || '100%', height: size.height || '100%', transform: rect ? `translateY(${-cropTop}px)` : undefined}}/>
@@ -116,13 +122,13 @@ function useVisualizationImageReader(entryId: string, item: VisualizationOccurre
   }, [entryId, ordinal, state, contentDigest, contentSize, mediaType, codec, imageRef, width, height, onRead]);
 }
 
-function ImagePage({ entryId, item, onRead }: { entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization }) {
+function ImagePage({ entryId, item, onRead, maximized = false }: { entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization; maximized?: boolean }) {
   const read = useVisualizationImageReader(entryId, item, onRead);
   // Reserve the saved image's layout before reading/decoding its bytes. A
   // loading line would shrink the transcript and clamp the reader's scrollTop.
   return <div className="inline-visualization__page inline-visualization__image-page" data-visualization-ordinal={item.ordinal}
     style={{ aspectRatio: `${item.width} / ${item.height}` }}>
-    <SavedImage read={read} title={item.sourceFilename || '图片'} inline />
+    <SavedImage read={read} title={item.sourceFilename || '图片'} inline loading={maximized ? <WorkspaceLoading overlay/> : undefined} />
   </div>;
 }
 
@@ -263,7 +269,6 @@ function FrozenVisualization({ sessionId, entryId, item, onRead }: { sessionId: 
     return content;
   }, [sessionId, onRead]);
   return <section className="frozen-visualization" aria-label={`历史可视化：${visualizationName(item)}`}>
-    <header><strong>{visualizationName(item)}</strong><small>发布时保存的内容</small></header>
-    {item.imageRef ? <ImagePage entryId={entryId} item={item} onRead={read} /> : <GalleryPage entryId={entryId} item={item} onRead={read} active maximized zoomControl={null} />}
+    {item.imageRef ? <ImagePage entryId={entryId} item={item} onRead={read} maximized /> : <GalleryPage entryId={entryId} item={item} onRead={read} active maximized zoomControl={null} />}
   </section>;
 }

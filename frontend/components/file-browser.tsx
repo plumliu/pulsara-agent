@@ -1,10 +1,10 @@
+import { WorkspaceLoading } from './workspace-loading';
 import {
   ArrowLeft,
   ArrowRight,
   Code2,
   Copy,
   FolderOpen,
-  LoaderCircle,
   RotateCcw,
 } from "lucide-react";
 import {
@@ -488,13 +488,8 @@ function FileBrowserView({
           {file && <button onClick={onDismiss}>返回</button>}
         </div>
       )}
-      {tab.loading && (
-        <div role="status">
-          <LoaderCircle className="is-spinning" size={16} />
-          正在读取文件…
-        </div>
-      )}
       <div className="file-preview-body">
+        {tab.loading && <WorkspaceLoading overlay/>}
         {file && api && (
           <FileLinkContext.Provider
             value={{
@@ -582,6 +577,7 @@ function FileBody({
   onNavigate,
 }: FileBodyProps) {
   const [error, setError] = useState<string>();
+  const [imageReady, setImageReady] = useState(false);
   const [htmlStatus, setHtmlStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -605,13 +601,8 @@ function FileBody({
     return (
       <>
         <div className="file-preview-html" hidden={source}>
-          {htmlStatus !== "ready" && (
-            <div className="file-preview-html-status" role="status">
-              {htmlStatus === "error"
-                ? "页面跳转已阻止或部分内容无法加载；请使用文档链接导航，或刷新重试。"
-                : "正在加载页面…"}
-            </div>
-          )}
+          {htmlStatus === "loading" && <WorkspaceLoading overlay/>}
+          {htmlStatus === "error" && <div className="file-preview-html-status" role="status">页面跳转已阻止或部分内容无法加载；请使用文档链接导航，或刷新重试。</div>}
           <SandboxedHtmlPreview
             source={{ url: file.document_url }}
             title={file.name}
@@ -650,6 +641,7 @@ function FileBody({
   )
     return (
       <div className="file-preview-image">
+        {!imageReady && !error && <WorkspaceLoading overlay/>}
         <div className="file-preview-pagebar">
           <button onClick={() => zoomTo(zoom / 1.25)} aria-label="缩小图片">
             −
@@ -675,6 +667,7 @@ function FileBody({
             src={file.content_url}
             alt={file.name}
             onLoad={(event) => {
+              setImageReady(true);
               const viewport = event.currentTarget.parentElement;
               if (viewport) {
                 viewport.scrollTop = visit?.position.top ?? 0;
@@ -808,9 +801,7 @@ function FileReader({
           </button>
         </div>
       ) : !page ? (
-        <div className="file-preview-status" role="status">
-          正在读取内容…
-        </div>
+        <WorkspaceLoading/>
       ) : page.mode === "table" ? (
         <PreviewTable
           rows={page.rows ?? []}

@@ -194,7 +194,7 @@ describe('InspectorPanel PR03 production navigation', () => {
       expect(screen.getByText('这个目录还没有技能')).toBe(empty);
       expect(screen.getByText('部分技能目录暂时无法完整读取')).toBe(warning);
       expect(screen.queryByText('正在同步')).toBeNull();
-      expect(screen.queryByText('正在读取项目能力')).toBeNull();
+      expect(screen.queryByText('正在加载...')).toBeNull();
       expect(view.container.querySelector('.project-capability-panel')?.getAttribute('aria-busy')).toBe(String(loading));
     }
   });
@@ -202,7 +202,7 @@ describe('InspectorPanel PR03 production navigation', () => {
   it('shows loading rather than an empty result before the first capability snapshot arrives', () => {
     render(<Panel {...props()} />);
     fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
-    expect(screen.getByText('正在读取项目能力')).toBeTruthy();
+    expect(screen.getByText('正在加载...')).toBeTruthy();
     expect(screen.queryByText('这个目录还没有技能')).toBeNull();
   });
 
@@ -277,7 +277,7 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(screen.queryAllByRole('tab')).toHaveLength(0);
     fireEvent.click(within(navigation).getByRole('button', { name: '项目能力' }));
     expect(screen.getByRole('tab', { name: '会话能力' })).toBeTruthy();
-    expect(screen.getByText('正在读取项目能力')).toBeTruthy();
+    expect(screen.getByText('正在加载...')).toBeTruthy();
 
     fireEvent.click(within(navigation).getByRole('button', { name: '任务' }));
     expect(screen.getByText('这个会话还没有任务')).toBeTruthy();
@@ -288,7 +288,7 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(screen.queryByRole('button', { name: '终止 sleep 30' })).toBeNull();
 
     fireEvent.click(within(navigation).getByRole('button', { name: '项目能力' }));
-    expect(await screen.findByText('正在读取项目能力')).toBeTruthy();
+    expect(await screen.findByText('正在加载...')).toBeTruthy();
   });
 
   it('keeps capability tabs on the left, groups MCP actions on the right, and shows effective totals', () => {

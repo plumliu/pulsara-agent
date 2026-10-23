@@ -31,7 +31,7 @@ export function useSavedImage(read: ReadSavedImage, enabled: boolean) {
   return { ...state, retry: () => setAttempt(value => value + 1) };
 }
 
-export function SavedImage({ read, title, inline = false, children }: { read: ReadSavedImage; title: string; inline?: boolean; children?: ReactNode }) {
+export function SavedImage({ read, title, inline = false, children, loading }: { read: ReadSavedImage; title: string; inline?: boolean; children?: ReactNode; loading?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const state = useSavedImage(read, inline || open);
   const opener = useRef<HTMLButtonElement>(null);
@@ -41,7 +41,7 @@ export function SavedImage({ read, title, inline = false, children }: { read: Re
       {/* Saved immutable blob URLs must not go through an image optimizer. */}
       {inline && state.url ? <img src={state.url} alt={title} width={state.width} height={state.height} /> : children ?? title}
     </button>
-    {inline && !state.url && <span role="status">{state.error ?? '正在加载图片…'}{state.error && <button onClick={state.retry}>重试</button>}</span>}
+    {inline && !state.url && (state.error ? <span role="status">{state.error}<button onClick={state.retry}>重试</button></span> : loading ?? <span role="status">正在加载图片…</span>)}
     <Lightbox open={open} close={close} plugins={[Zoom]}
       portal={{ root: () => opener.current?.closest('dialog:modal') ?? document.body }}
       slides={state.url ? [{ src: state.url, width: state.width, height: state.height, alt: title, imageFit: 'contain' }] : [{ src: '', alt: title }]}
