@@ -397,6 +397,24 @@ class LLMOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class EphemeralProviderWireInput:
+    """Exact advisory wire value; no kernel install or durable replay authority."""
+
+    wire_api: str
+    materialization: FrozenProviderWireMaterialization = field(repr=False)
+    budget_input_tokens: int
+    effective_input_budget_tokens: int
+
+    def __post_init__(self) -> None:
+        if self.wire_api not in {"openai_chat_completions", "openai_responses"}:
+            raise ValueError("ephemeral wire API is unsupported")
+        if not 0 <= self.budget_input_tokens <= self.effective_input_budget_tokens:
+            raise ValueError("ephemeral input exceeds model budget")
+        if len(canonical_json_bytes(thaw_json(self.materialization.context_bearing_projection))) > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
+            raise ValueError("ephemeral wire input exceeds physical byte bound")
+
+
+@dataclass(frozen=True, slots=True)
 class LLMContext:
     messages: tuple[LLMMessage, ...]
     context_id: str
@@ -408,8 +426,11 @@ class LLMContext:
         default=None, repr=False
     )
     tool_choice: Literal["auto", "none"] | None = None
+    ephemeral_wire_input: EphemeralProviderWireInput | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.provider_wire_input_plan is not None and self.ephemeral_wire_input is not None:
+            raise ValueError("model context has two wire input owners")
         object.__setattr__(
             self,
             "system_prompt",

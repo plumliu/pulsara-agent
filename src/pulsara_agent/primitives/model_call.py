@@ -18,6 +18,8 @@ class ModelCallPurpose(StrEnum):
     AGENT_MODEL_LOOP = "agent_model_loop"
     CONTEXT_COMPACTION_SUMMARY = "context_compaction_summary"
     CONNECTION_PROBE = "connection_probe"
+    SESSION_TITLE = "session_title"
+    CONVERSATION_SUGGESTION = "conversation_suggestion"
 
 
 class ModelContextMode(StrEnum):

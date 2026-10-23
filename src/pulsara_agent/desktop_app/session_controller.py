@@ -2507,6 +2507,24 @@ class LocalSessionController:
                 return {"state": "updating", "connection_id": None}
         return value
 
+    async def read_ephemeral_results(self, session_id: str) -> dict[str, object]:
+        # Permission checked against user-level data, without activating a Host.
+        summary = await self.core.read_resumable_session(
+            session_id, memory_domain_id=self.memory_domain_id,
+        )
+        if summary is None:
+            raise KeyError(session_id)
+        async with self._lock:
+            handle = self._by_session.get(session_id)
+            if not self._closing and session_id not in self._operations and handle is not None:
+                return handle.session.read_ephemeral_results()
+        return {
+            'session_id': session_id, 'host_session_id': None,
+            'suggestion': {'state': 'absent', 'origin_turn_id': None, 'turn_id': None,
+                           'final_entry_id': None, 'model_call_binding': None, 'text': None},
+            'title': {'state': 'absent'},
+        }
+
     async def update_model_call_binding(
         self, session_id: str, binding: ModelCallBinding
     ) -> dict[str, object]:

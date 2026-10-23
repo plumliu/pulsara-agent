@@ -154,7 +154,7 @@ class OpenAIResponsesTransport:
                 timeout_policy=self.timeout_policy,
                 credential_boundary=credential_boundary,
                 max_retries=sdk_max_retries_for_transport(
-                    retry_config=self.retry_config,
+                    retry_config=self.retry_config, purpose=call.fact.purpose,
                 ),
             )
         else:
@@ -329,7 +329,7 @@ def build_responses_payload(
 ) -> dict[str, Any]:
     validate_model_context_shape_for_call(call=call, context=context)
     model = call.target.model_profile
-    plan = context.provider_wire_input_plan
+    plan = context.provider_wire_input_plan or context.ephemeral_wire_input
     if plan is not None:
         if plan.wire_api != OPENAI_RESPONSES_API:
             raise ValueError("provider wire plan API does not match Responses")
@@ -340,7 +340,8 @@ def build_responses_payload(
             raise ValueError(
                 "Responses context tool choice changed after wire planning"
             )
-        wire_input_tokens = plan.quote.budget_input_tokens
+        wire_input_tokens = (plan.budget_input_tokens if context.ephemeral_wire_input is not None
+                             else plan.quote.budget_input_tokens)
     else:
         context_fields = materialize_responses_context_bearing_wire_projection(
             call=call,

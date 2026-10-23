@@ -165,7 +165,7 @@ class OpenAIChatCompletionsTransport:
                 timeout_policy=self.timeout_policy,
                 credential_boundary=credential_boundary,
                 max_retries=sdk_max_retries_for_transport(
-                    retry_config=self.retry_config,
+                    retry_config=self.retry_config, purpose=call.fact.purpose,
                 ),
             )
         else:
@@ -385,7 +385,7 @@ def build_chat_completions_payload(
     validate_model_context_shape_for_call(call=call, context=context)
     model = call.target.model_profile
     route_wire_profile = model.route_wire_profile
-    plan = context.provider_wire_input_plan
+    plan = context.provider_wire_input_plan or context.ephemeral_wire_input
     if plan is not None:
         if plan.wire_api != OPENAI_CHAT_COMPLETIONS_API:
             raise ValueError("provider wire plan API does not match Chat")
@@ -394,7 +394,8 @@ def build_chat_completions_payload(
             raise TypeError("Chat context projection must be an object")
         if context_fields.get("tool_choice") != context.tool_choice:
             raise ValueError("Chat context tool choice changed after wire planning")
-        wire_input_tokens = plan.quote.budget_input_tokens
+        wire_input_tokens = (plan.budget_input_tokens if context.ephemeral_wire_input is not None
+                             else plan.quote.budget_input_tokens)
     else:
         items_with_sources = _chat_message_items_with_sources(context.messages)
         ordered_items = tuple(item for item, _source in items_with_sources)

@@ -201,6 +201,13 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/compaction/runtime.py",
         "src/pulsara_agent/conversation_kernel/extensions.py",
         "src/pulsara_agent/conversation_kernel/host.py",
+        # Ephemeral request spec §§2/4/8: Host-owned advisory requests and
+        # cancellation-shielded physical execution close; no durable jobs.
+        "src/pulsara_agent/conversation_kernel/ephemeral.py",
+        "src/pulsara_agent/llm/ephemeral.py",
+        # Existing deferred history search owner: disposable hints and its
+        # one physical maintenance lane, joined on Core close.
+        "src/pulsara_agent/conversation_kernel/history_maintenance.py",
         # K2 owns one short-lived decoder process and joins its result/cleanup
         # tasks before releasing the single Host-wide validation slot.
         "src/pulsara_agent/conversation_kernel/image_validation.py",
@@ -230,6 +237,9 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # SDK initialization is import-only work. First use joins its thread
         # on cancellation without blocking independent desktop HTTP requests.
         "src/pulsara_agent/llm/adapters/openai/client.py",
+        # Existing catalog SDK preparation/parsing and unclaimed-client close
+        # physically join on cancellation before releasing their owner.
+        "src/pulsara_agent/llm/model_catalog.py",
         # The local-settings owner shields the single-document settlement so
         # cancellation cannot report an unknown publication as settled.
         "src/pulsara_agent/settings.py",

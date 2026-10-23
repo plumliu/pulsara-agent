@@ -130,9 +130,21 @@ def test_real_host_three_calls_use_old_input_anchor_across_missing_usage(tmp_pat
     monkeypatch.setenv('PULSARA_HOME', str(tmp_path/'product-home'))
     monkeypatch.setattr(host_module.LocalMcpManagementService, 'load_configs', lambda *_args, **_kwargs: ())
     requests = []
+    ephemeral_calls = []
+    from pulsara_agent.primitives.model_call import ModelCallPurpose
     original_stream = OpenAIChatCompletionsTransport.stream
 
     async def stream(adapter, *, call, context):
+        if call.fact.purpose in {ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION}:
+            ephemeral_calls.append(call.fact.purpose)
+            adapter._mock_chunks = [
+                {'choices': [{'index': 0, 'delta': {'content': 'Advisory title or question?'}}]},
+                {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
+                {'choices': [], 'usage': {'prompt_tokens': 9999, 'completion_tokens': 9}},
+            ]
+            async for item in original_stream(adapter, call=call, context=context):
+                yield item
+            return
         index = len(requests)
         requests.append(context.provider_wire_input_plan)
         chunks = [
@@ -155,6 +167,13 @@ def test_real_host_three_calls_use_old_input_anchor_across_missing_usage(tmp_pat
             for i in range(3):
                 result = await session.run_turn(PromptContent.text(f'question{i+1}'), command_id=derive_id("command", "test-fixture", 'command:bmlvqxpm2wdk24ikbvykya7xxa'+uuid4().hex))
                 assert result.final_text == f'reply{i+1}'
+            # Advisory calls use separate fixture output and must not become
+            # foreground usage rows or replace the reported input anchor.
+            async with asyncio.timeout(10):
+                while session._ephemeral._tasks:
+                    await asyncio.gather(*tuple(session._ephemeral._tasks), return_exceptions=True)
+            assert ModelCallPurpose.SESSION_TITLE in ephemeral_calls
+            assert ModelCallPurpose.CONVERSATION_SUGGESTION in ephemeral_calls
             assert len(requests) == 3
             first, middle, last = requests
             assert first.quote.budget_source == 'heuristic'

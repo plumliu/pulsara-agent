@@ -55,6 +55,8 @@ Expand tool calls, background commands, and subagent progress to see what is hap
 
 Select part of a reply and annotate it directly. It beats repeatedly explaining which file you meant.
 
+New sessions can get a title from your first message. After an answer finishes, the empty composer may suggest a follow-up question. Suggestions stay in memory: typing hides them, clearing the draft reveals them, and sending the next message clears them. Neither feature delays the answer.
+
 ## Pulsara keeps up as the work grows
 
 Long commands can run in the background while agents move on to other work. Context compaction makes room as the conversation grows, and saved sessions keep a record for your next visit.

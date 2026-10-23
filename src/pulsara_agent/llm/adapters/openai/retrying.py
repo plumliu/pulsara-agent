@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from pulsara_agent.llm.models import ModelProfile
 from pulsara_agent.llm.retry import LLMRetryConfig, LLMRetryDecision, RetryAttemptTrace
 from pulsara_agent.primitives.model_call import (
+    ModelCallPurpose,
     ProviderRetryAttemptSummaryFact,
     ProviderRetrySummaryFact,
 )
@@ -19,9 +20,13 @@ LOGGER = logging.getLogger(__name__)
 def sdk_max_retries_for_transport(
     *,
     retry_config: LLMRetryConfig,
+    purpose: ModelCallPurpose | None = None,
 ) -> int | None:
     """Return SDK max_retries for a transport that has Pulsara safe retry."""
 
+    # Advisory requests prohibit both adapter retries and SDK implicit retries.
+    if purpose in {ModelCallPurpose.CONNECTION_PROBE, ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION}:
+        return 0
     return 0 if retry_config.enabled else None
 
 

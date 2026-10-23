@@ -41,6 +41,7 @@ from pulsara_agent.llm.resolution import ResolvedModelCall, resolve_model_call
 from pulsara_agent.llm.provider_open import (
     CompactionSummaryProviderOpenPermit,
     ConnectionProbeProviderOpenPermit,
+    SavedEphemeralProviderOpenPermit,
     EpochAgentLoopProviderOpenPermit,
     ProviderOpenPurposePermit,
 )
@@ -240,6 +241,9 @@ class ModelRuntime:
         elif isinstance(purpose_permit, ConnectionProbeProviderOpenPermit):
             expected = ModelCallPurpose.CONNECTION_PROBE
             credential_owner = purpose_permit.credential_owner
+        elif isinstance(purpose_permit, SavedEphemeralProviderOpenPermit):
+            expected = purpose_permit.call_target.purpose
+            credential_owner = None
         else:  # pragma: no cover - the public union is closed
             raise TypeError("provider-open purpose permit union is not closed")
         call_target = purpose_permit.call_target
@@ -271,7 +275,10 @@ class ModelRuntime:
                         "draft probe target changed before provider open"
                     )
             else:
-                target = self.resolve_frozen_target_bundle(
+                # Advisory calls are single-attempt without mutating foreground retry policy.
+                resolver = (replace(self, retry=LLMRetryConfig(enabled=False, attempts=1))
+                            if isinstance(purpose_permit, SavedEphemeralProviderOpenPermit) else self)
+                target = resolver.resolve_frozen_target_bundle(
                     call_target.target_bundle,
                     binding=call_target.model_call_binding,
                     timeout_policy=purpose_permit.timeout_policy,

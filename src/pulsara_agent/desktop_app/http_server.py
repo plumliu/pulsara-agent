@@ -540,6 +540,9 @@ class LocalHttpServer:
         self._app.router.add_get("/api/sessions", self._list_sessions)
         self._app.router.add_post("/api/sessions/search", self._search_sessions)
         self._app.router.add_put("/api/sessions/{session_id}/title", self._rename_session)
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/ephemeral-results", self._read_ephemeral_results,
+        )
         self._app.router.add_post("/api/sessions/{session_id}/path-candidates", self._workspace_path_candidates)
         self._app.router.add_get(
             "/api/sessions/{session_id}/tasks", self._list_session_tasks
@@ -1357,6 +1360,12 @@ class LocalHttpServer:
 
     async def _read_context_usage(self, request: web.Request) -> web.Response:
         return web.json_response(await self.sessions.read_context_usage(request.match_info["session_id"]))
+
+    async def _read_ephemeral_results(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            await self.sessions.read_ephemeral_results(request.match_info["session_id"]),
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def _update_model_call_binding(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

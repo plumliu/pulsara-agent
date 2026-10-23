@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import json
 from threading import Lock
-from typing import AsyncIterator, Awaitable, Callable
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable
 
 from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
@@ -47,6 +47,7 @@ from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSp
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.frozen_target import (
     FrozenEpochModelCallTarget,
+    FrozenProviderPhysicalCallTarget,
     FrozenEpochModelTargetBundle,
     _freeze_provider_physical_call_target,
 )
@@ -66,6 +67,7 @@ from pulsara_agent.llm.provider_replay import (
 )
 from pulsara_agent.llm.request import (
     ProviderInputUsageAnchor,
+    EphemeralProviderWireInput,
     FrozenProviderWireInputPlan,
     FrozenProviderWireInputQuote,
     FrozenProviderWireMaterialization,
@@ -126,6 +128,10 @@ from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
 )
+
+
+if TYPE_CHECKING:
+    from pulsara_agent.llm.ephemeral import PreparedEphemeralRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +417,47 @@ class ProviderFollowupWireResourceQuote:
             self.appended_wire_item_count,
         ) < 0:
             raise ValueError("provider follow-up wire quote is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedProviderFinalSource:
+    """Frozen accepted answer context, without live execution or write authority."""
+
+    call_target: FrozenProviderPhysicalCallTarget
+    compiled_input: FrozenCompiledModelInput = field(repr=False)
+    wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
+    final_entry_id: str
+    final_message: LLMMessage = field(repr=False)
+    provider_replay: ProviderAssistantReplayFragment | None = field(repr=False)
+    usage_anchor: ProviderInputUsageAnchor | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            self.call_target.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP
+            or self.compiled_input.canonical_input_identity.conversation_scope_kind
+            is not ModelInputScopeKind.ROOT
+        ):
+            raise ValueError("advisory final source must belong to the ROOT model loop")
+        if self.wire_input_plan.context_id != self.compiled_input.context_id:
+            raise ValueError("advisory final source wire context drifted")
+        if (
+            self.final_message.role is not MessageRole.ASSISTANT
+            or self.final_message.tool_calls
+        ):
+            raise ValueError("advisory source must be a final public answer")
+        if any(
+            p.origin_entry_id == self.final_entry_id
+            for p in self.compiled_input.message_placements
+        ):
+            raise ValueError("final answer is already in the request prefix")
+        if self.provider_replay is not None and (
+            self.provider_replay.assistant_entry_id != self.final_entry_id
+            or self.provider_replay.public_projection_fingerprint
+            != provider_assistant_message_public_projection_fingerprint(
+                self.final_message
+            )
+        ):
+            raise ValueError("final replay differs from accepted answer")
 
 
 class PreparedKernelModelExecution:
@@ -1789,27 +1836,21 @@ def quote_provider_suffix_input_tokens(
     ).total_input_tokens
 
 
-def quote_provider_followup_wire_resources(
+def _materialize_provider_followup(
     *,
-    request: KernelModelExecutionRequest,
+    plan: FrozenProviderWireInputPlan,
+    call: ResolvedModelCall,
     actual_assistant_message: LLMMessage,
-    provider_replay: PreparedDurableProviderAssistantReplay | None,
+    provider_replay: PreparedDurableProviderAssistantReplay
+    | ProviderAssistantReplayFragment
+    | None,
     bounded_suffix_messages: tuple[LLMMessage, ...],
     usage_anchor: ProviderInputUsageAnchor | None = None,
-) -> ProviderFollowupWireResourceQuote:
-    """Quote one direct successor from the installed exact wire prefix.
-
-    The response carrier is exact (native replay where the adapter returned
-    one); only result/closure and source messages supplied by the caller are
-    conservative existing-owner bounds.  The function rematerializes the same
-    Chat/Responses context projection and uses the resolved target's frozen D1
-    estimator.  It has no install or provider-open authority.
-    """
-
+    force_tool_choice: str | None = None,
+) -> tuple[FrozenProviderWireMaterialization, ProviderFollowupWireResourceQuote]:
+    """Pure exact-prefix successor shared by resource quotes and advisory calls."""
     if actual_assistant_message.role is not MessageRole.ASSISTANT:
         raise ValueError("provider follow-up requires an assistant response")
-    plan = request.wire_input_plan
-    call = request.prepared_call.call
     profile = call.target.model_profile.route_wire_profile
     if plan.wire_api != profile.wire_api:
         raise ValueError("provider follow-up wire API differs from its prefix")
@@ -1821,9 +1862,7 @@ def quote_provider_followup_wire_resources(
         raise TypeError("installed provider input item is not an object")
     root = thaw_json(plan.materialization.root_policy_value)
     tools = tuple(thaw_json(item) for item in plan.materialization.tool_items)
-    current_projection = thaw_json(
-        plan.materialization.context_bearing_projection
-    )
+    current_projection = thaw_json(plan.materialization.context_bearing_projection)
     if not isinstance(current_projection, dict):
         raise TypeError("installed provider context projection is not an object")
     tool_choice = current_projection.get("tool_choice")
@@ -1839,6 +1878,9 @@ def quote_provider_followup_wire_resources(
     if reproduced != current_projection:
         raise ValueError("installed provider context cannot be rematerialized")
 
+    previous_tool_choice = tool_choice
+    if force_tool_choice is not None:
+        tool_choice = force_tool_choice
     appended_items: list[dict[str, object]] = []
     appended_sources: list[LLMMessage | None] = []
     if provider_replay is None:
@@ -1853,8 +1895,7 @@ def quote_provider_followup_wire_resources(
     else:
         target = DirectKernelModelPort.replay_target_for_resolved_call(call)
         if (
-            provider_replay.wire_api != profile.wire_api
-            or provider_replay.replay_target_fingerprint
+            provider_replay.replay_target_fingerprint
             != target.replay_target_fingerprint
         ):
             raise ValueError("provider follow-up replay targets another wire")
@@ -1886,33 +1927,171 @@ def quote_provider_followup_wire_resources(
         ordered_input_items=tuple(appended_items),
         ordered_input_sources=tuple(appended_sources),
     )
-    raw_tokens = plan.quote.raw_final_wire_estimated_input_tokens + suffix_quote.total_input_tokens
+    fixed_delta = 0
+    if tool_choice != previous_tool_choice:
+
+        def fixed_tokens(choice):
+            fixed = _materialize_context_bearing_projection(
+                call=call,
+                root_policy=root,
+                tool_items=tools,
+                ordered_input_items=(),
+                tool_choice=choice,
+            )
+            return call.target.token_estimator.estimate_final_wire_json_components(
+                fixed_context=fixed, ordered_input_items=(), ordered_input_sources=()
+            ).total_input_tokens
+
+        fixed_delta = fixed_tokens(tool_choice) - fixed_tokens(previous_tool_choice)
+    raw_tokens = (
+        plan.quote.raw_final_wire_estimated_input_tokens
+        + suffix_quote.total_input_tokens
+        + fixed_delta
+    )
     budget_tokens = raw_tokens
     if usage_anchor is not None:
         calibrated = usage_anchor.budget_for(
-            connection_id=call.binding.connection_id.value, target=call.target.fact,
+            connection_id=call.binding.connection_id.value,
+            target=call.target.fact,
             route_wire_profile_fingerprint=plan.route_wire_profile_fingerprint,
             materialization=FrozenProviderWireMaterialization(
                 root_policy_value=plan.materialization.root_policy_value,
                 tool_items=plan.materialization.tool_items,
-                ordered_input_items=tuple(freeze_json(item) for item in (*existing_items, *appended_items)),
+                ordered_input_items=tuple(
+                    freeze_json(item) for item in (*existing_items, *appended_items)
+                ),
                 context_bearing_projection=freeze_json(final_projection),
-            ), raw_input_tokens=raw_tokens,
+            ),
+            raw_input_tokens=raw_tokens,
         )
         if calibrated is not None:
             budget_tokens = calibrated[0]
-    return ProviderFollowupWireResourceQuote(
+    materialization = FrozenProviderWireMaterialization(
+        root_policy_value=plan.materialization.root_policy_value,
+        tool_items=plan.materialization.tool_items,
+        ordered_input_items=tuple(
+            freeze_json(item) for item in (*existing_items, *appended_items)
+        ),
+        context_bearing_projection=freeze_json(final_projection),
+    )
+    prefix = plan.materialization
+    if (
+        materialization.root_policy_value != prefix.root_policy_value
+        or materialization.tool_items != prefix.tool_items
+        or materialization.ordered_input_items[: len(prefix.ordered_input_items)]
+        != prefix.ordered_input_items
+    ):
+        raise ValueError("provider follow-up changed the installed prefix")
+    return materialization, ProviderFollowupWireResourceQuote(
         budget_input_tokens=budget_tokens,
         final_wire_utf8_bytes=len(canonical_json_bytes(final_projection)),
-        raw_final_wire_estimated_input_tokens=(
-            plan.quote.raw_final_wire_estimated_input_tokens
-            + suffix_quote.total_input_tokens
-        ),
+        raw_final_wire_estimated_input_tokens=raw_tokens,
         appended_wire_item_count=len(appended_items),
     )
 
 
+def quote_provider_followup_wire_resources(
+    *,
+    request: KernelModelExecutionRequest,
+    actual_assistant_message: LLMMessage,
+    provider_replay: PreparedDurableProviderAssistantReplay | None,
+    bounded_suffix_messages: tuple[LLMMessage, ...],
+    usage_anchor: ProviderInputUsageAnchor | None = None,
+) -> ProviderFollowupWireResourceQuote:
+    return _materialize_provider_followup(
+        plan=request.wire_input_plan,
+        call=request.prepared_call.call,
+        actual_assistant_message=actual_assistant_message,
+        provider_replay=provider_replay,
+        bounded_suffix_messages=bounded_suffix_messages,
+        usage_anchor=usage_anchor,
+    )[1]
+
+
+def prepare_suggestion_request(
+    *,
+    runtime: ModelRuntime,
+    source: AcceptedProviderFinalSource,
+    prompt: str,
+    timeout_policy: OpenAITransportTimeoutPolicy,
+) -> PreparedEphemeralRequest:
+    from pulsara_agent.llm.ephemeral import PreparedEphemeralRequest
+    from pulsara_agent.llm.resolution import with_call_output_cap
+
+    target = runtime.resolve_frozen_target_bundle(
+        source.call_target.target_bundle,
+        binding=source.call_target.model_call_binding,
+        timeout_policy=timeout_policy,
+    )
+    target = with_call_output_cap(
+        target, source.call_target.input_budget.effective_output_tokens
+    )
+    call = resolve_model_call(
+        target=target,
+        binding=source.call_target.model_call_binding,
+        purpose=ModelCallPurpose.CONVERSATION_SUGGESTION,
+    )
+    if target.fact.wire_api == "openai_responses" and source.provider_replay is None:
+        raise ValueError("Responses final answer lacks accepted native replay")
+    suffix = (LLMMessage.user(prompt),)
+    materialization, quote = _materialize_provider_followup(
+        plan=source.wire_input_plan,
+        call=call,
+        actual_assistant_message=source.final_message,
+        provider_replay=source.provider_replay,
+        bounded_suffix_messages=suffix,
+        usage_anchor=source.usage_anchor,
+        force_tool_choice="auto",
+    )
+    wire = EphemeralProviderWireInput(
+        wire_api=target.fact.wire_api,
+        materialization=materialization,
+        budget_input_tokens=quote.budget_input_tokens,
+        effective_input_budget_tokens=source.call_target.input_budget.effective_input_budget_tokens,
+    )
+    compiled = source.compiled_input
+    messages = (*compiled.messages, source.final_message, *suffix)
+    if messages[: len(compiled.messages)] != compiled.messages:
+        raise ValueError("suggestion semantic prefix changed")
+    tools = tuple(
+        ToolSpec(item.name, item.description, thaw_json(item.parameters))
+        for item in compiled.tools
+    )
+    context = LLMContext(
+        messages=messages,
+        context_id=random_id("context"),
+        resolved_model_call_id=call.resolved_model_call_id,
+        model_call_index=None,
+        tools=tools,
+        system_prompt=compiled.system_prompt,
+        tool_choice="auto",
+        ephemeral_wire_input=wire,
+    )
+    # Reuse the actual adapter's final output-window admission before provider open.
+    if target.fact.wire_api == "openai_chat_completions":
+        from pulsara_agent.llm.adapters.openai.chat_completions import (
+            build_chat_completions_payload,
+        )
+
+        build_chat_completions_payload(call=call, context=context)
+    else:
+        from pulsara_agent.llm.adapters.openai.responses import build_responses_payload
+
+        build_responses_payload(call=call, context=context)
+    return PreparedEphemeralRequest(
+        _freeze_provider_physical_call_target(
+            target=target,
+            call=call,
+            maximum_input_tokens=wire.effective_input_budget_tokens,
+        ),
+        context,
+        timeout_policy,
+    )
+
+
 __all__ = [
+    "AcceptedProviderFinalSource",
+    "prepare_suggestion_request",
     "DirectKernelModelPort",
     "KernelModelExecutionRequest",
     "KernelModelPreparationRequest",

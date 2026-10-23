@@ -659,6 +659,8 @@ class KernelHostSession:
         self.runtime_session_id = session_id
         self.session_id = session_id
         self.host_session_id = host_session_id
+        from pulsara_agent.conversation_kernel.ephemeral import SessionEphemeralProducts
+        self._ephemeral = SessionEphemeralProducts(self)
         self.live_bus = LiveAgentEventBus()
         self.extensions = KernelExtensionHost(
             session_id=session_id,
@@ -1574,12 +1576,17 @@ class KernelHostSession:
         accepted, _resolved, _changed = (
             self._model_runtime.freeze_resolution_snapshot().reconcile(binding)
         )
-        return await self._io.run(
+        result = await self._io.run(
             self.repository.update_session_model_call_binding,
             self._lease.guard,
             binding=accepted,
             deadline_monotonic=self._canonical_deadline(),
         )
+        self._ephemeral.invalidate()
+        return result
+
+    def read_ephemeral_results(self) -> dict[str, object]:
+        return self._ephemeral.read()
 
     async def read_context_usage(self) -> dict[str, object]:
         """Advisory ROOT input preview; never installs or opens a provider call.
@@ -2139,6 +2146,8 @@ class KernelHostSession:
                     None,
                     "COMPACTION_FAILED",
                 )
+        if outcome.disposition is CompactionDisposition.COMPACTED:
+            self._ephemeral.invalidate()
         await self._compaction.settle_manual(request, outcome)
 
     async def _settle_manual_compaction_command(
@@ -2324,6 +2333,7 @@ class KernelHostSession:
             model_call_count=total_model_calls,
             tool_call_count=total_tool_calls,
             pending_plan_interaction_id=result.pending_plan_interaction_id,
+            final_source=result.final_source,
         )
 
     def _install_active_root_task_locked(
@@ -2340,6 +2350,7 @@ class KernelHostSession:
         if self._active_task is not None:
             raise RuntimeError("a canonical ROOT turn is already running")
         intent = ActiveTurnCancellationIntent(turn_id, ModelInputScopeKind.ROOT, None)
+        self._ephemeral.activate(turn_id)
         task = asyncio.create_task(
             self._run_owned_root_task(run, intent),
             name=name,
@@ -2380,8 +2391,13 @@ class KernelHostSession:
             result = await run(intent)
             return result
         finally:
-            await self._settle_pending_root_successor(task)
-            await self._settle_active_root_task(task)
+            settled = False
+            try:
+                await self._settle_pending_root_successor(task)
+                await self._settle_active_root_task(task)
+                settled = True
+            finally:
+                self._ephemeral.completed(intent.turn_id, result if settled else None)
 
     async def _settle_pending_root_successor(self, task: asyncio.Task[object]) -> None:
         async with self._lock:
@@ -2478,6 +2494,9 @@ class KernelHostSession:
         async with self._lock:
             closed = self._finalize_todo_run_activation_locked(prepared, accepted)
         self._tools.offer_todo_close(closed)
+
+        if isinstance(prepared, PreparedTodoRootRunActivation):
+            self._ephemeral.admitted(accepted.turn_id)
 
     def _finalize_todo_run_activation_locked(
         self,
@@ -3194,6 +3213,8 @@ class KernelHostSession:
                 delivery_mode=delivery_mode.value,
             ),
         )
+
+        self._ephemeral.invalidate(preserve_running=True)
 
         if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
             return await self._wake_accepted_steer(
@@ -4493,6 +4514,7 @@ class KernelHostSession:
                             accepted.turn_id, intent, prospective_dispatch
                         ),
                     )
+                    self._ephemeral.admitted(accepted.turn_id)
                 except BaseException:
                     task = None
             elif finalization_failed:
@@ -7186,6 +7208,7 @@ class KernelHostSession:
             # lane consumes the carrier without reopening any execution owner.
             session_end_cwd = self._tools.snapshot_workspace_root()
             self._hooks.begin_host_close(deadline_monotonic=deadline)
+            await self._ephemeral.aclose()
             self.extensions.stop_admission()
             self._mcp_supervisor.stop_admission()
             mcp_close_task = asyncio.create_task(

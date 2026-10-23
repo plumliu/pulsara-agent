@@ -142,6 +142,74 @@ def _manual_compaction_turn_matches(
 
 
 class _ConversationOperations:
+    def read_ephemeral_user_origin(
+        self, guard: HostWriterGuard, *, turn_id: str, deadline_monotonic: float,
+    ):
+        """Read an accepted ROOT origin; only the admission callback calls this.
+
+        Historical reads never launch advisory work. Imported human history also
+        counts when determining whether this is the first user input.
+        """
+        from pulsara_agent.conversation_kernel.ephemeral import AcceptedUserOrigin
+        from pulsara_agent.conversation_kernel.prompt_storage import hydrate_canonical_prompt_owner
+        from pulsara_agent.llm.input import LLMMessage
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                """SELECT e.*, t.model_call_binding, s.title,
+                    NOT EXISTS (
+                        SELECT 1 FROM pulsara_v3.transcript_entries earlier
+                        WHERE earlier.session_id=e.session_id
+                          AND earlier.conversation_scope_kind='ROOT'
+                          AND earlier.entry_kind IN ('USER_MESSAGE', 'USER_STEER')
+                          AND earlier.scheduled_input IS NULL
+                          AND earlier.entry_sequence < e.entry_sequence
+                    ) AS first_user_input
+                   FROM pulsara_v3.turns t
+                   JOIN pulsara_v3.transcript_entries e ON e.session_id=t.session_id
+                        AND e.id=t.initial_entry_id
+                   JOIN pulsara_v3.sessions s ON s.id=t.session_id
+                   WHERE t.session_id=%s AND t.id=%s
+                     AND t.conversation_scope_kind='ROOT'""",
+                (guard.session_id, turn_id),
+            ).fetchone()
+            if row is None or row['entry_kind'] != 'USER_MESSAGE' or row['scheduled_input'] is not None:
+                return None
+            binding = model_call_binding_from_dict(row['model_call_binding'])
+            if binding is None:
+                return None
+            first = bool(row['first_user_input']) and row['title'] is None
+            message = None
+            if first:
+                prompt = hydrate_canonical_prompt_owner(
+                    connection, row=row, transcript_entry_id=str(row['id']),
+                )
+                message = LLMMessage.user_content(prompt.content)
+            return AcceptedUserOrigin(turn_id, str(row['id']), binding, message)
+
+    def adopt_generated_session_title(
+        self, *, session_id: str, memory_domain_id: str, title: str,
+        deadline_monotonic: float,
+    ) -> bool:
+        """Adopt display metadata only while no title has won the row lock."""
+        if not isinstance(title, str):
+            raise ValueError('title must be text')
+        title = title.strip()
+        if not title or any(ord(c) < 32 or 127 <= ord(c) <= 159 or c in '\u2028\u2029' for c in title):
+            raise ValueError('title must be non-empty single-line text without control characters')
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return connection.execute(
+                "UPDATE pulsara_v3.sessions SET title=%s "
+                "WHERE id=%s AND memory_domain_id=%s AND title IS NULL RETURNING id",
+                (title, session_id, memory_domain_id),
+            ).fetchone() is not None
+
     def rename_session(
         self, *, session_id: str, memory_domain_id: str, title: str,
         deadline_monotonic: float,

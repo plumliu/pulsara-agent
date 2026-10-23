@@ -1,5 +1,6 @@
 """Same-model budget edits reuse the complete existing three-tier handover."""
 from pulsara_agent.identity import derive_id
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 import asyncio
 import json
@@ -9,6 +10,24 @@ from uuid import uuid4
 import pytest
 
 pytestmark = pytest.mark.postgres
+
+
+def _advisory_call(call):
+    return call.fact.purpose in {
+        ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION,
+    }
+
+
+async def _advisory_stream(original_stream, adapter, *, call, context):
+    # Temporary products share the transport, but must not consume the scripted
+    # foreground/compaction sequence or its carefully chosen usage anchors.
+    adapter._mock_chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "Advisory result"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"prompt_tokens": 9999, "completion_tokens": 8}},
+    ]
+    async for item in original_stream(adapter, call=call, context=context):
+        yield item
 
 
 @pytest.mark.parametrize("tier", (1, 2, 3))
@@ -61,6 +80,10 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
     original_stream = OpenAIChatCompletionsTransport.stream
 
     async def stream(adapter, *, call, context):
+        if _advisory_call(call):
+            async for item in _advisory_stream(original_stream, adapter, call=call, context=context):
+                yield item
+            return
         requests.append(
             (
                 call.fact.purpose,
@@ -241,6 +264,10 @@ def test_allowance_edit_during_tool_followup_uses_handover(
 
     async def stream(adapter, *, call, context):
         nonlocal agent_calls, manual_request
+        if _advisory_call(call):
+            async for item in _advisory_stream(original_stream, adapter, call=call, context=context):
+                yield item
+            return
         summary = call.fact.purpose is ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
         if not summary:
             agent_calls += 1
@@ -488,6 +515,10 @@ def test_queued_child_preserves_accepted_allowance_then_hands_over_on_followup(
 
     async def stream(adapter, *, call, context):
         nonlocal root_calls
+        if _advisory_call(call):
+            async for item in _advisory_stream(original_stream, adapter, call=call, context=context):
+                yield item
+            return
         is_child = not any(
             root_prompt in join_text_content(message.content)
             for message in context.messages
@@ -620,6 +651,10 @@ def test_headroom_decision_failure_releases_handle_before_next_turn(
 
     async def stream(adapter, *, call, context):
         nonlocal calls
+        if _advisory_call(call):
+            async for item in _advisory_stream(original_stream, adapter, call=call, context=context):
+                yield item
+            return
         calls += 1
         delta = (
             {"content": "Completed."}

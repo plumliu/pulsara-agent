@@ -17,7 +17,7 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
-from pulsara_agent.primitives.model_call import ModelContextMode
+from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelContextMode
 
 
 def validate_model_context_shape_for_call(
@@ -28,6 +28,10 @@ def validate_model_context_shape_for_call(
     """Validate shape, target and transport binding without a token gate."""
 
     fact = call.fact
+    if context.ephemeral_wire_input is not None and fact.purpose not in {
+        ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION,
+    }:
+        raise ModelContextIdentityMismatch("ephemeral wire input requires advisory purpose")
     target_fact = call.target.fact
     if not context.context_id:
         raise ModelContextIdentityMismatch("LLMContext.context_id is required")

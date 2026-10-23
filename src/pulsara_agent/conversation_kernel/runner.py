@@ -74,6 +74,7 @@ from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
+    AcceptedProviderFinalSource,
     CompletedProviderModelExecution,
     KernelModelExecutionRequest,
     PreparedKernelModelCall,
@@ -331,6 +332,7 @@ class KernelRunResult:
     continuation_turn_id: str | None = None
     continuation_entry_id: str | None = None
     pending_plan_interaction_id: str | None = None
+    final_source: AcceptedProviderFinalSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2590,6 +2592,15 @@ class ConversationKernelRunner:
                         final_text=completed.public_text,
                         model_call_count=model_call_count,
                         tool_call_count=tool_call_count,
+                        final_source=(AcceptedProviderFinalSource(
+                            call_target=request.prepared_call.epoch_call_target.physical_call_target,
+                            compiled_input=request.compiled_input,
+                            wire_input_plan=request.wire_input_plan,
+                            final_entry_id=accepted.entry_id,
+                            final_message=LLMMessage.assistant(completed.public_text),
+                            provider_replay=None if collected.provider_replay is None else collected.provider_replay.fragment(),
+                            usage_anchor=self._continuity.current_usage_anchor(permit.scope),
+                        ) if identity.conversation_scope_kind is ModelInputScopeKind.ROOT else None),
                     )
                 if not calls:
                     # A steer arrived after this provider call froze its cut.

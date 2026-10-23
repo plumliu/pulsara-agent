@@ -161,6 +161,7 @@ interface WorkbenchViewProps {
   modelConfigurations: ModelConfigurationSummary[];
   modelCatalogLoading?: boolean;
   modelCallBinding?: ModelCallBindingPayload | null;
+  suggestion?: string;
   onReadContextUsage?: (signal: AbortSignal) => Promise<ContextUsagePreview>;
   contextUsageRevision?: number | string;
   interaction?: RuntimeInteractionSummary;
@@ -1897,6 +1898,7 @@ export function WorkbenchView({
   modelConfigurations,
   modelCatalogLoading = false,
   modelCallBinding,
+  suggestion,
   onReadContextUsage,
   contextUsageRevision = 0,
   interaction,
@@ -3053,7 +3055,7 @@ export function WorkbenchView({
               store={draftStore}
               sessionId={session.id}
               disabled={runtimeStatus !== 'online' || !session.id || editingQueue}
-              placeholder={isRunning ? '输入下一轮任务…' : '让 Pulsara 处理复杂工作…'}
+              placeholder={isRunning ? '输入下一轮任务…' : suggestion ?? '让 Pulsara 处理复杂工作…'}
               onSubmit={() => void submit()}
               onNotify={onNotify}
               skills={skills}

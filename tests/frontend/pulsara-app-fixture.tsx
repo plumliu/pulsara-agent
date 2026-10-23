@@ -512,6 +512,12 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  async ephemeralResults(sessionId: string): Promise<import('../../frontend/lib/runtime-adapter').SessionEphemeralResults> {
+    return { session_id: sessionId, host_session_id: this.lastConnection?.current().hostSessionId ?? null,
+      suggestion: { state: 'absent' as const, origin_turn_id: null, turn_id: null, final_entry_id: null, model_call_binding: null, text: null },
+      title: { state: 'absent' as const } };
+  }
+
   hooks = {list: vi.fn(async () => ({sources: [], details: []})), config: vi.fn(), save: vi.fn(), review: vi.fn(), trust: vi.fn()};
   userAvatar = vi.fn(async () => ({ configured: false }));
   uploadUserAvatar = vi.fn(async (_file: File) => { void _file; return { configured: true }; });

@@ -264,7 +264,7 @@ if __name__ == "__main__":
         gateway = TerminalKernelProtocolServer(socket_path=Path(socket_directory.name)/'socket', session_provider=lambda _: session)
 
         async def resume(_):
-            return SimpleNamespace(session_id=session.session_id, host_session_id=session.host_session_id)
+            return SimpleNamespace(session_id=session.session_id, host_session_id=session.host_session_id, session=session)
 
         bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume), protocol_server=gateway)
         try:

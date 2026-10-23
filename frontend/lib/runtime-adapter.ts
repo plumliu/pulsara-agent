@@ -86,6 +86,20 @@ export interface ModelCallBindingPayload {
   reasoning: ReasoningSelectionPayload | null;
 }
 
+export interface SessionEphemeralResults {
+  session_id: string;
+  host_session_id: string | null;
+  suggestion: {
+    state: 'awaiting_completion' | 'pending' | 'ready' | 'absent';
+    origin_turn_id: string | null;
+    turn_id: string | null;
+    final_entry_id: string | null;
+    model_call_binding: ModelCallBindingPayload | null;
+    text: string | null;
+  };
+  title: { state: 'pending' | 'adopted' | 'absent' };
+}
+
 /** Disposable preview of the selected next-turn model, not admission authority. */
 export interface ContextUsagePreview {
   state: 'ready' | 'empty' | 'updating' | 'compacting' | 'unavailable';
@@ -591,6 +605,7 @@ export interface RuntimeAdapter {
   setHistoryEnabled(enabled: boolean): Promise<MemoryRetrievalSettings>;
   setEmbeddingEnabled(enabled: boolean): Promise<MemoryRetrievalSettings>;
   setMemoryRanking(mode: RankingMode): Promise<MemoryRetrievalSettings>;
+  ephemeralResults(sessionId: string, signal?: AbortSignal): Promise<SessionEphemeralResults>;
   contextUsage(sessionId: string, signal?: AbortSignal): Promise<ContextUsagePreview>;
   updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
   reopenRuntime(sessionId: string): Promise<{
@@ -1603,6 +1618,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
   async setMemoryRanking(mode: RankingMode): Promise<MemoryRetrievalSettings> {
     return apiRequest('/api/local-settings/memory-retrieval/ranking-mode', { method: 'PUT', body: JSON.stringify({ mode }) });
+  }
+
+  async ephemeralResults(sessionId: string, signal?: AbortSignal): Promise<SessionEphemeralResults> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/ephemeral-results`, { signal });
   }
 
   async contextUsage(sessionId: string, signal?: AbortSignal): Promise<ContextUsagePreview> {

@@ -71,7 +71,7 @@ def test_probe_content_bound_is_independent_of_fragments_and_closes_transport(
     # Probe-only content protection survives removal of transport envelopes;
     # end snapshots are not charged again. Exercise the real SDK/HTTP close.
     monkeypatch.setattr(
-        "pulsara_agent.llm.connection_probe.MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES",
+        "pulsara_agent.llm.ephemeral.MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES",
         8,
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ProbeHandler)

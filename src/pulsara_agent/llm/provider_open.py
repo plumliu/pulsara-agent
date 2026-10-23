@@ -275,10 +275,60 @@ class ConnectionProbeProviderOpenPermit(_OneShotPermit):
         return self.probe_call_target
 
 
+@dataclass(slots=True, init=False)
+class SavedEphemeralProviderOpenPermit(_OneShotPermit):
+    """One advisory call through the ordinary saved credential owner."""
+
+    call_target: FrozenProviderPhysicalCallTarget
+    resolved_model_call_id: str
+    timeout_policy: OpenAITransportTimeoutPolicy = field(repr=False)
+
+    def __init__(
+        self,
+        *,
+        call_target: FrozenProviderPhysicalCallTarget,
+        resolved_model_call_id: str,
+        timeout_policy: OpenAITransportTimeoutPolicy,
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _EPHEMERAL_PERMIT_SEAL
+            or call_target.purpose
+            not in {
+                ModelCallPurpose.SESSION_TITLE,
+                ModelCallPurpose.CONVERSATION_SUGGESTION,
+            }
+            or not resolved_model_call_id
+        ):
+            raise TypeError("saved ephemeral permit is owner-issued")
+        _OneShotPermit.__init__(self)
+        self.call_target = call_target
+        self.resolved_model_call_id = resolved_model_call_id
+        self.timeout_policy = timeout_policy
+
+
+_EPHEMERAL_PERMIT_SEAL = object()
+
+
+def _issue_saved_ephemeral_provider_open_permit(
+    *,
+    call_target: FrozenProviderPhysicalCallTarget,
+    resolved_model_call_id: str,
+    timeout_policy: OpenAITransportTimeoutPolicy,
+) -> SavedEphemeralProviderOpenPermit:
+    return SavedEphemeralProviderOpenPermit(
+        call_target=call_target,
+        resolved_model_call_id=resolved_model_call_id,
+        timeout_policy=timeout_policy,
+        _seal=_EPHEMERAL_PERMIT_SEAL,
+    )
+
+
 ProviderOpenPurposePermit = (
     EpochAgentLoopProviderOpenPermit
     | CompactionSummaryProviderOpenPermit
     | ConnectionProbeProviderOpenPermit
+    | SavedEphemeralProviderOpenPermit
 )
 
 

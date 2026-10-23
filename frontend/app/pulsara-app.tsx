@@ -28,6 +28,7 @@ import { SettingsView, type SettingsSection } from '../components/settings-view'
 import { WorkbenchView } from '../components/workbench-view';
 import { ToolResultDisplayContext, readSavedToolResultDisplay } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
+import { SessionSuggestionCache, useSessionEphemeralResults } from '../lib/session-ephemeral-results';
 import {
   LocalHttpRuntimeAdapter,
   CanonicalHistoryView,
@@ -220,6 +221,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const workspaceControl = useRef<WorkspaceControl | null>(null);
   const taskCancelReferences = useRef(new Map<string, UserControlCommandRef>());
   const [promptDraftStore] = useState(() => new PromptDraftStore());
+  const [suggestionCache] = useState(() => new SessionSuggestionCache());
   const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
   const [activeView, setActiveView] = useState<AppView>('overview');
   const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>('plugins');
@@ -861,6 +863,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [adapter, acceptUserCapabilities, notify]);
 
   const forgetSession = useCallback((sessionId: string) => {
+    suggestionCache.forget(sessionId);
     workspaceControl.current?.forgetSession(sessionId);
     uiPreferences.removeItem(`pulsara-workspace-open:${sessionId}`);
     uiPreferences.removeItem(`pulsara-workspace-width:${sessionId}`);
@@ -920,7 +923,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setRuntimeStatus('online');
     setRuntimeError(undefined);
     if (previous) void previous.close().catch(() => {});
-  }, [changeSessionList, promptDraftStore]);
+  }, [changeSessionList, promptDraftStore, suggestionCache]);
 
   const readSessionList = useCallback(async (canPublish: () => boolean = () => true) => {
     const owner = {};
@@ -944,6 +947,13 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     if (globalReads.configuration.databaseReady) setUserServiceStatus('online');
     return sessions;
   }, [forgetSession, globalReads]);
+
+  const { suggestion, observeTitle } = useSessionEphemeralResults({
+    cache: suggestionCache, adapter, connection, projection,
+    binding: sessionList.find(session => session.id === activeSessionId)?.modelCallBinding,
+    visible: activeView === 'workbench' && connection?.sessionId === activeSessionId,
+    refreshSessions: readSessionList,
+  });
 
   const confirmSessionDelete = async () => {
     if (!deleteTarget || deletingSession.current || bulkDeletionOwner.current?.running) return;
@@ -1248,13 +1258,29 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [openRuntimeSession, ownsConnection]);
 
   useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let latestRead: object;
     const refreshSessions = () => {
+      clearTimeout(timer);
       if (document.visibilityState !== 'visible' || databaseState !== 'ready') return;
-      void readSessionList().catch(() => {});
+      const read = {};
+      latestRead = read;
+      void readSessionList().catch(() => {}).finally(() => {
+        if (!disposed && latestRead === read && document.visibilityState === 'visible') {
+          timer = setTimeout(refreshSessions, 30_000);
+        }
+      });
     };
+    // User-level metadata can change after a queued input becomes ROOT while
+    // another page is open. Use the ordinary desktop observation cadence;
+    // this reads session rows only and cannot create ephemeral provider work.
+    if (databaseState === 'ready') timer = setTimeout(refreshSessions, 30_000);
     window.addEventListener('focus', refreshSessions);
     document.addEventListener('visibilitychange', refreshSessions);
     return () => {
+      disposed = true;
+      clearTimeout(timer);
       window.removeEventListener('focus', refreshSessions);
       document.removeEventListener('visibilitychange', refreshSessions);
     };
@@ -1926,6 +1952,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       throw new Error('当前窗口没有修改这个会话的权限。');
     }
     invalidateSessionList();
+    suggestionCache.invalidate(sessionId);
     const accepted = await adapter.updateModelCallBinding(sessionId, binding);
     if (!ownsConnection(active)) return;
     changeSessionList((current) => current.map((session) => session.id === sessionId
@@ -1972,6 +1999,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const targetTurnId = current.control.active_turns?.find(
       turn => turn.scope_kind === 'ROOT' && turn.status === 'RUNNING',
     )?.turn_id;
+    if (kind === 'send') suggestionCache.invalidate(active.sessionId);
     if (kind === 'send' && !targetTurnId && !reviewInteraction) {
       notify('当前任务已结束', '这条输入会按队列顺序自动处理。', 'warning');
       return;
@@ -2163,7 +2191,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           && !localSubmissions.some(item => item.sessionId === active.sessionId
             && ['sending', 'synchronizing', 'queued', 'unknown'].includes(item.status)),
       }]);
+      suggestionCache.invalidate(active.sessionId);
       const receipt = await active.submitPrompt(commandId, content, permission);
+      const titleHost = active.current().hostSessionId;
+      if (promptWasAccepted(receipt) && titleHost) observeTitle(active.sessionId, titleHost);
       if (!ownsConnection(active)) return false;
       requirePromptReceipt(commandId, receipt);
       setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
@@ -2288,6 +2319,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const active = connectionRef.current;
     if (!active || active.role !== 'controller') return;
     try {
+      suggestionCache.invalidate(active.sessionId);
       const receipt = await active.compactContext(projection.activeTurnId);
       if (!ownsConnection(active)) return;
       const alreadyCompact = receipt.status === 'succeeded' && receipt.publicCode === 'NOT_NEEDED';
@@ -3134,6 +3166,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           canCreateSession={canCreateSession}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           onOpenModelSettings={() => navigate('settings', 'models')}
+          suggestion={suggestion}
           onModelCallBindingChange={updateModelCallBinding}
           onSend={sendPrompt}
           onStop={() => void stopRun()}
