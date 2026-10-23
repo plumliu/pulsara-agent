@@ -249,3 +249,33 @@ it('commits an empty directory with Space after its candidate popup has disappea
   key(' ');
   expect(store.summary('one').text).toBe(`${formatWorkspaceReference(directory)} `);
 });
+
+it('accepts the current follow-up with Tab as an editable draft, without submitting, and restores it on undo', () => {
+  const { props, rerender, store, editor, key, onSubmit } = setup();
+  rerender(<PromptComposer {...props} suggestion="旧问题？" />);
+  rerender(<PromptComposer {...props} suggestion="这些约束发生冲突时，我应该按什么标准取舍？" />);
+  expect(key('Tab')).toBe(false);
+  expect(store.summary('one').text).toBe('这些约束发生冲突时，我应该按什么标准取舍？');
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(screen.queryByText('这些约束发生冲突时，我应该按什么标准取舍？', { selector: '.prompt-composer__placeholder' })).toBeNull();
+  act(() => { editor.commands.undo(); });
+  expect(store.summary('one').hasContent).toBe(false);
+  expect(screen.getByText('这些约束发生冲突时，我应该按什么标准取舍？', { selector: '.prompt-composer__placeholder' })).toBeTruthy();
+});
+
+it('preserves normal Tab navigation without an available follow-up, during composition, or with a draft', () => {
+  const { props, rerender, store, type, key } = setup();
+  expect(key('Tab')).toBe(true);
+  rerender(<PromptComposer {...props} suggestion="我的问题？" />);
+  for (const modifier of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey', 'isComposing']) {
+    expect(key('Tab', { [modifier]: true })).toBe(true);
+  }
+  expect(store.summary('one').hasContent).toBe(false);
+  rerender(<PromptComposer {...props} suggestion="我的问题？" disabled />);
+  expect(key('Tab')).toBe(true);
+  rerender(<PromptComposer {...props} suggestion="我的问题？" />);
+  type('我的草稿');
+  expect(key('Tab')).toBe(true);
+  expect(store.summary('one').text).toBe('我的草稿');
+  expect(screen.queryByText('我的问题？')).toBeNull();
+});

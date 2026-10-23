@@ -16,6 +16,7 @@ interface PromptComposerProps {
   sessionId: string;
   disabled: boolean;
   placeholder: string;
+  suggestion?: string;
   onSubmit: () => void;
   onNotify: MarkdownNotify;
   skills?: readonly SkillCapability[];
@@ -27,6 +28,7 @@ export function PromptComposer({
   sessionId,
   disabled,
   placeholder,
+  suggestion,
   onSubmit,
   onNotify,
   skills = [],
@@ -40,6 +42,7 @@ export function PromptComposer({
   const disabledRef = useRef(disabled);
   const notifyRef = useRef(onNotify);
   const submitRef = useRef(onSubmit);
+  const followUpRef = useRef(suggestion);
   const imageStatuses = store.imageStatuses(sessionId);
   const suggestionKeyDown = usePromptSuggestions(editor, disabled, { skills, completePaths: onCompletePaths });
 
@@ -47,7 +50,8 @@ export function PromptComposer({
     disabledRef.current = disabled;
     notifyRef.current = onNotify;
     submitRef.current = onSubmit;
-  }, [disabled, onNotify, onSubmit]);
+    followUpRef.current = suggestion;
+  }, [disabled, onNotify, onSubmit, suggestion]);
 
   useEffect(() => {
     editor.setOptions({
@@ -75,6 +79,12 @@ export function PromptComposer({
         handleKeyDown: (_view, event) => {
           if (composing.current || event.isComposing || event.keyCode === 229) return false;
           if (suggestionKeyDown.current(_view, event)) { event.preventDefault(); return true; }
+          if (event.key === 'Tab' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
+            && !disabledRef.current && editor.isEmpty && followUpRef.current) {
+            event.preventDefault();
+            store.insertText(sessionId, followUpRef.current);
+            return true;
+          }
           if (event.key !== 'Enter') return false;
           event.preventDefault();
           if (event.shiftKey) {
@@ -165,11 +175,11 @@ export function PromptComposer({
         previewTrigger.current = trigger;
         setPreview(index);
       } }}>
-        <EditorContent editor={editor} />
+        <EditorContent editor={editor} className="prompt-composer__editor" />
       </DraftImagePreviewContext.Provider>
       {editor.isEmpty && (
         <span className="prompt-composer__placeholder" aria-hidden="true">
-          {placeholder}
+          {suggestion ?? placeholder}
         </span>
       )}
       <Lightbox

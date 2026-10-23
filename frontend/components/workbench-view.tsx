@@ -3055,7 +3055,8 @@ export function WorkbenchView({
               store={draftStore}
               sessionId={session.id}
               disabled={runtimeStatus !== 'online' || !session.id || editingQueue}
-              placeholder={isRunning ? '输入下一轮任务…' : suggestion ?? '让 Pulsara 处理复杂工作…'}
+              placeholder={isRunning ? '输入下一轮任务…' : '让 Pulsara 处理复杂工作…'}
+              suggestion={isRunning ? undefined : suggestion}
               onSubmit={() => void submit()}
               onNotify={onNotify}
               skills={skills}

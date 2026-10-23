@@ -564,10 +564,11 @@
 .todo-dock__item--completed .todo-dock__marker { border-color: var(--green); background: var(--green); }
 .composer-editor { display: flex; flex-direction: column; gap: 6px; min-height: 42px; padding: 12px 15px 4px; }
 .composer-editor > svg { margin-top: 2px; color: var(--amber); }
-.prompt-composer { position: relative; flex: 1; width: 100%; min-width: 0; }
+.prompt-composer { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; width: 100%; min-width: 0; max-height: 250px; overflow-y: auto; }
+.prompt-composer__editor { grid-area: 1 / 1; display: grid; min-width: 0; }
 .prompt-composer .tiptap { min-height: 24px; max-height: 250px; overflow-x: hidden; overflow-y: auto; border: 0; outline: 0; color: var(--ink); font-size: var(--type-control); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .prompt-composer .tiptap p { min-height: 24px; margin: 0; }
-.prompt-composer__placeholder { position: absolute; top: 0; left: 0; right: 0; overflow: hidden; color: var(--faint); font-size: var(--type-control); line-height: 1.55; white-space: nowrap; text-overflow: ellipsis; pointer-events: none; }
+.prompt-composer__placeholder { grid-area: 1 / 1; min-width: 0; color: var(--faint); font-size: var(--type-control); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; }
 .composer-actions { position: relative; display: flex; align-items: center; justify-content: space-between; gap: clamp(4px, 2cqw, 12px); padding: 4px clamp(7px, 1.5cqw, 9px) 8px; }
 .composer-actions > div { display: flex; align-items: center; gap: 3px; }
 .composer-utilities { flex: none; }
