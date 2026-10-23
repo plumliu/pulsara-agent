@@ -569,6 +569,8 @@
 .prompt-composer .tiptap { min-height: 24px; max-height: 250px; overflow-x: hidden; overflow-y: auto; border: 0; outline: 0; color: var(--ink); font-size: var(--type-control); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .prompt-composer .tiptap p { min-height: 24px; margin: 0; }
 .prompt-composer__placeholder { grid-area: 1 / 1; min-width: 0; color: var(--faint); font-size: var(--type-control); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; }
+.prompt-composer__accept-hint { display: inline-block; visibility: hidden; margin-left: 7px; padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--paper-darker) 45%, transparent); color: var(--faint); font-family: ui-rounded, "SF Pro Rounded", var(--sans); font-size: 11px; font-weight: 500; line-height: 17px; letter-spacing: .02em; vertical-align: 1px; white-space: nowrap; }
+.prompt-composer:has(.composer-prosemirror:focus) .prompt-composer__accept-hint { visibility: visible; }
 .composer-actions { position: relative; display: flex; align-items: center; justify-content: space-between; gap: clamp(4px, 2cqw, 12px); padding: 4px clamp(7px, 1.5cqw, 9px) 8px; }
 .composer-actions > div { display: flex; align-items: center; gap: 3px; }
 .composer-utilities { flex: none; }

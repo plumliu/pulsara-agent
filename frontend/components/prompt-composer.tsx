@@ -180,6 +180,7 @@ export function PromptComposer({
       {editor.isEmpty && (
         <span className="prompt-composer__placeholder" aria-hidden="true">
           {suggestion ?? placeholder}
+          {suggestion && !disabled && <kbd className="prompt-composer__accept-hint">tab</kbd>}
         </span>
       )}
       <Lightbox
