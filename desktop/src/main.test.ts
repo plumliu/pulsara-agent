@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { cliLauncherScript, type CliRegistration } from './cli-install';
+import type { DesktopResourcePaths } from './resource-paths';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -16,6 +18,8 @@ function fixture(options: {
   desktop?: string | Error;
   desktopState?: 'directory' | 'missing' | 'file';
   canceled?: boolean;
+  platform?: 'darwin' | 'linux';
+  packagedResources?: string;
 } = {}) {
   const cover = deferred();
   const previous = deferred();
@@ -27,8 +31,15 @@ function fixture(options: {
   const failures: string[] = [];
   const handlers = new Map<string, (event: unknown) => Promise<unknown>>();
   const dialogOptions: { defaultPath: string; properties: string[] }[] = [];
+  const composition: {
+    python?: string;
+    runtime?: { resources: DesktopResourcePaths; home: string; host: unknown };
+    postgres?: { bin: string; home: string };
+    cli?: CliRegistration;
+  } = {};
+  const host = { resolveHome(python: string) { composition.python = python; return '/tmp/pulsara-main-test'; } };
   const app = Object.assign(new EventEmitter(), {
-    isPackaged: false, setName() {}, setPath() {}, getPath(name: string) {
+    isPackaged: options.packagedResources !== undefined, setName() {}, setPath() {}, setAsDefaultProtocolClient() { return true; }, getPath(name: string) {
       if (name === 'home') return '/tmp/home';
       if (name === 'desktop') {
         if (options.desktop instanceof Error) throw options.desktop;
@@ -63,6 +74,7 @@ function fixture(options: {
     }
   }
   class Postgres {
+    constructor(operations: { bin: string; home: string }) { composition.postgres = operations; }
     async start() {
       calls.push('database-preparing'); preparingDatabase.resolve();
       await database.promise;
@@ -71,6 +83,9 @@ function fixture(options: {
     settings() { return { runtime_dsn: 'runtime', admin_dsn: 'admin' }; }
   }
   class Runtime {
+    constructor(resources: DesktopResourcePaths, home: string, _onEvent: unknown, operations: unknown) {
+      composition.runtime = { resources, home, host: operations };
+    }
     running = false;
     preparation?: Promise<void>;
     async waitForPreviousOwner() { calls.push('owner-wait'); await previous.promise; }
@@ -110,19 +125,47 @@ function fixture(options: {
       if (options.desktopState === 'missing') throw new Error('ENOENT');
       return { isDirectory: () => options.desktopState !== 'file' };
     } },
-    'node:child_process': { execFileSync() { return '/tmp/pulsara-main-test'; } },
+    './host-posix': { posixHostOperations: host },
+    './postgres-posix': { createPosixPostgresOperations(bin: string, home: string) { return { bin, home }; } },
     './postgres': { BundledPostgres: Postgres }, './runtime': { PythonRuntime: Runtime },
     './ui-preferences': { UiPreferences: class {} },
-    './cli-install': {}, './oauth-return': {},
+    './cli-install': {
+      cliLauncherScript,
+      async cliStatus(config: CliRegistration) { composition.cli = config; return { state: 'ready' }; },
+      async registerCli(config: CliRegistration) { composition.cli = config; return { state: 'ready' }; },
+    }, './oauth-return': {},
     './browser-owner': { BrowserOwner: class { async retireHost() {} } },
     './startup-cover': { StartupCover: Cover },
   };
   runInNewContext(readFileSync(path.join(__dirname, 'main.js'), 'utf8'), {
     exports: {}, __dirname, console, URL, Error,
-    process: { platform: 'darwin', env: {} },
+    process: { platform: options.platform ?? 'darwin', resourcesPath: options.packagedResources, env: {} },
     require(name: string) { return Object.hasOwn(modules, name) ? modules[name] : require(name); },
   });
-  return { dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, handlers, calls, failures, ready: ready! };
+  return { composition, host, dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, handlers, calls, failures, ready: ready! };
+}
+
+for (const scenario of [
+  { platform: 'darwin' as const, packagedResources: "/Applications/Pulsara user's.app/Contents/Resources", packageTarget: undefined },
+  { platform: 'linux' as const, packagedResources: '/opt/Pulsara/resources', packageTarget: '/opt/Pulsara/resources/bin/pulsara' },
+]) {
+  test(`main composes the ${scenario.platform} bundle once for home, runtime, PG and CLI`, async () => {
+    const value = fixture(scenario);
+    value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+    await value.ready;
+    await value.handlers.get('desktop:cli-status')!(value.trustedEvent());
+    const { composition } = value;
+    const paths = composition.runtime!.resources;
+    assert.equal(paths.root, scenario.packagedResources);
+    assert.equal(composition.python, paths.pythonExecutable);
+    assert.equal(composition.runtime!.host, value.host);
+    assert.equal(composition.runtime!.home, '/tmp/pulsara-main-test');
+    assert.deepEqual(composition.postgres, { bin: paths.postgresBin, home: composition.runtime!.home });
+    assert.equal(paths.playwrightBrowsers, path.join(scenario.packagedResources, 'playwright'));
+    assert.equal(composition.cli!.script, `#!/bin/sh\n# Pulsara desktop command-line launcher\nexec '${path.join(scenario.packagedResources, 'python/bin/python3').replaceAll("'", "'\\''")}' -m pulsara_agent "$@"\n`);
+    assert.equal(composition.cli!.packageTarget, scenario.packageTarget);
+    if (scenario.packageTarget) assert.equal(composition.cli!.destination, '/usr/bin/pulsara');
+  });
 }
 
 test('main overlaps cover loading and kernel preparation but gates the start frame and navigation', async () => {

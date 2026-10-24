@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { cliLauncherScript } from './cli-install';
+import { desktopResourcePaths } from './resource-paths';
 
 const afterPack = require('../scripts/linux-cli-entry.cjs');
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -19,7 +20,7 @@ test('installed desktop CLI resolves bundled Python and preserves arguments and 
     await writeFile(fixture, 'console.log(JSON.stringify(process.argv.slice(2))); process.exit(37);');
     await writeFile(python, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fixture)} "$@"\n`, { mode: 0o755 });
     const cli = path.join(root, 'pulsara');
-    await writeFile(cli, cliLauncherScript(resources), { mode: 0o755 });
+    await writeFile(cli, cliLauncherScript(desktopResourcePaths(resources).pythonExecutable), { mode: 0o755 });
     const args = ['mcp', 'a b', "quote's", '$(touch forbidden)', '中文'];
     const result = spawnSync(cli, args, { encoding: 'utf8' });
     assert.equal(result.status, 37, result.stderr);
@@ -59,9 +60,9 @@ import { registerCli, cliStatus } from './cli-install';
 test('automatic registration creates and updates its own launcher after the app moves', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pulsara-cli-register-'));
   try {
-    const config = { destination: path.join(root, 'bin/pulsara'), script: cliLauncherScript('/Applications/Pulsara.app/Contents/Resources'), searchPath: path.join(root, 'bin') };
+    const config = { destination: path.join(root, 'bin/pulsara'), script: cliLauncherScript(desktopResourcePaths('/Applications/Pulsara.app/Contents/Resources').pythonExecutable), searchPath: path.join(root, 'bin') };
     assert.equal((await registerCli(config)).state, 'ready');
-    const moved = { ...config, script: cliLauncherScript('/other/Pulsara.app/Contents/Resources') };
+    const moved = { ...config, script: cliLauncherScript(desktopResourcePaths('/other/Pulsara.app/Contents/Resources').pythonExecutable) };
     assert.equal((await cliStatus(moved)).state, 'outdated');
     assert.equal((await registerCli(moved)).state, 'ready');
     assert.equal(await readFile(config.destination, 'utf8'), moved.script);
@@ -77,7 +78,7 @@ test('old CLI symlinks are preserved automatically and explicit replacement neve
     await writeFile(old, '#!/bin/sh\necho old\n', { mode: 0o755 });
     const destination = path.join(root, 'pulsara');
     await symlink(old, destination);
-    const config = { destination, script: cliLauncherScript('/app/resources'), searchPath: root };
+    const config = { destination, script: cliLauncherScript(desktopResourcePaths('/app/resources').pythonExecutable), searchPath: root };
     const before = await registerCli(config);
     assert.equal(before.state, 'conflict');
     assert.equal(before.existingTarget, old);

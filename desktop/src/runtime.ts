@@ -1,9 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { appendFile, mkdir } from 'node:fs/promises';
-import path from 'node:path';
+import type { HostOperations } from './host-operations';
+import type { DesktopResourcePaths } from './resource-paths';
 
 export type RuntimeEvent = {type: string; origin?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string};
 type RuntimePostgres = {runtime_dsn: string; admin_dsn: string};
@@ -15,9 +13,9 @@ export class PythonRuntime {
   private reachedReady = false;
   private request = 0;
   private inspections = new Map<string, (value: RuntimeEvent) => void>();
-  constructor(readonly resources: string, readonly home: string, readonly onEvent: (event: RuntimeEvent) => void) {}
+  constructor(readonly resources: DesktopResourcePaths, readonly home: string, readonly onEvent: (event: RuntimeEvent) => void, private readonly host: HostOperations) {}
   async waitForPreviousOwner(): Promise<void> {
-    await promisify(execFile)(path.join(this.resources, 'python', 'bin', 'python3'), ['-m', 'pulsara_agent.desktop_runtime', '--wait-owner'], {env:{...process.env,PULSARA_HOME:this.home}});
+    await this.host.execFile(this.resources.pythonExecutable, ['-m', 'pulsara_agent.desktop_runtime', '--wait-owner'], {env:{...process.env,PULSARA_HOME:this.home}});
   }
   async start(preparePostgres: () => Promise<RuntimePostgres>, initialize: boolean): Promise<string> {
     if (this.child || this.preparing) throw new Error('内核进程尚未退出，不能启动第二个内核。');
@@ -25,10 +23,9 @@ export class PythonRuntime {
     let prepared!: () => void;
     this.preparation = new Promise(resolve => { prepared = resolve; });
     try {
-      await mkdir(path.join(this.home, 'desktop'), {recursive: true, mode: 0o700});
-      const child = spawn(path.join(this.resources, 'python', 'bin', 'python3'), ['-m', 'pulsara_agent.desktop_runtime'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: {...process.env, PULSARA_HOME: this.home, PYTHONUNBUFFERED: '1', PLAYWRIGHT_BROWSERS_PATH: path.join(this.resources, 'playwright')},
+      await this.host.prepareRuntimeDirectory(this.home);
+      const child = this.host.spawn(this.resources.pythonExecutable, ['-m', 'pulsara_agent.desktop_runtime'], {
+        env: {...process.env, PULSARA_HOME: this.home, PYTHONUNBUFFERED: '1', PLAYWRIGHT_BROWSERS_PATH: this.resources.playwrightBrowsers},
         cwd: this.home,
       });
       this.child = child;
@@ -42,7 +39,7 @@ export class PythonRuntime {
         }
       });
       child.stderr.on('data', (chunk: Buffer) => {
-        void appendFile(path.join(this.home, 'desktop', 'kernel.log'), chunk, {mode: 0o600})
+        void this.host.appendRuntimeLog(this.home, chunk)
           .catch(error => this.onEvent({type:'failed', error:`无法写入内核日志：${String(error)}`}));
       });
       const ready = new Promise<string>((resolve, reject) => {

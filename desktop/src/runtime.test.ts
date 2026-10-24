@@ -5,11 +5,14 @@ import { watch, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PythonRuntime, type RuntimeEvent } from './runtime';
+import type { HostOperations } from './host-operations';
+import { posixHostOperations } from './host-posix';
+import { desktopResourcePaths } from './resource-paths';
 
 const settings = {runtime_dsn: 'test-runtime-socket', admin_dsn: 'test-admin-socket'};
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
-async function fixture(mode = 'normal') {
+async function fixture(mode = 'normal', host: HostOperations = posixHostOperations) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pulsara-shell-test-'));
   const resources = path.join(root, 'resources');
   const home = path.join(root, 'home');
@@ -31,6 +34,7 @@ lines.on('line', line => {
   const message = JSON.parse(line);
   fs.appendFileSync(path.join(home, 'calls.jsonl'), JSON.stringify(message) + '\\n');
   if (message.type === 'start') {
+    if (mode === 'log') process.stderr.write('kernel diagnostic');
     if (mode === 'malformed') { process.stdout.write('not JSON\\n'); return; }
     output({type:'ready', origin:'http://127.0.0.1:12345', database_state:'ready'});
   } else if (message.type === 'inspect-quit') {
@@ -50,7 +54,7 @@ lines.on('line', line => {
 `);
   await writeFile(path.join(bin, 'python3'), `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} "$@"\n`, {mode:0o755});
   const events: RuntimeEvent[] = [];
-  const runtime = new PythonRuntime(resources, home, event => events.push(event));
+  const runtime = new PythonRuntime(desktopResourcePaths(resources), home, event => events.push(event), host);
   return {root, home, runtime, events,
     async close() {
       await writeFile(path.join(home, 'release'), 'release');
@@ -196,4 +200,42 @@ test('an early child exit is observed while PostgreSQL preparation is still sett
     assert.equal(value.runtime.running, false);
     assert.equal(existsSync(path.join(value.home, 'calls.jsonl')), false);
   } finally { release(); await value.close(); }
+});
+
+test('runtime directory failure rejects before spawning or preparing PostgreSQL', async () => {
+  const failure = new Error('runtime directory unavailable');
+  let spawned = false;
+  let prepared = false;
+  const value = await fixture('normal', {
+    ...posixHostOperations,
+    async prepareRuntimeDirectory() { throw failure; },
+    spawn(...args) { spawned = true; return posixHostOperations.spawn(...args); },
+  });
+  try {
+    await assert.rejects(value.runtime.start(async () => { prepared = true; return settings; }, true), error => error === failure);
+    assert.equal(spawned, false);
+    assert.equal(prepared, false);
+    assert.equal(value.runtime.running, false);
+    await value.runtime.stop();
+  } finally { await value.close(); }
+});
+
+test('a log append failure remains a runtime event and does not replace shutdown ownership', {timeout:10000}, async () => {
+  const failure = new Error('log append failed');
+  let logged!: () => void;
+  const attempted = new Promise<void>(resolve => { logged = resolve; });
+  const value = await fixture('log', {
+    ...posixHostOperations,
+    async appendRuntimeLog() { logged(); throw failure; },
+  });
+  try {
+    await value.runtime.start(async () => settings, true);
+    await attempted;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(value.events.some(event => event.type === 'failed' && event.error === `无法写入内核日志：${String(failure)}`));
+    assert.equal(value.runtime.running, true);
+    await value.runtime.stop();
+    assert.equal(value.runtime.running, false);
+    assert.equal((await value.calls()).filter(value => value.type === 'shutdown').length, 1);
+  } finally { await value.close(); }
 });

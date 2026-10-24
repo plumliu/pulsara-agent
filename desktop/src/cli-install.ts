@@ -2,8 +2,8 @@ import path from 'node:path';
 
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
-export function cliLauncherScript(resources: string): string {
-  const command = `${shellQuote(path.join(resources, 'python', 'bin', 'python3'))} -m pulsara_agent`;
+export function cliLauncherScript(pythonExecutable: string): string {
+  const command = `${shellQuote(pythonExecutable)} -m pulsara_agent`;
   return `#!/bin/sh\n# Pulsara desktop command-line launcher\nexec ${command} "$@"\n`;
 }
 

@@ -1,6 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import { stat } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { BundledPostgres } from './postgres';
@@ -10,10 +9,14 @@ import { cliLauncherScript, cliStatus, registerCli, type CliRegistration } from 
 import { BrowserOwner } from './browser-owner';
 import { StartupCover } from './startup-cover';
 import { isOAuthReturn } from './oauth-return';
+import { desktopResourcePaths } from './resource-paths';
+import { posixHostOperations } from './host-posix';
+import { createPosixPostgresOperations } from './postgres-posix';
 
-const resources = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', 'resources');
+const resources = desktopResourcePaths(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', 'resources'));
+const host = posixHostOperations;
 function resolveHome(): string {
-  try { return execFileSync(path.join(resources,'python/bin/python3'), ['-c','from pulsara_agent.capability.pulsara_home import require_pulsara_home; print(require_pulsara_home())'], {encoding:'utf8'}).trim(); }
+  try { return host.resolveHome(resources.pythonExecutable); }
   catch { dialog.showErrorBox('Pulsara 无法启动','无法解析应用数据目录或缺少随包 Python。请检查 PULSARA_HOME 与安装资源。'); app.exit(1); throw new Error('Desktop home unavailable'); }
 }
 const home = resolveHome();
@@ -33,13 +36,13 @@ let quittingRequest = false;
 let resetting = false;
 let databaseReady = false;
 let startupError = '';
-const postgres = new BundledPostgres(resources, home);
+const postgres = new BundledPostgres(createPosixPostgresOperations(resources.postgresBin, home));
 const runtime = new PythonRuntime(resources, home, event => {
   if ((event.type === 'failed' || event.type === 'exited') && !starting && !quitting && !resetting) {
     startupError = event.error ?? '内核不可用';
     void showStartup(startupError).catch(error => console.error('Could not display startup status', error));
   }
-});
+}, host);
 
 function focusWindow() { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } }
 async function showStartup(error = '', phase = error ? 'failed' : 'starting') {
@@ -96,11 +99,11 @@ function handle(name: string, action: (value?: any) => unknown, startupAllowed =
   ipcMain.handle(`desktop:${name}`, (event, value) => { trusted(event, startupAllowed); return action(value); });
 }
 function cliRegistration(): CliRegistration {
-  const packageTarget = process.platform === 'linux' && resources.startsWith('/opt/')
-    ? path.join(resources, 'bin', 'pulsara') : undefined;
+  const packageTarget = process.platform === 'linux' && resources.root.startsWith('/opt/')
+    ? resources.packageCli : undefined;
   return {
     destination: packageTarget ? '/usr/bin/pulsara' : path.join(os.homedir(), '.local', 'bin', 'pulsara'),
-    script: cliLauncherScript(resources), packageTarget, searchPath: process.env.PATH ?? '',
+    script: cliLauncherScript(resources.pythonExecutable), packageTarget, searchPath: process.env.PATH ?? '',
   };
 }
 // Registration is best effort and independent of kernel/database startup.
