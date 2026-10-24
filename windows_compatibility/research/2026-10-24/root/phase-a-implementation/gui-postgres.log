@@ -1,0 +1,46 @@
+2026-10-24 17:37:16.346 CST [62882] LOG:  registered custom resource manager "pg_search" with ID 137
+2026-10-24 17:37:16.350 CST [62882] LOG:  starting PostgreSQL 17.9 on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-10-24 17:37:16.350 CST [62882] LOG:  listening on Unix socket "/private/tmp/paGUI-78k3eg1_/h/desktop/socket/.s.PGSQL.5432"
+2026-10-24 17:37:16.354 CST [62886] LOG:  database system was shut down at 2026-10-24 17:37:16 CST
+2026-10-24 17:37:16.355 CST [62882] LOG:  database system is ready to accept connections
+2026-10-24 17:37:17.246 CST [62915] WARNING:  key_field is deprecated as of 0.26.0 and is a no-op; it no longer needs to be provided
+2026-10-24 17:37:17.318 CST [62915] WARNING:  key_field is deprecated as of 0.26.0 and is a no-op; it no longer needs to be provided
+2026-10-24 17:39:00.053 CST [65275] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:39:30.086 CST [65973] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:40:00.108 CST [66672] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:40:08.486 CST [62882] LOG:  received fast shutdown request
+2026-10-24 17:40:08.486 CST [62882] LOG:  aborting any active transactions
+2026-10-24 17:40:08.487 CST [62882] LOG:  background worker "logical replication launcher" (PID 62889) exited with exit code 1
+2026-10-24 17:40:08.487 CST [62884] LOG:  shutting down
+2026-10-24 17:40:08.487 CST [62884] LOG:  checkpoint starting: shutdown immediate
+2026-10-24 17:40:08.643 CST [62884] LOG:  checkpoint complete: wrote 1980 buffers (12.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.141 s, sync=0.014 s, total=0.156 s; sync files=539, longest=0.001 s, average=0.001 s; distance=8486 kB, estimate=8486 kB; lsn=0/1CE6B70, redo lsn=0/1CE6B70
+2026-10-24 17:40:08.645 CST [62882] LOG:  database system is shut down
+2026-10-24 17:40:29.210 CST [67400] LOG:  registered custom resource manager "pg_search" with ID 137
+2026-10-24 17:40:29.218 CST [67400] LOG:  starting PostgreSQL 17.9 on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-10-24 17:40:29.219 CST [67400] LOG:  listening on Unix socket "/private/tmp/paGUI-78k3eg1_/h/desktop/socket/.s.PGSQL.5432"
+2026-10-24 17:40:29.223 CST [67404] LOG:  database system was shut down at 2026-10-24 17:40:08 CST
+2026-10-24 17:40:29.252 CST [67400] LOG:  database system is ready to accept connections
+2026-10-24 17:40:30.824 CST [67443] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:41:00.847 CST [68203] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:41:50.347 CST [69514] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:41:50.737 CST [67400] LOG:  received fast shutdown request
+2026-10-24 17:41:50.737 CST [67400] LOG:  aborting any active transactions
+2026-10-24 17:41:50.738 CST [67400] LOG:  background worker "logical replication launcher" (PID 67408) exited with exit code 1
+2026-10-24 17:41:50.738 CST [67402] LOG:  shutting down
+2026-10-24 17:41:50.738 CST [67402] LOG:  checkpoint starting: shutdown immediate
+2026-10-24 17:41:50.742 CST [67402] LOG:  checkpoint complete: wrote 33 buffers (0.2%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.001 s, total=0.005 s; sync files=7, longest=0.001 s, average=0.001 s; distance=59 kB, estimate=59 kB; lsn=0/1CF5AC0, redo lsn=0/1CF5AC0
+2026-10-24 17:41:50.744 CST [67400] LOG:  database system is shut down
+2026-10-24 17:43:22.705 CST [72306] LOG:  registered custom resource manager "pg_search" with ID 137
+2026-10-24 17:43:22.715 CST [72306] LOG:  starting PostgreSQL 17.9 on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-10-24 17:43:22.715 CST [72306] LOG:  listening on Unix socket "/private/tmp/paGUI-78k3eg1_/h/desktop/socket/.s.PGSQL.5432"
+2026-10-24 17:43:22.734 CST [72311] LOG:  database system was shut down at 2026-10-24 17:41:50 CST
+2026-10-24 17:43:22.740 CST [72306] LOG:  database system is ready to accept connections
+2026-10-24 17:43:24.296 CST [72368] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:43:54.321 CST [73450] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-24 17:44:10.483 CST [72306] LOG:  received fast shutdown request
+2026-10-24 17:44:10.483 CST [72306] LOG:  aborting any active transactions
+2026-10-24 17:44:10.484 CST [72306] LOG:  background worker "logical replication launcher" (PID 72314) exited with exit code 1
+2026-10-24 17:44:10.484 CST [72309] LOG:  shutting down
+2026-10-24 17:44:10.484 CST [72309] LOG:  checkpoint starting: shutdown immediate
+2026-10-24 17:44:10.486 CST [72309] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/1CF5B70, redo lsn=0/1CF5B70
+2026-10-24 17:44:10.487 CST [72306] LOG:  database system is shut down

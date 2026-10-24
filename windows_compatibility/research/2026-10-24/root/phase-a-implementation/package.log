@@ -1,0 +1,21 @@
+
+> pulsara-desktop@0.1.0-alpha.6 package:dir
+> node scripts/linux-hooks.cjs && npm run build && electron-builder --dir --publish never --config.directories.output=/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/package
+
+
+> pulsara-desktop@0.1.0-alpha.6 build
+> tsc
+
+  • electron-builder  version=26.15.3 os=25.2.0
+  • loaded configuration  file=package.json ("build" field)
+  • executing @electron/rebuild  electronVersion=44.9.0 arch=arm64 buildFromSource=false workspaceRoot=/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop projectDir=./ appDir=./
+  • installing native dependencies  arch=arm64
+  • completed installing native dependencies
+  • packaging       platform=darwin arch=arm64 electron=44.9.0 appOutDir=/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/package/mac-arm64
+  • downloaded      label=electron progress=100%
+  • downloaded electron zip extracted successfully  output=/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/package/mac-arm64
+  • searching for node modules  pm=npm searchDir=/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop
+  • searching for node modules  pm=traversal searchDir=/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop
+  • using manual traversal of node_modules to build dependency tree
+  • no node modules returned while searching directories  searchDirectories=[""]
+  • skipped macOS code signing  reason=identity explicitly is set to null

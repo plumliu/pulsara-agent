@@ -1,0 +1,242 @@
+{
+  "comparison": "complete Buffer.equals, no digests",
+  "modules": [
+    "main",
+    "runtime",
+    "postgres",
+    "resource-paths",
+    "host-operations",
+    "host-posix",
+    "postgres-operations",
+    "postgres-posix",
+    "cli-install"
+  ],
+  "packages": [
+    {
+      "label": "package",
+      "app": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/package/mac-arm64/pulsara.app",
+      "archive": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/package/mac-arm64/pulsara.app/Contents/Resources/app.asar",
+      "comparisons": [
+        {
+          "entry": "dist/main.js",
+          "packagedBytes": 17419,
+          "currentBytes": 17419,
+          "equal": true
+        },
+        {
+          "entry": "dist/runtime.js",
+          "packagedBytes": 7492,
+          "currentBytes": 7492,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres.js",
+          "packagedBytes": 5318,
+          "currentBytes": 5318,
+          "equal": true
+        },
+        {
+          "entry": "dist/resource-paths.js",
+          "packagedBytes": 704,
+          "currentBytes": 704,
+          "equal": true
+        },
+        {
+          "entry": "dist/host-operations.js",
+          "packagedBytes": 77,
+          "currentBytes": 77,
+          "equal": true
+        },
+        {
+          "entry": "dist/host-posix.js",
+          "packagedBytes": 1487,
+          "currentBytes": 1487,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres-operations.js",
+          "packagedBytes": 77,
+          "currentBytes": 77,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres-posix.js",
+          "packagedBytes": 2729,
+          "currentBytes": 2729,
+          "equal": true
+        },
+        {
+          "entry": "dist/cli-install.js",
+          "packagedBytes": 4566,
+          "currentBytes": 4566,
+          "equal": true
+        }
+      ]
+    },
+    {
+      "label": "installed-clone",
+      "app": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/installed/pulsara.app",
+      "archive": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/installed/pulsara.app/Contents/Resources/app.asar",
+      "comparisons": [
+        {
+          "entry": "dist/main.js",
+          "packagedBytes": 17419,
+          "currentBytes": 17419,
+          "equal": true
+        },
+        {
+          "entry": "dist/runtime.js",
+          "packagedBytes": 7492,
+          "currentBytes": 7492,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres.js",
+          "packagedBytes": 5318,
+          "currentBytes": 5318,
+          "equal": true
+        },
+        {
+          "entry": "dist/resource-paths.js",
+          "packagedBytes": 704,
+          "currentBytes": 704,
+          "equal": true
+        },
+        {
+          "entry": "dist/host-operations.js",
+          "packagedBytes": 77,
+          "currentBytes": 77,
+          "equal": true
+        },
+        {
+          "entry": "dist/host-posix.js",
+          "packagedBytes": 1487,
+          "currentBytes": 1487,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres-operations.js",
+          "packagedBytes": 77,
+          "currentBytes": 77,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres-posix.js",
+          "packagedBytes": 2729,
+          "currentBytes": 2729,
+          "equal": true
+        },
+        {
+          "entry": "dist/cli-install.js",
+          "packagedBytes": 4566,
+          "currentBytes": 4566,
+          "equal": true
+        }
+      ]
+    }
+  ],
+  "cli": [
+    {
+      "label": "package",
+      "scratch": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6",
+      "relocated": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path",
+      "copiedPython": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python",
+      "script": "#!/bin/sh\n# Pulsara desktop command-line launcher\nexec '/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源'\\''s path/python/bin/python3' -m pulsara_agent \"$@\"\n",
+      "source": {
+        "executable": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python/bin/python3",
+        "prefix": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python",
+        "module": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+        "version": "0.1.0a6"
+      },
+      "commands": [
+        {
+          "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python/bin/python3",
+          "args": [
+            "-I",
+            "-B",
+            "-c",
+            "import json,sys,pulsara_agent; print(json.dumps({\"executable\":sys.executable,\"prefix\":sys.prefix,\"module\":pulsara_agent.__file__,\"version\":pulsara_agent.__version__},ensure_ascii=False))"
+          ],
+          "status": 0,
+          "signal": null,
+          "stdout": "{\"executable\": \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python/bin/python3\", \"prefix\": \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python\", \"module\": \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/中文 资源's path/python/lib/python3.12/site-packages/pulsara_agent/__init__.py\", \"version\": \"0.1.0a6\"}\n",
+          "stderr": ""
+        },
+        {
+          "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/pulsara",
+          "args": [
+            "--version"
+          ],
+          "status": 0,
+          "signal": null,
+          "stdout": "0.1.0a6\n",
+          "stderr": ""
+        },
+        {
+          "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-package-7MIDJ6/pulsara",
+          "args": [
+            "--help"
+          ],
+          "status": 0,
+          "signal": null,
+          "stdout": "usage: pulsara [-h] [--version]\n               {app,skills,plugins,mcp,hooks,db,config-check} ...\n\npositional arguments:\n  {app,skills,plugins,mcp,hooks,db,config-check}\n    app                 Launch or focus the installed Pulsara desktop\n                        application.\n    plugins             Manage local Agent Plugins 1.0 packages.\n    mcp                 Manage MCP server configuration.\n    hooks               Inspect and trust command Hooks.\n\noptions:\n  -h, --help            show this help message and exit\n  --version\n",
+          "stderr": ""
+        }
+      ],
+      "noPulsaraHomeCreated": true,
+      "scratchRemoved": true
+    },
+    {
+      "label": "installed-clone",
+      "scratch": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF",
+      "relocated": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path",
+      "copiedPython": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python",
+      "script": "#!/bin/sh\n# Pulsara desktop command-line launcher\nexec '/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源'\\''s path/python/bin/python3' -m pulsara_agent \"$@\"\n",
+      "source": {
+        "executable": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python/bin/python3",
+        "prefix": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python",
+        "module": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+        "version": "0.1.0a6"
+      },
+      "commands": [
+        {
+          "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python/bin/python3",
+          "args": [
+            "-I",
+            "-B",
+            "-c",
+            "import json,sys,pulsara_agent; print(json.dumps({\"executable\":sys.executable,\"prefix\":sys.prefix,\"module\":pulsara_agent.__file__,\"version\":pulsara_agent.__version__},ensure_ascii=False))"
+          ],
+          "status": 0,
+          "signal": null,
+          "stdout": "{\"executable\": \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python/bin/python3\", \"prefix\": \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python\", \"module\": \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/中文 资源's path/python/lib/python3.12/site-packages/pulsara_agent/__init__.py\", \"version\": \"0.1.0a6\"}\n",
+          "stderr": ""
+        },
+        {
+          "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/pulsara",
+          "args": [
+            "--version"
+          ],
+          "status": 0,
+          "signal": null,
+          "stdout": "0.1.0a6\n",
+          "stderr": ""
+        },
+        {
+          "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/cli-installed-clone-1aNgLF/pulsara",
+          "args": [
+            "--help"
+          ],
+          "status": 0,
+          "signal": null,
+          "stdout": "usage: pulsara [-h] [--version]\n               {app,skills,plugins,mcp,hooks,db,config-check} ...\n\npositional arguments:\n  {app,skills,plugins,mcp,hooks,db,config-check}\n    app                 Launch or focus the installed Pulsara desktop\n                        application.\n    plugins             Manage local Agent Plugins 1.0 packages.\n    mcp                 Manage MCP server configuration.\n    hooks               Inspect and trust command Hooks.\n\noptions:\n  -h, --help            show this help message and exit\n  --version\n",
+          "stderr": ""
+        }
+      ],
+      "noPulsaraHomeCreated": true,
+      "scratchRemoved": true
+    }
+  ],
+  "isolation": "No GUI, no registerCli, no real user CLI operation. Only --version/--help and an isolated source probe.",
+  "pass": true
+}

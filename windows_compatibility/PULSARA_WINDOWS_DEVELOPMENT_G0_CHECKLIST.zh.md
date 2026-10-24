@@ -380,7 +380,7 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 ## 8. 如何记录、同步和停止
 
-两份clone各在 `output/windows-g0/<个人名>/<一次实验名>/`记证据，别互相覆盖；此目录被Git忽略，**不会随本次提交自动带到Windows**。过去Mac的详细output也不会通过clone出现，已提交spec §16携带结论；需要历史原始证据时另从原机器明确取得，不用缺失文件推断没跑。
+两份clone各在 `output/windows-g0/<个人名>/<一次实验名>/`记证据，别互相覆盖；此目录被Git忽略，**不会随本次提交自动带到Windows**。本次已归整的Mac文字研究/原始日志/探针在本目录`research/2026-10-24/`随Git提供，spec §16携带结论；其中应用包/pytest临时数据等生成物仅原机器保留，不会通过clone出现，也不能在Windows复用Mac应用包。后续新G0的output仍不会自动提交。
 
 每个闸门保留：Git commit、Windows/WSL/rootfs/SDK来源和版本、运行用户、实际repo/home/PG/socket/端口、完整命令/退出码/输入输出、确切进程与锁/文件观察、截图、清理结果。官方制品校验digest可保留；其他代码/文档/证据不另造hash。实际credential精确删除，保留其他有用错误/响应，不提交raw settings、token或dump凭据。
 
@@ -409,3 +409,6 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 ## 10. 本清单交付检查
 
 root与三位`gpt-6.1-sol high` subagents已对照冻结spec、当前代码/锁文件、官方平台文档交叉审阅本清单，均同意交付。已采纳WSLENV大小写清理、Windows Node实际平台/架构/路径观测、明确退出码、mise版本来源和cloud-image签名/编辑步骤修正。示例JS做过`node --check`，列出的三个纯测试文件在Mac本机5/5通过；**这些不是Windows运行证据，G0-W状态仍为待实测**。本轮没有部署WSL或进入Phase B。
+
+
+活动实施目录入口：[README.md](README.md)。本文及冻结spec原位于仓库根，现统一存放`windows_compatibility/`；本文命令仍从对应系统的**仓库根**执行，不能先cd到本文件目录再运行。

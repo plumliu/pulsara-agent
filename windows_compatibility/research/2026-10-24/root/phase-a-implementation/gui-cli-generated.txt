@@ -1,0 +1,3 @@
+#!/bin/sh
+# Pulsara desktop command-line launcher
+exec '/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/installed/pulsara.app/Contents/Resources/python/bin/python3' -m pulsara_agent "$@"

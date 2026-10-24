@@ -1,0 +1,31 @@
+{
+  "observedAt": "2026-10-24T09:47:48.067Z",
+  "cli": {
+    "destination": "/Users/plumliu/.local/bin/pulsara",
+    "regularFile": true,
+    "symlink": false,
+    "executable": true,
+    "exactCurrentProductionLauncher": true
+  },
+  "temporaryHomes": [
+    {
+      "path": "/private/tmp/paGUI-78k3eg1_",
+      "exists": false
+    },
+    {
+      "path": "/private/tmp/prt-eof-tFGotX",
+      "exists": false
+    },
+    {
+      "path": "/private/tmp/pga-WOCf4r",
+      "exists": false
+    },
+    {
+      "path": "/private/tmp/paA-6820s4",
+      "exists": false
+    }
+  ],
+  "testProcesses": [],
+  "productionApp": "20252 /Applications/Pulsara.app/Contents/MacOS/pulsara",
+  "productionKernel": "20270 /Applications/Pulsara.app/Contents/Resources/python/bin/python3"
+}

@@ -1,0 +1,15 @@
+
+> pulsara-desktop@0.1.0-alpha.6 test:startup
+> npm run build && electron scripts/startup-cover-smoke.cjs
+
+
+> pulsara-desktop@0.1.0-alpha.6 build
+> tsc
+
+Downloading Electron binary...
+Startup document loaded
+PASS: hide settles startup IPC and releases the renderer interaction gate
+PASS: minimize settles startup IPC and releases the renderer interaction gate
+PASS: destroy-contents settles startup IPC and releases the renderer interaction gate
+PASS: replace settles startup IPC and releases the renderer interaction gate
+PASS: one startup document survives workbench navigation; logo centered; fade, error controls, trust and cleanup verified.

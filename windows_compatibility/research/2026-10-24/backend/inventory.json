@@ -1,0 +1,840 @@
+{
+  "kind": "static source evidence; no Windows execution",
+  "packages": [
+    {
+      "name": "aiohttp",
+      "version": "3.14.3",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "aiohttp-3.14.3-cp312-cp312-win32.whl",
+        "aiohttp-3.14.3-cp312-cp312-win_amd64.whl",
+        "aiohttp-3.14.3-cp312-cp312-win_arm64.whl"
+      ]
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "cffi-2.1.1-cp312-cp312-win32.whl",
+        "cffi-2.1.1-cp312-cp312-win_amd64.whl",
+        "cffi-2.1.1-cp312-cp312-win_arm64.whl"
+      ]
+    },
+    {
+      "name": "cryptography",
+      "version": "50.0.0",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "cryptography-50.0.0-cp311-abi3-win_amd64.whl",
+        "cryptography-50.0.0-cp39-abi3-win_amd64.whl"
+      ]
+    },
+    {
+      "name": "google-re2",
+      "version": "1.1.20251105",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "google_re2-1.1.20251105-1-cp312-cp312-win32.whl",
+        "google_re2-1.1.20251105-1-cp312-cp312-win_amd64.whl",
+        "google_re2-1.1.20251105-1-cp312-cp312-win_arm64.whl"
+      ]
+    },
+    {
+      "name": "greenlet",
+      "version": "3.5.6",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "greenlet-3.5.6-cp312-cp312-win_amd64.whl",
+        "greenlet-3.5.6-cp312-cp312-win_arm64.whl"
+      ]
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "pillow-12.3.0-cp312-cp312-win32.whl",
+        "pillow-12.3.0-cp312-cp312-win_amd64.whl",
+        "pillow-12.3.0-cp312-cp312-win_arm64.whl"
+      ]
+    },
+    {
+      "name": "playwright",
+      "version": "1.63.0",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "playwright-1.63.0-py3-none-win32.whl",
+        "playwright-1.63.0-py3-none-win_amd64.whl",
+        "playwright-1.63.0-py3-none-win_arm64.whl"
+      ]
+    },
+    {
+      "name": "psycopg-binary",
+      "version": "3.3.4",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "psycopg_binary-3.3.4-cp312-cp312-win_amd64.whl"
+      ]
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.46.4",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "pydantic_core-2.46.4-cp312-cp312-win32.whl",
+        "pydantic_core-2.46.4-cp312-cp312-win_amd64.whl",
+        "pydantic_core-2.46.4-cp312-cp312-win_arm64.whl"
+      ]
+    },
+    {
+      "name": "pywin32",
+      "version": "312",
+      "windows_cp312_or_abi3_or_py3_wheels": [
+        "pywin32-312-cp312-cp312-win32.whl",
+        "pywin32-312-cp312-cp312-win_amd64.whl",
+        "pywin32-312-cp312-cp312-win_arm64.whl"
+      ]
+    }
+  ],
+  "direct_unix_surface": [
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1032,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 747,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 781,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1102,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1151,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 51,
+      "attribute": "O_CLOEXEC"
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 51,
+      "attribute": "O_NOFOLLOW"
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 51,
+      "attribute": "O_DIRECTORY"
+    },
+    {
+      "path": "src/pulsara_agent/capability/skill_import.py",
+      "line": 54,
+      "attribute": "O_NOFOLLOW"
+    },
+    {
+      "path": "src/pulsara_agent/capability/skill_import.py",
+      "line": 54,
+      "attribute": "O_DIRECTORY"
+    },
+    {
+      "path": "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "line": 379,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "line": 481,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "line": 465,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "line": 384,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "line": 486,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/conversation_kernel/visualization_screenshot.py",
+      "line": 54,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/conversation_kernel/visualization_screenshot.py",
+      "line": 65,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 119,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 76,
+      "attribute": "O_NOFOLLOW"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 84,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 139,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 427,
+      "attribute": "O_CLOEXEC"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 482,
+      "attribute": "O_CLOEXEC"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 427,
+      "attribute": "O_NOFOLLOW"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 482,
+      "attribute": "O_NOFOLLOW"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_runtime.py",
+      "line": 40,
+      "attribute": "O_NOFOLLOW"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_runtime.py",
+      "line": 38,
+      "attribute": "getuid"
+    },
+    {
+      "path": "src/pulsara_agent/desktop_runtime.py",
+      "line": 67,
+      "attribute": "getuid"
+    },
+    {
+      "path": "src/pulsara_agent/hooks/executor.py",
+      "line": 524,
+      "attribute": "killpg"
+    },
+    {
+      "path": "src/pulsara_agent/hooks/trust.py",
+      "line": 347,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1750,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1589,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1817,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2043,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1819,
+      "attribute": "geteuid"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1564,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1739,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1745,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1614,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1630,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 627,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2068,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 637,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/settings.py",
+      "line": 396,
+      "attribute": "fchmod"
+    },
+    {
+      "path": "src/pulsara_agent/settings.py",
+      "line": 398,
+      "attribute": "fchmod"
+    }
+  ],
+  "dir_fd_calls": [
+    {
+      "path": "src/pulsara_agent/capability/local_skill_management.py",
+      "line": 624
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_management.py",
+      "line": 631
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 996
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1005
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1015
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1027
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1063
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1080
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1598
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1654
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1666
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1674
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 947
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 985
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1135
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1209
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1250
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1470
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1676
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1681
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1683
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 741
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 775
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 829
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1099
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1100
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1144
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1430
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 743
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 745
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 777
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 779
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 840
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_publisher.py",
+      "line": 1442
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 58
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 187
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 191
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 83
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 104
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 189
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 197
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 200
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 115
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 144
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 150
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skill_removal.py",
+      "line": 132
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skills.py",
+      "line": 1087
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skills.py",
+      "line": 1319
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skills.py",
+      "line": 1252
+    },
+    {
+      "path": "src/pulsara_agent/capability/local_skills.py",
+      "line": 1274
+    },
+    {
+      "path": "src/pulsara_agent/capability/skill_import.py",
+      "line": 49
+    },
+    {
+      "path": "src/pulsara_agent/capability/skill_import.py",
+      "line": 52
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 75
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 105
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 66
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 67
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 98
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 134
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_import.py",
+      "line": 140
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 425
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 480
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 234
+    },
+    {
+      "path": "src/pulsara_agent/desktop_app/file_preview.py",
+      "line": 422
+    },
+    {
+      "path": "src/pulsara_agent/hooks/source.py",
+      "line": 413
+    },
+    {
+      "path": "src/pulsara_agent/hooks/source.py",
+      "line": 383
+    },
+    {
+      "path": "src/pulsara_agent/hooks/source.py",
+      "line": 180
+    },
+    {
+      "path": "src/pulsara_agent/hooks/source.py",
+      "line": 192
+    },
+    {
+      "path": "src/pulsara_agent/hooks/source.py",
+      "line": 373
+    },
+    {
+      "path": "src/pulsara_agent/hooks/source.py",
+      "line": 205
+    },
+    {
+      "path": "src/pulsara_agent/hooks/trust.py",
+      "line": 136
+    },
+    {
+      "path": "src/pulsara_agent/hooks/trust.py",
+      "line": 156
+    },
+    {
+      "path": "src/pulsara_agent/hooks/trust.py",
+      "line": 346
+    },
+    {
+      "path": "src/pulsara_agent/hooks/trust.py",
+      "line": 353
+    },
+    {
+      "path": "src/pulsara_agent/hooks/trust.py",
+      "line": 384
+    },
+    {
+      "path": "src/pulsara_agent/hooks/trust.py",
+      "line": 369
+    },
+    {
+      "path": "src/pulsara_agent/local_source_binding.py",
+      "line": 50
+    },
+    {
+      "path": "src/pulsara_agent/local_source_binding.py",
+      "line": 70
+    },
+    {
+      "path": "src/pulsara_agent/local_source_binding.py",
+      "line": 76
+    },
+    {
+      "path": "src/pulsara_agent/local_source_binding.py",
+      "line": 73
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_core.py",
+      "line": 585
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_core.py",
+      "line": 607
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_core.py",
+      "line": 441
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_core.py",
+      "line": 470
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1900
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1918
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1576
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1856
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1895
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2021
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2036
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2098
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 520
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 521
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1762
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1780
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1866
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 970
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1560
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1737
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1743
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1878
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2007
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2082
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2090
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 972
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1185
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1190
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1424
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1434
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1562
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1563
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1611
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1612
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1623
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1334
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2057
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1197
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 1342
+    },
+    {
+      "path": "src/pulsara_agent/plugins/package_store.py",
+      "line": 2063
+    },
+    {
+      "path": "src/pulsara_agent/settings.py",
+      "line": 397
+    },
+    {
+      "path": "src/pulsara_agent/settings.py",
+      "line": 404
+    },
+    {
+      "path": "src/pulsara_agent/settings.py",
+      "line": 342
+    },
+    {
+      "path": "src/pulsara_agent/settings.py",
+      "line": 417
+    },
+    {
+      "path": "src/pulsara_agent/tools/builtins/filesystem.py",
+      "line": 1492
+    },
+    {
+      "path": "src/pulsara_agent/tools/builtins/filesystem.py",
+      "line": 1535
+    },
+    {
+      "path": "src/pulsara_agent/tools/builtins/filesystem.py",
+      "line": 1512
+    },
+    {
+      "path": "src/pulsara_agent/tools/builtins/filesystem.py",
+      "line": 1543
+    },
+    {
+      "path": "src/pulsara_agent/tools/builtins/filesystem.py",
+      "line": 1563
+    },
+    {
+      "path": "src/pulsara_agent/tools/builtins/filesystem.py",
+      "line": 1577
+    },
+    {
+      "path": "src/pulsara_agent/tools/builtins/filesystem.py",
+      "line": 1579
+    }
+  ]
+}

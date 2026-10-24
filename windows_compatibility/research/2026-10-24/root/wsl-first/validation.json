@@ -1,0 +1,19 @@
+{
+  "lines": 401,
+  "checks": {
+    "sections_1_to_15": true,
+    "paired_code_fences": true,
+    "literal_tests_exist": true,
+    "native_route_not_active": true,
+    "narrow_phase_a": true,
+    "gui_picker_explicit": true,
+    "pg_ready_before_operation": true,
+    "oauth_injection_explicit": true,
+    "frozen": true,
+    "g0_not_executed": true,
+    "all_three_round2_records": true,
+    "old_blocking_clauses_absent": true
+  },
+  "missing_literal_tests": [],
+  "scope": "documentation/location checks only; no product/G0/provider/database execution"
+}

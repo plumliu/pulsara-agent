@@ -61,6 +61,17 @@ logs/
 # Local experiment and generated output
 /experiments/
 /output/
+# Windows research text/logs travel with the implementation docs. Keep native
+# artifacts and fixture state out; root rules also apply to Hatch source builds.
+!/windows_compatibility/research/**/*.log
+/windows_compatibility/research/**/package/
+/windows_compatibility/research/**/installed/
+/windows_compatibility/research/**/pytest-tmp/
+/windows_compatibility/**/*.app/
+/windows_compatibility/**/*.dmg
+/windows_compatibility/**/*.blockmap
+/windows_compatibility/**/*.whl
+/windows_compatibility/**/*.deb
 /.benchmarks/
 /dogfood_evidence/
 .playwright-cli/

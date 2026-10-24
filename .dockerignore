@@ -11,6 +11,7 @@ frontend/dist
 .claude
 src/pulsara_agent/_vendor
 output
+windows_compatibility
 dogfood_evidence
 dist
 build

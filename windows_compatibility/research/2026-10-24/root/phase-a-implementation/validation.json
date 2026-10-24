@@ -1,0 +1,31 @@
+{
+  "scope": "Phase A only",
+  "code": "implemented",
+  "mac_arm64": "verified",
+  "ubuntu_native_x64_arm64_gui": "pending acceptance by explicit user decision",
+  "phase_b": "not implemented",
+  "g0_w": "not executed",
+  "windows_support": "not activated",
+  "baseline": {
+    "node": 31,
+    "python_desktop": 23
+  },
+  "final": {
+    "node": 46,
+    "python_desktop": 23,
+    "browser_smoke": 11,
+    "mise_verify": "passed",
+    "startup_smoke": "passed",
+    "wheel_outside_checkout": "passed",
+    "real_pg_runtime_lifecycle": "passed",
+    "mac_app_bundle_gui_normal_slow_failed_quit_reopen": "passed",
+    "ruff": "passed",
+    "diff_check": "passed"
+  },
+  "user_cli": "restored executable regular production launcher; no exact original content snapshot",
+  "production_app_kernel": "kept alive",
+  "production_settings_database": "unchanged",
+  "provider_calls": false,
+  "review": "root and all three gpt-6.1-sol/high reviewers explicitly approved",
+  "implementation_mac_evidence": "frozen"
+}

@@ -1,0 +1,75 @@
+{
+  "result": "passed",
+  "home": "/private/tmp/prt-eof-tFGotX",
+  "python": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+  "preparePostgresCalls": 1,
+  "postgresStarted": false,
+  "originalErrorIdentityPreserved": true,
+  "childPid": 70597,
+  "childClosed": true,
+  "childExitCode": 0,
+  "stdinEnded": true,
+  "runtimeRunning": false,
+  "events": [
+    {
+      "type": "stopping"
+    },
+    {
+      "type": "stopped"
+    }
+  ],
+  "observations": [
+    {
+      "event": "spawn-called",
+      "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+      "args": [
+        "-m",
+        "pulsara_agent.desktop_runtime"
+      ],
+      "cwd": "/private/tmp/prt-eof-tFGotX"
+    },
+    {
+      "event": "spawn",
+      "pid": 70597
+    },
+    {
+      "event": "exit",
+      "pid": 70597,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "event": "close",
+      "pid": 70597,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "event": "finite-exec",
+      "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+      "args": [
+        "-m",
+        "pulsara_agent.desktop_runtime",
+        "--wait-owner"
+      ]
+    },
+    {
+      "event": "finite-exec",
+      "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+      "args": [
+        "-m",
+        "pulsara_agent.desktop_runtime",
+        "--wait-owner"
+      ]
+    }
+  ],
+  "beforeWait": [],
+  "afterWait": [
+    "kernel.lock"
+  ],
+  "waitOwnerCompletedTwice": true,
+  "retainedLockFile": "expected lifetime-lock inode only; no held owner (two independent --wait-owner completions)",
+  "settingsCreated": false,
+  "postgresDirectoryCreated": false
+}
+{"cleanup":"temporary experiment home removed","home":"/private/tmp/prt-eof-tFGotX"}

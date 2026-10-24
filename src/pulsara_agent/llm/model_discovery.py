@@ -16,7 +16,7 @@ from pulsara_agent.llm.stream_limits import MAX_COMPLETED_PROVIDER_RESPONSE_AGGR
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 # One interactive discovery operation, matching connection_probe's network budget.
-# See PULSARA_CUSTOM_MODEL_DISCOVERY_IMPLEMENTATION_SPEC.zh.md.
+# See archived_docs/PULSARA_CUSTOM_MODEL_DISCOVERY_IMPLEMENTATION_SPEC.zh.md.
 _DISCOVERY_TIMEOUT = OpenAITransportTimeoutPolicy(10, 10, 10, 30, 45)
 
 

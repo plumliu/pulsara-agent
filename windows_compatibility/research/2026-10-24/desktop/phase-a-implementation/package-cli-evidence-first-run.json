@@ -1,0 +1,81 @@
+{
+  "comparison": "complete Buffer.equals, no digests",
+  "modules": [
+    "main",
+    "runtime",
+    "postgres",
+    "resource-paths",
+    "host-operations",
+    "host-posix",
+    "postgres-operations",
+    "postgres-posix",
+    "cli-install"
+  ],
+  "packages": [
+    {
+      "label": "package",
+      "app": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/package/mac-arm64/pulsara.app",
+      "archive": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/root/phase-a-implementation/package/mac-arm64/pulsara.app/Contents/Resources/app.asar",
+      "comparisons": [
+        {
+          "entry": "dist/main.js",
+          "packagedBytes": 17419,
+          "currentBytes": 17419,
+          "equal": true
+        },
+        {
+          "entry": "dist/runtime.js",
+          "packagedBytes": 7492,
+          "currentBytes": 7492,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres.js",
+          "packagedBytes": 5318,
+          "currentBytes": 5318,
+          "equal": true
+        },
+        {
+          "entry": "dist/resource-paths.js",
+          "packagedBytes": 704,
+          "currentBytes": 704,
+          "equal": true
+        },
+        {
+          "entry": "dist/host-operations.js",
+          "packagedBytes": 77,
+          "currentBytes": 77,
+          "equal": true
+        },
+        {
+          "entry": "dist/host-posix.js",
+          "packagedBytes": 1487,
+          "currentBytes": 1487,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres-operations.js",
+          "packagedBytes": 77,
+          "currentBytes": 77,
+          "equal": true
+        },
+        {
+          "entry": "dist/postgres-posix.js",
+          "packagedBytes": 2729,
+          "currentBytes": 2729,
+          "equal": true
+        },
+        {
+          "entry": "dist/cli-install.js",
+          "packagedBytes": 4566,
+          "currentBytes": 4566,
+          "equal": true
+        }
+      ]
+    }
+  ],
+  "cli": [],
+  "isolation": "No GUI, no registerCli, no real user CLI operation. Only --version/--help and an isolated source probe.",
+  "pass": false,
+  "failure": "AssertionError [ERR_ASSERTION]: The input did not match the regular expression /Launch or focus the installed Pulsara desktop application/. Input:\n\n'usage: pulsara [-h] [--version]\\n' +\n  '               {app,skills,plugins,mcp,hooks,db,config-check} ...\\n' +\n  '\\n' +\n  'positional arguments:\\n' +\n  '  {app,skills,plugins,mcp,hooks,db,config-check}\\n' +\n  '    app                 Launch or focus the installed Pulsara desktop\\n' +\n  '                        application.\\n' +\n  '    plugins             Manage local Agent Plugins 1.0 packages.\\n' +\n  '    mcp                 Manage MCP server configuration.\\n' +\n  '    hooks               Inspect and trust command Hooks.\\n' +\n  '\\n' +\n  'options:\\n' +\n  '  -h, --help            show this help message and exit\\n' +\n  '  --version\\n'\n\n    at Object.<anonymous> (/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/phase-a-implementation/verify-package-cli.cjs:63:12)\n    at Module._compile (node:internal/modules/cjs/loader:1781:14)\n    at Object..js (node:internal/modules/cjs/loader:1913:10)\n    at Module.load (node:internal/modules/cjs/loader:1505:32)\n    at Function._load (node:internal/modules/cjs/loader:1309:12)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)\n    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)\n    at node:internal/main/run_main_module:36:49"
+}

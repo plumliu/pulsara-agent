@@ -1,0 +1,19 @@
+{
+  "file": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md",
+  "lines": 397,
+  "characters": 37070,
+  "checks": {
+    "frozen_status": true,
+    "fifteen_sections": true,
+    "balanced_fences": true,
+    "no_draft_or_placeholder": true,
+    "no_trailing_whitespace": true,
+    "all_reviewers_explicitly_approve": true,
+    "local_markdown_links_exist": true
+  },
+  "reviews": [
+    "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/terminal/review-round2.md",
+    "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/backend/review-round2.md",
+    "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/windows-compat-20261024/desktop/review-round2.md"
+  ]
+}

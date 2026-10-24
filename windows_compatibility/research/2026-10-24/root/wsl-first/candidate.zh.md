@@ -1,8 +1,8 @@
 # Pulsara Windows 兼容实施规格：Windows Electron + WSL2 内核
 
-日期：2026-10-24。状态：**Windows Electron + WSL2全内核实施规格已冻结。收窄后的Phase A已实现，macOS本机回归和应用包GUI验收通过，本次实现及本机证据已交叉审阅冻结；Ubuntu原生/图形资格按用户要求待验收。Phase B未实施，G0-W未执行，Windows支持未激活。**
+日期：2026-10-24。状态：**Windows Electron + WSL2全内核实施规格已冻结。收窄后的Phase A/B未实施，G0-W未执行，Windows支持未激活。**
 
-调研基线：Git `60e8f21d37ca2c650500ae14438630006d3e62fb`。路线冻结时仅修规格；后续按用户授权实施收窄Phase A，实际记录见第16节。不部署WSL发行版、不修改保存配置、不调用真实provider；真实PG实验仅操作已确认的独立临时实例。冻结规格、完成A、通过G0-W、Windows激活是四个不同状态。
+调研基线：Git `60e8f21d37ca2c650500ae14438630006d3e62fb`。本轮只修规格，不实施代码、不部署发行版、不修改保存配置、不执行数据库重置或真实provider。冻结规格、完成A、通过G0-W、Windows激活是四个不同状态。
 
 ## 1. 路线决策与支持范围
 
@@ -27,7 +27,7 @@
 | `terminal_protocol/v3_gateway.py`、`desktop_app/protocol_client.py` | 会话内部protobuf/auth/attachment经Unix socket通信 | gateway/client都在Linux，Unix协议原样保留，不搬loopback |
 | `desktop_runtime.py` | stdin/stdout UTF-8 JSONL、start帧门、kernel lifetime flock、Unix diagnostics、application.aclose | Linux入口继续负责原kernel关闭；WSL carrier是外层传输，不成为kernel完成authority |
 | `desktop/src/main.ts`、`runtime.ts` | main唯一boot/reset/requestQuit；runtime唯一子进程/start/ready/EOF/inspect owner | 注入宿主操作和明确host/guest路径，保留一套状态机 |
-| `desktop/src/postgres.ts` | 调研时Node同时拥有PG状态/顺序与物理操作；A已将后者分到postgres-posix，状态/顺序仍唯一 | 保留唯一TS lifecycle owner；文件/PG操作经窄Linux执行件，不能仅给binary加wsl.exe前缀 |
+| `desktop/src/postgres.ts` | Node同时拥有PG状态/顺序与execFile、fs/path物理操作 | 保留唯一TS lifecycle owner；文件/PG操作经窄Linux执行件，不能仅给binary加wsl.exe前缀 |
 | `desktop_app/http_server.py` | 当前HTTP 127.0.0.1、Host/Origin/Fetch-Site保护；origin硬编码http | WSL跨宿主链新增经G0验证的TLS连接身份；原aiohttp/路由/业务owner继续共用 |
 | `desktop/src/main.ts`、preload、`frontend/lib/desktop-host.ts` | chooseDirectory返回本机路径；open-path用本机stat；platform只darwin/linux | 区分Windows宿主和Linux执行域；新增Linux-backed图形工作区选择，不把C盘路径塞入kernel |
 | `frontend/lib/prompt-draft.ts`、`file-drop.ts`、`desktop_app/file_import.py` | 原生path直接变reference；无path的File已有原始字节导入 | 同发行版合法路径可转Linux引用；Windows文件显式导入副本，复用现有流式import |
@@ -76,15 +76,14 @@ Windows Electron（main唯一boot/reset/quit）
 | Linux↔Windows显示路径 | 单一host路径适配 + Linux目标验证 | 固定发行版映射，路径字符串不作授权，也不重建workspace身份 |
 | 发行版/资源安装 | Windows setup owner、现有资源构建owner | 复用WSL注册/import与官方rootfs；安装维护使用有限显式root操作，日常模型不用root |
 
-### 3.2 文件落点（A已实现；B仍为计划）
+### 3.2 文件落点（计划，尚未创建）
 
 Python生产仍在`src/pulsara_agent/`，Electron在`desktop/`，frontend在`frontend/`。`output/`仅个人研究/探针/证据，不被安装包import。
 
 | 位置 | 计划变化 | 阶段 |
 | --- | --- | --- |
-| `desktop/src/resource-paths.ts` | A的纯只读本机资源locator：root、pythonExecutable、playwrightBrowsers、postgresBin、packageCli；只包含当前consumer。B再按真实需要引入guest路径 | A已实现；guest部分属B |
-| `desktop/src/host-operations.ts`、`host-posix.ts` | 当前stream child、有限exec、同步home解析、runtime目录与日志；POSIX实现直接复用Node，runtime仍拥有策略与生命周期 | A已实现 |
-| `desktop/src/postgres-operations.ts`、`postgres-posix.ts` | 专用PG物理端口及本机实现；与host执行端口分别直接复用Node，无跨域泛化或重复PG状态 | A已实现 |
+| `desktop/src/resource-paths.ts` | 只读资源布局：分别返回host资源与guest POSIX资源；集中main/runtime/CLI真实重复 | A |
+| `desktop/src/host-operations.ts`、`host-posix.ts` | 现有实际使用的stream child、有限exec、home解析及PG物理操作窄契约；本机实现直接复用Node/原代码 | A |
 | `desktop/src/{main,runtime,postgres,cli-install}.ts` | 注入上述操作，沿用唯一状态/错误/退出顺序；去除被替代的内联操作 | A；B只加WSL接入 |
 | `desktop/src/host-wsl.ts`、`wsl-setup.ts` | 固定-d/-u/--exec、有限调用结果分类、环境检查/import/provision/安装状态 | B |
 | `desktop/src/backend-paths.ts`、`backend-session.ts` | 固定发行版路径映射、系统open/reveal、每次launch专属TLS Session与retire | B |
@@ -380,7 +379,7 @@ A不因薄宿主抽取强制重跑未触及的全部terminal/filesystem/provider
 
 本轮继续参考当前生产、AGENTS与用户指定本地仓库；上一轮源码版本为deepseek-harness `687f282e8625`、codex `89461ea68338`、ZCode `3c5b22764937`、grok-build `2bdd1d6a6369`、opencode `37e3912d8ea5`。它们的Windows Job/ConPTY/PowerShell实现仅保留为已放弃原生路线的研究背景，不成为WSL生产依赖。ZCode/opencode的NSIS安装资源/更新退出、grok文件锁生命周期观察仍可作review反例，不复制其强杀/fallback/新manifest或恢复机制。
 
-主要实际修改导航为`desktop/src/{main,runtime,postgres,preload,cli-install,browser-owner,browser-policy}.ts`、`frontend/lib/{desktop-host,runtime-adapter,prompt-draft,file-drop,file-preview}.ts`、`desktop_runtime.py`、`desktop_app/{http_server,application,file_import,file_preview,file_preview_http,path_completion}.py`、`workspace_identity.py`及现构建/安装/release owners。其中A的Node资源/宿主/PG接缝已按第16节落地；其余B模块仍为计划，未创建Windows/WSL生产实现。
+主要实际修改导航为`desktop/src/{main,runtime,postgres,preload,cli-install,browser-owner,browser-policy}.ts`、`frontend/lib/{desktop-host,runtime-adapter,prompt-draft,file-drop,file-preview}.ts`、`desktop_runtime.py`、`desktop_app/{http_server,application,file_import,file_preview,file_preview_http,path_completion}.py`、`workspace_identity.py`及现构建/安装/release owners。新增模块均是上述窄边界计划，未创建生产代码。
 
 官方依据在相应章节近旁链接；文档证明平台能力/依赖扩展点，不证明Pulsara集成已通过。下载/布局/API须检查实际锁定版本实现，禁止拿别的agent产品已发Windows包推断本产品PG、物理join、文件授权或prefix已成立。
 
@@ -399,74 +398,4 @@ A不因薄宿主抽取强制重跑未触及的全部terminal/filesystem/provider
 | desktop / gpt-6.1-sol high | `desktop/wsl-first/proposal.md`、`review-round1.md`、`review-round2.md` | 可冻结；D1关闭；部署保数据、File来源、TLS实际Session/WebContents退役、安装/构建/预算闭合 |
 | root | `root/wsl-first/research-notes.md`、`validation.json`、`freeze-record.md` | 独立同意冻结；完整取代旧native/宽A前置，当前文档/位置检查通过 |
 
-**路线冻结时事实：WSL2主路线及收窄Phase A实施规格已冻结；当时A/B实现与回归未执行。后续A实施事实仅以第16节为准，前轮文档批准不替代本轮代码/测试审阅；G0-W及B/Windows激活仍未完成。**
-
-
-## 16. Phase A实施与验收记录（2026-10-24）
-
-本轮由root与原三位`gpt-6.1-sol / high` subagents在各自`output/windows-compat-20261024/{root,terminal,backend,desktop}/phase-a-implementation/`工作；仅root汇总本规格。用户明确授权将当前无法获得的Ubuntu原生/图形资格保留为**待验收**，不删除矩阵、不计作通过，也不进入B。
-
-### 16.1 实际hard cut与所有权
-
-- `DesktopResourcePaths`只返回当前随包路径；main一次装配，runtime wait/start、CLI及PG消费相同值。不读取fs/settings/manifest，不预建WSL字段。
-- `HostOperations`仅同步`resolveHome`、三pipe `spawn`、有限`execFile`、`prepareRuntimeDirectory`、`appendRuntimeLog`。`posixHostOperations`复用Node；`PythonRuntime`保留唯一child/preparing/start帧/ready/inspect/stop/EOF状态、原环境及错误通道。
-- `PostgresOperations`仅现有目录/socket/log路径事实、布局/version/实例/权限/realpath/uid观察、限定`initdb`/`pg_ctl`执行与删除。`postgres-posix.ts`直接复用Node fs/execFile，保留原`LC_ALL=C`和4MiB有限exec输出边界；`BundledPostgres`唯一拥有initialized/startedHere、104字节socket协议边界、DSN、version拒绝、Numeric status 3、失败start确认、reset及stop顺序。
-- `readInstance('resolved')`仅供startup确认，`readInstance('raw')`供reset精确比较。审阅发现提取时对reset额外执行`path.resolve`会在调用者cwd已删除时抢先抛ENOENT；现仅resolved分支规范化，并以独立真实Node child覆盖原中文拒绝及数据保留。Mac测试临时根先realpath，不能因`/tmp`自身链接提前命中原symlink保护。
-- `main.ts`显式注入两组POSIX操作；原boot/reset/requestQuit与同步home错误时点保留。`cliLauncherScript`改为消费已解析Python路径，原marker、shell quoting、argv、exit、注册冲突/PATH与Linux packageTarget规则保留。所有调用者和测试同片更新，无旧构造器/双路径/平台fallback。
-- Python、terminal/filesystem、provider prefix、schema/oracle、frontend、构建recipe、WSL helper/部署/TLS/OAuth桥均未修改；不存在新增持久状态、事件或恢复机制。新TS文件已被现tsconfig与`dist/**`打包规则覆盖，无新的native资源输入需要改mise失效规则。
-
-### 16.2 基线与当前验证
-
-改前Git为`60e8f21d37ca2c650500ae14438630006d3e62fb`，仅根规格未跟踪，无生产代码dirty；在同一checkout先完成改前构建/测试再修改，未冒用另一editable版本。macOS 26.2/Darwin25.2 arm64，Node22.23.3、uv0.13.4、Python3.12.15（仓库`.venv`）。
-
-| 验证 | 改前 | 当前结果/边界 |
-| --- | --- | --- |
-| `npm --prefix desktop test` / tsc | 31/31 | 46/46，0skip；覆盖main/runtime/PG/CLI与真实Node POSIX边界 |
-| 三份Python桌面契约 `test_desktop_runtime` / `launch_directory` / `release` | 23通过 | 23通过；未修改Python业务 |
-| `mise run --jobs 1 desktop:verify` | 改前独立资源smoke通过 | 通过；fresh frontend/application wheel、Node测试、relocation、资源/版本检查。未变SDK按原cache复用 |
-| checkout外已安装wheel smoke | — | 随包site-packages来源，真实launcher/assets/rg/Skill/Plugin/HTTP startup/shutdown通过；Mac证据不算Ubuntu资格 |
-| `test:startup` / `test:browser` | startup通过 | startup通过；browser 11/11通过 |
-| 真实POSIX lifecycle | 资源smoke通过 | 当前dist配随包PG/Python；init/reuse、pg_search/vector、reset、kernel ready/inspect/normal quit/锁释放/重开通过；仅自建canonical临时home |
-| `ruff check` / `git diff --check` | — | 通过 |
-| native Ubuntu x64/arm64、真实Ubuntu GUI/安装 | 未具备 | **待验收**；用户已明确同意。未以Mac/mock/container冒充 |
-
-首轮新增main fixture漏mock原有`setAsDefaultProtocolClient`，修正fixture后45/45通过；之后新增删除cwd回归的Mac `/tmp`前置已纠正，最终46/46通过，没有削断言、skip/xfail或生产兼容分支。一次并发Python测试遇到mise bootstrap暂时移除editable项目，待mise project安装完毕后重跑23通过；属于验证调度，不修改import规则。
-
-macOS独立包/GUI及三位并行真实实验已完成，实际结果见16.3；最终全文审阅记录见16.4。主要原始证据为root工作区`before/`、`verify-final.log`、`python-final.log`、`wheel-outside-checkout.log`、`startup-final.log`、`browser-final.log`、`real-posix-lifecycle.{cjs,log}`及各agent个人记录；`output/`是本地证据，不被生产import，也不作为运行时依赖。
-
-
-### 16.3 独立包/GUI与并行真实实验
-
-`npm --prefix desktop run package:dir -- --publish never --config.directories.output=.../root/phase-a-implementation/package`成功构建当前Mac arm64应用包，未覆盖`/Applications/Pulsara.app`、未发布。其APFS clone在独立目录通过LaunchServices/CUA实际启动；仅测试bundle ID、PULSARA_HOME/HOME及URL注册元数据作隔离、重签测试包，应用ASAR/业务不变。desktop独立以现asar SDK对两个包中九个生产模块逐完整Buffer比对当前dist，18/18一致，不生成hash；两份包实际Python各复制到中文/空格/单引号资源路径，六次version/help/源码来源检查exit0。
-
-Mac GUI实测：新home工作台ready/数据正常→正常Quit（核实本次Electron/Python/PG均退出）→重开；暂停**已验证确切测试PID**的kernel制造慢退，原inspect unknown确认后保持stopping遮罩且PG仍运行，恢复该child后按原顺序退出；停止的自有cluster临时PG_VERSION=99时显示原完整版本错误/重试不会清库，数据保留、不起PG、pre-start child按EOF退出；退出后恢复自己的17版本，重开ready，再正常Quit和原`--wait-owner`通过。只有自建临时home被清理，用户原应用/kernel持续运行，保存settings/用户DB未修改。不是旧release、mock窗口或容器GUI证据。
-
-测试隔离修正也如实保留：最初改测试包显示名导致Electron找不到helper、CUA报超时；恢复原命名后解决，没有要求用户授权或改生产。另发现Mac Electron `os.homedir()`并未被临时HOME隔离，原best-effort CLI注册短暂把用户launcher更新为测试包路径；root恢复到`/Applications/Pulsara.app`的常规脚本，余下验收用临时symlink冲突保护，最终已移除保护并验证为可执行普通文件。没有改前完整launcher快照，不能声称逐字恢复未知旧内容；已恢复现有生产应用的正确入口。下次GUI harness必须显式保护CLI。详见root `macos-gui-review.md`与`gui-cleanup.log`；测试副作用不混写成产品代码变更。
-
-三位同时补做独立实际资源实验，不争用dist、不重建、不共享PG/home：
-
-| 实验者 | 实际边界 | 结果 |
-| --- | --- | --- |
-| terminal | 当前dist+真实随包Python，preparePostgres受控失败，不发start帧 | 原Error对象保留；EOF后exit0/close、无running/PID，原wait-owner通过，临时home清理 |
-| backend | 当前dist+真实PG17.9，错socket/PID目录拼写/版本 | 拒绝复用/reset时同一PG仍可查询、未误停；`/.`仅startup resolved接受/reset raw拒绝；停库后版本16拒绝且control/sentinel保留；恢复后确切status3再清理 |
-| desktop | 两包真实ASAR与私有Python/CLI | 完整字节来源一致；中文/空格/引号路径及真实版本/help/import来源通过；未调用registerCli |
-
-三项均不调用provider、不读取保存凭据，不把mock/容器/本机结果记作Windows或native Ubuntu资格。原始证据在各个人目录`runtime-eof-real.*`、`real-pg-failures.*`、`package-cli-evidence.json`及各final review。
-
-### 16.4 最终状态与交叉审阅
-
-当前源码、本机证据及本节记录已由root和三位交叉终审，四方均明确同意冻结，无剩余代码/本机证据阻断；本次仅冻结实际通过的Phase A实现/本机证据，不取消第13.1节的Ubuntu待验收项。root的最终收口记录保存于`root/phase-a-implementation/final-review.md`；三位个人记录为terminal `evidence-review-final.md`、backend `final-review.md`、desktop `final-evidence-review.md`及后续本候选全文批准。
-
-**当前事实：Phase A代码实施完成，本机Mac arm64回归、真实资源/PG/内核与独立应用包GUI验证通过；Ubuntu x64/arm64原生与真实Ubuntu GUI/安装相关资格按用户要求待验收，因此不宣称A全平台验收完成。Phase B、G0-W、WSL部署、Windows支持/激活/发布均未实施。**
-
-
-| 最终审阅者 | 实际批准记录 | 本次结论 |
-| --- | --- | --- |
-| terminal / gpt-6.1-sol high | `terminal/phase-a-implementation/freeze-review.md` | 同意冻结A实现与Mac证据；EOF/控制与PG/GUI关闭边界无剩余阻断 |
-| backend / gpt-6.1-sol high | `backend/phase-a-implementation/freeze-review.md` | 同意冻结；真实PG失败保数据/实例及最终清理证据闭合 |
-| desktop / gpt-6.1-sol high | `desktop/phase-a-implementation/freeze-review.md` | 同意冻结；包来源/CLI/GUI和实际清理核对无阻断 |
-| root | `root/phase-a-implementation/final-review.md` | 独立同意；Ubuntu待验收，B未实施 |
-
-root逐份读取三位最终批准，之后只更新本次冻结/批准元数据；未因agent沉默或前轮45条结果推断通过。A冻结时尚未提交/推送或发布；现有用户应用持续运行，测试CLI临时保护已撤回。
-
-Windows接手的环境安装、双仓库落点及G0-W逐项操作见[PULSARA_WINDOWS_DEVELOPMENT_G0_CHECKLIST.zh.md](PULSARA_WINDOWS_DEVELOPMENT_G0_CHECKLIST.zh.md)。该清单仅提供准备与实验步骤，不代表Windows实测，也不授权进入Phase B；此前未提交/推送是本轮A冻结时事实，后续用户已另行授权提交和推送。
+**最终事实：WSL2主路线及收窄Phase A实施规格已冻结。A/B实现与回归未执行，G0-W未执行，WSL部署/Windows原生验收/激活/发布未完成；本轮仅文档和只读研究，没有生产代码、保存配置或数据库变更，也没有新一轮产品测试/provider调用。**
