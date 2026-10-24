@@ -1,0 +1,20 @@
+[
+  {
+    "Name": "Domain",
+    "Enabled": 1,
+    "DefaultInboundAction": 0,
+    "DefaultOutboundAction": 0
+  },
+  {
+    "Name": "Private",
+    "Enabled": 1,
+    "DefaultInboundAction": 0,
+    "DefaultOutboundAction": 0
+  },
+  {
+    "Name": "Public",
+    "Enabled": 0,
+    "DefaultInboundAction": 0,
+    "DefaultOutboundAction": 0
+  }
+]

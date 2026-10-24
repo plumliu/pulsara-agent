@@ -1,0 +1,36 @@
+[
+  {
+    "name": "parent-replacement-at-mkdir",
+    "candidate": false,
+    "error": "FileNotFoundError",
+    "createdInHeldParent": true,
+    "createdInReplacementParent": false,
+    "outcome": "misclassified-as-ordinary-error",
+    "replayed": false
+  },
+  {
+    "name": "selection-replacement-before-resolver",
+    "candidate": false,
+    "acceptedReplacement": true,
+    "response": {
+      "selected": "/home/plumwsl/workspaces/g0-file-race-6dh8qnft/selection",
+      "key": "workspace:gbwkgnwzw7cb6cen6cmua4etsq",
+      "activeSession": null
+    }
+  },
+  {
+    "name": "parent-replacement-at-mkdir",
+    "candidate": true,
+    "error": "DirectoryOutcomeUnknown",
+    "createdInHeldParent": true,
+    "createdInReplacementParent": false,
+    "outcome": "unknown",
+    "replayed": false
+  },
+  {
+    "name": "selection-replacement-before-resolver",
+    "candidate": true,
+    "acceptedReplacement": false,
+    "error": "directory changed before acceptance"
+  }
+]

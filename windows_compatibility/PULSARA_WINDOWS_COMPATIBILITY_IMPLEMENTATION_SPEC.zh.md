@@ -1,8 +1,10 @@
 # Pulsara Windows 兼容实施规格：Windows Electron + WSL2 内核
 
-日期：2026-10-24。状态：**Windows Electron + WSL2路线按用户授权修订为接入已有发行版/默认非root用户，保留interop与自动挂载。Phase A代码与Mac证据冻结范围保持；Ubuntu原生/图形资格待验收，Phase B未实施，完整G0-W未通过，Windows支持未激活。原四方冻结审阅属于修订前合同。**
+日期：2026-10-24；G0验收更新：2026-10-25。状态：**Windows Electron + WSL2接入已有发行版/默认非root用户，保留interop与自动挂载。本机所选矩阵G0-W-D/C/P/F/N机制可行性验收通过（§22）。Phase A代码与Mac证据冻结范围保持；Ubuntu原生/图形资格按用户要求延期，Phase B未实施，Windows支持未激活。原四方冻结审阅属于修订前合同。**
 
 2026-10-24 用户授权修订：删除Ubuntu发行版本号及`Pulsara`/`pulsara`固定命名要求；默认接入用户已有WSL2 Ubuntu及其默认非root用户，允许interop、Windows PATH注入和自动挂载。Ubuntu 26.04.1 LTS可作为候选，实际兼容性由资源与G0-W实测决定。无需另立解冻结流程；历史研究/批准记录保留原貌，本次修订及跨域生命周期仍须实际验证。
+
+2026-10-25 用户明确本轮聚焦Windows WSL2，原生Ubuntu x64/arm64与GUI资格延期，不能以WSL代证，也不作为继续G0-W的阻塞。继续复用三位研究agent，保持interop及用户Hiddify TUN，不进入Phase B。G0验收对象是隔离探针与真实现有owner的机制可行性；§13.2中的正式NSIS/产品setup与生产界面闭环仍属B及激活验收，不能要求先实现B再给G0结论。研究接缝与fixture范围须逐项注明，不以此减免G0必须实测的控制、文件、网络与失联合同。
 
 调研基线：Git `60e8f21d37ca2c650500ae14438630006d3e62fb`。路线冻结时仅修规格；后续按用户授权实施收窄Phase A，实际记录见第16节。不部署WSL发行版、不修改保存配置、不调用真实provider；真实PG实验仅操作已确认的独立临时实例。冻结规格、完成A、通过G0-W、Windows激活是四个不同状态。
 
@@ -117,9 +119,11 @@ reset先取得原kernel锁并核对准确实例，必要时执行有限stop；�
 
 完整有效回复与carrier正常结束才可采用操作结果；wsl启动失败、截断、EOF、丢回复与pg_ctl真实非零不同。可能已经生效但未收全结果时返回本次结果不明，保留PG/data，不自动重发start/reset/delete或继续初始化。重新进入由TS先等原kernel锁，再通过当前Linux事实验证；不做跨重启操作重放。
 
+第五轮有限helper候选将请求收窄为：持锁ready之后，恰一条完整LF结尾operation JSONL及stdin EOF才接纳执行；拒绝提前、重复、尾随残片。该EOF是一次有限调用的输入结束，不用于长连接desktop_runtime。回复须完整fatal UTF-8 decode、唯一ready/result、次序/方法/必要值类型正确，且carrier正常结束才采用；已发操作后的坏帧/截断仍为unknown。仅复用既有有限exec每流4MiB资源边界，不增加任务寿命限制。部分删除后失联如实保留unknown及部分目录，不自动恢复、重删或初始化；unknown不承诺撤销已生效副作用。
+
 物理错误须向原TS owner区分“本次未提交”“可能执行但结果不明”“子命令已结算非零”，不能都由同一catch读当前status再更新startedHere。第四轮真实反例证明：本次未提交后，其他调用可在合法间隙启动同库，原owner随后status/readInstance会误记startedHere=true。当前候选对未提交/unknown原样抛错，不据此次catch认领实例；已结算PG非零仍保持原readback和原错误。已有startedHere不因新错误被清空，不增第二份状态。研究字段`postgresExecution`及两行guard仅为§20的output合同草案，生产错误接口尚未实现；不能用数值code3或当前同路径实例代替操作执行类别。
 
-**第三、四轮候选已取得真实PG机制与TS owner集成正证（§19–20），尚无生产WSL helper。** 已覆盖helper死亡后的晚start拒绝、有限stop/initdb后代持锁、双锁内删除/重建，以及真实TS running→stop→delete、选定EOF/失联边界。明确未提交必须关闭本次准入、拒晚ready后的写帧并等helper实际退出；发帧后不因EOF撤回副作用。完整framing/所有操作故障/宿主关闭及全部P矩阵仍待验，不能把这些子项当整门资格。被否定的单helper CLOEXEC方案只作§18历史反例保留。
+**第三至六轮候选已有真实PG机制、TS owner与实际bundled kernel集成证据（§19–21），尚无生产WSL helper。** 已覆盖晚start拒绝、有限stop/initdb后代持锁、双锁内删除/重建、真实TS reset、有限framing、remove前中后失联、方法间竞争、真实PG非零readback及正常kernel退出后PGstop。明确未提交须关闭准入、拒晚ready写帧并等helper退出；发帧后不因EOF撤回副作用。宿主异常退出与整发行版/睡眠等组合仍须按当前证据分别裁定，不能把这些子项当整门资格。被否定的单helper CLOEXEC方案只作§18历史反例保留。
 
 ## 4. G0-W：WSL路线可行性闸门
 
@@ -149,7 +153,9 @@ probe继续原default-deny、single-flight/TTL、shell候选、`.venv/bin`与实
 
 kernel、私有PG、Protocol-v3和应用资源仍使用Linux机制与ext4。自动挂载可用不扩大workspace/PG的存储接纳范围，首版C盘工程仍按第6/7节显式导入。宿主UI、OAuth、下载/reveal仍经原可信Electron owner，不改为拼接shell调用Windows程序。普通任务可使用互操作能力，受现有权限和副作用规则约束；不以PATH隐藏或通用命令黑名单冒充禁止Windows执行。
 
-**跨域生命周期仍为G0-W-C未闭合项。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。Windows模型任务的取消/关闭范围与可观测机制必须在G0证据中闭合，之后才可进入B；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
+**跨域生命周期仍按当前G0-W-C组合证据验收，未接入生产。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。Windows模型任务的取消/关闭范围与可观测机制必须在G0证据中闭合，之后才可进入B；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
+
+第五轮真实MCP/hooks/environment研究证明跨域scope必须接在原spawn/关闭边界，不能套用terminal槽或另建调度器。MCP stdio服务进程属于连接/会话生命周期；一次tool cancel可释放原call permit但不能擅自结束仍READY的服务会话，session close才结算其Linux/Windows范围。原timeout的remote UNKNOWN与现transport failure/fence处理保持，不重放工具。hooks成功/失败/取消、environment probe缓存写入均须等待其同一物理scope结算；credential guard拒绝应发生在scope prepare/spawn之前。证据见§21，生产仍未改。
 
 §18–20的无breakaway Job、专属anchor及私有socket字节转发只通过明确的机制/集成子场景。首次绑定候选由anchor自己打开上游O_PATH fd，经标准SCM_RIGHTS转交，以SO_PEERCRED/pidfd及本次可信anchor身份核对，避免另一进程重开旧PID路径。第四轮已把它放进真实terminal的启动预约内，与选定取消门合成；其余交错仍待验。裸WSL_INTEROP失效会回退，私有socket须保留到旧调用者结算，不能由Job空就提前unlink。
 
@@ -266,6 +272,8 @@ NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckApp
 
 `runtime.ts`当前`child`在close后清空，`stop()`若child已无会直接return；WSL接入必须保留本次已结束attempt的退出/失败/unknown并在stop/quit检查，不能因为carrier先消失便升级为clean success并让main停PG。复用现owner的process-local字段，不建durable退出receipt；刚创建尚未start-frame的无工作child可按原可证明not-started路径收回。
 
+第六轮在真实宿主强退后观察到kernel收到SIGHUP（未记录发送者siginfo），原默认动作会先于stdin EOF收尾终止kernel。研究启动接缝仅忽略该载体挂断信号后，Node/Electron两项均实际进入原EOF/application.aclose，关闭门持有时kernel活且原锁忙，放门后完成原收尾并由独立pidfd确认退出。B必须在Linux启动边界保留该挂断处理与原EOF所有权，不能靠存活carrier或原默认signal行为推定已清洁关闭；不新增daemon/第二kernel owner，不忽略任意致命信号。宿主已死仍不能获得新的clean回复，本次未确认输入保持unknown。
+
 随后只有TS owner确认本实例可停止时才执行Linux`pg_ctl stop -w -m fast`并核验status为已停；最后退休TLS/控制资源并退出Windows壳。无法确认结算就保留实际错误/数据/清理责任，阻止本次维护或reset继续，不发第二stop/reset或把超时升级为总寿命cap。reset沿原明确用户确认→关闭kernel→等待旧锁→当前helper取得原kernel锁→精确PG身份/停止→取得独立PG生命周期EX并重新确认已停→持两锁删除专用data→clean-v0重建（§3.3）；不使用Windowsrm/UNC权限替代Linux验证，不触workspace/settings。
 
 ### 9.3 失败矩阵
@@ -296,6 +304,8 @@ WSL官方启动实现区分pipe/terminal/file relay，并描述root退出后的I
 localhost可达不证明服务是本次Linux kernel；一次明文challenge后任意新连接仍可能误连重绑定端口。因此冻结连接级身份要求，并选用**标准TLS的最小WSL适配**作为G0-W-N验证方案：Linux本次进程生成短命server key/cert，通过可信继承控制pipe把完整public certificate与精确origin交Electron；私钥不出Linux执行owner。aiohttp现TCPSite接受SSLContext，无需复制HTTP服务器。[aiohttp接口](https://docs.aiohttp.org/en/stable/web_reference.html#aiohttp.web.TCPSite)
 
 Electron在任何导航/HTTP/WS/SSE/preview/下载前创建本次launch专属workbench Session，使用已锁Electron的证书验证扩展点比对完整certificate和准确目标；原Host/Origin/Fetch-Site与IPC sender验证继续存在。证书callback不提供port且网络服务缓存验证结果，所以**还必须单独限制精确scheme/host/port，并为新launch使用全新Session/连接上下文**，不能在旧session热换pin/沿用旧缓存。当前WebContents.session构造时固定，main须在同一UI owner中为新launch更换实际workbench Window/WebContents，完整退休旧browser/views、StartupCover、IPC sender、SSE/上传/下载与连接，同时保存用户窗口/UI偏好；不能只换一个session变量或未经证明用clearAuthCache当证书验证缓存清除。G0-W-N验证重开/启动失败/慢退这一真实构造闭包。退休时先封旧请求、再关闭连接/清数据，旧origin、旧cert和端口rebind均不得被采用。[Electron Session官方API](https://www.electronjs.org/docs/latest/api/session#sessetcertificateverifyprocproc)
+
+第七轮真实在途实验中，仅关闭连接及销毁窗口/取消下载后，三条尚未收headers的请求未在本次观察截止前结算；没有据此推断SDK在所有场景的行为。退休须复用各原owner已持有的请求/下载对象：封准入，abort在途ClientRequest、在native回调外cancel本次DownloadItem，销毁对应WebContents并等destroyed，再关闭Session连接并等原请求/下载终态与Linux流清理。真实LocalImport的部分stage被清、没有发布或重放；这个组合不新增通用任务registry。生产renderer fetch/SSE、IPC与connection的具体关闭仍由各现owner装配并验收，不能把研究壳的几个对象列表当产品通用实现。
 
 不使用全局ignore-certificate-errors、不将self-signed任意放行、不改系统trust store、不引入自制TLS/proxy/持久证书registry。完整public cert已携带，直接typed值比较，不另加DTO指纹；临时key/cert仅此次网络物理生命周期，必要私有临时文件0600/加载后删除，不作为durable身份。“短命”指随本次进程退出废弃，不能给长期运行任务增加证书到期的隐藏wall-clock cap；本地精确pin校验/时间处理必须由G0封闭，不能到期强制重启kernel、换epoch或中断任务。G0须验证fetch/SSE、sandbox HTML/null-Origin、PDF/image、下载、时间变化/长期连接及retire后的新连接，不仅首个healthz。
 
@@ -525,3 +535,34 @@ Windows接手的环境安装、双仓库落点及G0-W逐项操作见[PULSARA_WIN
 - 原PG owner真实负例：本次零operation提交，另一有限调用已起同库后，catch按当前status/readInstance仍设startedHere=true；这不能代表本次启动归属。output机械生成两行guard，对not-submitted/unknown保原错误而不由此次catch更新归属，对已结算PG非零保原readback。两项真实对照及原/研究变体各8测试通过，未修改生产，也未把main Quit条件推导当GUI实测。
 
 本轮没有增加durable receipt、第二startedHere、产品总寿命cap或关闭interop。剩余MCP/hooks/environment、更多启动取消/relay失联、真实Electron退出/休眠、PG全操作framing/失联及其他G0门继续待验；原生Ubuntu资格仍独立。生产尚有已记录缺口，不能激活Windows或放行Phase B。
+
+## 21. 第五、六轮剩余G0机制与GUI实证（2026-10-25）
+
+两clone受测基线b741dd92，复用三位gpt-6.1-sol/high；用户确认既有Ubuntu/plumwsl、interop和Hiddify TUN保持。原生Ubuntu延期，生产代码不变，B未实施。以下是已经归档的阶段证据，不以其数量代替整门审阅。
+
+- [MCP](research/2026-10-25/terminal/mcp-round5/report.zh.md)：6个真实SDK/transport/executor场景及21项原测试；原close会在无pipe Windows后代仍活时返回，研究scope等自然结束/精确join。tool cancel与session close保持不同边界；timeout/服务进程死亡的原UNKNOWN和fence语义保留；guard拒绝不spawn。
+- [hooks/environment](research/2026-10-25/terminal/hooks-environment-round5/report.zh.md)：12个选定场景，含3个原跨域提前完成反例；真实取消/timeout/close等待同scope，environment不能在Windows尾部仍活时缓存成功；55项原测试通过，精确清理有记录。
+- [PG剩余边界](research/2026-10-25/backend/pg-boundaries-round5/report.zh.md)：29个物理case；ext4中文路径clean-v0/deep验证、真实BM25中英代码/snippet及vector、搬移重开、精确reset；有限framing与UTF8、initdb/stop/remove前中后失联、方法间新start、真实PG非零/readback均有证据。未声称全部故障排列或最终源码整套重跑。
+- [真实kernel/main控制链](research/2026-10-25/terminal/kernel-control-round6/report.zh.md)：Windows Node/Electron壳、原Runtime/BundledPostgres、AST抽取原requestQuit、实际bundled DesktopApplication及PG。22次运行中18项完成观测、4项探针失败保留；12项原runtime测试通过。正常EOF关闭门证明kernel/锁结算后才PGstop；原child已清空后kernel/carrier异常仍停PG并请求exit0为真实反例，两行output候选在三个已测窗口拒绝。app.exit/UI用观察stub，不冒称正式GUI/安装包。宿主强退下无aclose的unclean事实仍需与§9.3合同收敛，不能以外层研究清理代产品成功。
+- [目标/离线payload](research/2026-10-25/desktop/discovery-payload-round6/report.zh.md)：真实默认发现、显式固定目标、缺发行版/用户及root拒绝；完整资源经字节pipe传入非root私有无网络namespace。缺制品、坏摘要、真实写点ENOSPC、解包中断/部分stage重开拒绝均保模拟数据；发布后Python/CLI/PG/rg在新位置实际执行。默认变化仅输入阴性，ENOSPC不是整块ext4真满，未伪造WSL未安装/需重启环境。
+- [图形目录/文件与HTTP](research/2026-10-25/root/g0-w-round5/report.zh.md)：无active session的Windows图形浏览/新建/选择/取消；用户真实选择及拖放285字节文件，三个Linux副本逐字节相同、0400/0500。17项HTTP目录/导入、4项真实替换竞态、2项private mount namespace拒绝及最终9项路径检查；两个原目录竞态分别收敛为已写unknown与接纳前同inode重核。生产HTTP/import/preview owners的13项集成与17项原测试通过，session依赖为明确fixture；HTML/null-Origin、图片解码、可见PDF及真实保存/失败取消均有证据。
+
+PDF正证需要Electron内置固定extension及其自身frame发起的chrome://resources本地资源，不能因此放宽backend精确origin/完整cert、任意extension/file/外网。下载失败的updated interrupted仍可恢复；明确取消须离开当前回调再执行并等待done cancelled，不能以取消冒充下载成功。研究启动器stdout管道提前关闭引发EPIPE、中文filename header初错、PDF白屏和native同步取消日志均原样保留；最终host exit0/stderr空，未改生产以求绿。
+
+本节归档时剩余独立发行版故障、宿主loss收尾、在途网络退休/证书有效期、OAuth和真实睡眠恢复另行补证，当时未宣布完整G0通过；后续最终结论见§22。每轮已经记录并精确清理自己的进程/home/大资源，未向共享Ubuntu执行终止、未改用户网络配置或运行真实provider。
+
+## 22. Windows WSL2本机G0最终验收（2026-10-25）
+
+**本机所选矩阵的D/C/P/F/N机制可行性验收通过。** [最终报告](research/2026-10-25/root/g0-w-final/report.zh.md)给出逐门索引、原失败和证据限度；复用三位gpt-6.1-sol/high完成各自实验及交叉审阅。受测生产基线b741dd92，仍包含main/3ac7fc2b；本轮只有研究记录与规格变化，没有生产WSL接入，也没有进入B。
+
+资格范围是Windows11 25H2 x64普通用户、WSL2.7.11.0/kernel6.18.33.2、已有Ubuntu26.04.1/plumwsl/ext4、Electron44.9.0及固定资源、nat网络与用户Hiddify TUN开启。Ubuntu版本数字不是新准入门槛；此实测不泛化为所有Windows/WSL/网络组合。用户延期的原生Ubuntu x64/arm64/GUI未记通过。
+
+- D/F：目标发现/显式重开、非root完整离线payload及失败保数据；图形目录、Windows选择/拖放、路径竞态与挂载拒绝、大小写/NFC/NFD独立identity、HTML/image/可见PDF与真实native SaveDialog取消/拒绝覆盖/确认覆盖。默认变化仅输入阴性，ENOSPC为真实写点注入，不伪造WSL未安装/需重启或整盘真满。
+- C/P：R4/R5真实各scope owner与原上层await闭包，加R6实际bundled kernel/main关闭门、异常退出检查、SIGHUP默认与最小忽略策略、可见窗口close及睡眠，支撑机制可组合性；不是声称同一个run同时运行全部工作类型。原信号日志不证明sender PID，忽略策略须在guest可处理start前安装。
+- [真实dirty恢复](research/2026-10-25/terminal/distro-recovery-round7/report.zh.md)补上终审具体缺项：原HTTP提交canonical会话→仅终止明确可丢弃distro→保持PGDATA/pidfile/socket原样→新显式attempt原wait-owner/TS start/initialize=False→PG真实redo/ready，同system_identifier/PGDATA inode/原canonical SQL与HTTP记录可读→正常Quit。旧attempt仍unknown，不重发工具或原写入，不以手工删pidfile/reset/initdb冒充恢复。
+- [网络与睡眠](research/2026-10-25/desktop/network-round7/report.zh.md)：自然cert跨validTo时同PID/SSE及新TLS Session可用；在途上传stage、下载、SSE与pending用原SDK对象结算，旧Session拒新请求。实际睡眠事件间隔88.493秒；同kernel/PG/锁/SQL继续，SSE一次只读自动重连，未重启guest或重放工具。
+- [OAuth](research/2026-10-25/backend/oauth-round6/report.zh.md)：原SDK拥有PKCE/state/issuer/token，Windows仅OAuth-only系统打开；8项mock与用户现场真实Notion授权/token200、协商2026-07-28/list_tools65成功，无业务tools调用。本地grant/listener/home清理不代表撤销Notion远端授权/DCR。额外[旧callback端口rebind](research/2026-10-25/backend/oauth-round6/rebind/report.zh.md)证明错服务成功页不能改变原cancelled/token0/no grant；最初整N结论因漏此must-have被撤回，补验和复审后才恢复。
+
+原反例、修正前源码与有限探针失败保留，不弱化原测试、不把最终源码未整套重跑写成已重跑。官方制品摘要/签名只用于真实下载边界；无代码/证据hash、durable receipt、恢复队列、第二lifecycle owner或新产品寿命cap。各研究进程/PG/home/大资源及临时发行版精确清理；可选Electron缓存自动审批拒删，保留ignored output，不绕过、不归档。R7注销后共享Ubuntu实际曾观测Stopped，保留原要求Running的探针断言失败，不猜原因；命令审计及注册/default核对证明未主动终止它，后续Git同步显式重开与该历史观察分别记录。
+
+**G0通过只表示所选机制可用于后续实施决策。** 生产跨域scope、PG typed helper、Runtime退出/信号接缝、目录与TLS/OAuth/Session装配仍未实施；正式setup/NSIS、tray/IME/DPI、更新卸载、真实provider长程和受影响平台回归仍按§11–13验收。用户本轮明确不进入B，故不启动这些生产改动或宣称Windows支持已完成。

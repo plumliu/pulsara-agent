@@ -1,0 +1,6 @@
+{
+  "ProcessId": 25272,
+  "CreationDate": "2026-10-25T01:19:21.601493+08:00",
+  "ExecutablePath": "C:\\python_workspace\\pulsara-agent\\desktop\\node_modules\\electron\\dist\\electron.exe",
+  "CommandLine": "\"C:\\python_workspace\\pulsara-agent\\desktop\\node_modules\\electron\\dist\\electron.exe\" output/windows-g0/root/round5/http_host.cjs"
+}

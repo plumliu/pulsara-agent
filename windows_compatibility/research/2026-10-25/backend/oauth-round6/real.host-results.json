@@ -1,0 +1,178 @@
+{
+  "mode": "real",
+  "records": [
+    {
+      "event": "electron-ready",
+      "time": 1792864655710,
+      "mode": "real",
+      "electron": "44.9.0",
+      "node": "v24.22.0",
+      "platform": "win32"
+    },
+    {
+      "event": "guest-carrier",
+      "time": 1792864655719,
+      "pid": 32900,
+      "executable": "C:\\WINDOWS\\System32\\wsl.exe",
+      "argv": [
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round6/guest.py",
+        "real"
+      ]
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864659053,
+      "record": {
+        "type": "guest-ready",
+        "mode": "real",
+        "home": "/home/plumwsl/.g0oauth6-k9uzi43p",
+        "uid": 1000,
+        "device": 2096,
+        "sdk": "2.1.0"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864659059,
+      "record": {
+        "type": "case-start",
+        "case": "real-notion"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864659060,
+      "record": {
+        "type": "real-authorization-ready",
+        "endpoint": "https://mcp.notion.com/mcp",
+        "callback_origin": "http://127.0.0.1:39965"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864659859,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "https://mcp.notion.com",
+        "path": "/mcp",
+        "status": 401,
+        "body": ""
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864660346,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "https://mcp.notion.com",
+        "path": "/.well-known/oauth-protected-resource/mcp",
+        "status": 200
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864660823,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "https://mcp.notion.com",
+        "path": "/.well-known/oauth-authorization-server",
+        "status": 200
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864661701,
+      "record": {
+        "type": "oauth-http",
+        "method": "POST",
+        "origin": "https://mcp.notion.com",
+        "path": "/register",
+        "status": 201
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864662036,
+      "requestId": "1",
+      "case": "real-notion",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864662037,
+      "requestId": "1",
+      "case": "real-notion",
+      "origin": "https://mcp.notion.com"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864662075,
+      "requestId": "1",
+      "case": "real-notion",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864694493,
+      "record": {
+        "type": "oauth-http",
+        "method": "POST",
+        "origin": "https://mcp.notion.com",
+        "path": "/token",
+        "status": 200
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864696188,
+      "record": {
+        "type": "real-result",
+        "state": "authorized",
+        "protocol_version": "2026-07-28",
+        "tool_count": 65,
+        "next_cursor_present": false,
+        "listener_closed": true,
+        "pending_count": 0,
+        "business_tools_called": false,
+        "local_grant_removed": true
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864696188,
+      "record": {
+        "type": "host-pipe-settled",
+        "pending_count": 0
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864696189,
+      "record": {
+        "type": "guest-cleaned",
+        "home": "/home/plumwsl/.g0oauth6-k9uzi43p",
+        "removed": true
+      }
+    },
+    {
+      "event": "guest-carrier-closed",
+      "time": 1792864696613,
+      "code": 0,
+      "signal": null,
+      "stderrBytes": 0,
+      "partialFrame": false
+    }
+  ]
+}

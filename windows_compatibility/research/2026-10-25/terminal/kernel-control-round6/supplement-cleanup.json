@@ -1,0 +1,144 @@
+{
+  "hostCount": 8,
+  "sharedKernelHomeCount": 6,
+  "retiredDistroCaseCount": 2,
+  "remainingExactHosts": [],
+  "currentHostPidUnobservable": [],
+  "hostFacts": [
+    {
+      "pid": 7028,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 25668,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37708,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33440,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33512,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 27400,
+      "exists": false,
+      "creation": 134373379182151702,
+      "sameIdentity": true
+    },
+    {
+      "pid": 31496,
+      "exists": false,
+      "creation": 134373379388502917,
+      "sameIdentity": true
+    },
+    {
+      "pid": 37428,
+      "exists": false,
+      "error": 87
+    }
+  ],
+  "sharedKernelFacts": [
+    {
+      "pid": 450,
+      "expectedStarttime": "26994",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 569,
+      "expectedStarttime": "27852",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 691,
+      "expectedStarttime": "28608",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 810,
+      "expectedStarttime": "35969",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 934,
+      "expectedStarttime": "38036",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1062,
+      "expectedStarttime": "42308",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    }
+  ],
+  "remainingSharedHomes": [],
+  "retiredDistroCleanup": {
+    "management": [
+      {
+        "event": "registered-target-guard",
+        "time": 1792864215.42443,
+        "target": {
+          "id": "{2abf609d-eb8a-4980-9f49-a5cf79b45220}",
+          "name": "PulsaraG0-kernel6-20261025-d88d705e",
+          "path": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round6\\disposable-distro\\PulsaraG0-kernel6-20261025-d88d705e\\instance",
+          "version": 2
+        },
+        "default": "{482bba13-880f-47a9-a872-4e6cbd01ec05}"
+      },
+      {
+        "event": "management-command",
+        "time": 1792864215.5320613,
+        "args": [
+          "--unregister",
+          "PulsaraG0-kernel6-20261025-d88d705e"
+        ],
+        "exit": 0,
+        "stdout": "操作成功完成。 \r\n",
+        "stderr": ""
+      },
+      {
+        "event": "temporary-distro-unregistered",
+        "time": 1792864215.5325747,
+        "registry": {
+          "default": "{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+          "distributions": [
+            {
+              "id": "{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+              "name": "Ubuntu",
+              "path": "C:\\Users\\plumlocal\\AppData\\Local\\wsl\\{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+              "version": 2
+            }
+          ]
+        },
+        "freeBytes": 434399735808
+      }
+    ],
+    "ownRegistrationAbsent": true,
+    "ownFolderAbsent": true,
+    "sharedUbuntuStillRunning": true,
+    "listing": "  NAME      STATE           VERSION\r\n* Ubuntu    Running         2\r\n",
+    "freeBytes": 434818240512
+  },
+  "allCasePgBothLocksFreeAndNoProcessesBeforeHomeRemoval": true
+}

@@ -1,0 +1,179 @@
+{
+  "tests": [
+    {
+      "name": "cancel-dialog",
+      "pass": true,
+      "detail": {
+        "state": "cancelled",
+        "path": "",
+        "bytes": 0
+      }
+    },
+    {
+      "name": "decline-overwrite",
+      "pass": true,
+      "detail": {
+        "state": "cancelled",
+        "path": "",
+        "bytes": 0
+      }
+    },
+    {
+      "name": "accept-overwrite",
+      "pass": true,
+      "detail": {
+        "state": "completed",
+        "path": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\root\\round6\\save-dialog-existing.txt",
+        "bytes": 28
+      }
+    }
+  ],
+  "events": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:32783",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUe0MMAGo8Te2F1romnNn/JpjvTMUwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3NTkwNVoXDTI2MTAy\nNTE3NTkwNVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAl1kTnW8CuvJA6/mU6qct9Nrs7yohYRrVSsd+39z+cILN\nivn6OcOjRq6d/Si9zLch455S8UqHLUkWw5fUGccTMjVqee90ckyHDfOq8gElIYkh\n5ClSwDp6gMd2/QYckk7jLwU7VUdnlNbIPiAT3wj2lPudA37yNE8OMrvd2N9euHMz\nbmlm0KiIgvUN4XEATseTXjx1JJS7zGIEUS2n2ZBruukz89RSi7Gc1YAtQy8HHCev\nUcRIFB/yQQFYhOuXLJI+phy+kp6/B8OFGeuIpzDDY2JvhMqY6fIEMmW0p1awLzqv\nDhuUrLG0VF9/8pHZpnuKpFHu9ClFO8OSoYVDq30b7wIDAQABo1MwUTAdBgNVHQ4E\nFgQU/90VmLIqmRme2kmLF6m3R+PY0XEwHwYDVR0jBBgwFoAU/90VmLIqmRme2kmL\nF6m3R+PY0XEwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAeR8H\nmwrZ4+/uyuS0y7Khxu0J3QjgU9bekEF8WBImjESpLFk2x8AtB7ycUh/AAXcVKbhU\n/xFeAVmtKuURy+71J0YJAziOUiVEVCnICkm49ApNeYfi6ZxVocHv1R8TZGPZDPEv\nDInnZnqYbOfvRdMX+oLCLd5yq1IP7v8vIOmbtZO8Y167SIEG3BAVK9ChxY7mLBAi\n+JHxknk/H7U5fnpaAg+UjtGyzuVmDgn/wuL+QCLZLUeMtvKrhFzarh9P8YQiF/2m\n3IuLn43efxrkDxbbHmmwztZuonM6N6aGUPv6Mb7zEu/xNK2S6VAuepqbWMp9YL2p\neY3oicTqZAP4jefu8A==\n-----END CERTIFICATE-----\n",
+      "home": "/home/plumwsl/.g0-http-4rn3jx8r",
+      "workspace": "/home/plumwsl/.g0-http-4rn3jx8r/workspace",
+      "uid": 1000,
+      "pid": 324,
+      "owners": [
+        "LocalHttpServer",
+        "RendererBridge",
+        "LocalImport",
+        "FilePreviewHttp",
+        "FilePreviews"
+      ]
+    },
+    {
+      "event": "response",
+      "path": "/",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/U92abWRjy_vc6BtnucAjaIZY_GxbTgjBJUp6V6culu4/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/U92abWRjy_vc6BtnucAjaIZY_GxbTgjBJUp6V6culu4/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/U92abWRjy_vc6BtnucAjaIZY_GxbTgjBJUp6V6culu4/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "stopped",
+      "slots": 0,
+      "pending": 0,
+      "home": "/home/plumwsl/.g0-http-4rn3jx8r"
+    }
+  ],
+  "requests": [
+    {
+      "url": "https://127.0.0.1:32783/",
+      "allowed": true,
+      "resourceType": "mainFrame",
+      "frameUrl": ""
+    },
+    {
+      "url": "https://127.0.0.1:32783/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:32783/api/file-previews/U92abWRjy_vc6BtnucAjaIZY_GxbTgjBJUp6V6culu4/content?download=1",
+      "allowed": true,
+      "resourceType": "other",
+      "frameUrl": "https://127.0.0.1:32783/"
+    },
+    {
+      "url": "https://127.0.0.1:32783/api/file-previews/U92abWRjy_vc6BtnucAjaIZY_GxbTgjBJUp6V6culu4/content?download=1",
+      "allowed": true,
+      "resourceType": "other",
+      "frameUrl": "https://127.0.0.1:32783/"
+    },
+    {
+      "url": "https://127.0.0.1:32783/api/file-previews/U92abWRjy_vc6BtnucAjaIZY_GxbTgjBJUp6V6culu4/content?download=1",
+      "allowed": true,
+      "resourceType": "other",
+      "frameUrl": "https://127.0.0.1:32783/"
+    }
+  ],
+  "certChecks": [
+    {
+      "same": false,
+      "hostname": "redirector.gvt1.com"
+    },
+    {
+      "same": true,
+      "hostname": "127.0.0.1"
+    }
+  ],
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  },
+  "stage": "complete",
+  "dialogOptions": {
+    "window": null,
+    "title": "G0 accept-overwrite",
+    "message": "",
+    "buttonLabel": "",
+    "nameFieldLabel": "",
+    "defaultPath": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\root\\round6\\save-dialog-existing.txt",
+    "filters": [],
+    "showsTagField": false,
+    "securityScopedBookmarks": false
+  },
+  "carrierExit": {
+    "code": 0,
+    "signal": null
+  },
+  "summary": {
+    "passed": 3,
+    "failed": 0
+  }
+}

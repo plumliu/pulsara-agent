@@ -1,0 +1,3 @@
+-    if (!child) return;
+-    this.send(child, {type:'shutdown'}, true);
++    if (child) this.send(child, {type:'shutdown'}, true);

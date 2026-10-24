@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "physical_cases": 29,
+  "groups": {
+    "functional.results.json": 1,
+    "framing.results.json": 9,
+    "framing-supplement.results.json": 2,
+    "mutators.results.json": 13,
+    "extracted-client.results.json": 1,
+    "utf8.results.json": 1,
+    "partial-delete.results.json": 1,
+    "readonly.results.json": 1
+  },
+  "utf8_original_byte_spans_verified": true,
+  "real_nonzero_readback_verified": true
+}

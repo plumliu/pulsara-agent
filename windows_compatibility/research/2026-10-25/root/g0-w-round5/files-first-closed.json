@@ -1,0 +1,345 @@
+{
+  "events": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:45455",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUHkFVP8azqYN6tP1SJnd0PBsZFxgwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3MTAyMVoXDTI2MTAy\nNTE3MTAyMVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAy2iyBRlLPiOqnIBcMYO3Y17VPVmuWQrxICclnWxSVcMu\nEmQuL0602wIq4gvt2jEpUvv/HkfB/Be3SMUzEIlVodKf+H3r2SvDd/TTsJaChGeP\n/icdGWfIeuSlxDW1eWrO2FPoAtO+wW3jIfmYkhRI+enT3G6umtXyXDNgurxi3PTP\nSHPLvEz9g6JiY1HIOXnw0xzzITvWbZ0hfyGlYW+U1GEn0GNtKEMmsyPPcCHPIC5y\nzQBubnbMpyROwg3ZzevRneIjkErlxzhQSxZB1REfo9LWBfMy69YWN5IKI1JCM7YI\nE9QeJgfxvadhuhcLqhlTRcHc2svrObkqZEbQrm50JwIDAQABo1MwUTAdBgNVHQ4E\nFgQUFhOMubVslcu17yEdPvfUCe9ZhLQwHwYDVR0jBBgwFoAUFhOMubVslcu17yEd\nPvfUCe9ZhLQwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAUdRP\nvOcgRHAqV6NQU39Vw2xKTOV7TVMtqhe+cv3pZwNZiS+Mf/tgaWrsS/qCvWq5O3Dk\ndDZQGCEptKukZLGiTKHl808db77DXGhoxy/QT+wFaXHEbIBzbOZn+lBLouYnM+B8\n8n9c6CB616BFsViJ5FllnOsvMzJWTmlPh+25TzHLazXt2FFEIpSIMTZqpifuIEl+\npg/IHlPcO+PNhhvTdHnhoxwzqRw2krECh6YKg44blzEP2KUSiuYHxc0BfDzBIs+i\nIZ+h6fRSXsxVHE/olxBXEVkXDVc1mxI8etl4sXNXusAFMLYrKbmlEyv+hTmNeGDt\nfac+SCea1MLGhJXfVg==\n-----END CERTIFICATE-----\n",
+      "home": "/home/plumwsl/.g0-files-yjev4s5f",
+      "root": "/home/plumwsl/workspaces",
+      "pid": 532,
+      "uid": 1000
+    },
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces",
+        "names": [
+          "pulsara_agent",
+          "中文 工程 G0-20261024"
+        ],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "gui-ready",
+      "activeSession": null
+    },
+    {
+      "event": "renderer-console",
+      "args": [
+        "2",
+        "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged.",
+        "2",
+        "node:electron/js2c/sandbox_bundle"
+      ]
+    },
+    {
+      "event": "directory",
+      "operation": "mkdir",
+      "result": {
+        "created": "/home/plumwsl/workspaces/中文 工程 G0-R5"
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces",
+        "names": [
+          "pulsara_agent",
+          "中文 工程 G0-20261024",
+          "中文 工程 G0-R5"
+        ],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+        "names": [],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+        "key": "workspace:7xtse2bgw3bx5do6viju3q2cxm",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+        "key": "workspace:7xtse2bgw3bx5do6viju3q2cxm",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+        "key": "workspace:7xtse2bgw3bx5do6viju3q2cxm",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+        "key": "workspace:7xtse2bgw3bx5do6viju3q2cxm",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "wrong UNC target"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "wrong UNC target"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "outside workspace root"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "NotADirectoryError",
+      "detail": "[Errno 20] Not a directory: 'symlink-ext4'"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "NotADirectoryError",
+      "detail": "[Errno 20] Not a directory: 'symlink-drvfs'"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "PermissionError",
+      "detail": "[Errno 13] Permission denied: 'no-access'"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "FileNotFoundError",
+      "detail": "[Errno 2] No such file or directory: 'does-not-exist'"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "FileExistsError",
+      "detail": "[Errno 17] File exists: 'duplicate'"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "invalid Windows-visible name"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "reserved Windows-visible name"
+    },
+    {
+      "event": "directory",
+      "operation": "mkdir",
+      "result": {
+        "created": "/home/plumwsl/workspaces/中文 工程 G0-R5/lost-reply"
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+        "names": [
+          "duplicate",
+          "lost-reply",
+          "no-access",
+          "symlink-drvfs",
+          "symlink-ext4"
+        ],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "rejected",
+      "route": "/import",
+      "error": "ConnectionResetError",
+      "detail": "Connection lost"
+    },
+    {
+      "event": "renderer-console",
+      "args": [
+        "3",
+        "Uncaught (in promise) TypeError: Failed to execute 'fetch' on 'Window': Failed to read the 'headers' property from 'RequestInit': String contains non ISO-8859-1 code point.",
+        "18",
+        "https://127.0.0.1:45455/"
+      ]
+    },
+    {
+      "event": "stopped",
+      "home": "/home/plumwsl/.g0-files-yjev4s5f",
+      "imports": []
+    },
+    {
+      "event": "carrier-close",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "event": "host-stopped"
+    }
+  ],
+  "requests": [
+    {
+      "url": "https://127.0.0.1:45455/",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:45455/directories",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:45455/directories",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:45455/directories",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:45455/directories",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:45455/directories",
+      "allow": true
+    }
+  ],
+  "certificates": [
+    {
+      "hostname": "redirector.gvt1.com",
+      "same": false
+    },
+    {
+      "hostname": "127.0.0.1",
+      "same": true
+    }
+  ],
+  "started": "2026-10-24T17:10:19.633Z",
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  }
+}

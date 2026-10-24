@@ -1,0 +1,29 @@
+{
+  "name": "PulsaraG0-kernel7-20261025-e4e95020",
+  "user": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "layout": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "wsl: Failed to start the systemd user session for 'plumwsl'. See journalctl for more details.\n"
+  },
+  "resourceTransfer": {
+    "sourceExit": 0,
+    "targetExit": 0,
+    "sourceStderr": "",
+    "targetStderr": ""
+  },
+  "helpers": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "facts": {
+    "exit": 0,
+    "stdout": "uid=1000(plumwsl) gid=1000(plumwsl) groups=1000(plumwsl)\nPRETTY_NAME=\"Ubuntu 26.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"26.04\"\nVERSION=\"26.04.1 LTS (Resolute Raccoon)\"\nVERSION_CODENAME=resolute\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=resolute\nLOGO=ubuntu-logo\npid:[4026532242]\n513299d9-d395-4f7c-bed4-f3c042b0b4b6\nFilesystem         1B-blocks       Used     Available Use% Mounted on\n/dev/sde       1081101176832 2253238272 1023855583232   1% /\n477121651\t/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python\n356507014\t/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres\n\tlinux-vdso.so.1 (0x000072a9c7a3b000)\n\tlibpthread.so.0 => /usr/lib/x86_64-linux-gnu/libpthread.so.0 (0x000072a9c7a29000)\n\tlibdl.so.2 => /usr/lib/x86_64-linux-gnu/libdl.so.2 (0x000072a9c7a24000)\n\tlibutil.so.1 => /usr/lib/x86_64-linux-gnu/libutil.so.1 (0x000072a9c7a1f000)\n\tlibm.so.6 => /usr/lib/x86_64-linux-gnu/libm.so.6 (0x000072a9c78f9000)\n\tlibrt.so.1 => /usr/lib/x86_64-linux-gnu/librt.so.1 (0x000072a9c78f4000)\n\tlibc.so.6 => /usr/lib/x86_64-linux-gnu/libc.so.6 (0x000072a9c7600000)\n\t/lib64/ld-linux-x86-64.so.2 (0x000072a9c7a3d000)\n\tlinux-vdso.so.1 (0x0000789af389a000)\n\tlibm.so.6 => /usr/lib/x86_64-linux-gnu/libm.so.6 (0x0000789af2cda000)\n\tlibc.so.6 => /usr/lib/x86_64-linux-gnu/libc.so.6 (0x0000789af2a00000)\n\t/lib64/ld-linux-x86-64.so.2 (0x0000789af389c000)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/desktop_runtime.py\n",
+    "stderr": ""
+  }
+}

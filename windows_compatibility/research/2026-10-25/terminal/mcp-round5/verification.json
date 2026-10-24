@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "cases": 6,
+  "baselineGapObserved": true,
+  "candidatePhysicalCloseCases": 4,
+  "realCredentialDenialBeforeScope": true,
+  "originalFocusedTests": "21 passed in 6.68s",
+  "singleCallCancellationDoesNotCloseSession": true,
+  "timeoutAndProcessLossRemainUnknown": true
+}

@@ -1,0 +1,97 @@
+{
+  "events": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:46227",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUELNAX6HTg4WNb8H5HeSSxmYLUtgwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3MDk0NVoXDTI2MTAy\nNTE3MDk0NVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAtFRVXEHS8iNqp7pnVUtjkEmXfDxOadhbhXWLdx5OXzWY\neXpYe0XS64LkcvOsHSft2wyb64CSithc1WjkplNyMbCOqOw9tZKHftM8LYV9yNw/\n1u1KNPRy54NKsVTuHqzFrZ/MZjoXCdNBb5T3ksSvS8ICzjswrvqd+AdauVcHaqu0\ngUnrqAdnD0+oi8KkJsxX9Qf2i4m4WTev77ul4Ei8pXNeFS2oiWrt1Tb6XN68bwX9\nF8aZk9be4LKgMf+6IwimbMVCTNzzisRhT+lev+gB+tx0ypnW1f+v+g5M+rR2we+V\nKBIdomAYz2dTBUCY1BoTXZH0U7WqwY1jYJR3VVdVPQIDAQABo1MwUTAdBgNVHQ4E\nFgQUbZG7H5OuM/ozSyg6/rxi2+95hNIwHwYDVR0jBBgwFoAUbZG7H5OuM/ozSyg6\n/rxi2+95hNIwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAegDM\nXgN+k0I1u/jxMXlVJ5TEsLEF5/RYrbAFMyHHLglaTNMV2hmcjRuItq4MxInDlOt5\ncFqTNd+lk59ncMrhJ1NgP+hcV7RjZ3IW2hyKKvHWSAgl0jX6t+tydluOZ7dqWJbC\nG5BETXFdQezRqWXiWOjEwWI+ZVqcclL6D6IikpsvzI4PZfcIUNTqoRpTKdEvtvsF\nSgoJyY2qfzCyAaWoX2qIxkx+E+M2HJNen1/qTbCGfZYyGQTM/PFUjODxWy6+INY1\nQc8yE0sg7znHTcRSLcJcyg70J1TNTPiIKn1EjZzd8iW35TbHWp5PEI7I7Lzc5Goi\nTKn2jxujxrWcr89bxQ==\n-----END CERTIFICATE-----\n",
+      "home": "/home/plumwsl/.g0-files-s2wiqd62",
+      "root": "/home/plumwsl/workspaces",
+      "pid": 449,
+      "uid": 1000
+    },
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces",
+        "names": [
+          "pulsara_agent",
+          "中文 工程 G0-20261024"
+        ],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "gui-ready",
+      "activeSession": null
+    },
+    {
+      "event": "renderer-console",
+      "args": [
+        "2",
+        "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged.",
+        "2",
+        "node:electron/js2c/sandbox_bundle"
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "url": "https://127.0.0.1:46227/",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:46227/directories",
+      "allow": true
+    }
+  ],
+  "certificates": [
+    {
+      "hostname": "redirector.gvt1.com",
+      "same": false
+    },
+    {
+      "hostname": "127.0.0.1",
+      "same": true
+    }
+  ],
+  "started": "2026-10-24T17:09:42.421Z",
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  }
+}

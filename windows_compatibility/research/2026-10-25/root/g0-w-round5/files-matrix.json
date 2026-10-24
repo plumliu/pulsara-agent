@@ -1,0 +1,159 @@
+[
+  {
+    "fixture": {
+      "fixture": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+      "uid": 1000
+    }
+  },
+  {
+    "name": "canonical",
+    "status": 200,
+    "reply": {
+      "selected": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+      "key": "workspace:7xtse2bgw3bx5do6viju3q2cxm",
+      "activeSession": null
+    },
+    "pass": true
+  },
+  {
+    "name": "UNC-localhost",
+    "status": 200,
+    "reply": {
+      "selected": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+      "key": "workspace:7xtse2bgw3bx5do6viju3q2cxm",
+      "activeSession": null
+    },
+    "pass": true
+  },
+  {
+    "name": "UNC-dollar",
+    "status": 200,
+    "reply": {
+      "selected": "/home/plumwsl/workspaces/中文 工程 G0-R5",
+      "key": "workspace:7xtse2bgw3bx5do6viju3q2cxm",
+      "activeSession": null
+    },
+    "pass": true
+  },
+  {
+    "name": "wrong-distro",
+    "status": 400,
+    "reply": {
+      "error": "ValueError",
+      "detail": "wrong UNC target"
+    },
+    "pass": true
+  },
+  {
+    "name": "windows-drive",
+    "status": 400,
+    "reply": {
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    "pass": true
+  },
+  {
+    "name": "network-share",
+    "status": 400,
+    "reply": {
+      "error": "ValueError",
+      "detail": "wrong UNC target"
+    },
+    "pass": true
+  },
+  {
+    "name": "drvfs",
+    "status": 400,
+    "reply": {
+      "error": "ValueError",
+      "detail": "outside workspace root"
+    },
+    "pass": true
+  },
+  {
+    "name": "escape",
+    "status": 400,
+    "reply": {
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    "pass": true
+  },
+  {
+    "name": "ext4-symlink",
+    "status": 400,
+    "reply": {
+      "error": "NotADirectoryError",
+      "detail": "[Errno 20] Not a directory: 'symlink-ext4'"
+    },
+    "pass": true
+  },
+  {
+    "name": "drvfs-symlink",
+    "status": 400,
+    "reply": {
+      "error": "NotADirectoryError",
+      "detail": "[Errno 20] Not a directory: 'symlink-drvfs'"
+    },
+    "pass": true
+  },
+  {
+    "name": "permissions",
+    "status": 400,
+    "reply": {
+      "error": "PermissionError",
+      "detail": "[Errno 13] Permission denied: 'no-access'"
+    },
+    "pass": true
+  },
+  {
+    "name": "missing",
+    "status": 400,
+    "reply": {
+      "error": "FileNotFoundError",
+      "detail": "[Errno 2] No such file or directory: 'does-not-exist'"
+    },
+    "pass": true
+  },
+  {
+    "name": "duplicate",
+    "status": 400,
+    "reply": {
+      "error": "FileExistsError",
+      "detail": "[Errno 17] File exists: 'duplicate'"
+    },
+    "pass": true
+  },
+  {
+    "name": "separator",
+    "status": 400,
+    "reply": {
+      "error": "ValueError",
+      "detail": "invalid Windows-visible name"
+    },
+    "pass": true
+  },
+  {
+    "name": "reserved",
+    "status": 400,
+    "reply": {
+      "error": "ValueError",
+      "detail": "reserved Windows-visible name"
+    },
+    "pass": true
+  },
+  {
+    "name": "mkdir-response-discarded",
+    "pass": true,
+    "callerOutcome": "unknown",
+    "refreshedDirectoryPresent": true,
+    "replayed": false
+  },
+  {
+    "name": "partial-upload-disconnect",
+    "pass": true,
+    "stages": [],
+    "partialFiles": []
+  }
+]

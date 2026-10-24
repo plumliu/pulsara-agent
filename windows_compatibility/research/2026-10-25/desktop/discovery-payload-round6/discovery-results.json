@@ -1,0 +1,222 @@
+{
+  "passed": true,
+  "target": {
+    "distro": "Ubuntu",
+    "user": "plumwsl",
+    "uid": 1000,
+    "home": "/home/plumwsl"
+  },
+  "windowsIsUserAnAdmin": false,
+  "rootRejectedBeforeLaunch": "ROOT_TARGET_REJECTED",
+  "changedDefaultTest": {
+    "kind": "input-only-no-system-default-change",
+    "input": {
+      "distro": "A different default",
+      "user": "root",
+      "uid": 0,
+      "home": "/root"
+    },
+    "selectedRemains": {
+      "distro": "Ubuntu",
+      "user": "plumwsl",
+      "uid": 1000,
+      "home": "/home/plumwsl"
+    }
+  },
+  "events": [
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--version"
+      ],
+      "exit": 0,
+      "stdout": "WSL 版本: 2.7.11.0\r\n内核版本: 6.18.33.2-2\r\nWSLg 版本: 1.0.73.2\r\nMSRDC 版本: 1.2.7214\r\nDirect3D 版本: 1.611.1-81528511\r\nDXCore 版本: 10.0.26100.1-240331-1435.ge-release\r\nWindows: 10.0.26200.9711\r\n",
+      "stderr": "",
+      "stdoutBase64": "VwBTAEwAIABIcixnOgAgADIALgA3AC4AMQAxAC4AMAANAAoAhVE4aEhyLGc6ACAANgAuADEAOAAuADMAMwAuADIALQAyAA0ACgBXAFMATABnACAASHIsZzoAIAAxAC4AMAAuADcAMwAuADIADQAKAE0AUwBSAEQAQwAgAEhyLGc6ACAAMQAuADIALgA3ADIAMQA0AA0ACgBEAGkAcgBlAGMAdAAzAEQAIABIcixnOgAgADEALgA2ADEAMQAuADEALQA4ADEANQAyADgANQAxADEADQAKAEQAWABDAG8AcgBlACAASHIsZzoAIAAxADAALgAwAC4AMgA2ADEAMAAwAC4AMQAtADIANAAwADMAMwAxAC0AMQA0ADMANQAuAGcAZQAtAHIAZQBsAGUAYQBzAGUADQAKAFcAaQBuAGQAbwB3AHMAOgAgADEAMAAuADAALgAyADYAMgAwADAALgA5ADcAMQAxAA0ACgA=",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--status"
+      ],
+      "exit": 0,
+      "stdout": "默认分发: Ubuntu\r\n默认版本: 2\r\n",
+      "stderr": "",
+      "stdoutBase64": "2J6kiwZS0VM6ACAAVQBiAHUAbgB0AHUADQAKANiepItIcixnOgAgADIADQAKAA==",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--list",
+        "--verbose"
+      ],
+      "exit": 0,
+      "stdout": "  NAME      STATE           VERSION\r\n* Ubuntu    Running         2\r\n",
+      "stderr": "",
+      "stdoutBase64": "IAAgAE4AQQBNAEUAIAAgACAAIAAgACAAUwBUAEEAVABFACAAIAAgACAAIAAgACAAIAAgACAAIABWAEUAUgBTAEkATwBOAA0ACgAqACAAVQBiAHUAbgB0AHUAIAAgACAAIABSAHUAbgBuAGkAbgBnACAAIAAgACAAIAAgACAAIAAgADIADQAKAA==",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--exec",
+        "/usr/bin/python3",
+        "-c",
+        "import json,os,pwd,platform,subprocess; p=pwd.getpwuid(os.getuid()); print(json.dumps(dict(distro=os.environ['WSL_DISTRO_NAME'],user=p.pw_name,uid=os.getuid(),home=p.pw_dir,pid=os.getpid(),release=platform.freedesktop_os_release(),uname=platform.uname()._asdict(),homeMount=subprocess.check_output(['findmnt','-T',p.pw_dir,'-n','-o','FSTYPE,SOURCE,TARGET'],text=True).strip())))"
+      ],
+      "exit": 0,
+      "stdout": "{\"distro\": \"Ubuntu\", \"user\": \"plumwsl\", \"uid\": 1000, \"home\": \"/home/plumwsl\", \"pid\": 2698, \"release\": {\"NAME\": \"Ubuntu\", \"ID\": \"ubuntu\", \"PRETTY_NAME\": \"Ubuntu 26.04.1 LTS\", \"VERSION_ID\": \"26.04\", \"VERSION\": \"26.04.1 LTS (Resolute Raccoon)\", \"VERSION_CODENAME\": \"resolute\", \"ID_LIKE\": \"debian\", \"HOME_URL\": \"https://www.ubuntu.com/\", \"SUPPORT_URL\": \"https://help.ubuntu.com/\", \"BUG_REPORT_URL\": \"https://bugs.launchpad.net/ubuntu/\", \"PRIVACY_POLICY_URL\": \"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\", \"UBUNTU_CODENAME\": \"resolute\", \"LOGO\": \"ubuntu-logo\"}, \"uname\": {\"system\": \"Linux\", \"node\": \"plumliuwin\", \"release\": \"6.18.33.2-microsoft-standard-WSL2\", \"version\": \"#1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026\", \"machine\": \"x86_64\", \"processor\": \"\"}, \"homeMount\": \"ext4 /dev/sdd /\"}\n",
+      "stderr": "",
+      "stdoutBase64": "eyJkaXN0cm8iOiAiVWJ1bnR1IiwgInVzZXIiOiAicGx1bXdzbCIsICJ1aWQiOiAxMDAwLCAiaG9tZSI6ICIvaG9tZS9wbHVtd3NsIiwgInBpZCI6IDI2OTgsICJyZWxlYXNlIjogeyJOQU1FIjogIlVidW50dSIsICJJRCI6ICJ1YnVudHUiLCAiUFJFVFRZX05BTUUiOiAiVWJ1bnR1IDI2LjA0LjEgTFRTIiwgIlZFUlNJT05fSUQiOiAiMjYuMDQiLCAiVkVSU0lPTiI6ICIyNi4wNC4xIExUUyAoUmVzb2x1dGUgUmFjY29vbikiLCAiVkVSU0lPTl9DT0RFTkFNRSI6ICJyZXNvbHV0ZSIsICJJRF9MSUtFIjogImRlYmlhbiIsICJIT01FX1VSTCI6ICJodHRwczovL3d3dy51YnVudHUuY29tLyIsICJTVVBQT1JUX1VSTCI6ICJodHRwczovL2hlbHAudWJ1bnR1LmNvbS8iLCAiQlVHX1JFUE9SVF9VUkwiOiAiaHR0cHM6Ly9idWdzLmxhdW5jaHBhZC5uZXQvdWJ1bnR1LyIsICJQUklWQUNZX1BPTElDWV9VUkwiOiAiaHR0cHM6Ly93d3cudWJ1bnR1LmNvbS9sZWdhbC90ZXJtcy1hbmQtcG9saWNpZXMvcHJpdmFjeS1wb2xpY3kiLCAiVUJVTlRVX0NPREVOQU1FIjogInJlc29sdXRlIiwgIkxPR08iOiAidWJ1bnR1LWxvZ28ifSwgInVuYW1lIjogeyJzeXN0ZW0iOiAiTGludXgiLCAibm9kZSI6ICJwbHVtbGl1d2luIiwgInJlbGVhc2UiOiAiNi4xOC4zMy4yLW1pY3Jvc29mdC1zdGFuZGFyZC1XU0wyIiwgInZlcnNpb24iOiAiIzEgU01QIFBSRUVNUFRfRFlOQU1JQyBUaHUgSnVuIDE4IDIxOjU0OjQzIFVUQyAyMDI2IiwgIm1hY2hpbmUiOiAieDg2XzY0IiwgInByb2Nlc3NvciI6ICIifSwgImhvbWVNb3VudCI6ICJleHQ0IC9kZXYvc2RkIC8ifQo=",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl",
+        "--exec",
+        "/usr/bin/python3",
+        "-c",
+        "import json,os,pwd,platform,subprocess; p=pwd.getpwuid(os.getuid()); print(json.dumps(dict(distro=os.environ['WSL_DISTRO_NAME'],user=p.pw_name,uid=os.getuid(),home=p.pw_dir,pid=os.getpid(),release=platform.freedesktop_os_release(),uname=platform.uname()._asdict(),homeMount=subprocess.check_output(['findmnt','-T',p.pw_dir,'-n','-o','FSTYPE,SOURCE,TARGET'],text=True).strip())))"
+      ],
+      "exit": 0,
+      "stdout": "{\"distro\": \"Ubuntu\", \"user\": \"plumwsl\", \"uid\": 1000, \"home\": \"/home/plumwsl\", \"pid\": 2703, \"release\": {\"NAME\": \"Ubuntu\", \"ID\": \"ubuntu\", \"PRETTY_NAME\": \"Ubuntu 26.04.1 LTS\", \"VERSION_ID\": \"26.04\", \"VERSION\": \"26.04.1 LTS (Resolute Raccoon)\", \"VERSION_CODENAME\": \"resolute\", \"ID_LIKE\": \"debian\", \"HOME_URL\": \"https://www.ubuntu.com/\", \"SUPPORT_URL\": \"https://help.ubuntu.com/\", \"BUG_REPORT_URL\": \"https://bugs.launchpad.net/ubuntu/\", \"PRIVACY_POLICY_URL\": \"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\", \"UBUNTU_CODENAME\": \"resolute\", \"LOGO\": \"ubuntu-logo\"}, \"uname\": {\"system\": \"Linux\", \"node\": \"plumliuwin\", \"release\": \"6.18.33.2-microsoft-standard-WSL2\", \"version\": \"#1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026\", \"machine\": \"x86_64\", \"processor\": \"\"}, \"homeMount\": \"ext4 /dev/sdd /\"}\n",
+      "stderr": "",
+      "stdoutBase64": "eyJkaXN0cm8iOiAiVWJ1bnR1IiwgInVzZXIiOiAicGx1bXdzbCIsICJ1aWQiOiAxMDAwLCAiaG9tZSI6ICIvaG9tZS9wbHVtd3NsIiwgInBpZCI6IDI3MDMsICJyZWxlYXNlIjogeyJOQU1FIjogIlVidW50dSIsICJJRCI6ICJ1YnVudHUiLCAiUFJFVFRZX05BTUUiOiAiVWJ1bnR1IDI2LjA0LjEgTFRTIiwgIlZFUlNJT05fSUQiOiAiMjYuMDQiLCAiVkVSU0lPTiI6ICIyNi4wNC4xIExUUyAoUmVzb2x1dGUgUmFjY29vbikiLCAiVkVSU0lPTl9DT0RFTkFNRSI6ICJyZXNvbHV0ZSIsICJJRF9MSUtFIjogImRlYmlhbiIsICJIT01FX1VSTCI6ICJodHRwczovL3d3dy51YnVudHUuY29tLyIsICJTVVBQT1JUX1VSTCI6ICJodHRwczovL2hlbHAudWJ1bnR1LmNvbS8iLCAiQlVHX1JFUE9SVF9VUkwiOiAiaHR0cHM6Ly9idWdzLmxhdW5jaHBhZC5uZXQvdWJ1bnR1LyIsICJQUklWQUNZX1BPTElDWV9VUkwiOiAiaHR0cHM6Ly93d3cudWJ1bnR1LmNvbS9sZWdhbC90ZXJtcy1hbmQtcG9saWNpZXMvcHJpdmFjeS1wb2xpY3kiLCAiVUJVTlRVX0NPREVOQU1FIjogInJlc29sdXRlIiwgIkxPR08iOiAidWJ1bnR1LWxvZ28ifSwgInVuYW1lIjogeyJzeXN0ZW0iOiAiTGludXgiLCAibm9kZSI6ICJwbHVtbGl1d2luIiwgInJlbGVhc2UiOiAiNi4xOC4zMy4yLW1pY3Jvc29mdC1zdGFuZGFyZC1XU0wyIiwgInZlcnNpb24iOiAiIzEgU01QIFBSRUVNUFRfRFlOQU1JQyBUaHUgSnVuIDE4IDIxOjU0OjQzIFVUQyAyMDI2IiwgIm1hY2hpbmUiOiAieDg2XzY0IiwgInByb2Nlc3NvciI6ICIifSwgImhvbWVNb3VudCI6ICJleHQ0IC9kZXYvc2RkIC8ifQo=",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl",
+        "--exec",
+        "/usr/bin/getent",
+        "passwd",
+        "root"
+      ],
+      "exit": 0,
+      "stdout": "root:x:0:0:root:/root:/bin/bash\n",
+      "stderr": "",
+      "stdoutBase64": "cm9vdDp4OjA6MDpyb290Oi9yb290Oi9iaW4vYmFzaAo=",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "PulsaraG0Missing-39748ed85a3947f2be6448fcfb86b419",
+        "-u",
+        "plumwsl",
+        "--exec",
+        "/usr/bin/id"
+      ],
+      "exit": 4294967295,
+      "stdout": "不存在具有所提供名称的分发。\r\n错误代码: Wsl/Service/WSL_E_DISTRO_NOT_FOUND\r\n",
+      "stderr": "",
+      "stdoutBase64": "DU5YWyhXd1EJZ0Bi0GObTw1U8HmEdgZS0VMCMA0ACgAZle+L404BeDoAIABXAHMAbAAvAFMAZQByAHYAaQBjAGUALwBXAFMATABfAEUAXwBEAEkAUwBUAFIATwBfAE4ATwBUAF8ARgBPAFUATgBEAA0ACgA=",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "g0-no-such-user-b792be0a9fc6445896c2fe3dc1d718c1",
+        "--exec",
+        "/usr/bin/id"
+      ],
+      "exit": 4294967295,
+      "stdout": "找不到用户。\r\n错误代码: Wsl/WSL_E_USER_NOT_FOUND\r\n",
+      "stderr": "<3>WSL (2711 - Relay) ERROR: CreateProcessParseCommon:1006: getpwnam(g0-no-such-user-b792be0a9fc6445896c2fe3dc1d718c1) failed 0\n",
+      "stdoutBase64": "fmINTjBSKHU3YgIwDQAKABmV74vjTgF4OgAgAFcAcwBsAC8AVwBTAEwAXwBFAF8AVQBTAEUAUgBfAE4ATwBUAF8ARgBPAFUATgBEAA0ACgA=",
+      "stderrBase64": "PDM+V1NMICgyNzExIC0gUmVsYXkpIEVSUk9SOiBDcmVhdGVQcm9jZXNzUGFyc2VDb21tb246MTAwNjogZ2V0cHduYW0oZzAtbm8tc3VjaC11c2VyLWI3OTJiZTBhOWZjNjQ0NTg5NmMyZmUzZGMxZDcxOGMxKSBmYWlsZWQgMAo="
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl",
+        "--exec",
+        "/usr/bin/python3",
+        "-c",
+        "import json,os,pwd,platform,subprocess; p=pwd.getpwuid(os.getuid()); print(json.dumps(dict(distro=os.environ['WSL_DISTRO_NAME'],user=p.pw_name,uid=os.getuid(),home=p.pw_dir,pid=os.getpid(),release=platform.freedesktop_os_release(),uname=platform.uname()._asdict(),homeMount=subprocess.check_output(['findmnt','-T',p.pw_dir,'-n','-o','FSTYPE,SOURCE,TARGET'],text=True).strip())))"
+      ],
+      "exit": 0,
+      "stdout": "{\"distro\": \"Ubuntu\", \"user\": \"plumwsl\", \"uid\": 1000, \"home\": \"/home/plumwsl\", \"pid\": 2714, \"release\": {\"NAME\": \"Ubuntu\", \"ID\": \"ubuntu\", \"PRETTY_NAME\": \"Ubuntu 26.04.1 LTS\", \"VERSION_ID\": \"26.04\", \"VERSION\": \"26.04.1 LTS (Resolute Raccoon)\", \"VERSION_CODENAME\": \"resolute\", \"ID_LIKE\": \"debian\", \"HOME_URL\": \"https://www.ubuntu.com/\", \"SUPPORT_URL\": \"https://help.ubuntu.com/\", \"BUG_REPORT_URL\": \"https://bugs.launchpad.net/ubuntu/\", \"PRIVACY_POLICY_URL\": \"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\", \"UBUNTU_CODENAME\": \"resolute\", \"LOGO\": \"ubuntu-logo\"}, \"uname\": {\"system\": \"Linux\", \"node\": \"plumliuwin\", \"release\": \"6.18.33.2-microsoft-standard-WSL2\", \"version\": \"#1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026\", \"machine\": \"x86_64\", \"processor\": \"\"}, \"homeMount\": \"ext4 /dev/sdd /\"}\n",
+      "stderr": "",
+      "stdoutBase64": "eyJkaXN0cm8iOiAiVWJ1bnR1IiwgInVzZXIiOiAicGx1bXdzbCIsICJ1aWQiOiAxMDAwLCAiaG9tZSI6ICIvaG9tZS9wbHVtd3NsIiwgInBpZCI6IDI3MTQsICJyZWxlYXNlIjogeyJOQU1FIjogIlVidW50dSIsICJJRCI6ICJ1YnVudHUiLCAiUFJFVFRZX05BTUUiOiAiVWJ1bnR1IDI2LjA0LjEgTFRTIiwgIlZFUlNJT05fSUQiOiAiMjYuMDQiLCAiVkVSU0lPTiI6ICIyNi4wNC4xIExUUyAoUmVzb2x1dGUgUmFjY29vbikiLCAiVkVSU0lPTl9DT0RFTkFNRSI6ICJyZXNvbHV0ZSIsICJJRF9MSUtFIjogImRlYmlhbiIsICJIT01FX1VSTCI6ICJodHRwczovL3d3dy51YnVudHUuY29tLyIsICJTVVBQT1JUX1VSTCI6ICJodHRwczovL2hlbHAudWJ1bnR1LmNvbS8iLCAiQlVHX1JFUE9SVF9VUkwiOiAiaHR0cHM6Ly9idWdzLmxhdW5jaHBhZC5uZXQvdWJ1bnR1LyIsICJQUklWQUNZX1BPTElDWV9VUkwiOiAiaHR0cHM6Ly93d3cudWJ1bnR1LmNvbS9sZWdhbC90ZXJtcy1hbmQtcG9saWNpZXMvcHJpdmFjeS1wb2xpY3kiLCAiVUJVTlRVX0NPREVOQU1FIjogInJlc29sdXRlIiwgIkxPR08iOiAidWJ1bnR1LWxvZ28ifSwgInVuYW1lIjogeyJzeXN0ZW0iOiAiTGludXgiLCAibm9kZSI6ICJwbHVtbGl1d2luIiwgInJlbGVhc2UiOiAiNi4xOC4zMy4yLW1pY3Jvc29mdC1zdGFuZGFyZC1XU0wyIiwgInZlcnNpb24iOiAiIzEgU01QIFBSRUVNUFRfRFlOQU1JQyBUaHUgSnVuIDE4IDIxOjU0OjQzIFVUQyAyMDI2IiwgIm1hY2hpbmUiOiAieDg2XzY0IiwgInByb2Nlc3NvciI6ICIifSwgImhvbWVNb3VudCI6ICJleHQ0IC9kZXYvc2RkIC8ifQo=",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl",
+        "--exec",
+        "/usr/bin/python3",
+        "-c",
+        "import configparser,json,os,subprocess; c=configparser.ConfigParser();c.read('/etc/wsl.conf');print(json.dumps(dict(interop=c.getboolean('interop','enabled',fallback=True),appendWindowsPath=c.getboolean('interop','appendWindowsPath',fallback=True),automount=c.getboolean('automount','enabled',fallback=True),mountFsTab=c.getboolean('automount','mountFsTab',fallback=True),windowsPathPresent=any(p.startswith('/mnt/c/Windows') for p in os.environ.get('PATH','').split(':')),windowsMount=subprocess.check_output(['findmnt','-T','/mnt/c','-n','-o','FSTYPE,SOURCE,TARGET'],text=True).strip())))"
+      ],
+      "exit": 0,
+      "stdout": "{\"interop\": true, \"appendWindowsPath\": true, \"automount\": true, \"mountFsTab\": true, \"windowsPathPresent\": false, \"windowsMount\": \"9p C:\\\\ /mnt/c\"}\n",
+      "stderr": "",
+      "stdoutBase64": "eyJpbnRlcm9wIjogdHJ1ZSwgImFwcGVuZFdpbmRvd3NQYXRoIjogdHJ1ZSwgImF1dG9tb3VudCI6IHRydWUsICJtb3VudEZzVGFiIjogdHJ1ZSwgIndpbmRvd3NQYXRoUHJlc2VudCI6IGZhbHNlLCAid2luZG93c01vdW50IjogIjlwIEM6XFwgL21udC9jIn0K",
+      "stderrBase64": ""
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl",
+        "--exec",
+        "/mnt/c/Windows/System32/cmd.exe",
+        "/c",
+        "ver"
+      ],
+      "exit": 0,
+      "stdout": "\r\nMicrosoft Windows [�汾 10.0.26200.9711]\r\n",
+      "stderr": "'\\\\wsl.localhost\\Ubuntu\\home\\plumwsl'\r\n����Ϊ��ǰĿ¼������·�������� CMD.EXE��\r\nUNC ·������֧�֡�Ĭ��ֵ��Ϊ Windows Ŀ¼��\r\n",
+      "stdoutBase64": "DQpNaWNyb3NvZnQgV2luZG93cyBbsOaxviAxMC4wLjI2MjAwLjk3MTFdDQo=",
+      "stderrBase64": "J1xcd3NsLmxvY2FsaG9zdFxVYnVudHVcaG9tZVxwbHVtd3NsJw0K08PX986qtbHHsMS/wry1xNLUyc/Ct762xvS2r8HLIENNRC5FWEWhow0KVU5DIMK3vrayu8rc1qez1qGjxKzIz9a1yejOqiBXaW5kb3dzIMS/wryhow0K"
+    },
+    {
+      "args": [
+        "C:\\WINDOWS\\System32\\wsl.exe",
+        "--exec",
+        "/usr/bin/python3",
+        "-c",
+        "import json,os,pwd,platform,subprocess; p=pwd.getpwuid(os.getuid()); print(json.dumps(dict(distro=os.environ['WSL_DISTRO_NAME'],user=p.pw_name,uid=os.getuid(),home=p.pw_dir,pid=os.getpid(),release=platform.freedesktop_os_release(),uname=platform.uname()._asdict(),homeMount=subprocess.check_output(['findmnt','-T',p.pw_dir,'-n','-o','FSTYPE,SOURCE,TARGET'],text=True).strip())))"
+      ],
+      "exit": 0,
+      "stdout": "{\"distro\": \"Ubuntu\", \"user\": \"plumwsl\", \"uid\": 1000, \"home\": \"/home/plumwsl\", \"pid\": 2733, \"release\": {\"NAME\": \"Ubuntu\", \"ID\": \"ubuntu\", \"PRETTY_NAME\": \"Ubuntu 26.04.1 LTS\", \"VERSION_ID\": \"26.04\", \"VERSION\": \"26.04.1 LTS (Resolute Raccoon)\", \"VERSION_CODENAME\": \"resolute\", \"ID_LIKE\": \"debian\", \"HOME_URL\": \"https://www.ubuntu.com/\", \"SUPPORT_URL\": \"https://help.ubuntu.com/\", \"BUG_REPORT_URL\": \"https://bugs.launchpad.net/ubuntu/\", \"PRIVACY_POLICY_URL\": \"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\", \"UBUNTU_CODENAME\": \"resolute\", \"LOGO\": \"ubuntu-logo\"}, \"uname\": {\"system\": \"Linux\", \"node\": \"plumliuwin\", \"release\": \"6.18.33.2-microsoft-standard-WSL2\", \"version\": \"#1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026\", \"machine\": \"x86_64\", \"processor\": \"\"}, \"homeMount\": \"ext4 /dev/sdd /\"}\n",
+      "stderr": "",
+      "stdoutBase64": "eyJkaXN0cm8iOiAiVWJ1bnR1IiwgInVzZXIiOiAicGx1bXdzbCIsICJ1aWQiOiAxMDAwLCAiaG9tZSI6ICIvaG9tZS9wbHVtd3NsIiwgInBpZCI6IDI3MzMsICJyZWxlYXNlIjogeyJOQU1FIjogIlVidW50dSIsICJJRCI6ICJ1YnVudHUiLCAiUFJFVFRZX05BTUUiOiAiVWJ1bnR1IDI2LjA0LjEgTFRTIiwgIlZFUlNJT05fSUQiOiAiMjYuMDQiLCAiVkVSU0lPTiI6ICIyNi4wNC4xIExUUyAoUmVzb2x1dGUgUmFjY29vbikiLCAiVkVSU0lPTl9DT0RFTkFNRSI6ICJyZXNvbHV0ZSIsICJJRF9MSUtFIjogImRlYmlhbiIsICJIT01FX1VSTCI6ICJodHRwczovL3d3dy51YnVudHUuY29tLyIsICJTVVBQT1JUX1VSTCI6ICJodHRwczovL2hlbHAudWJ1bnR1LmNvbS8iLCAiQlVHX1JFUE9SVF9VUkwiOiAiaHR0cHM6Ly9idWdzLmxhdW5jaHBhZC5uZXQvdWJ1bnR1LyIsICJQUklWQUNZX1BPTElDWV9VUkwiOiAiaHR0cHM6Ly93d3cudWJ1bnR1LmNvbS9sZWdhbC90ZXJtcy1hbmQtcG9saWNpZXMvcHJpdmFjeS1wb2xpY3kiLCAiVUJVTlRVX0NPREVOQU1FIjogInJlc29sdXRlIiwgIkxPR08iOiAidWJ1bnR1LWxvZ28ifSwgInVuYW1lIjogeyJzeXN0ZW0iOiAiTGludXgiLCAibm9kZSI6ICJwbHVtbGl1d2luIiwgInJlbGVhc2UiOiAiNi4xOC4zMy4yLW1pY3Jvc29mdC1zdGFuZGFyZC1XU0wyIiwgInZlcnNpb24iOiAiIzEgU01QIFBSRUVNUFRfRFlOQU1JQyBUaHUgSnVuIDE4IDIxOjU0OjQzIFVUQyAyMDI2IiwgIm1hY2hpbmUiOiAieDg2XzY0IiwgInByb2Nlc3NvciI6ICIifSwgImhvbWVNb3VudCI6ICJleHQ0IC9kZXYvc2RkIC8ifQo=",
+      "stderrBase64": ""
+    }
+  ]
+}

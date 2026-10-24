@@ -1,0 +1,47 @@
+# 第七轮 N 网络/有效期/退休研究
+
+2026-10-25，生产基线 b741dd92；仅output探针。Windows Electron44.9.0实际Session/net/BrowserWindow/powerMonitor，现Ubuntu/plumwsl UID1000。interop/Hiddify TUN保持；未改VPN、firewall、系统clock、WSL设置或生产代码，未进Phase B。
+
+## 所有权与接缝
+
+只读复用root/round5/http_guest.py实际LocalHttpServer、RendererBridge、LocalImport、FilePreviewHttp/FilePreviews及其TLS注入。sessions/protocol仍为该fixture预置SimpleNamespace，不冒称完整kernel/main/session装配。network_guest.py通过runpy捕获其唯一main，仅追加三个只读可控stream路由、短有效期公钥证书与物理handler观测；不复制HTTP/parser/import状态机。SSE、慢download和未发headers的pending是小控制工作负载；upload实际经过生产LocalImport流式写入与取消清理。
+
+Windows父壳仅用实际Electron维护SDK：Session.setCertificateVerifyProc完整公钥证书一致+hostname、webRequest精确origin；过期证书仍按本次不可变pin接纳，不给长任务引入证书有效期寿命cap。第一次cert检查中Chromium内部证书和本次PEM不一致时确实拒绝，随后匹配才接纳；没有全局忽略证书错误。新Session采用独立partition，验证自然过期后的新TLS上下文。
+
+## 已完成自动子项
+
+最终选定raw为n7-4e98c96a-54f9-4e9e-88a3-77cd9cfcc7dc-results.json，host11540退出0、carrier0，guest425/start25096，自有home实际删除。verify_results.py只读窄断言通过。
+
+- openssl创建validFrom=当前UTC前一分钟、validTo=当前UTC后15秒的真实证书；正常等待实际时间跨界，未改clock。一个guest/同PID/同证书，SSE count4→153、opens1/errors0；过期后原Session fetch与新Session新握手均成功且完整cert相同。selfsigned链的Chromium验证返回ERR_CERT_AUTHORITY_INVALID，过期事实由X509 validTo和真实时间比较证明，不冒称Chromium错误码必为DATE_INVALID。
+- 在途退休前真实LocalImport已有393216byte/0600/uid1000的`.import-*` stage；这已是被接纳的部分写入，不是“未执行”。一条持续SSE、一条慢download和3条并发pending也已进入Linux handler。下载updated实际已接收非零字节；cancel后DownloadItem最终bytes0/partialfile0是SDK删除partial的结果，不抹除已接收事实。
+- 最小收敛顺序为本次策略seal→显式abort持有的ClientRequest、deferred cancel本次DownloadItem→销毁WebContents并等destroyed→await Session.closeAllConnections→等待4个ClientRequest close/DownloadItem done cancelled→Linux5个已接纳handler均transportClosing并退出、import stage/发布文件皆0→清Storage。随后同旧Session4个新fetch全拒绝。upload实际只有一次请求，没有重放；控制GET也未新增重复handler。
+- guest正常stop依次server.aclose、stopped、home清理、carrier close0；没有以scope外层杀进程替代owner成功。DownloadItem.cancel离开native updated回调再执行，沿用root已证明的SDK接缝。
+
+这证明研究壳对真实Electron Session/stream与实际LocalImport物理资源的有限退休组合；不证明生产main已装配该策略，也不把手动策略flag或预置connection当完整controller/IPC生命周期。pending控制handler取消后的response观测500是研究route的取消收尾，未当成功业务响应。
+
+## 原失败保留
+
+1. n7-60330538：自然证书子项已过，但probe误断言inspect.imports必须空。root inspect会枚举`.import-*`里的0600 staging文件，故断言失败；没有发布成功证据。network_host_first_failure.cjs与原raw保留。cleanup的15秒观察截止到期；后续独立精确核/proc/328与其唯一home均不存在，不能据此倒填当时carrier正常退出。
+2. n7-c8877c9b：修正staging分类后，仅Session.closeAllConnections加WebContents销毁/deferred download cancel，SSE/download已观察transport closing，但pending和ClientRequest close未全部结算，观察截止报retired requests；随后guest close观察亦超时。network_host_session_only_failure.cjs及原stderr/raw保留。后续/proc/332及唯一home均为空。最终候选显式取消自己已持有的ClientRequest，未改SDK，不把单独closeAllConnections宣称充分。
+
+以上15秒/launcher100秒仅研究观察截止，既不是产品lifetime cap，也不将没收到回复改成没执行。原失败不改写，最终源码没有复跑对方13项HTTP/GUI矩阵。
+
+## 真实用户睡眠与恢复
+
+manual-ready.json：n7-47fc4a8b；Win7032精确creation134373378430316801；Linux678/start28429、同cert、唯一guest。证书自然过期后继续等待唯一continue/stop文件，无总寿命cap、自动重启或自动睡眠。实际powerMonitor只监听Windows suspend/resume事件，绝不人工emit伪事件。
+
+用户按root协调实际睡眠并回复约1–2分钟后已唤醒。真实powerMonitor suspend1792864428598→resume1792864517091，事件差88.493秒；这是事件间隔，与用户自报分别保留于manual-resume-observation.json，不编造为预定30–60秒。SSE出现一次错误并只读重连，opens1→2/errors0→1；恢复后count2854/last.pid678，同PID/starttime/唯一guest，不能称全程不断线。恢复后的healthz实际新fetch成功，继续使用原Session与原pin/SSLContext；Chromium复用证书缓存，恢复时没有新增verify callback，不冒称额外新上下文握手证据。自然过期的新上下文正测在睡眠前已单独完成。
+
+tasks先核其真实bundledruntime辅助：同host37428/kernel1062start42308/PG1100start42462/namespace4026532222，双锁inode+busy、SQL postmasterstart/current_database一致，见对方round6/sleep-076aee0b-result.json；随后原Quit clean kerneljoin→PGstop1/appExit0。HTTPfixture不冒称持有这套kernel/PG，也不把两个独立owner偷换为生产main全部装配。
+
+收到tasks确认后才写唯一continue门，本网络fixture通过恢复事实及相同在途退休子项：真实upload393216byte stage→0，四个request close、DownloadItem cancelled、所有handler终止、旧Session四新请求拒绝。guest stopped/home deleted、carrier0，manual stderr为空，精确Windowshost身份已不存在。manual启动器退出后没有保留宿主wait句柄，所以不编造Windows OS历史exitcode；探针按无fatal/cleanupError分支请求app.exit0，最终身份查询为空。verification.manualComplete=true。
+
+## 交叉审查与待验
+
+http-cross-review.zh.md与control-cross-review.zh.md已只读审root F/N及tasks C：PDF内置资源例外精确、文件路径最终9项与GUI分阶段范围准确；C两行候选保留exit检查及PGstop顺序，22/18/4与宿主死亡UNKNOWN限制准确，没有实质扩大。
+
+cleanup-final.json：4个精确Linux PID/starttime及对应home全空；最后automatic/manual两个Windows PID/creation身份全空。前两个失败host启动时未存creation，只保留当前两个PID均不存在的窄事实，不冒充历史identity。没有清理信号或全局terminate。
+
+四个自有Electron profile当前为output闲置缓存，未入archive。自动审批review先拦截计算路径递归删除，复核固定绝对LiteralPath删除后仍拒绝，均仅返回blocked by policy；不绕过限制或宣称已删除。profile-cleanup.json记确切范围。所有活动进程、Linuxhome、partial下载已收回，profile留存不混为运行资源。archive-files.txt保代码、完整选定raw及两个失败、审计与交叉审查。
+
+本轮所列N物理机制子项闭合；完整产品Session/main激活仍属B。native Ubuntu按用户指令延期；Notion OAuth由root负责，未在本fixture触真实凭据/provider。

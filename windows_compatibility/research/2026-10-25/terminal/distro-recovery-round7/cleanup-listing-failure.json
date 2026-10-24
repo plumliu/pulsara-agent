@@ -1,0 +1,4 @@
+{
+  "assertion": "Expected English Running in wsl list after unregister",
+  "listing": "  NAME      STATE           VERSION\r\n* Ubuntu    Stopped         2\r\n"
+}

@@ -1,0 +1,652 @@
+{
+  "cases": [
+    {
+      "scenario": "readonly-missing",
+      "home": "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+      "node_pid": 5652,
+      "events": [
+        {
+          "event": "node-start",
+          "time": 1792862795406,
+          "pid": 5652,
+          "scenario": "readonly-missing",
+          "node": "v22.23.3"
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862795413,
+          "id": 1,
+          "method": "readVersion",
+          "fault": "none",
+          "carrierPid": 34108,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+            "readVersion",
+            "{\"fault\":\"none\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862795521,
+          "id": 1,
+          "method": "readVersion",
+          "frame": {
+            "type": "ready",
+            "method": "readVersion",
+            "pid": 3263,
+            "start_ticks": "116278"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862795521,
+          "id": 1,
+          "method": "readVersion",
+          "requestBytes": 28
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862795522,
+          "id": 1,
+          "method": "readVersion",
+          "frame": {
+            "type": "accepted",
+            "method": "readVersion"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862795522,
+          "id": 1,
+          "method": "readVersion",
+          "frame": {
+            "type": "result",
+            "ok": false,
+            "error": {
+              "code": "ENOENT",
+              "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'",
+              "execution": "settled"
+            }
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862795535,
+          "id": 1,
+          "method": "readVersion",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 333,
+          "chunks": 3,
+          "leadingTailSplits": 0,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "observation",
+          "time": 1792862795629,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/control.py",
+            "state",
+            "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a"
+          ],
+          "exit": 0,
+          "stdout": "{\"home\": \"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a\", \"kernel\": {\"exists\": true, \"acquired\": true, \"inode\": 148046}, \"pg\": {\"exists\": false, \"acquired\": true}, \"status\": {\"exit\": 4, \"stdout\": \"\", \"stderr\": \"pg_ctl: directory \\\"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a/desktop/postgres\\\" does not exist\\n\"}, \"partial_deletion\": null, \"data_exists\": false, \"socket_exists\": false, \"outside_sentinel\": \"outside-sentinel\", \"data_sentinel\": null, \"pidfile\": null, \"processes\": []}\n",
+          "stderr": ""
+        },
+        {
+          "event": "readonly-known-missing",
+          "time": 1792862795629,
+          "error": {
+            "code": "ENOENT",
+            "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'"
+          },
+          "state": {
+            "home": "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+            "kernel": {
+              "exists": true,
+              "acquired": true,
+              "inode": 148046
+            },
+            "pg": {
+              "exists": false,
+              "acquired": true
+            },
+            "status": {
+              "exit": 4,
+              "stdout": "",
+              "stderr": "pg_ctl: directory \"/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres\" does not exist\n"
+            },
+            "partial_deletion": null,
+            "data_exists": false,
+            "socket_exists": false,
+            "outside_sentinel": "outside-sentinel",
+            "data_sentinel": null,
+            "pidfile": null,
+            "processes": []
+          }
+        },
+        {
+          "event": "case-complete",
+          "time": 1792862795629,
+          "scenario": "readonly-missing",
+          "owner": {
+            "initialized": false,
+            "startedHere": false
+          }
+        }
+      ],
+      "node_exit": 0,
+      "stderr": "",
+      "cleanup": {
+        "home_removed": true,
+        "before": {
+          "home": "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+          "kernel": {
+            "exists": true,
+            "acquired": true,
+            "inode": 148046
+          },
+          "pg": {
+            "exists": false,
+            "acquired": true
+          },
+          "status": {
+            "exit": 4,
+            "stdout": "",
+            "stderr": "pg_ctl: directory \"/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres\" does not exist\n"
+          },
+          "partial_deletion": null,
+          "data_exists": false,
+          "socket_exists": false,
+          "outside_sentinel": "outside-sentinel",
+          "data_sentinel": null,
+          "pidfile": null,
+          "processes": []
+        }
+      },
+      "carrier_waits": [
+        {
+          "pid": 34108,
+          "wait": 0
+        }
+      ]
+    }
+  ],
+  "failures": [],
+  "records": [
+    {
+      "kind": "control",
+      "time_ns": 1792862795354735900,
+      "argv": [
+        "C:\\Windows\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/control.py",
+        "setup"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a\", \"uid\": 1000, \"device\": 2096}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "node-spawn",
+      "time_ns": 1792862795360932000,
+      "argv": [
+        "C:\\Users\\plumlocal\\AppData\\Local\\mise\\installs\\node\\22.23.3\\node.exe",
+        "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\round5\\owner.cjs",
+        "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+        "readonly-missing",
+        "baseline"
+      ],
+      "pid": 5652
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795406848500,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "node-start",
+        "time": 1792862795406,
+        "pid": 5652,
+        "scenario": "readonly-missing",
+        "node": "v22.23.3"
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795412984600,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862795413,
+        "id": 1,
+        "method": "readVersion",
+        "fault": "none",
+        "carrierPid": 34108,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+          "readVersion",
+          "{\"fault\":\"none\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795521167900,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862795521,
+        "id": 1,
+        "method": "readVersion",
+        "frame": {
+          "type": "ready",
+          "method": "readVersion",
+          "pid": 3263,
+          "start_ticks": "116278"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795521167900,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862795521,
+        "id": 1,
+        "method": "readVersion",
+        "requestBytes": 28
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795522167600,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862795522,
+        "id": 1,
+        "method": "readVersion",
+        "frame": {
+          "type": "accepted",
+          "method": "readVersion"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795522167600,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862795522,
+        "id": 1,
+        "method": "readVersion",
+        "frame": {
+          "type": "result",
+          "ok": false,
+          "error": {
+            "code": "ENOENT",
+            "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'",
+            "execution": "settled"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795535273200,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862795535,
+        "id": 1,
+        "method": "readVersion",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 333,
+        "chunks": 3,
+        "leadingTailSplits": 0,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795628831200,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "observation",
+        "time": 1792862795629,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/control.py",
+          "state",
+          "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a"
+        ],
+        "exit": 0,
+        "stdout": "{\"home\": \"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a\", \"kernel\": {\"exists\": true, \"acquired\": true, \"inode\": 148046}, \"pg\": {\"exists\": false, \"acquired\": true}, \"status\": {\"exit\": 4, \"stdout\": \"\", \"stderr\": \"pg_ctl: directory \\\"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a/desktop/postgres\\\" does not exist\\n\"}, \"partial_deletion\": null, \"data_exists\": false, \"socket_exists\": false, \"outside_sentinel\": \"outside-sentinel\", \"data_sentinel\": null, \"pidfile\": null, \"processes\": []}\n",
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795628831200,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "readonly-known-missing",
+        "time": 1792862795629,
+        "error": {
+          "code": "ENOENT",
+          "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'"
+        },
+        "state": {
+          "home": "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+          "kernel": {
+            "exists": true,
+            "acquired": true,
+            "inode": 148046
+          },
+          "pg": {
+            "exists": false,
+            "acquired": true
+          },
+          "status": {
+            "exit": 4,
+            "stdout": "",
+            "stderr": "pg_ctl: directory \"/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres\" does not exist\n"
+          },
+          "partial_deletion": null,
+          "data_exists": false,
+          "socket_exists": false,
+          "outside_sentinel": "outside-sentinel",
+          "data_sentinel": null,
+          "pidfile": null,
+          "processes": []
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862795628831200,
+      "scenario": "readonly-missing",
+      "record": {
+        "event": "case-complete",
+        "time": 1792862795629,
+        "scenario": "readonly-missing",
+        "owner": {
+          "initialized": false,
+          "startedHere": false
+        }
+      }
+    },
+    {
+      "kind": "node-exit",
+      "time_ns": 1792862795634596800,
+      "scenario": "readonly-missing",
+      "exit": 0,
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792862795718131000,
+      "argv": [
+        "C:\\Windows\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/control.py",
+        "cleanup",
+        "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a"
+      ],
+      "exit": 0,
+      "stdout": "{\"home_removed\": true, \"before\": {\"home\": \"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a\", \"kernel\": {\"exists\": true, \"acquired\": true, \"inode\": 148046}, \"pg\": {\"exists\": false, \"acquired\": true}, \"status\": {\"exit\": 4, \"stdout\": \"\", \"stderr\": \"pg_ctl: directory \\\"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a/desktop/postgres\\\" does not exist\\n\"}, \"partial_deletion\": null, \"data_exists\": false, \"socket_exists\": false, \"outside_sentinel\": \"outside-sentinel\", \"data_sentinel\": null, \"pidfile\": null, \"processes\": []}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "case-result",
+      "time_ns": 1792862795718131000,
+      "case": {
+        "scenario": "readonly-missing",
+        "home": "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+        "node_pid": 5652,
+        "events": [
+          {
+            "event": "node-start",
+            "time": 1792862795406,
+            "pid": 5652,
+            "scenario": "readonly-missing",
+            "node": "v22.23.3"
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862795413,
+            "id": 1,
+            "method": "readVersion",
+            "fault": "none",
+            "carrierPid": 34108,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+              "readVersion",
+              "{\"fault\":\"none\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862795521,
+            "id": 1,
+            "method": "readVersion",
+            "frame": {
+              "type": "ready",
+              "method": "readVersion",
+              "pid": 3263,
+              "start_ticks": "116278"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862795521,
+            "id": 1,
+            "method": "readVersion",
+            "requestBytes": 28
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862795522,
+            "id": 1,
+            "method": "readVersion",
+            "frame": {
+              "type": "accepted",
+              "method": "readVersion"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862795522,
+            "id": 1,
+            "method": "readVersion",
+            "frame": {
+              "type": "result",
+              "ok": false,
+              "error": {
+                "code": "ENOENT",
+                "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'",
+                "execution": "settled"
+              }
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862795535,
+            "id": 1,
+            "method": "readVersion",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 333,
+            "chunks": 3,
+            "leadingTailSplits": 0,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "observation",
+            "time": 1792862795629,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/control.py",
+              "state",
+              "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a"
+            ],
+            "exit": 0,
+            "stdout": "{\"home\": \"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a\", \"kernel\": {\"exists\": true, \"acquired\": true, \"inode\": 148046}, \"pg\": {\"exists\": false, \"acquired\": true}, \"status\": {\"exit\": 4, \"stdout\": \"\", \"stderr\": \"pg_ctl: directory \\\"/home/plumwsl/.g0p5-mngx6mz6-\\u4e2d\\u6587 \\u7a7a/desktop/postgres\\\" does not exist\\n\"}, \"partial_deletion\": null, \"data_exists\": false, \"socket_exists\": false, \"outside_sentinel\": \"outside-sentinel\", \"data_sentinel\": null, \"pidfile\": null, \"processes\": []}\n",
+            "stderr": ""
+          },
+          {
+            "event": "readonly-known-missing",
+            "time": 1792862795629,
+            "error": {
+              "code": "ENOENT",
+              "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'"
+            },
+            "state": {
+              "home": "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+              "kernel": {
+                "exists": true,
+                "acquired": true,
+                "inode": 148046
+              },
+              "pg": {
+                "exists": false,
+                "acquired": true
+              },
+              "status": {
+                "exit": 4,
+                "stdout": "",
+                "stderr": "pg_ctl: directory \"/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres\" does not exist\n"
+              },
+              "partial_deletion": null,
+              "data_exists": false,
+              "socket_exists": false,
+              "outside_sentinel": "outside-sentinel",
+              "data_sentinel": null,
+              "pidfile": null,
+              "processes": []
+            }
+          },
+          {
+            "event": "case-complete",
+            "time": 1792862795629,
+            "scenario": "readonly-missing",
+            "owner": {
+              "initialized": false,
+              "startedHere": false
+            }
+          }
+        ],
+        "node_exit": 0,
+        "stderr": "",
+        "cleanup": {
+          "home_removed": true,
+          "before": {
+            "home": "/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a",
+            "kernel": {
+              "exists": true,
+              "acquired": true,
+              "inode": 148046
+            },
+            "pg": {
+              "exists": false,
+              "acquired": true
+            },
+            "status": {
+              "exit": 4,
+              "stdout": "",
+              "stderr": "pg_ctl: directory \"/home/plumwsl/.g0p5-mngx6mz6-\u4e2d\u6587 \u7a7a/desktop/postgres\" does not exist\n"
+            },
+            "partial_deletion": null,
+            "data_exists": false,
+            "socket_exists": false,
+            "outside_sentinel": "outside-sentinel",
+            "data_sentinel": null,
+            "pidfile": null,
+            "processes": []
+          }
+        },
+        "carrier_waits": [
+          {
+            "pid": 34108,
+            "wait": 0
+          }
+        ]
+      }
+    }
+  ]
+}

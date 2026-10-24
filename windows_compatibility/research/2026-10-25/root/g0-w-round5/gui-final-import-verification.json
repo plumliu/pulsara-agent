@@ -1,0 +1,32 @@
+{
+  "copies": [
+    {
+      "path": "/home/plumwsl/.g0-files-7gizwyeo/imports/d7c22b75e7e94f33aef4975c683d49c1/Windows 中文附件.bin",
+      "bytes": 285,
+      "mode": "0400",
+      "directoryMode": "0500",
+      "uid": 1000,
+      "mount": "ext4 /dev/sdd"
+    },
+    {
+      "path": "/home/plumwsl/.g0-files-7gizwyeo/imports/980da893a0734cb8b3ef47eb2c159e02/Windows 中文附件.bin",
+      "bytes": 285,
+      "mode": "0400",
+      "directoryMode": "0500",
+      "uid": 1000,
+      "mount": "ext4 /dev/sdd"
+    },
+    {
+      "path": "/home/plumwsl/.g0-files-7gizwyeo/imports/a936ad2def1c40989040e3709f62db0d/Windows 中文附件.bin",
+      "bytes": 285,
+      "mode": "0400",
+      "directoryMode": "0500",
+      "uid": 1000,
+      "mount": "ext4 /dev/sdd"
+    }
+  ],
+  "allBytesExactlyEqual": true,
+  "nativeChooser": "user operated after modal tool failed",
+  "dragDrop": "user confirmed this turn; server received copies",
+  "inputEventIdsNotRecorded": true
+}

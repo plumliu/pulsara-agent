@@ -1,0 +1,182 @@
+{
+  "cases": [
+    {
+      "name": "list",
+      "status": 200,
+      "body": {
+        "path": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu",
+        "names": [],
+        "next": null
+      },
+      "pass": true
+    },
+    {
+      "name": "select",
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu",
+        "key": "workspace:7ykxgtbsswj3p44rqqewggynfq",
+        "activeSession": null
+      },
+      "pass": true
+    },
+    {
+      "name": "mkdir",
+      "status": 200,
+      "body": {
+        "created": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu/中文 子目录"
+      },
+      "pass": true
+    },
+    {
+      "name": "select-new",
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu/中文 子目录",
+        "key": "workspace:k4ef6jmymljn4equehljxzwd3y",
+        "activeSession": null
+      },
+      "pass": true
+    },
+    {
+      "name": "duplicate",
+      "status": 400,
+      "body": {
+        "error": "FileExistsError",
+        "detail": "[Errno 17] File exists: '中文 子目录'"
+      },
+      "pass": true
+    },
+    {
+      "name": "linux-dot",
+      "status": 400,
+      "body": {
+        "error": "ValueError",
+        "detail": "not a canonical Linux workspace path"
+      },
+      "pass": true
+    },
+    {
+      "name": "linux-empty",
+      "status": 400,
+      "body": {
+        "error": "ValueError",
+        "detail": "not a canonical Linux workspace path"
+      },
+      "pass": true
+    },
+    {
+      "name": "unc-dot",
+      "status": 400,
+      "body": {
+        "error": "ValueError",
+        "detail": "not a canonical Linux workspace path"
+      },
+      "pass": true
+    },
+    {
+      "name": "unc-empty",
+      "status": 400,
+      "body": {
+        "error": "ValueError",
+        "detail": "not a canonical Linux workspace path"
+      },
+      "pass": true
+    }
+  ],
+  "carrierExit": 0,
+  "guestTail": [
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu",
+        "names": [],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu",
+        "key": "workspace:7ykxgtbsswj3p44rqqewggynfq",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "mkdir",
+      "result": {
+        "created": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu/中文 子目录"
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu/中文 子目录",
+        "key": "workspace:k4ef6jmymljn4equehljxzwd3y",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "FileExistsError",
+      "detail": "[Errno 17] File exists: '中文 子目录'"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    {
+      "event": "rejected",
+      "route": "/directories",
+      "error": "ValueError",
+      "detail": "not a canonical Linux workspace path"
+    },
+    {
+      "event": "stopped",
+      "home": "/home/plumwsl/.g0-files-c7k039kj",
+      "imports": []
+    }
+  ],
+  "home": "/home/plumwsl/.g0-files-c7k039kj",
+  "workspace": "/home/plumwsl/workspaces/g0-directory-final-a5uw6siu",
+  "cleanup": true
+}

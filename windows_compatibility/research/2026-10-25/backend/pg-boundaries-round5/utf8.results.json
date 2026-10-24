@@ -1,0 +1,3252 @@
+{
+  "cases": [
+    {
+      "scenario": "utf8-fragmented",
+      "home": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+      "node_pid": 33988,
+      "events": [
+        {
+          "event": "node-start",
+          "time": 1792862567504,
+          "pid": 33988,
+          "scenario": "utf8-fragmented",
+          "node": "v22.23.3"
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862567510,
+          "id": 1,
+          "method": "prepareLayout",
+          "fault": "fragmented",
+          "carrierPid": 34532,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "prepareLayout",
+            "{\"fault\":\"fragmented\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567646,
+          "id": 1,
+          "method": "prepareLayout",
+          "frame": {
+            "type": "ready",
+            "method": "prepareLayout",
+            "pid": 2364,
+            "start_ticks": "93489"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862567646,
+          "id": 1,
+          "method": "prepareLayout",
+          "requestBytes": 30
+        },
+        {
+          "event": "request-fragmented",
+          "time": 1792862567647,
+          "id": 1,
+          "writes": 30
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567653,
+          "id": 1,
+          "method": "prepareLayout",
+          "frame": {
+            "type": "accepted",
+            "method": "prepareLayout"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567658,
+          "id": 1,
+          "method": "prepareLayout",
+          "frame": {
+            "type": "result",
+            "ok": true,
+            "value": null
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862567671,
+          "id": 1,
+          "method": "prepareLayout",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 176,
+          "chunks": 169,
+          "leadingTailSplits": 0,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862567676,
+          "id": 2,
+          "method": "readVersion",
+          "fault": "fragmented",
+          "carrierPid": 13016,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "readVersion",
+            "{\"fault\":\"fragmented\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567813,
+          "id": 2,
+          "method": "readVersion",
+          "frame": {
+            "type": "ready",
+            "method": "readVersion",
+            "pid": 2367,
+            "start_ticks": "93506"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862567813,
+          "id": 2,
+          "method": "readVersion",
+          "requestBytes": 28
+        },
+        {
+          "event": "request-fragmented",
+          "time": 1792862567814,
+          "id": 2,
+          "writes": 28
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567819,
+          "id": 2,
+          "method": "readVersion",
+          "frame": {
+            "type": "accepted",
+            "method": "readVersion"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567840,
+          "id": 2,
+          "method": "readVersion",
+          "frame": {
+            "type": "result",
+            "ok": false,
+            "error": {
+              "code": "ENOENT",
+              "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'",
+              "execution": "unknown"
+            }
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862567854,
+          "id": 2,
+          "method": "readVersion",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 332,
+          "chunks": 324,
+          "leadingTailSplits": 3,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862567861,
+          "id": 3,
+          "method": "run:initdb",
+          "fault": "fragmented",
+          "carrierPid": 9960,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "run:initdb",
+            "{\"fault\":\"fragmented\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567990,
+          "id": 3,
+          "method": "run:initdb",
+          "frame": {
+            "type": "ready",
+            "method": "run:initdb",
+            "pid": 2370,
+            "start_ticks": "93524"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862567990,
+          "id": 3,
+          "method": "run:initdb",
+          "requestBytes": 194
+        },
+        {
+          "event": "request-fragmented",
+          "time": 1792862567992,
+          "id": 3,
+          "writes": 194
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862567997,
+          "id": 3,
+          "method": "run:initdb",
+          "frame": {
+            "type": "accepted",
+            "method": "run:initdb"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862568007,
+          "id": 3,
+          "method": "run:initdb",
+          "frame": {
+            "type": "launched",
+            "method": "run:initdb",
+            "child": {
+              "pid": 2411,
+              "start_ticks": "93533"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862575759,
+          "id": 3,
+          "method": "run:initdb",
+          "frame": {
+            "type": "launched",
+            "method": "run:initdb",
+            "child": {
+              "pid": 2638,
+              "start_ticks": "94308"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862575880,
+          "id": 3,
+          "method": "run:initdb",
+          "frame": {
+            "type": "settled",
+            "method": "run:initdb",
+            "result": {
+              "exit": 0,
+              "stdout": "The files belonging to this database system will be owned by user \"plumwsl\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Singapore\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres' -l logfile start\n\n",
+              "stderr": ""
+            },
+            "readback": {
+              "exit": 3,
+              "stdout": "pg_ctl: no server running\n",
+              "stderr": ""
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862575991,
+          "id": 3,
+          "method": "run:initdb",
+          "frame": {
+            "type": "result",
+            "ok": true,
+            "value": {
+              "stdout": "The files belonging to this database system will be owned by user \"plumwsl\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Singapore\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres' -l logfile start\n\n",
+              "stderr": ""
+            }
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862576012,
+          "id": 3,
+          "method": "run:initdb",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 2517,
+          "chunks": 2474,
+          "leadingTailSplits": 12,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862576017,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "fault": "fragmented",
+          "carrierPid": 38288,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "run:pg_ctl:status",
+            "{\"fault\":\"fragmented\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576149,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "frame": {
+            "type": "ready",
+            "method": "run:pg_ctl:status",
+            "pid": 2646,
+            "start_ticks": "94340"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862576149,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "requestBytes": 116
+        },
+        {
+          "event": "request-fragmented",
+          "time": 1792862576150,
+          "id": 4,
+          "writes": 116
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576156,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "frame": {
+            "type": "accepted",
+            "method": "run:pg_ctl:status"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576167,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "frame": {
+            "type": "launched",
+            "method": "run:pg_ctl:status",
+            "child": {
+              "pid": 2647,
+              "start_ticks": "94349"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576178,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "frame": {
+            "type": "launched",
+            "method": "run:pg_ctl:status",
+            "child": {
+              "pid": 2648,
+              "start_ticks": "94350"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576200,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "frame": {
+            "type": "settled",
+            "method": "run:pg_ctl:status",
+            "result": {
+              "exit": 3,
+              "stdout": "pg_ctl: no server running\n",
+              "stderr": ""
+            },
+            "readback": {
+              "exit": 3,
+              "stdout": "pg_ctl: no server running\n",
+              "stderr": ""
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576218,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "frame": {
+            "type": "result",
+            "ok": false,
+            "error": {
+              "code": 3,
+              "message": "pg_ctl: no server running\n",
+              "stdout": "pg_ctl: no server running\n",
+              "stderr": "",
+              "execution": "settled"
+            }
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862576233,
+          "id": 4,
+          "method": "run:pg_ctl:status",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 722,
+          "chunks": 714,
+          "leadingTailSplits": 0,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862576237,
+          "id": 5,
+          "method": "socketMode",
+          "fault": "fragmented",
+          "carrierPid": 37308,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "socketMode",
+            "{\"fault\":\"fragmented\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576366,
+          "id": 5,
+          "method": "socketMode",
+          "frame": {
+            "type": "ready",
+            "method": "socketMode",
+            "pid": 2651,
+            "start_ticks": "94361"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862576366,
+          "id": 5,
+          "method": "socketMode",
+          "requestBytes": 27
+        },
+        {
+          "event": "request-fragmented",
+          "time": 1792862576366,
+          "id": 5,
+          "writes": 27
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576371,
+          "id": 5,
+          "method": "socketMode",
+          "frame": {
+            "type": "accepted",
+            "method": "socketMode"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576375,
+          "id": 5,
+          "method": "socketMode",
+          "frame": {
+            "type": "result",
+            "ok": true,
+            "value": 16832
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862576391,
+          "id": 5,
+          "method": "socketMode",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 171,
+          "chunks": 169,
+          "leadingTailSplits": 0,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862576396,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "fault": "fragmented",
+          "carrierPid": 34284,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "run:pg_ctl:start",
+            "{\"fault\":\"fragmented\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576519,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "frame": {
+            "type": "ready",
+            "method": "run:pg_ctl:start",
+            "pid": 2654,
+            "start_ticks": "94377"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862576519,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "requestBytes": 360
+        },
+        {
+          "event": "request-fragmented",
+          "time": 1792862576525,
+          "id": 6,
+          "writes": 360
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576530,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "frame": {
+            "type": "accepted",
+            "method": "run:pg_ctl:start"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576541,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "frame": {
+            "type": "launched",
+            "method": "run:pg_ctl:start",
+            "child": {
+              "pid": 2655,
+              "start_ticks": "94386"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576844,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "frame": {
+            "type": "launched",
+            "method": "run:pg_ctl:start",
+            "child": {
+              "pid": 2680,
+              "start_ticks": "94417"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576906,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "frame": {
+            "type": "settled",
+            "method": "run:pg_ctl:start",
+            "result": {
+              "exit": 0,
+              "stdout": "waiting for server to start.... done\nserver started\n",
+              "stderr": ""
+            },
+            "readback": {
+              "exit": 0,
+              "stdout": "pg_ctl: server is running (PID: 2658)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+              "stderr": ""
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862576919,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "frame": {
+            "type": "result",
+            "ok": true,
+            "value": {
+              "stdout": "waiting for server to start.... done\nserver started\n",
+              "stderr": ""
+            }
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862576935,
+          "id": 6,
+          "method": "run:pg_ctl:start",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 1055,
+          "chunks": 1040,
+          "leadingTailSplits": 6,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862576940,
+          "id": 7,
+          "method": "readInstance",
+          "fault": "fragmented",
+          "carrierPid": 35852,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "readInstance",
+            "{\"fault\":\"fragmented\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577062,
+          "id": 7,
+          "method": "readInstance",
+          "frame": {
+            "type": "ready",
+            "method": "readInstance",
+            "pid": 2683,
+            "start_ticks": "94432"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862577062,
+          "id": 7,
+          "method": "readInstance",
+          "requestBytes": 42
+        },
+        {
+          "event": "request-fragmented",
+          "time": 1792862577062,
+          "id": 7,
+          "writes": 42
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577067,
+          "id": 7,
+          "method": "readInstance",
+          "frame": {
+            "type": "accepted",
+            "method": "readInstance"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577086,
+          "id": 7,
+          "method": "readInstance",
+          "frame": {
+            "type": "result",
+            "ok": true,
+            "value": {
+              "directory": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres",
+              "socket": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket"
+            }
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862577101,
+          "id": 7,
+          "method": "readInstance",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 311,
+          "chunks": 291,
+          "leadingTailSplits": 5,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "utf8-codepoint-splits-verified",
+          "time": 1792862577101,
+          "instance": {
+            "directory": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres",
+            "socket": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket"
+          },
+          "splits": 26
+        },
+        {
+          "event": "carrier-spawn",
+          "time": 1792862577105,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "fault": "none",
+          "carrierPid": 34384,
+          "argv": [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "plumwsl",
+            "--cd",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "--exec",
+            "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+            "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+            "/home/plumwsl/workspaces/pulsara_agent",
+            "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "run:pg_ctl:stop",
+            "{\"fault\":\"none\",\"moved\":false}"
+          ]
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577218,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "frame": {
+            "type": "ready",
+            "method": "run:pg_ctl:stop",
+            "pid": 2686,
+            "start_ticks": "94448"
+          }
+        },
+        {
+          "event": "operation-written",
+          "time": 1792862577218,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "requestBytes": 129
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577218,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "frame": {
+            "type": "accepted",
+            "method": "run:pg_ctl:stop"
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577219,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "frame": {
+            "type": "launched",
+            "method": "run:pg_ctl:stop",
+            "child": {
+              "pid": 2687,
+              "start_ticks": "94455"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577421,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "frame": {
+            "type": "launched",
+            "method": "run:pg_ctl:stop",
+            "child": {
+              "pid": 2691,
+              "start_ticks": "94475"
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577421,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "frame": {
+            "type": "settled",
+            "method": "run:pg_ctl:stop",
+            "result": {
+              "exit": 0,
+              "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+              "stderr": ""
+            },
+            "readback": {
+              "exit": 3,
+              "stdout": "pg_ctl: no server running\n",
+              "stderr": ""
+            }
+          }
+        },
+        {
+          "event": "helper-frame",
+          "time": 1792862577421,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "frame": {
+            "type": "result",
+            "ok": true,
+            "value": {
+              "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+              "stderr": ""
+            }
+          }
+        },
+        {
+          "event": "carrier-close",
+          "time": 1792862577436,
+          "id": 8,
+          "method": "run:pg_ctl:stop",
+          "code": 0,
+          "signal": null,
+          "sent": true,
+          "bytes": 696,
+          "chunks": 5,
+          "leadingTailSplits": 0,
+          "pendingBytes": 0,
+          "stderr": ""
+        },
+        {
+          "event": "case-complete",
+          "time": 1792862577436,
+          "scenario": "utf8-fragmented",
+          "owner": {
+            "initialized": true,
+            "startedHere": true
+          }
+        }
+      ],
+      "node_exit": 0,
+      "stderr": "",
+      "cleanup": {
+        "home_removed": true,
+        "before": {
+          "home": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "kernel": {
+            "exists": true,
+            "acquired": true,
+            "inode": 186551
+          },
+          "pg": {
+            "exists": true,
+            "acquired": true,
+            "inode": 187826
+          },
+          "status": {
+            "exit": 3,
+            "stdout": "pg_ctl: no server running\n",
+            "stderr": ""
+          },
+          "data_exists": true,
+          "socket_exists": true,
+          "outside_sentinel": "outside-sentinel",
+          "data_sentinel": null,
+          "pidfile": null,
+          "processes": []
+        }
+      },
+      "carrier_waits": [
+        {
+          "pid": 34532,
+          "wait": 0
+        },
+        {
+          "pid": 13016,
+          "wait": 0
+        },
+        {
+          "pid": 9960,
+          "wait": 0
+        },
+        {
+          "pid": 38288,
+          "wait": 0
+        },
+        {
+          "pid": 37308,
+          "wait": 0
+        },
+        {
+          "pid": 34284,
+          "wait": 0
+        },
+        {
+          "pid": 35852,
+          "wait": 0
+        },
+        {
+          "pid": 34384,
+          "wait": 0
+        }
+      ]
+    }
+  ],
+  "failures": [],
+  "records": [
+    {
+      "kind": "control",
+      "time_ns": 1792862567438561900,
+      "argv": [
+        "C:\\Windows\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/control.py",
+        "setup"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p5-3ojf1pb6-\\u4e2d\\u6587 \\u7a7a\", \"uid\": 1000, \"device\": 2096}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "node-spawn",
+      "time_ns": 1792862567444239600,
+      "argv": [
+        "C:\\Users\\plumlocal\\AppData\\Local\\mise\\installs\\node\\22.23.3\\node.exe",
+        "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\round5\\owner.cjs",
+        "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+        "utf8-fragmented",
+        "baseline"
+      ],
+      "pid": 33988
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567504653100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "node-start",
+        "time": 1792862567504,
+        "pid": 33988,
+        "scenario": "utf8-fragmented",
+        "node": "v22.23.3"
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567511180700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862567510,
+        "id": 1,
+        "method": "prepareLayout",
+        "fault": "fragmented",
+        "carrierPid": 34532,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "prepareLayout",
+          "{\"fault\":\"fragmented\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567646497700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567646,
+        "id": 1,
+        "method": "prepareLayout",
+        "frame": {
+          "type": "ready",
+          "method": "prepareLayout",
+          "pid": 2364,
+          "start_ticks": "93489"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567646497700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862567646,
+        "id": 1,
+        "method": "prepareLayout",
+        "requestBytes": 30
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567647505800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "request-fragmented",
+        "time": 1792862567647,
+        "id": 1,
+        "writes": 30
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567653098800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567653,
+        "id": 1,
+        "method": "prepareLayout",
+        "frame": {
+          "type": "accepted",
+          "method": "prepareLayout"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567658456100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567658,
+        "id": 1,
+        "method": "prepareLayout",
+        "frame": {
+          "type": "result",
+          "ok": true,
+          "value": null
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567671630100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862567671,
+        "id": 1,
+        "method": "prepareLayout",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 176,
+        "chunks": 169,
+        "leadingTailSplits": 0,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567677035100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862567676,
+        "id": 2,
+        "method": "readVersion",
+        "fault": "fragmented",
+        "carrierPid": 13016,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "readVersion",
+          "{\"fault\":\"fragmented\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567814048700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567813,
+        "id": 2,
+        "method": "readVersion",
+        "frame": {
+          "type": "ready",
+          "method": "readVersion",
+          "pid": 2367,
+          "start_ticks": "93506"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567814048700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862567813,
+        "id": 2,
+        "method": "readVersion",
+        "requestBytes": 28
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567814048700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "request-fragmented",
+        "time": 1792862567814,
+        "id": 2,
+        "writes": 28
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567819552100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567819,
+        "id": 2,
+        "method": "readVersion",
+        "frame": {
+          "type": "accepted",
+          "method": "readVersion"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567840638100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567840,
+        "id": 2,
+        "method": "readVersion",
+        "frame": {
+          "type": "result",
+          "ok": false,
+          "error": {
+            "code": "ENOENT",
+            "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'",
+            "execution": "unknown"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567854915900,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862567854,
+        "id": 2,
+        "method": "readVersion",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 332,
+        "chunks": 324,
+        "leadingTailSplits": 3,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567861731500,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862567861,
+        "id": 3,
+        "method": "run:initdb",
+        "fault": "fragmented",
+        "carrierPid": 9960,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "run:initdb",
+          "{\"fault\":\"fragmented\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567990982000,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567990,
+        "id": 3,
+        "method": "run:initdb",
+        "frame": {
+          "type": "ready",
+          "method": "run:initdb",
+          "pid": 2370,
+          "start_ticks": "93524"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567990982000,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862567990,
+        "id": 3,
+        "method": "run:initdb",
+        "requestBytes": 194
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567992982800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "request-fragmented",
+        "time": 1792862567992,
+        "id": 3,
+        "writes": 194
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862567997982000,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862567997,
+        "id": 3,
+        "method": "run:initdb",
+        "frame": {
+          "type": "accepted",
+          "method": "run:initdb"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862568007387400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862568007,
+        "id": 3,
+        "method": "run:initdb",
+        "frame": {
+          "type": "launched",
+          "method": "run:initdb",
+          "child": {
+            "pid": 2411,
+            "start_ticks": "93533"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862575760252000,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862575759,
+        "id": 3,
+        "method": "run:initdb",
+        "frame": {
+          "type": "launched",
+          "method": "run:initdb",
+          "child": {
+            "pid": 2638,
+            "start_ticks": "94308"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862575881243900,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862575880,
+        "id": 3,
+        "method": "run:initdb",
+        "frame": {
+          "type": "settled",
+          "method": "run:initdb",
+          "result": {
+            "exit": 0,
+            "stdout": "The files belonging to this database system will be owned by user \"plumwsl\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Singapore\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres' -l logfile start\n\n",
+            "stderr": ""
+          },
+          "readback": {
+            "exit": 3,
+            "stdout": "pg_ctl: no server running\n",
+            "stderr": ""
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862575992457400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862575991,
+        "id": 3,
+        "method": "run:initdb",
+        "frame": {
+          "type": "result",
+          "ok": true,
+          "value": {
+            "stdout": "The files belonging to this database system will be owned by user \"plumwsl\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Singapore\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres' -l logfile start\n\n",
+            "stderr": ""
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576012531700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862576012,
+        "id": 3,
+        "method": "run:initdb",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 2517,
+        "chunks": 2474,
+        "leadingTailSplits": 12,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576018248400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862576017,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "fault": "fragmented",
+        "carrierPid": 38288,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "run:pg_ctl:status",
+          "{\"fault\":\"fragmented\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576149727100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576149,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "frame": {
+          "type": "ready",
+          "method": "run:pg_ctl:status",
+          "pid": 2646,
+          "start_ticks": "94340"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576149727100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862576149,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "requestBytes": 116
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576151274700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "request-fragmented",
+        "time": 1792862576150,
+        "id": 4,
+        "writes": 116
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576156976300,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576156,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "frame": {
+          "type": "accepted",
+          "method": "run:pg_ctl:status"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576167695800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576167,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "frame": {
+          "type": "launched",
+          "method": "run:pg_ctl:status",
+          "child": {
+            "pid": 2647,
+            "start_ticks": "94349"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576178699700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576178,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "frame": {
+          "type": "launched",
+          "method": "run:pg_ctl:status",
+          "child": {
+            "pid": 2648,
+            "start_ticks": "94350"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576200130700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576200,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "frame": {
+          "type": "settled",
+          "method": "run:pg_ctl:status",
+          "result": {
+            "exit": 3,
+            "stdout": "pg_ctl: no server running\n",
+            "stderr": ""
+          },
+          "readback": {
+            "exit": 3,
+            "stdout": "pg_ctl: no server running\n",
+            "stderr": ""
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576218917600,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576218,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "frame": {
+          "type": "result",
+          "ok": false,
+          "error": {
+            "code": 3,
+            "message": "pg_ctl: no server running\n",
+            "stdout": "pg_ctl: no server running\n",
+            "stderr": "",
+            "execution": "settled"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576234063100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862576233,
+        "id": 4,
+        "method": "run:pg_ctl:status",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 722,
+        "chunks": 714,
+        "leadingTailSplits": 0,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576238199300,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862576237,
+        "id": 5,
+        "method": "socketMode",
+        "fault": "fragmented",
+        "carrierPid": 37308,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "socketMode",
+          "{\"fault\":\"fragmented\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576366108500,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576366,
+        "id": 5,
+        "method": "socketMode",
+        "frame": {
+          "type": "ready",
+          "method": "socketMode",
+          "pid": 2651,
+          "start_ticks": "94361"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576366108500,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862576366,
+        "id": 5,
+        "method": "socketMode",
+        "requestBytes": 27
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576366108500,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "request-fragmented",
+        "time": 1792862576366,
+        "id": 5,
+        "writes": 27
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576371508200,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576371,
+        "id": 5,
+        "method": "socketMode",
+        "frame": {
+          "type": "accepted",
+          "method": "socketMode"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576376057100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576375,
+        "id": 5,
+        "method": "socketMode",
+        "frame": {
+          "type": "result",
+          "ok": true,
+          "value": 16832
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576392191900,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862576391,
+        "id": 5,
+        "method": "socketMode",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 171,
+        "chunks": 169,
+        "leadingTailSplits": 0,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576396916600,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862576396,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "fault": "fragmented",
+        "carrierPid": 34284,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "run:pg_ctl:start",
+          "{\"fault\":\"fragmented\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576519876800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576519,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "frame": {
+          "type": "ready",
+          "method": "run:pg_ctl:start",
+          "pid": 2654,
+          "start_ticks": "94377"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576519876800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862576519,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "requestBytes": 360
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576524876400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "request-fragmented",
+        "time": 1792862576525,
+        "id": 6,
+        "writes": 360
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576529876900,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576530,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "frame": {
+          "type": "accepted",
+          "method": "run:pg_ctl:start"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576541302800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576541,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "frame": {
+          "type": "launched",
+          "method": "run:pg_ctl:start",
+          "child": {
+            "pid": 2655,
+            "start_ticks": "94386"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576845248200,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576844,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "frame": {
+          "type": "launched",
+          "method": "run:pg_ctl:start",
+          "child": {
+            "pid": 2680,
+            "start_ticks": "94417"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576906654100,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576906,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "frame": {
+          "type": "settled",
+          "method": "run:pg_ctl:start",
+          "result": {
+            "exit": 0,
+            "stdout": "waiting for server to start.... done\nserver started\n",
+            "stderr": ""
+          },
+          "readback": {
+            "exit": 0,
+            "stdout": "pg_ctl: server is running (PID: 2658)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+            "stderr": ""
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576920158500,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862576919,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "frame": {
+          "type": "result",
+          "ok": true,
+          "value": {
+            "stdout": "waiting for server to start.... done\nserver started\n",
+            "stderr": ""
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576935353200,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862576935,
+        "id": 6,
+        "method": "run:pg_ctl:start",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 1055,
+        "chunks": 1040,
+        "leadingTailSplits": 6,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862576940753400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862576940,
+        "id": 7,
+        "method": "readInstance",
+        "fault": "fragmented",
+        "carrierPid": 35852,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "readInstance",
+          "{\"fault\":\"fragmented\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577062571800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577062,
+        "id": 7,
+        "method": "readInstance",
+        "frame": {
+          "type": "ready",
+          "method": "readInstance",
+          "pid": 2683,
+          "start_ticks": "94432"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577062571800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862577062,
+        "id": 7,
+        "method": "readInstance",
+        "requestBytes": 42
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577063084500,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "request-fragmented",
+        "time": 1792862577062,
+        "id": 7,
+        "writes": 42
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577067821300,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577067,
+        "id": 7,
+        "method": "readInstance",
+        "frame": {
+          "type": "accepted",
+          "method": "readInstance"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577086956800,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577086,
+        "id": 7,
+        "method": "readInstance",
+        "frame": {
+          "type": "result",
+          "ok": true,
+          "value": {
+            "directory": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres",
+            "socket": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577101233900,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862577101,
+        "id": 7,
+        "method": "readInstance",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 311,
+        "chunks": 291,
+        "leadingTailSplits": 5,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577101233900,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "utf8-codepoint-splits-verified",
+        "time": 1792862577101,
+        "instance": {
+          "directory": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres",
+          "socket": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket"
+        },
+        "splits": 26
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577106234500,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-spawn",
+        "time": 1792862577105,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "fault": "none",
+        "carrierPid": 34384,
+        "argv": [
+          "-d",
+          "Ubuntu",
+          "-u",
+          "plumwsl",
+          "--cd",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "--exec",
+          "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+          "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+          "/home/plumwsl/workspaces/pulsara_agent",
+          "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+          "run:pg_ctl:stop",
+          "{\"fault\":\"none\",\"moved\":false}"
+        ]
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577218639700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577218,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "frame": {
+          "type": "ready",
+          "method": "run:pg_ctl:stop",
+          "pid": 2686,
+          "start_ticks": "94448"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577218639700,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "operation-written",
+        "time": 1792862577218,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "requestBytes": 129
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577219156000,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577218,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "frame": {
+          "type": "accepted",
+          "method": "run:pg_ctl:stop"
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577219794000,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577219,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "frame": {
+          "type": "launched",
+          "method": "run:pg_ctl:stop",
+          "child": {
+            "pid": 2687,
+            "start_ticks": "94455"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577421591400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577421,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "frame": {
+          "type": "launched",
+          "method": "run:pg_ctl:stop",
+          "child": {
+            "pid": 2691,
+            "start_ticks": "94475"
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577422111400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577421,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "frame": {
+          "type": "settled",
+          "method": "run:pg_ctl:stop",
+          "result": {
+            "exit": 0,
+            "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+            "stderr": ""
+          },
+          "readback": {
+            "exit": 3,
+            "stdout": "pg_ctl: no server running\n",
+            "stderr": ""
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577422111400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "helper-frame",
+        "time": 1792862577421,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "frame": {
+          "type": "result",
+          "ok": true,
+          "value": {
+            "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+            "stderr": ""
+          }
+        }
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577436052400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "carrier-close",
+        "time": 1792862577436,
+        "id": 8,
+        "method": "run:pg_ctl:stop",
+        "code": 0,
+        "signal": null,
+        "sent": true,
+        "bytes": 696,
+        "chunks": 5,
+        "leadingTailSplits": 0,
+        "pendingBytes": 0,
+        "stderr": ""
+      }
+    },
+    {
+      "kind": "node-event",
+      "time_ns": 1792862577436052400,
+      "scenario": "utf8-fragmented",
+      "record": {
+        "event": "case-complete",
+        "time": 1792862577436,
+        "scenario": "utf8-fragmented",
+        "owner": {
+          "initialized": true,
+          "startedHere": true
+        }
+      }
+    },
+    {
+      "kind": "node-exit",
+      "time_ns": 1792862577443880700,
+      "scenario": "utf8-fragmented",
+      "exit": 0,
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792862577550109900,
+      "argv": [
+        "C:\\Windows\\System32\\wsl.exe",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/control.py",
+        "cleanup",
+        "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a"
+      ],
+      "exit": 0,
+      "stdout": "{\"home_removed\": true, \"before\": {\"home\": \"/home/plumwsl/.g0p5-3ojf1pb6-\\u4e2d\\u6587 \\u7a7a\", \"kernel\": {\"exists\": true, \"acquired\": true, \"inode\": 186551}, \"pg\": {\"exists\": true, \"acquired\": true, \"inode\": 187826}, \"status\": {\"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\"}, \"data_exists\": true, \"socket_exists\": true, \"outside_sentinel\": \"outside-sentinel\", \"data_sentinel\": null, \"pidfile\": null, \"processes\": []}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "case-result",
+      "time_ns": 1792862577550109900,
+      "case": {
+        "scenario": "utf8-fragmented",
+        "home": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+        "node_pid": 33988,
+        "events": [
+          {
+            "event": "node-start",
+            "time": 1792862567504,
+            "pid": 33988,
+            "scenario": "utf8-fragmented",
+            "node": "v22.23.3"
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862567510,
+            "id": 1,
+            "method": "prepareLayout",
+            "fault": "fragmented",
+            "carrierPid": 34532,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "prepareLayout",
+              "{\"fault\":\"fragmented\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567646,
+            "id": 1,
+            "method": "prepareLayout",
+            "frame": {
+              "type": "ready",
+              "method": "prepareLayout",
+              "pid": 2364,
+              "start_ticks": "93489"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862567646,
+            "id": 1,
+            "method": "prepareLayout",
+            "requestBytes": 30
+          },
+          {
+            "event": "request-fragmented",
+            "time": 1792862567647,
+            "id": 1,
+            "writes": 30
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567653,
+            "id": 1,
+            "method": "prepareLayout",
+            "frame": {
+              "type": "accepted",
+              "method": "prepareLayout"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567658,
+            "id": 1,
+            "method": "prepareLayout",
+            "frame": {
+              "type": "result",
+              "ok": true,
+              "value": null
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862567671,
+            "id": 1,
+            "method": "prepareLayout",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 176,
+            "chunks": 169,
+            "leadingTailSplits": 0,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862567676,
+            "id": 2,
+            "method": "readVersion",
+            "fault": "fragmented",
+            "carrierPid": 13016,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "readVersion",
+              "{\"fault\":\"fragmented\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567813,
+            "id": 2,
+            "method": "readVersion",
+            "frame": {
+              "type": "ready",
+              "method": "readVersion",
+              "pid": 2367,
+              "start_ticks": "93506"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862567813,
+            "id": 2,
+            "method": "readVersion",
+            "requestBytes": 28
+          },
+          {
+            "event": "request-fragmented",
+            "time": 1792862567814,
+            "id": 2,
+            "writes": 28
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567819,
+            "id": 2,
+            "method": "readVersion",
+            "frame": {
+              "type": "accepted",
+              "method": "readVersion"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567840,
+            "id": 2,
+            "method": "readVersion",
+            "frame": {
+              "type": "result",
+              "ok": false,
+              "error": {
+                "code": "ENOENT",
+                "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres/PG_VERSION'",
+                "execution": "unknown"
+              }
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862567854,
+            "id": 2,
+            "method": "readVersion",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 332,
+            "chunks": 324,
+            "leadingTailSplits": 3,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862567861,
+            "id": 3,
+            "method": "run:initdb",
+            "fault": "fragmented",
+            "carrierPid": 9960,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "run:initdb",
+              "{\"fault\":\"fragmented\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567990,
+            "id": 3,
+            "method": "run:initdb",
+            "frame": {
+              "type": "ready",
+              "method": "run:initdb",
+              "pid": 2370,
+              "start_ticks": "93524"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862567990,
+            "id": 3,
+            "method": "run:initdb",
+            "requestBytes": 194
+          },
+          {
+            "event": "request-fragmented",
+            "time": 1792862567992,
+            "id": 3,
+            "writes": 194
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862567997,
+            "id": 3,
+            "method": "run:initdb",
+            "frame": {
+              "type": "accepted",
+              "method": "run:initdb"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862568007,
+            "id": 3,
+            "method": "run:initdb",
+            "frame": {
+              "type": "launched",
+              "method": "run:initdb",
+              "child": {
+                "pid": 2411,
+                "start_ticks": "93533"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862575759,
+            "id": 3,
+            "method": "run:initdb",
+            "frame": {
+              "type": "launched",
+              "method": "run:initdb",
+              "child": {
+                "pid": 2638,
+                "start_ticks": "94308"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862575880,
+            "id": 3,
+            "method": "run:initdb",
+            "frame": {
+              "type": "settled",
+              "method": "run:initdb",
+              "result": {
+                "exit": 0,
+                "stdout": "The files belonging to this database system will be owned by user \"plumwsl\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Singapore\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres' -l logfile start\n\n",
+                "stderr": ""
+              },
+              "readback": {
+                "exit": 3,
+                "stdout": "pg_ctl: no server running\n",
+                "stderr": ""
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862575991,
+            "id": 3,
+            "method": "run:initdb",
+            "frame": {
+              "type": "result",
+              "ok": true,
+              "value": {
+                "stdout": "The files belonging to this database system will be owned by user \"plumwsl\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Singapore\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D '/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres' -l logfile start\n\n",
+                "stderr": ""
+              }
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862576012,
+            "id": 3,
+            "method": "run:initdb",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 2517,
+            "chunks": 2474,
+            "leadingTailSplits": 12,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862576017,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "fault": "fragmented",
+            "carrierPid": 38288,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "run:pg_ctl:status",
+              "{\"fault\":\"fragmented\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576149,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "frame": {
+              "type": "ready",
+              "method": "run:pg_ctl:status",
+              "pid": 2646,
+              "start_ticks": "94340"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862576149,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "requestBytes": 116
+          },
+          {
+            "event": "request-fragmented",
+            "time": 1792862576150,
+            "id": 4,
+            "writes": 116
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576156,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "frame": {
+              "type": "accepted",
+              "method": "run:pg_ctl:status"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576167,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "frame": {
+              "type": "launched",
+              "method": "run:pg_ctl:status",
+              "child": {
+                "pid": 2647,
+                "start_ticks": "94349"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576178,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "frame": {
+              "type": "launched",
+              "method": "run:pg_ctl:status",
+              "child": {
+                "pid": 2648,
+                "start_ticks": "94350"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576200,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "frame": {
+              "type": "settled",
+              "method": "run:pg_ctl:status",
+              "result": {
+                "exit": 3,
+                "stdout": "pg_ctl: no server running\n",
+                "stderr": ""
+              },
+              "readback": {
+                "exit": 3,
+                "stdout": "pg_ctl: no server running\n",
+                "stderr": ""
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576218,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "frame": {
+              "type": "result",
+              "ok": false,
+              "error": {
+                "code": 3,
+                "message": "pg_ctl: no server running\n",
+                "stdout": "pg_ctl: no server running\n",
+                "stderr": "",
+                "execution": "settled"
+              }
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862576233,
+            "id": 4,
+            "method": "run:pg_ctl:status",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 722,
+            "chunks": 714,
+            "leadingTailSplits": 0,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862576237,
+            "id": 5,
+            "method": "socketMode",
+            "fault": "fragmented",
+            "carrierPid": 37308,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "socketMode",
+              "{\"fault\":\"fragmented\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576366,
+            "id": 5,
+            "method": "socketMode",
+            "frame": {
+              "type": "ready",
+              "method": "socketMode",
+              "pid": 2651,
+              "start_ticks": "94361"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862576366,
+            "id": 5,
+            "method": "socketMode",
+            "requestBytes": 27
+          },
+          {
+            "event": "request-fragmented",
+            "time": 1792862576366,
+            "id": 5,
+            "writes": 27
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576371,
+            "id": 5,
+            "method": "socketMode",
+            "frame": {
+              "type": "accepted",
+              "method": "socketMode"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576375,
+            "id": 5,
+            "method": "socketMode",
+            "frame": {
+              "type": "result",
+              "ok": true,
+              "value": 16832
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862576391,
+            "id": 5,
+            "method": "socketMode",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 171,
+            "chunks": 169,
+            "leadingTailSplits": 0,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862576396,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "fault": "fragmented",
+            "carrierPid": 34284,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "run:pg_ctl:start",
+              "{\"fault\":\"fragmented\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576519,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "frame": {
+              "type": "ready",
+              "method": "run:pg_ctl:start",
+              "pid": 2654,
+              "start_ticks": "94377"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862576519,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "requestBytes": 360
+          },
+          {
+            "event": "request-fragmented",
+            "time": 1792862576525,
+            "id": 6,
+            "writes": 360
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576530,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "frame": {
+              "type": "accepted",
+              "method": "run:pg_ctl:start"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576541,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "frame": {
+              "type": "launched",
+              "method": "run:pg_ctl:start",
+              "child": {
+                "pid": 2655,
+                "start_ticks": "94386"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576844,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "frame": {
+              "type": "launched",
+              "method": "run:pg_ctl:start",
+              "child": {
+                "pid": 2680,
+                "start_ticks": "94417"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576906,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "frame": {
+              "type": "settled",
+              "method": "run:pg_ctl:start",
+              "result": {
+                "exit": 0,
+                "stdout": "waiting for server to start.... done\nserver started\n",
+                "stderr": ""
+              },
+              "readback": {
+                "exit": 0,
+                "stdout": "pg_ctl: server is running (PID: 2658)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+                "stderr": ""
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862576919,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "frame": {
+              "type": "result",
+              "ok": true,
+              "value": {
+                "stdout": "waiting for server to start.... done\nserver started\n",
+                "stderr": ""
+              }
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862576935,
+            "id": 6,
+            "method": "run:pg_ctl:start",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 1055,
+            "chunks": 1040,
+            "leadingTailSplits": 6,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862576940,
+            "id": 7,
+            "method": "readInstance",
+            "fault": "fragmented",
+            "carrierPid": 35852,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "readInstance",
+              "{\"fault\":\"fragmented\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577062,
+            "id": 7,
+            "method": "readInstance",
+            "frame": {
+              "type": "ready",
+              "method": "readInstance",
+              "pid": 2683,
+              "start_ticks": "94432"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862577062,
+            "id": 7,
+            "method": "readInstance",
+            "requestBytes": 42
+          },
+          {
+            "event": "request-fragmented",
+            "time": 1792862577062,
+            "id": 7,
+            "writes": 42
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577067,
+            "id": 7,
+            "method": "readInstance",
+            "frame": {
+              "type": "accepted",
+              "method": "readInstance"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577086,
+            "id": 7,
+            "method": "readInstance",
+            "frame": {
+              "type": "result",
+              "ok": true,
+              "value": {
+                "directory": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres",
+                "socket": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket"
+              }
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862577101,
+            "id": 7,
+            "method": "readInstance",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 311,
+            "chunks": 291,
+            "leadingTailSplits": 5,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "utf8-codepoint-splits-verified",
+            "time": 1792862577101,
+            "instance": {
+              "directory": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/postgres",
+              "socket": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a/desktop/socket"
+            },
+            "splits": 26
+          },
+          {
+            "event": "carrier-spawn",
+            "time": 1792862577105,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "fault": "none",
+            "carrierPid": 34384,
+            "argv": [
+              "-d",
+              "Ubuntu",
+              "-u",
+              "plumwsl",
+              "--cd",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "--exec",
+              "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+              "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round5/helper.py",
+              "/home/plumwsl/workspaces/pulsara_agent",
+              "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+              "run:pg_ctl:stop",
+              "{\"fault\":\"none\",\"moved\":false}"
+            ]
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577218,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "frame": {
+              "type": "ready",
+              "method": "run:pg_ctl:stop",
+              "pid": 2686,
+              "start_ticks": "94448"
+            }
+          },
+          {
+            "event": "operation-written",
+            "time": 1792862577218,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "requestBytes": 129
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577218,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "frame": {
+              "type": "accepted",
+              "method": "run:pg_ctl:stop"
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577219,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "frame": {
+              "type": "launched",
+              "method": "run:pg_ctl:stop",
+              "child": {
+                "pid": 2687,
+                "start_ticks": "94455"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577421,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "frame": {
+              "type": "launched",
+              "method": "run:pg_ctl:stop",
+              "child": {
+                "pid": 2691,
+                "start_ticks": "94475"
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577421,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "frame": {
+              "type": "settled",
+              "method": "run:pg_ctl:stop",
+              "result": {
+                "exit": 0,
+                "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+                "stderr": ""
+              },
+              "readback": {
+                "exit": 3,
+                "stdout": "pg_ctl: no server running\n",
+                "stderr": ""
+              }
+            }
+          },
+          {
+            "event": "helper-frame",
+            "time": 1792862577421,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "frame": {
+              "type": "result",
+              "ok": true,
+              "value": {
+                "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+                "stderr": ""
+              }
+            }
+          },
+          {
+            "event": "carrier-close",
+            "time": 1792862577436,
+            "id": 8,
+            "method": "run:pg_ctl:stop",
+            "code": 0,
+            "signal": null,
+            "sent": true,
+            "bytes": 696,
+            "chunks": 5,
+            "leadingTailSplits": 0,
+            "pendingBytes": 0,
+            "stderr": ""
+          },
+          {
+            "event": "case-complete",
+            "time": 1792862577436,
+            "scenario": "utf8-fragmented",
+            "owner": {
+              "initialized": true,
+              "startedHere": true
+            }
+          }
+        ],
+        "node_exit": 0,
+        "stderr": "",
+        "cleanup": {
+          "home_removed": true,
+          "before": {
+            "home": "/home/plumwsl/.g0p5-3ojf1pb6-\u4e2d\u6587 \u7a7a",
+            "kernel": {
+              "exists": true,
+              "acquired": true,
+              "inode": 186551
+            },
+            "pg": {
+              "exists": true,
+              "acquired": true,
+              "inode": 187826
+            },
+            "status": {
+              "exit": 3,
+              "stdout": "pg_ctl: no server running\n",
+              "stderr": ""
+            },
+            "data_exists": true,
+            "socket_exists": true,
+            "outside_sentinel": "outside-sentinel",
+            "data_sentinel": null,
+            "pidfile": null,
+            "processes": []
+          }
+        },
+        "carrier_waits": [
+          {
+            "pid": 34532,
+            "wait": 0
+          },
+          {
+            "pid": 13016,
+            "wait": 0
+          },
+          {
+            "pid": 9960,
+            "wait": 0
+          },
+          {
+            "pid": 38288,
+            "wait": 0
+          },
+          {
+            "pid": 37308,
+            "wait": 0
+          },
+          {
+            "pid": 34284,
+            "wait": 0
+          },
+          {
+            "pid": 35852,
+            "wait": 0
+          },
+          {
+            "pid": 34384,
+            "wait": 0
+          }
+        ]
+      }
+    }
+  ]
+}

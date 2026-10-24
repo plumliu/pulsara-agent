@@ -1,0 +1,353 @@
+{
+  "requests": [
+    {
+      "input": {
+        "op": "mkdir",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8",
+        "name": "Case"
+      },
+      "status": 200,
+      "body": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/Case"
+      }
+    },
+    {
+      "input": {
+        "op": "mkdir",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8",
+        "name": "case"
+      },
+      "status": 200,
+      "body": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/case"
+      }
+    },
+    {
+      "input": {
+        "op": "mkdir",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8",
+        "name": "café 中文"
+      },
+      "status": 200,
+      "body": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文"
+      }
+    },
+    {
+      "input": {
+        "op": "mkdir",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8",
+        "name": "café 中文"
+      },
+      "status": 200,
+      "body": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文"
+      }
+    },
+    {
+      "input": {
+        "op": "list",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8"
+      },
+      "status": 200,
+      "body": {
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8",
+        "names": [
+          "Case",
+          "café 中文",
+          "café 中文",
+          "case"
+        ],
+        "next": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8/Case"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/Case",
+        "key": "workspace:eqeawp4q3csxqejhwufwfxftfi",
+        "activeSession": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8/case"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/case",
+        "key": "workspace:pm4gmg2pbjuwn4wjh2jwa7w7sm",
+        "activeSession": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:wclbyrv5afkknrzfpbyhkiv3gi",
+        "activeSession": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:i3k4qalvdublyyelqinkbyusd4",
+        "activeSession": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "\\\\wsl.localhost\\Ubuntu\\home\\plumwsl\\workspaces\\g0-names-a55pp9l8\\Case"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/Case",
+        "key": "workspace:eqeawp4q3csxqejhwufwfxftfi",
+        "activeSession": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "\\\\wsl.localhost\\Ubuntu\\home\\plumwsl\\workspaces\\g0-names-a55pp9l8\\case"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/case",
+        "key": "workspace:pm4gmg2pbjuwn4wjh2jwa7w7sm",
+        "activeSession": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "\\\\wsl.localhost\\Ubuntu\\home\\plumwsl\\workspaces\\g0-names-a55pp9l8\\café 中文"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:wclbyrv5afkknrzfpbyhkiv3gi",
+        "activeSession": null
+      }
+    },
+    {
+      "input": {
+        "op": "select",
+        "path": "\\\\wsl.localhost\\Ubuntu\\home\\plumwsl\\workspaces\\g0-names-a55pp9l8\\café 中文"
+      },
+      "status": 200,
+      "body": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:i3k4qalvdublyyelqinkbyusd4",
+        "activeSession": null
+      }
+    }
+  ],
+  "carrierExit": 0,
+  "guestTail": [
+    {
+      "event": "directory",
+      "operation": "mkdir",
+      "result": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/Case"
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "mkdir",
+      "result": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/case"
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "mkdir",
+      "result": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文"
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "mkdir",
+      "result": {
+        "created": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文"
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces/g0-names-a55pp9l8",
+        "names": [
+          "Case",
+          "café 中文",
+          "café 中文",
+          "case"
+        ],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/Case",
+        "key": "workspace:eqeawp4q3csxqejhwufwfxftfi",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/case",
+        "key": "workspace:pm4gmg2pbjuwn4wjh2jwa7w7sm",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:wclbyrv5afkknrzfpbyhkiv3gi",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:i3k4qalvdublyyelqinkbyusd4",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/Case",
+        "key": "workspace:eqeawp4q3csxqejhwufwfxftfi",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/case",
+        "key": "workspace:pm4gmg2pbjuwn4wjh2jwa7w7sm",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:wclbyrv5afkknrzfpbyhkiv3gi",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "directory",
+      "operation": "select",
+      "result": {
+        "selected": "/home/plumwsl/workspaces/g0-names-a55pp9l8/café 中文",
+        "key": "workspace:i3k4qalvdublyyelqinkbyusd4",
+        "activeSession": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "stopped",
+      "home": "/home/plumwsl/.g0-files-nqet2zbu",
+      "imports": []
+    }
+  ],
+  "home": "/home/plumwsl/.g0-files-nqet2zbu",
+  "workspace": "/home/plumwsl/workspaces/g0-names-a55pp9l8",
+  "cleanup": {
+    "remaining": []
+  }
+}

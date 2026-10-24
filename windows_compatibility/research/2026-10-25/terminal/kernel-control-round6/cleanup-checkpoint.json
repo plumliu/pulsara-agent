@@ -1,0 +1,182 @@
+{
+  "hostIdentityCount": 15,
+  "kernelIdentityCount": 13,
+  "homeCount": 15,
+  "remainingExactHosts": [],
+  "currentHostPidUnobservable": [],
+  "remainingExactKernels": [],
+  "remainingHomes": [],
+  "hostFacts": [
+    {
+      "pid": 37412,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 20836,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 2900,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34868,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38772,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31024,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34712,
+      "exists": false,
+      "creation": 134373365403497518,
+      "sameIdentity": true
+    },
+    {
+      "pid": 2728,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 19452,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32832,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32812,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38052,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33848,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38344,
+      "exists": false,
+      "error": 87
+    }
+  ],
+  "kernelFacts": [
+    {
+      "pid": 3315,
+      "expectedStarttime": "120744",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 3483,
+      "expectedStarttime": "123209",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 3621,
+      "expectedStarttime": "123723",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 3868,
+      "expectedStarttime": "124224",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 3874,
+      "expectedStarttime": "124255",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 3985,
+      "expectedStarttime": "124521",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 4087,
+      "expectedStarttime": "124955",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 4198,
+      "expectedStarttime": "125397",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 4300,
+      "expectedStarttime": "125833",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 4403,
+      "expectedStarttime": "126268",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 4525,
+      "expectedStarttime": "126784",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 4556,
+      "expectedStarttime": "127691",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 4676,
+      "expectedStarttime": "128234",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    }
+  ],
+  "allCasePgStoppedAndBothLocksFreeBeforeRemoval": true,
+  "userStopHonored": true
+}

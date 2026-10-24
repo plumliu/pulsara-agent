@@ -1,0 +1,17 @@
+{
+  "registry": {
+    "default": "{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+    "distributions": [
+      {
+        "id": "{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+        "name": "Ubuntu",
+        "path": "C:\\Users\\plumlocal\\AppData\\Local\\wsl\\{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+        "version": 2
+      }
+    ]
+  },
+  "ownRegistrationAbsent": true,
+  "ownFolderAbsent": true,
+  "listing": "  NAME      STATE           VERSION\r\n* Ubuntu    Stopped         2\r\n",
+  "freeBytes": 434391187456
+}

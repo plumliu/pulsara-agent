@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "cases": 1,
+  "original_flow_remains_cancelled": true,
+  "foreign_stale_callback_http_status": 200,
+  "token_requests": 0,
+  "grant_present": false,
+  "both_listeners_closed": true,
+  "host_structure_and_authquery_scan_passed": true,
+  "checked_files": [
+    "first.rebind.host-results.json",
+    "first.rebind.launch.json",
+    "rebind.host-results.json",
+    "rebind.launch.json",
+    "rebind.live.jsonl",
+    "rebind.windows.log"
+  ]
+}

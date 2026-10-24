@@ -1,0 +1,16 @@
+.................                                                        [100%]
+=============================== warnings summary ===============================
+tests/test_local_file_import.py::test_file_streaming_above_json_limit_and_readonly
+tests/test_local_file_import.py::test_controller_generation_origin_and_takeover_are_checked
+tests/test_local_file_import.py::test_failed_disk_and_rebinding_clean_unpublished_files
+tests/test_local_file_import.py::test_cancelled_upload_removes_unpublished_tree
+tests/test_local_file_import.py::test_import_root_symlink_is_not_followed
+tests/test_local_file_import.py::test_publish_checks_tree_after_exclusive_rename
+tests/test_local_file_import.py::test_published_copy_survives_host_close_and_new_host
+tests/test_local_file_import.py::test_published_copy_survives_host_close_and_new_host
+tests/test_session_file_preview.py::test_http_preview_contract
+  /home/plumwsl/workspaces/pulsara_agent/.venv/lib/python3.12/site-packages/aiohttp/web_runner.py:99: DeprecationWarning: shutdown_timeout should be set on BaseRunner
+    super().__init__(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+17 passed, 9 warnings in 1.85s

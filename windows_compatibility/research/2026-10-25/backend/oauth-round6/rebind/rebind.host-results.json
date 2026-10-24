@@ -1,0 +1,215 @@
+{
+  "mode": "rebind",
+  "records": [
+    {
+      "event": "electron-ready",
+      "time": 1792865404354,
+      "mode": "rebind",
+      "electron": "44.9.0",
+      "node": "v24.22.0",
+      "platform": "win32"
+    },
+    {
+      "event": "guest-carrier",
+      "time": 1792865404361,
+      "pid": 42384,
+      "executable": "C:\\WINDOWS\\System32\\wsl.exe",
+      "argv": [
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round6/rebind/guest.py",
+        "rebind"
+      ]
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405199,
+      "record": {
+        "type": "guest-ready",
+        "mode": "rebind",
+        "home": "/home/plumwsl/.g0oauth6-85uexsb8",
+        "uid": 1000,
+        "device": 2096,
+        "sdk": "2.1.0"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405206,
+      "record": {
+        "type": "case-start",
+        "case": "rebind"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405214,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "http://127.0.0.1:32851",
+        "path": "/mcp",
+        "status": 401,
+        "body": ""
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405217,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "http://127.0.0.1:32851",
+        "path": "/resource",
+        "status": 200
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405218,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "http://127.0.0.1:32851",
+        "path": "/.well-known/oauth-authorization-server",
+        "status": 200
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405221,
+      "record": {
+        "type": "oauth-http",
+        "method": "POST",
+        "origin": "http://127.0.0.1:32851",
+        "path": "/register",
+        "status": 201
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792865405858,
+      "requestId": "1",
+      "case": "rebind",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792865405859,
+      "requestId": "1",
+      "case": "rebind",
+      "origin": "http://127.0.0.1:32851"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792865405894,
+      "requestId": "1",
+      "case": "rebind",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405952,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "rebind",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405953,
+      "record": {
+        "type": "original-flow-retired",
+        "state": "cancelled",
+        "listener_closed": true,
+        "pending_count": 0
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865405954,
+      "record": {
+        "type": "rebind-ready",
+        "navigation_origin": "http://127.0.0.1:32851",
+        "callback_origin": "http://127.0.0.1:36683"
+      }
+    },
+    {
+      "event": "foreign-listener-present",
+      "time": 1792865405956,
+      "reachable": true,
+      "status": 200
+    },
+    {
+      "event": "foreign-stale-navigation-opened",
+      "time": 1792865405971,
+      "origin": "http://127.0.0.1:32851"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865406047,
+      "record": {
+        "type": "case-result",
+        "case": "rebind",
+        "state": "cancelled",
+        "grant_present": false,
+        "token_requests": 0,
+        "listener_closed": true,
+        "pending_count": 0,
+        "foreign_callback_requests": 1,
+        "foreign_success_status": 200,
+        "old_callback_parameters_matched": true,
+        "foreign_listener_closed": true,
+        "callback_origin": "http://127.0.0.1:36683"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865406048,
+      "record": {
+        "type": "matrix-complete",
+        "cases": 1
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865406049,
+      "record": {
+        "type": "host-pipe-settled",
+        "pending_count": 0
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865406049,
+      "record": {
+        "type": "guest-cleaned",
+        "home": "/home/plumwsl/.g0oauth6-85uexsb8",
+        "removed": true
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792865406050,
+      "case": "rebind",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-carrier-closed",
+      "time": 1792865406374,
+      "code": 0,
+      "signal": null,
+      "stderrBytes": 0,
+      "partialFrame": false
+    }
+  ]
+}

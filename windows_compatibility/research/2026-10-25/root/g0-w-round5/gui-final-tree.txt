@@ -1,0 +1,44 @@
+Window: "G0 Windows WSL2 文件验收", App: electron.exe.
+	0 窗口 G0 Windows WSL2 文件验收 Secondary Actions: Raise
+		1 窗格 (disabled)
+		2 区域 G0 Windows WSL2 文件验收
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 菜单栏
+								8 按钮 File
+								9 按钮 Edit ID: view_1
+								10 按钮 View ID: view_2
+								11 按钮 Window ID: view_3
+							12 区域
+								13 区域
+									14 文档 G0 Windows WSL2 文件验收 Value: https://127.0.0.1:35677/ ID: RootWebArea
+										15 标题 Windows → WSL2 文件验收
+										16 文本 独立 G0 实验 · 没有 active session · Ubuntu / plumwsl
+										17 文本 当前目录
+										18 编辑 (settable, string) 当前目录 Value: /home/plumwsl/workspaces ID: path
+										19 按钮 刷新目录 ID: refresh
+										20 按钮 上一级 ID: up
+										21 文本 
+										22 列表 (settable, string) Linux目录 ID: dirs
+											23 选项 (selectable) pulsara_agent
+											24 选项 (selectable) 中文 工程 G0-20261024
+											25 选项 (selectable) 中文 工程 G0-R5
+										26 按钮 进入目录 ID: browse
+										27 文本 
+										28 文本 文件夹名称
+										29 编辑 (settable, string) 文件夹名称 ID: name
+										30 按钮 新建文件夹 ID: mkdir
+										31 按钮 选择当前工作区 ID: select
+										32 按钮 取消选择 ID: cancel
+										33 标题 Windows 文件导入
+										34 按钮 选择 Windows 文件: Windows 中文附件.bin Value: Windows 中文附件.bin ID: file
+										35 文本 将 Windows 文件拖到这里，复制到独立 Linux 实验 home
+										36 状态 ID: status
+											39 文本 { "cancelled": true, "activeSession": null }
+								38 区域
+
+Document text: ```
+文件夹名称
+```

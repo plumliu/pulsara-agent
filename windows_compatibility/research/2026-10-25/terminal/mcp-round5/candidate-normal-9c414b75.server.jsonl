@@ -1,0 +1,5 @@
+{"event": "sdk-server-started", "time": 1792861859.1978521, "pid": 694, "starttime": "22587"}
+{"event": "tool-entered", "time": 1792861859.260822, "pid": 694, "starttime": "22587", "mode": "normal"}
+{"event": "tool-created-interop-child", "time": 1792861859.2681158, "pid": 694, "starttime": "22587", "childPid": 697}
+{"event": "tool-normal-reply", "time": 1792861859.644301, "pid": 694, "starttime": "22587", "exit": 0}
+{"event": "tool-handler-left", "time": 1792861859.6509092, "pid": 694, "starttime": "22587", "linuxChildReturncode": 0}

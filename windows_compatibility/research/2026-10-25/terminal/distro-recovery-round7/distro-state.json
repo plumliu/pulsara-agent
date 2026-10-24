@@ -1,0 +1,22 @@
+{
+  "name": "PulsaraG0-kernel7-20261025-e4e95020",
+  "folder": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round7\\disposable-distro\\PulsaraG0-kernel7-20261025-e4e95020",
+  "install": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round7\\disposable-distro\\PulsaraG0-kernel7-20261025-e4e95020\\instance",
+  "before": {
+    "default": "{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+    "distributions": [
+      {
+        "id": "{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+        "name": "Ubuntu",
+        "path": "C:\\Users\\plumlocal\\AppData\\Local\\wsl\\{482bba13-880f-47a9-a872-4e6cbd01ec05}",
+        "version": 2
+      }
+    ]
+  },
+  "registration": {
+    "id": "{c6987db1-b068-4097-a76c-58e0a29b6de4}",
+    "name": "PulsaraG0-kernel7-20261025-e4e95020",
+    "path": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round7\\disposable-distro\\PulsaraG0-kernel7-20261025-e4e95020\\instance",
+    "version": 2
+  }
+}

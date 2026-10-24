@@ -1,0 +1,189 @@
+{
+  "mode": "rebind",
+  "records": [
+    {
+      "event": "electron-ready",
+      "time": 1792865364943,
+      "mode": "rebind",
+      "electron": "44.9.0",
+      "node": "v24.22.0",
+      "platform": "win32"
+    },
+    {
+      "event": "guest-carrier",
+      "time": 1792865364952,
+      "pid": 39224,
+      "executable": "C:\\WINDOWS\\System32\\wsl.exe",
+      "argv": [
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round6/rebind/guest.py",
+        "rebind"
+      ]
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366595,
+      "record": {
+        "type": "guest-ready",
+        "mode": "rebind",
+        "home": "/home/plumwsl/.g0oauth6-jzeoc5vz",
+        "uid": 1000,
+        "device": 2096,
+        "sdk": "2.1.0"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366601,
+      "record": {
+        "type": "case-start",
+        "case": "rebind"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366611,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "http://127.0.0.1:39745",
+        "path": "/mcp",
+        "status": 401,
+        "body": ""
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366614,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "http://127.0.0.1:39745",
+        "path": "/resource",
+        "status": 200
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366616,
+      "record": {
+        "type": "oauth-http",
+        "method": "GET",
+        "origin": "http://127.0.0.1:39745",
+        "path": "/.well-known/oauth-authorization-server",
+        "status": 200
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366618,
+      "record": {
+        "type": "oauth-http",
+        "method": "POST",
+        "origin": "http://127.0.0.1:39745",
+        "path": "/register",
+        "status": 201
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792865366845,
+      "requestId": "1",
+      "case": "rebind",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792865366845,
+      "requestId": "1",
+      "case": "rebind",
+      "origin": "http://127.0.0.1:39745"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792865366881,
+      "requestId": "1",
+      "case": "rebind",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366945,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "rebind",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366946,
+      "record": {
+        "type": "original-flow-retired",
+        "state": "cancelled",
+        "listener_closed": true,
+        "pending_count": 0
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865366946,
+      "record": {
+        "type": "rebind-ready",
+        "navigation_origin": "http://127.0.0.1:39745",
+        "callback_origin": "http://127.0.0.1:45477"
+      }
+    },
+    {
+      "event": "foreign-listener-present",
+      "time": 1792865366947,
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "foreign-navigation-failed",
+      "time": 1792865366948
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865391972,
+      "record": {
+        "type": "host-pipe-settled",
+        "pending_count": 0
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865391972,
+      "record": {
+        "type": "guest-cleaned",
+        "home": "/home/plumwsl/.g0oauth6-jzeoc5vz",
+        "removed": true
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792865391973,
+      "record": {
+        "type": "guest-failure",
+        "error_type": "TimeoutError"
+      }
+    },
+    {
+      "event": "guest-carrier-closed",
+      "time": 1792865392165,
+      "code": 1,
+      "signal": null,
+      "stderrBytes": 0,
+      "partialFrame": false
+    }
+  ]
+}

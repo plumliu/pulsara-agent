@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "mock_cases": 8,
+  "real_authorized": true,
+  "real_tool_count": 65,
+  "protocol_version": "2026-07-28",
+  "local_grant_removed": true,
+  "remote_revocation_performed": false,
+  "host_structure_and_authquery_scan_passed": true,
+  "checked_files": [
+    "first.mock.host-results.json",
+    "first.mock.launch.json",
+    "first.mock.windows.log",
+    "mock.host-results.json",
+    "mock.launch.json",
+    "mock.windows.log",
+    "real.host-results.json",
+    "real.launch.json",
+    "real.live.jsonl",
+    "real.windows.log",
+    "second.mock.host-results.json",
+    "second.mock.launch.json",
+    "second.mock.windows.log"
+  ],
+  "exact_secret_scrub": "performed in Linux with observed values before diagnostics crossed host"
+}

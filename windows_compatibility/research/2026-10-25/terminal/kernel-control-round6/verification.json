@@ -1,0 +1,84 @@
+{
+  "checks": [
+    {
+      "label": "fragmented-original-node-240796c2",
+      "claim": "clean-kernel-join-before-original-pg-stop"
+    },
+    {
+      "label": "normal-original-electron-dfc27874",
+      "claim": "clean-kernel-join-before-original-pg-stop"
+    },
+    {
+      "label": "ready-eof-gated-original-node-f41d42ec",
+      "claim": "clean-kernel-join-before-original-pg-stop"
+    },
+    {
+      "claim": "real-clean-eof-close-gate-prevents-early-main-pg-stop"
+    },
+    {
+      "label": "kernel-crash-original-node-3b5e04fc",
+      "claim": "original-owner-counterexample-unclean-exit-still-stops-pg"
+    },
+    {
+      "label": "carrier-loss-original-node-0d0a152e",
+      "claim": "original-owner-counterexample-unclean-exit-still-stops-pg"
+    },
+    {
+      "label": "kernel-crash-candidate-node-fe454dde",
+      "claim": "output-candidate-rechecks-saved-unclean-exit-and-preserves-pg"
+    },
+    {
+      "label": "carrier-loss-candidate-node-b069fd26",
+      "claim": "output-candidate-rechecks-saved-unclean-exit-and-preserves-pg"
+    },
+    {
+      "label": "carrier-loss-candidate-electron-a828bac6",
+      "claim": "output-candidate-rechecks-saved-unclean-exit-and-preserves-pg"
+    },
+    {
+      "label": "host-loss-candidate-node-1cf0dad7",
+      "claim": "host-loss-is-unclean-not-clean-ack-pg-preserved-until-fixture-cleanup"
+    },
+    {
+      "label": "host-loss-candidate-electron-0f1fb1de",
+      "claim": "host-loss-is-unclean-not-clean-ack-pg-preserved-until-fixture-cleanup"
+    },
+    {
+      "label": "before-start-eof-original-node-e7a0e1ba",
+      "claim": "pre-start-loss-never-starts-private-pg-or-application"
+    },
+    {
+      "label": "carrier-before-start-original-node-75732b63",
+      "claim": "pre-start-loss-never-starts-private-pg-or-application"
+    },
+    {
+      "label": "host-before-start-original-node-0405c9ee",
+      "claim": "pre-start-loss-never-starts-private-pg-or-application"
+    },
+    {
+      "label": "malformed-output-original-node-1c8b1719",
+      "claim": "original-runtime-rejects-injected-output-or-real-start-failure-and-joins"
+    },
+    {
+      "label": "partial-output-original-node-948d90ca",
+      "claim": "original-runtime-rejects-injected-output-or-real-start-failure-and-joins"
+    },
+    {
+      "label": "unicode-failure-original-node-49c3d654",
+      "claim": "original-runtime-rejects-injected-output-or-real-start-failure-and-joins"
+    },
+    {
+      "label": "close-failure-original-node-4ed8cd1e",
+      "claim": "original-live-child-close-failure-already-preserves-pg"
+    }
+  ],
+  "cases": 22,
+  "observed": 18,
+  "preservedHarnessFailures": [
+    "carrier-loss-candidate-node-5b8b6ae7",
+    "host-loss-candidate-electron-df51f0ee",
+    "host-loss-candidate-node-a25a0b09",
+    "ready-eof-gated-original-node-f52fad5e"
+  ],
+  "originalDesktopRuntimeTests": "12 passed in 1.53s"
+}

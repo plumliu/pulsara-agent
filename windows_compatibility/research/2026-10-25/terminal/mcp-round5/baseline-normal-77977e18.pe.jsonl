@@ -1,0 +1,5 @@
+{"event": "pe-start", "time": 1792861812.6464329, "pid": 32132, "role": "parent", "scenario": "normal", "creation": 134373354125158287, "inJob": true}
+{"event": "pe-start", "time": 1792861812.8015306, "pid": 5976, "role": "child", "scenario": "normal", "creation": 134373354126705428, "inJob": true}
+{"event": "child-ready", "time": 1792861812.8015306, "pid": 5976}
+{"event": "parent-early-exit", "time": 1792861812.8087604, "pid": 32132, "childPid": 33252, "childStdio": "DEVNULL"}
+{"event": "pe-finished", "time": 1792861818.8020296, "pid": 5976, "role": "child"}

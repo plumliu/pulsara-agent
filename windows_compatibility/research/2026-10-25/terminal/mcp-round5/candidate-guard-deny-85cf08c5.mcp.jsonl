@@ -1,0 +1,4 @@
+{"event": "probe-started", "time": 1792861821.0367124, "pid": 528, "starttime": "18681", "candidate": true, "scenario": "guard-deny"}
+{"event": "real-credential-guard-entered", "time": 1792861821.044363, "locked": true}
+{"event": "guard-denied-before-spawn", "time": 1792861821.0513992, "error": "ValueError: MCP stdio admission contains a caller credential", "spawnCount": 0, "scopePrepared": false}
+{"event": "probe-finished", "time": 1792861821.0579555, "spawnCount": 0, "guardEntries": 1}

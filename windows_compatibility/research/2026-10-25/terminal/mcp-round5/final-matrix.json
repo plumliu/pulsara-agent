@@ -1,0 +1,4844 @@
+{
+  "gitHead": "b741dd92b06a2d167d882e312e18f503e23b8a89",
+  "cases": [
+    {
+      "label": "baseline-normal-77977e18",
+      "scenario": "normal",
+      "candidate": false,
+      "windowsAtMcpOwnerClose": {
+        "accounting": {
+          "TotalUserTime": 2031250,
+          "TotalKernelTime": 2812500,
+          "ThisPeriodTotalUserTime": 2031250,
+          "ThisPeriodTotalKernelTime": 2812500,
+          "TotalPageFaultCount": 40670,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 8,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [
+          {
+            "pid": 29332,
+            "exists": true,
+            "creation": 134373354113659112,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 38116,
+            "exists": true,
+            "creation": 134373354113713867,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 37588,
+            "exists": true,
+            "creation": 134373354114145739,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 24972,
+            "exists": true,
+            "creation": 134373354114290382,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 33252,
+            "exists": true,
+            "creation": 134373354126480580,
+            "sameIdentity": true,
+            "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+          },
+          {
+            "pid": 8908,
+            "exists": true,
+            "creation": 134373354126552991,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 25784,
+            "exists": true,
+            "creation": 134373354113891036,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          },
+          {
+            "pid": 5976,
+            "exists": true,
+            "creation": 134373354126705428,
+            "sameIdentity": true,
+            "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+          }
+        ],
+        "held": [
+          {
+            "pid": 29332,
+            "creation": 134373354113659112,
+            "waitResult": 258
+          },
+          {
+            "pid": 38116,
+            "creation": 134373354113713867,
+            "waitResult": 258
+          },
+          {
+            "pid": 25784,
+            "creation": 134373354113891036,
+            "waitResult": 258
+          },
+          {
+            "pid": 37588,
+            "creation": 134373354114145739,
+            "waitResult": 258
+          },
+          {
+            "pid": 24972,
+            "creation": 134373354114290382,
+            "waitResult": 258
+          },
+          {
+            "pid": 29528,
+            "creation": 134373354115911018,
+            "waitResult": 0
+          },
+          {
+            "pid": 31880,
+            "creation": 134373354115986179,
+            "waitResult": 0
+          },
+          {
+            "pid": 32424,
+            "creation": 134373354116131030,
+            "waitResult": 0
+          },
+          {
+            "pid": 1488,
+            "creation": 134373354124928140,
+            "waitResult": 0
+          },
+          {
+            "pid": 22484,
+            "creation": 134373354125004462,
+            "waitResult": 0
+          },
+          {
+            "pid": 32132,
+            "creation": 134373354125158287,
+            "waitResult": 0
+          },
+          {
+            "pid": 33252,
+            "creation": 134373354126480580,
+            "waitResult": 258
+          },
+          {
+            "pid": 8908,
+            "creation": 134373354126552991,
+            "waitResult": 258
+          },
+          {
+            "pid": 5976,
+            "creation": 134373354126705428,
+            "waitResult": 258
+          }
+        ],
+        "terminateJobCalled": false
+      },
+      "ownerProcess": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "mcpRows": [
+        {
+          "event": "probe-started",
+          "time": 1792861811.226004,
+          "pid": 500,
+          "starttime": "17686",
+          "candidate": false,
+          "scenario": "normal"
+        },
+        {
+          "event": "scope-prepare-entered",
+          "time": 1792861811.2323954,
+          "scope": "mcp-session",
+          "receiverPid": 507
+        },
+        {
+          "event": "scope-fd-bound",
+          "time": 1792861811.5753357,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "scope-operation-admitted",
+          "time": 1792861811.762205,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "real-credential-guard-entered",
+          "time": 1792861811.7679067,
+          "locked": true
+        },
+        {
+          "event": "actual-stdio-sink-inside-credential-guard",
+          "time": 1792861811.774586,
+          "candidate": false
+        },
+        {
+          "event": "real-stdio-process-created",
+          "time": 1792861811.78195,
+          "pid": 512,
+          "starttime": "17911",
+          "guardStillLocked": true
+        },
+        {
+          "event": "real-supervisor-ready-and-permit-accepted",
+          "time": 1792861812.4687338,
+          "protocol": "2026-07-28",
+          "effect": "EXTERNAL_EFFECT",
+          "supportsParallel": false
+        },
+        {
+          "event": "real-tool-outcome",
+          "time": 1792861812.8312683,
+          "state": "SUCCESS",
+          "content": "{\"content\":[{\"text\":\"MCP-ACK:héllo:0\",\"type\":\"text\"}],\"isError\":false,\"resultType\":\"complete\",\"structuredContent\":{\"result\":\"MCP-ACK:héllo:0\"}}",
+          "permitState": "RELEASED"
+        },
+        {
+          "event": "original-supervisor-close-returned",
+          "time": 1792861812.837999,
+          "clientClosed": true,
+          "processReturncode": -15,
+          "stdioTasksDone": true,
+          "linuxGroupAlive": false,
+          "permitState": "RELEASED",
+          "spawnCount": 1,
+          "guardEntries": 1
+        },
+        {
+          "event": "baseline-external-research-cleanup-entered",
+          "time": 1792861812.846778
+        },
+        {
+          "event": "relay-ack-observed",
+          "time": 1792861812.8627014,
+          "scope": "mcp-session",
+          "snapshot": {
+            "mode": "normal",
+            "accepted": 3,
+            "taskCount": 0,
+            "writerCount": 0,
+            "forwardedBytes": 1218,
+            "anyForwarded": true,
+            "operationAccepted": 2,
+            "operationForwardedBytes": 619,
+            "operationAnyForwarded": true,
+            "socketExists": true,
+            "directory": "/home/plumwsl/.g0m5-ed22dec7d08e"
+          },
+          "crossDomainOutcome": "unknown"
+        },
+        {
+          "event": "retained-socket-late-caller-rejected",
+          "time": 1792861812.870678,
+          "scope": "mcp-session",
+          "pid": 516,
+          "exit": 1,
+          "stdout": "",
+          "stderr": "<3>WSL (516 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+          "socketStillExists": true,
+          "groupAlive": false
+        },
+        {
+          "event": "relay-ack-remains-stable",
+          "time": 1792861812.8794525,
+          "scope": "mcp-session",
+          "mode": "normal",
+          "operationForwardedBytes": 619
+        },
+        {
+          "event": "retirement-after-real-mcp-owner-close",
+          "time": 1792861818.8257399,
+          "transportsClosed": true,
+          "stdioTasksDone": true
+        },
+        {
+          "event": "scope-receiver-retired",
+          "time": 1792861818.8611574,
+          "scope": "mcp-session",
+          "exit": 0,
+          "output": "",
+          "directoryExists": false
+        },
+        {
+          "event": "probe-finished",
+          "time": 1792861818.8691907,
+          "spawnCount": 1,
+          "guardEntries": 1
+        }
+      ],
+      "serverRows": [
+        {
+          "event": "sdk-server-started",
+          "time": 1792861812.439911,
+          "pid": 512,
+          "starttime": "17911"
+        },
+        {
+          "event": "tool-entered",
+          "time": 1792861812.4721506,
+          "pid": 512,
+          "starttime": "17911",
+          "mode": "normal"
+        },
+        {
+          "event": "tool-created-interop-child",
+          "time": 1792861812.479136,
+          "pid": 512,
+          "starttime": "17911",
+          "childPid": 515
+        },
+        {
+          "event": "tool-normal-reply",
+          "time": 1792861812.8194234,
+          "pid": 512,
+          "starttime": "17911",
+          "exit": 0
+        },
+        {
+          "event": "tool-handler-left",
+          "time": 1792861812.8266492,
+          "pid": 512,
+          "starttime": "17911",
+          "linuxChildReturncode": 0
+        }
+      ],
+      "relayRows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792861811.360075,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "control": "/home/plumwsl/.g0m5-ed22dec7d08e/control",
+          "directory": "/home/plumwsl/.g0m5-ed22dec7d08e",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792861811.556655,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "peer": {
+            "pid": 510,
+            "starttime": "17875",
+            "pgid": 510,
+            "sid": 510
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792861811.5621157,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "peer": {
+            "pid": 510,
+            "starttime": "17875",
+            "pgid": 510,
+            "sid": 510
+          },
+          "peerUid": 1000,
+          "inode": 959,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792861811.5675743,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "socket": "/home/plumwsl/.g0m5-ed22dec7d08e/interop",
+          "directory": "/home/plumwsl/.g0m5-ed22dec7d08e",
+          "peer": {
+            "pid": 510,
+            "starttime": "17875",
+            "pgid": 510,
+            "sid": 510
+          },
+          "pinned": "/proc/507/fd/9"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792861811.5730207,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861811.5831227,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "operation": false,
+          "bytes": 599,
+          "total": 599
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861811.7602499,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "operation": false
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861812.480627,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "operation": true,
+          "bytes": 32,
+          "total": 32
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861812.4867418,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "operation": true
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861812.4931402,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "operation": true,
+          "bytes": 587,
+          "total": 587
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861812.8191261,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792861812.8525796,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "mode": "normal",
+          "accepted": 3,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 1218,
+          "anyForwarded": true,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 619,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0m5-ed22dec7d08e"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792861818.8339944,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792861818.8411922,
+          "pid": 507,
+          "starttime": "17856",
+          "pgid": 500,
+          "sid": 500,
+          "directoryExists": false
+        }
+      ],
+      "anchorRows": [
+        {
+          "event": "anchor-ready",
+          "time": 1792861811.5478756,
+          "pid": 510,
+          "starttime": "17875",
+          "pgid": 510,
+          "sid": 510,
+          "socket": "/run/WSL/509_interop",
+          "uid": 1000
+        },
+        {
+          "event": "anchor-pinned",
+          "time": 1792861811.554788,
+          "pid": 510,
+          "starttime": "17875",
+          "pgid": 510,
+          "sid": 510,
+          "inode": 959
+        },
+        {
+          "event": "anchor-fd-sent",
+          "time": 1792861811.5601127,
+          "pid": 510,
+          "starttime": "17875",
+          "pgid": 510,
+          "sid": 510
+        },
+        {
+          "event": "anchor-eof",
+          "time": 1792861812.8855412,
+          "pid": 510,
+          "starttime": "17875",
+          "pgid": 510,
+          "sid": 510
+        }
+      ],
+      "windowsRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792861811.369237,
+          "carrierPid": 29332,
+          "carrierCreation": 134373354113659112,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "host-verified-transferred-fd-job-binding",
+          "time": 1792861811.748984,
+          "pid": 32424,
+          "creation": 134373354116131030,
+          "sameCreation": true,
+          "member": true,
+          "waitResult": 258
+        },
+        {
+          "event": "before-normal-anchor-eof",
+          "time": 1792861812.8833115,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2031250,
+              "TotalKernelTime": 2812500,
+              "ThisPeriodTotalUserTime": 2031250,
+              "ThisPeriodTotalKernelTime": 2812500,
+              "TotalPageFaultCount": 40670,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 8,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [
+              {
+                "pid": 29332,
+                "exists": true,
+                "creation": 134373354113659112,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\wsl.exe"
+              },
+              {
+                "pid": 38116,
+                "exists": true,
+                "creation": 134373354113713867,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 37588,
+                "exists": true,
+                "creation": 134373354114145739,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wslhost.exe"
+              },
+              {
+                "pid": 24972,
+                "exists": true,
+                "creation": 134373354114290382,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 33252,
+                "exists": true,
+                "creation": 134373354126480580,
+                "sameIdentity": true,
+                "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+              },
+              {
+                "pid": 8908,
+                "exists": true,
+                "creation": 134373354126552991,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 25784,
+                "exists": true,
+                "creation": 134373354113891036,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wsl.exe"
+              },
+              {
+                "pid": 5976,
+                "exists": true,
+                "creation": 134373354126705428,
+                "sameIdentity": true,
+                "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+              }
+            ],
+            "held": [
+              {
+                "pid": 29332,
+                "creation": 134373354113659112,
+                "waitResult": 258
+              },
+              {
+                "pid": 38116,
+                "creation": 134373354113713867,
+                "waitResult": 258
+              },
+              {
+                "pid": 25784,
+                "creation": 134373354113891036,
+                "waitResult": 258
+              },
+              {
+                "pid": 37588,
+                "creation": 134373354114145739,
+                "waitResult": 258
+              },
+              {
+                "pid": 24972,
+                "creation": 134373354114290382,
+                "waitResult": 258
+              },
+              {
+                "pid": 29528,
+                "creation": 134373354115911018,
+                "waitResult": 0
+              },
+              {
+                "pid": 31880,
+                "creation": 134373354115986179,
+                "waitResult": 0
+              },
+              {
+                "pid": 32424,
+                "creation": 134373354116131030,
+                "waitResult": 0
+              },
+              {
+                "pid": 1488,
+                "creation": 134373354124928140,
+                "waitResult": 0
+              },
+              {
+                "pid": 22484,
+                "creation": 134373354125004462,
+                "waitResult": 0
+              },
+              {
+                "pid": 32132,
+                "creation": 134373354125158287,
+                "waitResult": 0
+              },
+              {
+                "pid": 33252,
+                "creation": 134373354126480580,
+                "waitResult": 258
+              },
+              {
+                "pid": 8908,
+                "creation": 134373354126552991,
+                "waitResult": 258
+              },
+              {
+                "pid": 5976,
+                "creation": 134373354126705428,
+                "waitResult": 258
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        },
+        {
+          "event": "windows-scope-joined",
+          "time": 1792861818.8223,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2031250,
+              "TotalKernelTime": 2968750,
+              "ThisPeriodTotalUserTime": 2031250,
+              "ThisPeriodTotalKernelTime": 2968750,
+              "TotalPageFaultCount": 42024,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 29332,
+                "creation": 134373354113659112,
+                "waitResult": 0
+              },
+              {
+                "pid": 38116,
+                "creation": 134373354113713867,
+                "waitResult": 0
+              },
+              {
+                "pid": 25784,
+                "creation": 134373354113891036,
+                "waitResult": 0
+              },
+              {
+                "pid": 37588,
+                "creation": 134373354114145739,
+                "waitResult": 0
+              },
+              {
+                "pid": 24972,
+                "creation": 134373354114290382,
+                "waitResult": 0
+              },
+              {
+                "pid": 29528,
+                "creation": 134373354115911018,
+                "waitResult": 0
+              },
+              {
+                "pid": 31880,
+                "creation": 134373354115986179,
+                "waitResult": 0
+              },
+              {
+                "pid": 32424,
+                "creation": 134373354116131030,
+                "waitResult": 0
+              },
+              {
+                "pid": 1488,
+                "creation": 134373354124928140,
+                "waitResult": 0
+              },
+              {
+                "pid": 22484,
+                "creation": 134373354125004462,
+                "waitResult": 0
+              },
+              {
+                "pid": 32132,
+                "creation": 134373354125158287,
+                "waitResult": 0
+              },
+              {
+                "pid": 33252,
+                "creation": 134373354126480580,
+                "waitResult": 0
+              },
+              {
+                "pid": 8908,
+                "creation": 134373354126552991,
+                "waitResult": 0
+              },
+              {
+                "pid": 5976,
+                "creation": 134373354126705428,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        }
+      ],
+      "peRows": [
+        {
+          "event": "pe-start",
+          "time": 1792861812.6464329,
+          "pid": 32132,
+          "role": "parent",
+          "scenario": "normal",
+          "creation": 134373354125158287,
+          "inJob": true
+        },
+        {
+          "event": "pe-start",
+          "time": 1792861812.8015306,
+          "pid": 5976,
+          "role": "child",
+          "scenario": "normal",
+          "creation": 134373354126705428,
+          "inJob": true
+        },
+        {
+          "event": "child-ready",
+          "time": 1792861812.8015306,
+          "pid": 5976
+        },
+        {
+          "event": "parent-early-exit",
+          "time": 1792861812.8087604,
+          "pid": 32132,
+          "childPid": 33252,
+          "childStdio": "DEVNULL"
+        },
+        {
+          "event": "pe-finished",
+          "time": 1792861818.8020296,
+          "pid": 5976,
+          "role": "child"
+        }
+      ],
+      "observed": true,
+      "cleanupWindows": {
+        "accounting": {
+          "TotalUserTime": 2031250,
+          "TotalKernelTime": 2968750,
+          "ThisPeriodTotalUserTime": 2031250,
+          "ThisPeriodTotalKernelTime": 2968750,
+          "TotalPageFaultCount": 42024,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 29332,
+            "creation": 134373354113659112,
+            "waitResult": 0
+          },
+          {
+            "pid": 38116,
+            "creation": 134373354113713867,
+            "waitResult": 0
+          },
+          {
+            "pid": 25784,
+            "creation": 134373354113891036,
+            "waitResult": 0
+          },
+          {
+            "pid": 37588,
+            "creation": 134373354114145739,
+            "waitResult": 0
+          },
+          {
+            "pid": 24972,
+            "creation": 134373354114290382,
+            "waitResult": 0
+          },
+          {
+            "pid": 29528,
+            "creation": 134373354115911018,
+            "waitResult": 0
+          },
+          {
+            "pid": 31880,
+            "creation": 134373354115986179,
+            "waitResult": 0
+          },
+          {
+            "pid": 32424,
+            "creation": 134373354116131030,
+            "waitResult": 0
+          },
+          {
+            "pid": 1488,
+            "creation": 134373354124928140,
+            "waitResult": 0
+          },
+          {
+            "pid": 22484,
+            "creation": 134373354125004462,
+            "waitResult": 0
+          },
+          {
+            "pid": 32132,
+            "creation": 134373354125158287,
+            "waitResult": 0
+          },
+          {
+            "pid": 33252,
+            "creation": 134373354126480580,
+            "waitResult": 0
+          },
+          {
+            "pid": 8908,
+            "creation": 134373354126552991,
+            "waitResult": 0
+          },
+          {
+            "pid": 5976,
+            "creation": 134373354126705428,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": false
+      }
+    },
+    {
+      "label": "candidate-normal-9c414b75",
+      "scenario": "normal",
+      "candidate": true,
+      "windowsAtMcpOwnerClose": {
+        "accounting": {
+          "TotalUserTime": 2343750,
+          "TotalKernelTime": 2656250,
+          "ThisPeriodTotalUserTime": 2343750,
+          "ThisPeriodTotalKernelTime": 2656250,
+          "TotalPageFaultCount": 42262,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 38288,
+            "creation": 134373354581023689,
+            "waitResult": 0
+          },
+          {
+            "pid": 7076,
+            "creation": 134373354581096370,
+            "waitResult": 0
+          },
+          {
+            "pid": 35820,
+            "creation": 134373354581278383,
+            "waitResult": 0
+          },
+          {
+            "pid": 15676,
+            "creation": 134373354581556333,
+            "waitResult": 0
+          },
+          {
+            "pid": 37148,
+            "creation": 134373354581698970,
+            "waitResult": 0
+          },
+          {
+            "pid": 36832,
+            "creation": 134373354583518463,
+            "waitResult": 0
+          },
+          {
+            "pid": 36612,
+            "creation": 134373354583599857,
+            "waitResult": 0
+          },
+          {
+            "pid": 1492,
+            "creation": 134373354583758682,
+            "waitResult": 0
+          },
+          {
+            "pid": 32864,
+            "creation": 134373354592825221,
+            "waitResult": 0
+          },
+          {
+            "pid": 33416,
+            "creation": 134373354592902692,
+            "waitResult": 0
+          },
+          {
+            "pid": 11540,
+            "creation": 134373354593049278,
+            "waitResult": 0
+          },
+          {
+            "pid": 38108,
+            "creation": 134373354594481155,
+            "waitResult": 0
+          },
+          {
+            "pid": 10436,
+            "creation": 134373354594559540,
+            "waitResult": 0
+          },
+          {
+            "pid": 2380,
+            "creation": 134373354594716051,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": false
+      },
+      "ownerProcess": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "mcpRows": [
+        {
+          "event": "probe-started",
+          "time": 1792861857.897692,
+          "pid": 683,
+          "starttime": "22368",
+          "candidate": true,
+          "scenario": "normal"
+        },
+        {
+          "event": "real-credential-guard-entered",
+          "time": 1792861857.9059641,
+          "locked": true
+        },
+        {
+          "event": "actual-stdio-sink-inside-credential-guard",
+          "time": 1792861857.9127405,
+          "candidate": true
+        },
+        {
+          "event": "scope-prepare-entered",
+          "time": 1792861857.9225068,
+          "scope": "mcp-session",
+          "receiverPid": 689
+        },
+        {
+          "event": "scope-fd-bound",
+          "time": 1792861858.3332453,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "scope-operation-admitted",
+          "time": 1792861858.5374737,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "real-stdio-process-created",
+          "time": 1792861858.545265,
+          "pid": 694,
+          "starttime": "22587",
+          "guardStillLocked": true
+        },
+        {
+          "event": "real-supervisor-ready-and-permit-accepted",
+          "time": 1792861859.2568116,
+          "protocol": "2026-07-28",
+          "effect": "EXTERNAL_EFFECT",
+          "supportsParallel": false
+        },
+        {
+          "event": "real-tool-outcome",
+          "time": 1792861859.6556816,
+          "state": "SUCCESS",
+          "content": "{\"content\":[{\"text\":\"MCP-ACK:héllo:0\",\"type\":\"text\"}],\"isError\":false,\"resultType\":\"complete\",\"structuredContent\":{\"result\":\"MCP-ACK:héllo:0\"}}",
+          "permitState": "RELEASED"
+        },
+        {
+          "event": "scoped-transport-close-entered",
+          "time": 1792861859.6633785,
+          "mode": "normal"
+        },
+        {
+          "event": "relay-ack-observed",
+          "time": 1792861859.6851225,
+          "scope": "mcp-session",
+          "snapshot": {
+            "mode": "normal",
+            "accepted": 3,
+            "taskCount": 0,
+            "writerCount": 0,
+            "forwardedBytes": 1222,
+            "anyForwarded": true,
+            "operationAccepted": 2,
+            "operationForwardedBytes": 621,
+            "operationAnyForwarded": true,
+            "socketExists": true,
+            "directory": "/home/plumwsl/.g0m5-b62deec543f5"
+          },
+          "crossDomainOutcome": "unknown"
+        },
+        {
+          "event": "retained-socket-late-caller-rejected",
+          "time": 1792861859.6933148,
+          "scope": "mcp-session",
+          "pid": 698,
+          "exit": 1,
+          "stdout": "",
+          "stderr": "<3>WSL (698 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+          "socketStillExists": true,
+          "groupAlive": false
+        },
+        {
+          "event": "relay-ack-remains-stable",
+          "time": 1792861859.7011557,
+          "scope": "mcp-session",
+          "mode": "normal",
+          "operationForwardedBytes": 621
+        },
+        {
+          "event": "normal-close-still-owned",
+          "time": 1792861859.7749395,
+          "closeDone": false,
+          "clientClosed": false,
+          "windows": {
+            "accounting": {
+              "TotalUserTime": 2343750,
+              "TotalKernelTime": 2656250,
+              "ThisPeriodTotalUserTime": 2343750,
+              "ThisPeriodTotalKernelTime": 2656250,
+              "TotalPageFaultCount": 41932,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 3,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [
+              {
+                "pid": 38108,
+                "exists": true,
+                "creation": 134373354594481155,
+                "sameIdentity": true,
+                "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+              },
+              {
+                "pid": 10436,
+                "exists": true,
+                "creation": 134373354594559540,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 2380,
+                "exists": true,
+                "creation": 134373354594716051,
+                "sameIdentity": true,
+                "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+              }
+            ],
+            "held": [
+              {
+                "pid": 38288,
+                "creation": 134373354581023689,
+                "waitResult": 0
+              },
+              {
+                "pid": 7076,
+                "creation": 134373354581096370,
+                "waitResult": 0
+              },
+              {
+                "pid": 35820,
+                "creation": 134373354581278383,
+                "waitResult": 0
+              },
+              {
+                "pid": 15676,
+                "creation": 134373354581556333,
+                "waitResult": 0
+              },
+              {
+                "pid": 37148,
+                "creation": 134373354581698970,
+                "waitResult": 0
+              },
+              {
+                "pid": 36832,
+                "creation": 134373354583518463,
+                "waitResult": 0
+              },
+              {
+                "pid": 36612,
+                "creation": 134373354583599857,
+                "waitResult": 0
+              },
+              {
+                "pid": 1492,
+                "creation": 134373354583758682,
+                "waitResult": 0
+              },
+              {
+                "pid": 32864,
+                "creation": 134373354592825221,
+                "waitResult": 0
+              },
+              {
+                "pid": 33416,
+                "creation": 134373354592902692,
+                "waitResult": 0
+              },
+              {
+                "pid": 11540,
+                "creation": 134373354593049278,
+                "waitResult": 0
+              },
+              {
+                "pid": 38108,
+                "creation": 134373354594481155,
+                "waitResult": 258
+              },
+              {
+                "pid": 10436,
+                "creation": 134373354594559540,
+                "waitResult": 258
+              },
+              {
+                "pid": 2380,
+                "creation": 134373354594716051,
+                "waitResult": 258
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        },
+        {
+          "event": "scoped-transport-physical-joined",
+          "time": 1792861865.6525033,
+          "mode": "normal",
+          "linuxGroupAlive": false,
+          "stdioTasksDone": true,
+          "windows": {
+            "accounting": {
+              "TotalUserTime": 2343750,
+              "TotalKernelTime": 2656250,
+              "ThisPeriodTotalUserTime": 2343750,
+              "ThisPeriodTotalKernelTime": 2656250,
+              "TotalPageFaultCount": 42262,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 38288,
+                "creation": 134373354581023689,
+                "waitResult": 0
+              },
+              {
+                "pid": 7076,
+                "creation": 134373354581096370,
+                "waitResult": 0
+              },
+              {
+                "pid": 35820,
+                "creation": 134373354581278383,
+                "waitResult": 0
+              },
+              {
+                "pid": 15676,
+                "creation": 134373354581556333,
+                "waitResult": 0
+              },
+              {
+                "pid": 37148,
+                "creation": 134373354581698970,
+                "waitResult": 0
+              },
+              {
+                "pid": 36832,
+                "creation": 134373354583518463,
+                "waitResult": 0
+              },
+              {
+                "pid": 36612,
+                "creation": 134373354583599857,
+                "waitResult": 0
+              },
+              {
+                "pid": 1492,
+                "creation": 134373354583758682,
+                "waitResult": 0
+              },
+              {
+                "pid": 32864,
+                "creation": 134373354592825221,
+                "waitResult": 0
+              },
+              {
+                "pid": 33416,
+                "creation": 134373354592902692,
+                "waitResult": 0
+              },
+              {
+                "pid": 11540,
+                "creation": 134373354593049278,
+                "waitResult": 0
+              },
+              {
+                "pid": 38108,
+                "creation": 134373354594481155,
+                "waitResult": 0
+              },
+              {
+                "pid": 10436,
+                "creation": 134373354594559540,
+                "waitResult": 0
+              },
+              {
+                "pid": 2380,
+                "creation": 134373354594716051,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        },
+        {
+          "event": "original-supervisor-close-returned",
+          "time": 1792861865.6601846,
+          "clientClosed": true,
+          "processReturncode": -15,
+          "stdioTasksDone": true,
+          "linuxGroupAlive": false,
+          "permitState": "RELEASED",
+          "spawnCount": 1,
+          "guardEntries": 1
+        },
+        {
+          "event": "retirement-after-real-mcp-owner-close",
+          "time": 1792861865.670104,
+          "transportsClosed": true,
+          "stdioTasksDone": true
+        },
+        {
+          "event": "scope-receiver-retired",
+          "time": 1792861865.70654,
+          "scope": "mcp-session",
+          "exit": 0,
+          "output": "",
+          "directoryExists": false
+        },
+        {
+          "event": "probe-finished",
+          "time": 1792861865.7155707,
+          "spawnCount": 1,
+          "guardEntries": 1
+        }
+      ],
+      "serverRows": [
+        {
+          "event": "sdk-server-started",
+          "time": 1792861859.1978521,
+          "pid": 694,
+          "starttime": "22587"
+        },
+        {
+          "event": "tool-entered",
+          "time": 1792861859.260822,
+          "pid": 694,
+          "starttime": "22587",
+          "mode": "normal"
+        },
+        {
+          "event": "tool-created-interop-child",
+          "time": 1792861859.2681158,
+          "pid": 694,
+          "starttime": "22587",
+          "childPid": 697
+        },
+        {
+          "event": "tool-normal-reply",
+          "time": 1792861859.644301,
+          "pid": 694,
+          "starttime": "22587",
+          "exit": 0
+        },
+        {
+          "event": "tool-handler-left",
+          "time": 1792861859.6509092,
+          "pid": 694,
+          "starttime": "22587",
+          "linuxChildReturncode": 0
+        }
+      ],
+      "relayRows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792861858.0894835,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "control": "/home/plumwsl/.g0m5-b62deec543f5/control",
+          "directory": "/home/plumwsl/.g0m5-b62deec543f5",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792861858.3102932,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "peer": {
+            "pid": 692,
+            "starttime": "22549",
+            "pgid": 692,
+            "sid": 692
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792861858.3177266,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "peer": {
+            "pid": 692,
+            "starttime": "22549",
+            "pgid": 692,
+            "sid": 692
+          },
+          "peerUid": 1000,
+          "inode": 1124,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792861858.3244073,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "socket": "/home/plumwsl/.g0m5-b62deec543f5/interop",
+          "directory": "/home/plumwsl/.g0m5-b62deec543f5",
+          "peer": {
+            "pid": 692,
+            "starttime": "22549",
+            "pgid": 692,
+            "sid": 692
+          },
+          "pinned": "/proc/689/fd/9"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792861858.3312793,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861858.3415227,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "operation": false,
+          "bytes": 601,
+          "total": 601
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861858.5355394,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "operation": false
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861859.2691207,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "operation": true,
+          "bytes": 32,
+          "total": 32
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861859.2758524,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "operation": true
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861859.2837148,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "operation": true,
+          "bytes": 589,
+          "total": 589
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861859.6441007,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792861859.6725516,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "mode": "normal",
+          "accepted": 3,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 1222,
+          "anyForwarded": true,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 621,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0m5-b62deec543f5"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792861865.6746922,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792861865.6823928,
+          "pid": 689,
+          "starttime": "22525",
+          "pgid": 683,
+          "sid": 683,
+          "directoryExists": false
+        }
+      ],
+      "anchorRows": [
+        {
+          "event": "anchor-ready",
+          "time": 1792861858.300036,
+          "pid": 692,
+          "starttime": "22549",
+          "pgid": 692,
+          "sid": 692,
+          "socket": "/run/WSL/691_interop",
+          "uid": 1000
+        },
+        {
+          "event": "anchor-pinned",
+          "time": 1792861858.307329,
+          "pid": 692,
+          "starttime": "22549",
+          "pgid": 692,
+          "sid": 692,
+          "inode": 1124
+        },
+        {
+          "event": "anchor-fd-sent",
+          "time": 1792861858.3159428,
+          "pid": 692,
+          "starttime": "22549",
+          "pgid": 692,
+          "sid": 692
+        },
+        {
+          "event": "anchor-eof",
+          "time": 1792861859.7060688,
+          "pid": 692,
+          "starttime": "22549",
+          "pgid": 692,
+          "sid": 692
+        }
+      ],
+      "windowsRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792861858.1066,
+          "carrierPid": 38288,
+          "carrierCreation": 134373354581023689,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "host-verified-transferred-fd-job-binding",
+          "time": 1792861858.521767,
+          "pid": 1492,
+          "creation": 134373354583758682,
+          "sameCreation": true,
+          "member": true,
+          "waitResult": 258
+        },
+        {
+          "event": "before-normal-anchor-eof",
+          "time": 1792861859.7046304,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2343750,
+              "TotalKernelTime": 2656250,
+              "ThisPeriodTotalUserTime": 2343750,
+              "ThisPeriodTotalKernelTime": 2656250,
+              "TotalPageFaultCount": 40911,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 8,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [
+              {
+                "pid": 38288,
+                "exists": true,
+                "creation": 134373354581023689,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\wsl.exe"
+              },
+              {
+                "pid": 7076,
+                "exists": true,
+                "creation": 134373354581096370,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 15676,
+                "exists": true,
+                "creation": 134373354581556333,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wslhost.exe"
+              },
+              {
+                "pid": 37148,
+                "exists": true,
+                "creation": 134373354581698970,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 38108,
+                "exists": true,
+                "creation": 134373354594481155,
+                "sameIdentity": true,
+                "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+              },
+              {
+                "pid": 10436,
+                "exists": true,
+                "creation": 134373354594559540,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 35820,
+                "exists": true,
+                "creation": 134373354581278383,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wsl.exe"
+              },
+              {
+                "pid": 2380,
+                "exists": true,
+                "creation": 134373354594716051,
+                "sameIdentity": true,
+                "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+              }
+            ],
+            "held": [
+              {
+                "pid": 38288,
+                "creation": 134373354581023689,
+                "waitResult": 258
+              },
+              {
+                "pid": 7076,
+                "creation": 134373354581096370,
+                "waitResult": 258
+              },
+              {
+                "pid": 35820,
+                "creation": 134373354581278383,
+                "waitResult": 258
+              },
+              {
+                "pid": 15676,
+                "creation": 134373354581556333,
+                "waitResult": 258
+              },
+              {
+                "pid": 37148,
+                "creation": 134373354581698970,
+                "waitResult": 258
+              },
+              {
+                "pid": 36832,
+                "creation": 134373354583518463,
+                "waitResult": 0
+              },
+              {
+                "pid": 36612,
+                "creation": 134373354583599857,
+                "waitResult": 0
+              },
+              {
+                "pid": 1492,
+                "creation": 134373354583758682,
+                "waitResult": 0
+              },
+              {
+                "pid": 32864,
+                "creation": 134373354592825221,
+                "waitResult": 0
+              },
+              {
+                "pid": 33416,
+                "creation": 134373354592902692,
+                "waitResult": 0
+              },
+              {
+                "pid": 11540,
+                "creation": 134373354593049278,
+                "waitResult": 0
+              },
+              {
+                "pid": 38108,
+                "creation": 134373354594481155,
+                "waitResult": 258
+              },
+              {
+                "pid": 10436,
+                "creation": 134373354594559540,
+                "waitResult": 258
+              },
+              {
+                "pid": 2380,
+                "creation": 134373354594716051,
+                "waitResult": 258
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        },
+        {
+          "event": "windows-scope-joined",
+          "time": 1792861865.640504,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2343750,
+              "TotalKernelTime": 2656250,
+              "ThisPeriodTotalUserTime": 2343750,
+              "ThisPeriodTotalKernelTime": 2656250,
+              "TotalPageFaultCount": 42262,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 38288,
+                "creation": 134373354581023689,
+                "waitResult": 0
+              },
+              {
+                "pid": 7076,
+                "creation": 134373354581096370,
+                "waitResult": 0
+              },
+              {
+                "pid": 35820,
+                "creation": 134373354581278383,
+                "waitResult": 0
+              },
+              {
+                "pid": 15676,
+                "creation": 134373354581556333,
+                "waitResult": 0
+              },
+              {
+                "pid": 37148,
+                "creation": 134373354581698970,
+                "waitResult": 0
+              },
+              {
+                "pid": 36832,
+                "creation": 134373354583518463,
+                "waitResult": 0
+              },
+              {
+                "pid": 36612,
+                "creation": 134373354583599857,
+                "waitResult": 0
+              },
+              {
+                "pid": 1492,
+                "creation": 134373354583758682,
+                "waitResult": 0
+              },
+              {
+                "pid": 32864,
+                "creation": 134373354592825221,
+                "waitResult": 0
+              },
+              {
+                "pid": 33416,
+                "creation": 134373354592902692,
+                "waitResult": 0
+              },
+              {
+                "pid": 11540,
+                "creation": 134373354593049278,
+                "waitResult": 0
+              },
+              {
+                "pid": 38108,
+                "creation": 134373354594481155,
+                "waitResult": 0
+              },
+              {
+                "pid": 10436,
+                "creation": 134373354594559540,
+                "waitResult": 0
+              },
+              {
+                "pid": 2380,
+                "creation": 134373354594716051,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        }
+      ],
+      "peRows": [
+        {
+          "event": "pe-start",
+          "time": 1792861859.44668,
+          "pid": 11540,
+          "role": "parent",
+          "scenario": "normal",
+          "creation": 134373354593049278,
+          "inJob": true
+        },
+        {
+          "event": "pe-start",
+          "time": 1792861859.6203787,
+          "pid": 2380,
+          "role": "child",
+          "scenario": "normal",
+          "creation": 134373354594716051,
+          "inJob": true
+        },
+        {
+          "event": "child-ready",
+          "time": 1792861859.621383,
+          "pid": 2380
+        },
+        {
+          "event": "parent-early-exit",
+          "time": 1792861859.6320918,
+          "pid": 11540,
+          "childPid": 38108,
+          "childStdio": "DEVNULL"
+        },
+        {
+          "event": "pe-finished",
+          "time": 1792861865.6219356,
+          "pid": 2380,
+          "role": "child"
+        }
+      ],
+      "observed": true,
+      "cleanupWindows": {
+        "accounting": {
+          "TotalUserTime": 2343750,
+          "TotalKernelTime": 2656250,
+          "ThisPeriodTotalUserTime": 2343750,
+          "ThisPeriodTotalKernelTime": 2656250,
+          "TotalPageFaultCount": 42262,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 38288,
+            "creation": 134373354581023689,
+            "waitResult": 0
+          },
+          {
+            "pid": 7076,
+            "creation": 134373354581096370,
+            "waitResult": 0
+          },
+          {
+            "pid": 35820,
+            "creation": 134373354581278383,
+            "waitResult": 0
+          },
+          {
+            "pid": 15676,
+            "creation": 134373354581556333,
+            "waitResult": 0
+          },
+          {
+            "pid": 37148,
+            "creation": 134373354581698970,
+            "waitResult": 0
+          },
+          {
+            "pid": 36832,
+            "creation": 134373354583518463,
+            "waitResult": 0
+          },
+          {
+            "pid": 36612,
+            "creation": 134373354583599857,
+            "waitResult": 0
+          },
+          {
+            "pid": 1492,
+            "creation": 134373354583758682,
+            "waitResult": 0
+          },
+          {
+            "pid": 32864,
+            "creation": 134373354592825221,
+            "waitResult": 0
+          },
+          {
+            "pid": 33416,
+            "creation": 134373354592902692,
+            "waitResult": 0
+          },
+          {
+            "pid": 11540,
+            "creation": 134373354593049278,
+            "waitResult": 0
+          },
+          {
+            "pid": 38108,
+            "creation": 134373354594481155,
+            "waitResult": 0
+          },
+          {
+            "pid": 10436,
+            "creation": 134373354594559540,
+            "waitResult": 0
+          },
+          {
+            "pid": 2380,
+            "creation": 134373354594716051,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": false
+      }
+    },
+    {
+      "label": "candidate-call-cancel-126280df",
+      "scenario": "call-cancel",
+      "candidate": true,
+      "windowsAtMcpOwnerClose": {
+        "accounting": {
+          "TotalUserTime": 2187500,
+          "TotalKernelTime": 2343750,
+          "ThisPeriodTotalUserTime": 2187500,
+          "ThisPeriodTotalKernelTime": 2343750,
+          "TotalPageFaultCount": 40653,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 20884,
+            "creation": 134373354680682080,
+            "waitResult": 0
+          },
+          {
+            "pid": 37676,
+            "creation": 134373354680745630,
+            "waitResult": 0
+          },
+          {
+            "pid": 17816,
+            "creation": 134373354680925529,
+            "waitResult": 0
+          },
+          {
+            "pid": 32704,
+            "creation": 134373354681204611,
+            "waitResult": 0
+          },
+          {
+            "pid": 24548,
+            "creation": 134373354681359901,
+            "waitResult": 0
+          },
+          {
+            "pid": 248,
+            "creation": 134373354683081044,
+            "waitResult": 0
+          },
+          {
+            "pid": 10808,
+            "creation": 134373354683155598,
+            "waitResult": 0
+          },
+          {
+            "pid": 12964,
+            "creation": 134373354683319510,
+            "waitResult": 0
+          },
+          {
+            "pid": 36960,
+            "creation": 134373354692371575,
+            "waitResult": 0
+          },
+          {
+            "pid": 33804,
+            "creation": 134373354692450420,
+            "waitResult": 0
+          },
+          {
+            "pid": 35128,
+            "creation": 134373354692599861,
+            "waitResult": 0
+          },
+          {
+            "pid": 37468,
+            "creation": 134373354694029492,
+            "waitResult": 0
+          },
+          {
+            "pid": 37976,
+            "creation": 134373354694103672,
+            "waitResult": 0
+          },
+          {
+            "pid": 10960,
+            "creation": 134373354694251124,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": true
+      },
+      "ownerProcess": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "mcpRows": [
+        {
+          "event": "probe-started",
+          "time": 1792861867.896002,
+          "pid": 709,
+          "starttime": "23378",
+          "candidate": true,
+          "scenario": "call-cancel"
+        },
+        {
+          "event": "real-credential-guard-entered",
+          "time": 1792861867.9029286,
+          "locked": true
+        },
+        {
+          "event": "actual-stdio-sink-inside-credential-guard",
+          "time": 1792861867.9088676,
+          "candidate": true
+        },
+        {
+          "event": "scope-prepare-entered",
+          "time": 1792861867.9155908,
+          "scope": "mcp-session",
+          "receiverPid": 711
+        },
+        {
+          "event": "scope-fd-bound",
+          "time": 1792861868.2957802,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "scope-operation-admitted",
+          "time": 1792861868.4962785,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "real-stdio-process-created",
+          "time": 1792861868.5033789,
+          "pid": 716,
+          "starttime": "23583",
+          "guardStillLocked": true
+        },
+        {
+          "event": "real-supervisor-ready-and-permit-accepted",
+          "time": 1792861869.2125428,
+          "protocol": "2026-07-28",
+          "effect": "EXTERNAL_EFFECT",
+          "supportsParallel": false
+        },
+        {
+          "event": "single-call-cancel-observed",
+          "time": 1792861869.632878,
+          "callCancelled": true,
+          "permitState": "RELEASED",
+          "clientClosed": false,
+          "serverState": "READY",
+          "activeOperations": 0
+        },
+        {
+          "event": "scoped-transport-close-entered",
+          "time": 1792861869.641152,
+          "mode": "cancel"
+        },
+        {
+          "event": "scope-cancel-requested",
+          "time": 1792861869.6490543,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "relay-ack-observed",
+          "time": 1792861869.6672,
+          "scope": "mcp-session",
+          "snapshot": {
+            "mode": "cancel",
+            "accepted": 3,
+            "taskCount": 0,
+            "writerCount": 0,
+            "forwardedBytes": 1242,
+            "anyForwarded": true,
+            "operationAccepted": 2,
+            "operationForwardedBytes": 631,
+            "operationAnyForwarded": true,
+            "socketExists": true,
+            "directory": "/home/plumwsl/.g0m5-50da961e8157"
+          },
+          "crossDomainOutcome": "unknown"
+        },
+        {
+          "event": "retained-socket-late-caller-rejected",
+          "time": 1792861869.6751325,
+          "scope": "mcp-session",
+          "pid": 720,
+          "exit": 1,
+          "stdout": "",
+          "stderr": "<3>WSL (720 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+          "socketStillExists": true,
+          "groupAlive": false
+        },
+        {
+          "event": "relay-ack-remains-stable",
+          "time": 1792861869.6836476,
+          "scope": "mcp-session",
+          "mode": "cancel",
+          "operationForwardedBytes": 631
+        },
+        {
+          "event": "scoped-transport-physical-joined",
+          "time": 1792861869.7128077,
+          "mode": "cancel",
+          "linuxGroupAlive": false,
+          "stdioTasksDone": true,
+          "windows": {
+            "accounting": {
+              "TotalUserTime": 2187500,
+              "TotalKernelTime": 2343750,
+              "ThisPeriodTotalUserTime": 2187500,
+              "ThisPeriodTotalKernelTime": 2343750,
+              "TotalPageFaultCount": 40653,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 20884,
+                "creation": 134373354680682080,
+                "waitResult": 0
+              },
+              {
+                "pid": 37676,
+                "creation": 134373354680745630,
+                "waitResult": 0
+              },
+              {
+                "pid": 17816,
+                "creation": 134373354680925529,
+                "waitResult": 0
+              },
+              {
+                "pid": 32704,
+                "creation": 134373354681204611,
+                "waitResult": 0
+              },
+              {
+                "pid": 24548,
+                "creation": 134373354681359901,
+                "waitResult": 0
+              },
+              {
+                "pid": 248,
+                "creation": 134373354683081044,
+                "waitResult": 0
+              },
+              {
+                "pid": 10808,
+                "creation": 134373354683155598,
+                "waitResult": 0
+              },
+              {
+                "pid": 12964,
+                "creation": 134373354683319510,
+                "waitResult": 0
+              },
+              {
+                "pid": 36960,
+                "creation": 134373354692371575,
+                "waitResult": 0
+              },
+              {
+                "pid": 33804,
+                "creation": 134373354692450420,
+                "waitResult": 0
+              },
+              {
+                "pid": 35128,
+                "creation": 134373354692599861,
+                "waitResult": 0
+              },
+              {
+                "pid": 37468,
+                "creation": 134373354694029492,
+                "waitResult": 0
+              },
+              {
+                "pid": 37976,
+                "creation": 134373354694103672,
+                "waitResult": 0
+              },
+              {
+                "pid": 10960,
+                "creation": 134373354694251124,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": true
+          }
+        },
+        {
+          "event": "original-supervisor-close-returned",
+          "time": 1792861869.7209175,
+          "clientClosed": true,
+          "processReturncode": -15,
+          "stdioTasksDone": true,
+          "linuxGroupAlive": false,
+          "permitState": "RELEASED",
+          "spawnCount": 1,
+          "guardEntries": 1
+        },
+        {
+          "event": "retirement-after-real-mcp-owner-close",
+          "time": 1792861869.7318094,
+          "transportsClosed": true,
+          "stdioTasksDone": true
+        },
+        {
+          "event": "scope-receiver-retired",
+          "time": 1792861869.7676713,
+          "scope": "mcp-session",
+          "exit": 0,
+          "output": "",
+          "directoryExists": false
+        },
+        {
+          "event": "probe-finished",
+          "time": 1792861869.777254,
+          "spawnCount": 1,
+          "guardEntries": 1
+        }
+      ],
+      "serverRows": [
+        {
+          "event": "sdk-server-started",
+          "time": 1792861869.1734602,
+          "pid": 716,
+          "starttime": "23583"
+        },
+        {
+          "event": "tool-entered",
+          "time": 1792861869.2162097,
+          "pid": 716,
+          "starttime": "23583",
+          "mode": "hold"
+        },
+        {
+          "event": "tool-created-interop-child",
+          "time": 1792861869.2245374,
+          "pid": 716,
+          "starttime": "23583",
+          "childPid": 719
+        },
+        {
+          "event": "sdk-tool-cancel-notification-observed",
+          "time": 1792861869.5832253,
+          "pid": 716,
+          "starttime": "23583"
+        },
+        {
+          "event": "tool-handler-left",
+          "time": 1792861869.5913374,
+          "pid": 716,
+          "starttime": "23583",
+          "linuxChildReturncode": null
+        }
+      ],
+      "relayRows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792861868.056249,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "control": "/home/plumwsl/.g0m5-50da961e8157/control",
+          "directory": "/home/plumwsl/.g0m5-50da961e8157",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792861868.2723575,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "peer": {
+            "pid": 714,
+            "starttime": "23545",
+            "pgid": 714,
+            "sid": 714
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792861868.27993,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "peer": {
+            "pid": 714,
+            "starttime": "23545",
+            "pgid": 714,
+            "sid": 714
+          },
+          "peerUid": 1000,
+          "inode": 1137,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792861868.2867212,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "socket": "/home/plumwsl/.g0m5-50da961e8157/interop",
+          "directory": "/home/plumwsl/.g0m5-50da961e8157",
+          "peer": {
+            "pid": 714,
+            "starttime": "23545",
+            "pgid": 714,
+            "sid": 714
+          },
+          "pinned": "/proc/711/fd/9"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792861868.2935705,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861868.3041081,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "operation": false,
+          "bytes": 611,
+          "total": 611
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861868.4943304,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "operation": false
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861869.2242246,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "operation": true,
+          "bytes": 32,
+          "total": 32
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861869.2316654,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "operation": true
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861869.238796,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "operation": true,
+          "bytes": 599,
+          "total": 599
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792861869.6453376,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792861869.6532726,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "mode": "cancel",
+          "accepted": 3,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 1242,
+          "anyForwarded": true,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 631,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0m5-50da961e8157"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792861869.7391834,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792861869.747068,
+          "pid": 711,
+          "starttime": "23525",
+          "pgid": 709,
+          "sid": 709,
+          "directoryExists": false
+        }
+      ],
+      "anchorRows": [
+        {
+          "event": "anchor-ready",
+          "time": 1792861868.2633321,
+          "pid": 714,
+          "starttime": "23545",
+          "pgid": 714,
+          "sid": 714,
+          "socket": "/run/WSL/713_interop",
+          "uid": 1000
+        },
+        {
+          "event": "anchor-pinned",
+          "time": 1792861868.2704003,
+          "pid": 714,
+          "starttime": "23545",
+          "pgid": 714,
+          "sid": 714,
+          "inode": 1137
+        },
+        {
+          "event": "anchor-fd-sent",
+          "time": 1792861868.2777956,
+          "pid": 714,
+          "starttime": "23545",
+          "pgid": 714,
+          "sid": 714
+        },
+        {
+          "event": "anchor-eof",
+          "time": 1792861869.6909072,
+          "pid": 714,
+          "starttime": "23545",
+          "pgid": 714,
+          "sid": 714
+        }
+      ],
+      "windowsRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792861868.070707,
+          "carrierPid": 20884,
+          "carrierCreation": 134373354680682080,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "host-verified-transferred-fd-job-binding",
+          "time": 1792861868.477044,
+          "pid": 12964,
+          "creation": 134373354683319510,
+          "sameCreation": true,
+          "member": true,
+          "waitResult": 258
+        },
+        {
+          "event": "before-job-cancel",
+          "time": 1792861869.6894283,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2187500,
+              "TotalKernelTime": 2343750,
+              "ThisPeriodTotalUserTime": 2187500,
+              "ThisPeriodTotalKernelTime": 2343750,
+              "TotalPageFaultCount": 40653,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 9,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [
+              {
+                "pid": 20884,
+                "exists": true,
+                "creation": 134373354680682080,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\wsl.exe"
+              },
+              {
+                "pid": 37676,
+                "exists": true,
+                "creation": 134373354680745630,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 32704,
+                "exists": true,
+                "creation": 134373354681204611,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wslhost.exe"
+              },
+              {
+                "pid": 24548,
+                "exists": true,
+                "creation": 134373354681359901,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 33804,
+                "exists": true,
+                "creation": 134373354692450420,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 37468,
+                "exists": true,
+                "creation": 134373354694029492,
+                "sameIdentity": true,
+                "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+              },
+              {
+                "pid": 37976,
+                "exists": true,
+                "creation": 134373354694103672,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 17816,
+                "exists": true,
+                "creation": 134373354680925529,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wsl.exe"
+              },
+              {
+                "pid": 10960,
+                "exists": true,
+                "creation": 134373354694251124,
+                "sameIdentity": true,
+                "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+              }
+            ],
+            "held": [
+              {
+                "pid": 20884,
+                "creation": 134373354680682080,
+                "waitResult": 258
+              },
+              {
+                "pid": 37676,
+                "creation": 134373354680745630,
+                "waitResult": 258
+              },
+              {
+                "pid": 17816,
+                "creation": 134373354680925529,
+                "waitResult": 258
+              },
+              {
+                "pid": 32704,
+                "creation": 134373354681204611,
+                "waitResult": 258
+              },
+              {
+                "pid": 24548,
+                "creation": 134373354681359901,
+                "waitResult": 258
+              },
+              {
+                "pid": 248,
+                "creation": 134373354683081044,
+                "waitResult": 0
+              },
+              {
+                "pid": 10808,
+                "creation": 134373354683155598,
+                "waitResult": 0
+              },
+              {
+                "pid": 12964,
+                "creation": 134373354683319510,
+                "waitResult": 0
+              },
+              {
+                "pid": 36960,
+                "creation": 134373354692371575,
+                "waitResult": 0
+              },
+              {
+                "pid": 33804,
+                "creation": 134373354692450420,
+                "waitResult": 258
+              },
+              {
+                "pid": 35128,
+                "creation": 134373354692599861,
+                "waitResult": 258
+              },
+              {
+                "pid": 37468,
+                "creation": 134373354694029492,
+                "waitResult": 258
+              },
+              {
+                "pid": 37976,
+                "creation": 134373354694103672,
+                "waitResult": 258
+              },
+              {
+                "pid": 10960,
+                "creation": 134373354694251124,
+                "waitResult": 258
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        },
+        {
+          "event": "windows-scope-joined",
+          "time": 1792861869.698581,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2187500,
+              "TotalKernelTime": 2343750,
+              "ThisPeriodTotalUserTime": 2187500,
+              "ThisPeriodTotalKernelTime": 2343750,
+              "TotalPageFaultCount": 40653,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 20884,
+                "creation": 134373354680682080,
+                "waitResult": 0
+              },
+              {
+                "pid": 37676,
+                "creation": 134373354680745630,
+                "waitResult": 0
+              },
+              {
+                "pid": 17816,
+                "creation": 134373354680925529,
+                "waitResult": 0
+              },
+              {
+                "pid": 32704,
+                "creation": 134373354681204611,
+                "waitResult": 0
+              },
+              {
+                "pid": 24548,
+                "creation": 134373354681359901,
+                "waitResult": 0
+              },
+              {
+                "pid": 248,
+                "creation": 134373354683081044,
+                "waitResult": 0
+              },
+              {
+                "pid": 10808,
+                "creation": 134373354683155598,
+                "waitResult": 0
+              },
+              {
+                "pid": 12964,
+                "creation": 134373354683319510,
+                "waitResult": 0
+              },
+              {
+                "pid": 36960,
+                "creation": 134373354692371575,
+                "waitResult": 0
+              },
+              {
+                "pid": 33804,
+                "creation": 134373354692450420,
+                "waitResult": 0
+              },
+              {
+                "pid": 35128,
+                "creation": 134373354692599861,
+                "waitResult": 0
+              },
+              {
+                "pid": 37468,
+                "creation": 134373354694029492,
+                "waitResult": 0
+              },
+              {
+                "pid": 37976,
+                "creation": 134373354694103672,
+                "waitResult": 0
+              },
+              {
+                "pid": 10960,
+                "creation": 134373354694251124,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": true
+          }
+        }
+      ],
+      "peRows": [
+        {
+          "event": "pe-start",
+          "time": 1792861869.401316,
+          "pid": 35128,
+          "role": "parent",
+          "scenario": "cancel",
+          "creation": 134373354692599861,
+          "inJob": true
+        },
+        {
+          "event": "pe-start",
+          "time": 1792861869.5715191,
+          "pid": 10960,
+          "role": "child",
+          "scenario": "cancel",
+          "creation": 134373354694251124,
+          "inJob": true
+        },
+        {
+          "event": "child-ready",
+          "time": 1792861869.5715191,
+          "pid": 10960
+        }
+      ],
+      "observed": true,
+      "cleanupWindows": {
+        "accounting": {
+          "TotalUserTime": 2187500,
+          "TotalKernelTime": 2343750,
+          "ThisPeriodTotalUserTime": 2187500,
+          "ThisPeriodTotalKernelTime": 2343750,
+          "TotalPageFaultCount": 40653,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 20884,
+            "creation": 134373354680682080,
+            "waitResult": 0
+          },
+          {
+            "pid": 37676,
+            "creation": 134373354680745630,
+            "waitResult": 0
+          },
+          {
+            "pid": 17816,
+            "creation": 134373354680925529,
+            "waitResult": 0
+          },
+          {
+            "pid": 32704,
+            "creation": 134373354681204611,
+            "waitResult": 0
+          },
+          {
+            "pid": 24548,
+            "creation": 134373354681359901,
+            "waitResult": 0
+          },
+          {
+            "pid": 248,
+            "creation": 134373354683081044,
+            "waitResult": 0
+          },
+          {
+            "pid": 10808,
+            "creation": 134373354683155598,
+            "waitResult": 0
+          },
+          {
+            "pid": 12964,
+            "creation": 134373354683319510,
+            "waitResult": 0
+          },
+          {
+            "pid": 36960,
+            "creation": 134373354692371575,
+            "waitResult": 0
+          },
+          {
+            "pid": 33804,
+            "creation": 134373354692450420,
+            "waitResult": 0
+          },
+          {
+            "pid": 35128,
+            "creation": 134373354692599861,
+            "waitResult": 0
+          },
+          {
+            "pid": 37468,
+            "creation": 134373354694029492,
+            "waitResult": 0
+          },
+          {
+            "pid": 37976,
+            "creation": 134373354694103672,
+            "waitResult": 0
+          },
+          {
+            "pid": 10960,
+            "creation": 134373354694251124,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": true
+      }
+    },
+    {
+      "label": "candidate-timeout-cf6c3921",
+      "scenario": "timeout",
+      "candidate": true,
+      "windowsAtMcpOwnerClose": {
+        "accounting": {
+          "TotalUserTime": 2968750,
+          "TotalKernelTime": 3281250,
+          "ThisPeriodTotalUserTime": 2968750,
+          "ThisPeriodTotalKernelTime": 3281250,
+          "TotalPageFaultCount": 40616,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 33916,
+            "creation": 134373354717556818,
+            "waitResult": 0
+          },
+          {
+            "pid": 18880,
+            "creation": 134373354717626293,
+            "waitResult": 0
+          },
+          {
+            "pid": 38708,
+            "creation": 134373354717853873,
+            "waitResult": 0
+          },
+          {
+            "pid": 22356,
+            "creation": 134373354718156544,
+            "waitResult": 0
+          },
+          {
+            "pid": 36776,
+            "creation": 134373354718312090,
+            "waitResult": 0
+          },
+          {
+            "pid": 23504,
+            "creation": 134373354720059504,
+            "waitResult": 0
+          },
+          {
+            "pid": 37956,
+            "creation": 134373354720148279,
+            "waitResult": 0
+          },
+          {
+            "pid": 36040,
+            "creation": 134373354720299389,
+            "waitResult": 0
+          },
+          {
+            "pid": 38608,
+            "creation": 134373354729653702,
+            "waitResult": 0
+          },
+          {
+            "pid": 16784,
+            "creation": 134373354729741569,
+            "waitResult": 0
+          },
+          {
+            "pid": 17732,
+            "creation": 134373354729908612,
+            "waitResult": 0
+          },
+          {
+            "pid": 26652,
+            "creation": 134373354731296289,
+            "waitResult": 0
+          },
+          {
+            "pid": 36036,
+            "creation": 134373354731375144,
+            "waitResult": 0
+          },
+          {
+            "pid": 9552,
+            "creation": 134373354731541350,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": true
+      },
+      "ownerProcess": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "mcpRows": [
+        {
+          "event": "probe-started",
+          "time": 1792861871.5776205,
+          "pid": 724,
+          "starttime": "23742",
+          "candidate": true,
+          "scenario": "timeout"
+        },
+        {
+          "event": "real-credential-guard-entered",
+          "time": 1792861871.5844417,
+          "locked": true
+        },
+        {
+          "event": "actual-stdio-sink-inside-credential-guard",
+          "time": 1792861871.5916064,
+          "candidate": true
+        },
+        {
+          "event": "scope-prepare-entered",
+          "time": 1792861871.5987463,
+          "scope": "mcp-session",
+          "receiverPid": 726
+        },
+        {
+          "event": "scope-fd-bound",
+          "time": 1792861871.99345,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "scope-operation-admitted",
+          "time": 1792861872.2040555,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "real-stdio-process-created",
+          "time": 1792861872.2117102,
+          "pid": 731,
+          "starttime": "23954",
+          "guardStillLocked": true
+        },
+        {
+          "event": "real-supervisor-ready-and-permit-accepted",
+          "time": 1792861872.9392552,
+          "protocol": "2026-07-28",
+          "effect": "EXTERNAL_EFFECT",
+          "supportsParallel": false
+        },
+        {
+          "event": "real-tool-outcome",
+          "time": 1792861874.4456713,
+          "state": "SYSTEM_ERROR",
+          "content": "{\"error\":\"MCP_CALL_FAILED\",\"guidance\":\"The remote operation may have executed. Do not assume success or that nothing happened. Before repeating an operation with side effects, verify its outcome or idempotency; otherwise ask the user. You may continue with independent work or another read-only source.\",\"message\":\"MCPError: Request 'tools/call' timed out\",\"remote_outcome\":\"UNKNOWN\",\"retry_performed\":false}",
+          "permitState": "RELEASED"
+        },
+        {
+          "event": "scoped-transport-close-entered",
+          "time": 1792861874.452704,
+          "mode": "cancel"
+        },
+        {
+          "event": "scope-cancel-requested",
+          "time": 1792861874.4610045,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "relay-ack-observed",
+          "time": 1792861874.4826322,
+          "scope": "mcp-session",
+          "snapshot": {
+            "mode": "cancel",
+            "accepted": 3,
+            "taskCount": 0,
+            "writerCount": 0,
+            "forwardedBytes": 1226,
+            "anyForwarded": true,
+            "operationAccepted": 2,
+            "operationForwardedBytes": 623,
+            "operationAnyForwarded": true,
+            "socketExists": true,
+            "directory": "/home/plumwsl/.g0m5-2aed85d11961"
+          },
+          "crossDomainOutcome": "unknown"
+        },
+        {
+          "event": "retained-socket-late-caller-rejected",
+          "time": 1792861874.4904575,
+          "scope": "mcp-session",
+          "pid": 736,
+          "exit": 1,
+          "stdout": "",
+          "stderr": "<3>WSL (736 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+          "socketStillExists": true,
+          "groupAlive": false
+        },
+        {
+          "event": "relay-ack-remains-stable",
+          "time": 1792861874.498576,
+          "scope": "mcp-session",
+          "mode": "cancel",
+          "operationForwardedBytes": 623
+        },
+        {
+          "event": "scoped-transport-physical-joined",
+          "time": 1792861874.5276735,
+          "mode": "cancel",
+          "linuxGroupAlive": false,
+          "stdioTasksDone": true,
+          "windows": {
+            "accounting": {
+              "TotalUserTime": 2968750,
+              "TotalKernelTime": 3281250,
+              "ThisPeriodTotalUserTime": 2968750,
+              "ThisPeriodTotalKernelTime": 3281250,
+              "TotalPageFaultCount": 40616,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 33916,
+                "creation": 134373354717556818,
+                "waitResult": 0
+              },
+              {
+                "pid": 18880,
+                "creation": 134373354717626293,
+                "waitResult": 0
+              },
+              {
+                "pid": 38708,
+                "creation": 134373354717853873,
+                "waitResult": 0
+              },
+              {
+                "pid": 22356,
+                "creation": 134373354718156544,
+                "waitResult": 0
+              },
+              {
+                "pid": 36776,
+                "creation": 134373354718312090,
+                "waitResult": 0
+              },
+              {
+                "pid": 23504,
+                "creation": 134373354720059504,
+                "waitResult": 0
+              },
+              {
+                "pid": 37956,
+                "creation": 134373354720148279,
+                "waitResult": 0
+              },
+              {
+                "pid": 36040,
+                "creation": 134373354720299389,
+                "waitResult": 0
+              },
+              {
+                "pid": 38608,
+                "creation": 134373354729653702,
+                "waitResult": 0
+              },
+              {
+                "pid": 16784,
+                "creation": 134373354729741569,
+                "waitResult": 0
+              },
+              {
+                "pid": 17732,
+                "creation": 134373354729908612,
+                "waitResult": 0
+              },
+              {
+                "pid": 26652,
+                "creation": 134373354731296289,
+                "waitResult": 0
+              },
+              {
+                "pid": 36036,
+                "creation": 134373354731375144,
+                "waitResult": 0
+              },
+              {
+                "pid": 9552,
+                "creation": 134373354731541350,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": true
+          }
+        },
+        {
+          "event": "original-supervisor-close-returned",
+          "time": 1792861874.5367324,
+          "clientClosed": true,
+          "processReturncode": -15,
+          "stdioTasksDone": true,
+          "linuxGroupAlive": false,
+          "permitState": "RELEASED",
+          "spawnCount": 1,
+          "guardEntries": 1
+        },
+        {
+          "event": "retirement-after-real-mcp-owner-close",
+          "time": 1792861874.547219,
+          "transportsClosed": true,
+          "stdioTasksDone": true
+        },
+        {
+          "event": "scope-receiver-retired",
+          "time": 1792861874.5836694,
+          "scope": "mcp-session",
+          "exit": 0,
+          "output": "",
+          "directoryExists": false
+        },
+        {
+          "event": "probe-finished",
+          "time": 1792861874.592209,
+          "spawnCount": 1,
+          "guardEntries": 1
+        }
+      ],
+      "serverRows": [
+        {
+          "event": "sdk-server-started",
+          "time": 1792861872.881832,
+          "pid": 731,
+          "starttime": "23954"
+        },
+        {
+          "event": "tool-entered",
+          "time": 1792861872.94301,
+          "pid": 731,
+          "starttime": "23954",
+          "mode": "hold"
+        },
+        {
+          "event": "tool-created-interop-child",
+          "time": 1792861872.9508557,
+          "pid": 731,
+          "starttime": "23954",
+          "childPid": 734
+        },
+        {
+          "event": "sdk-tool-cancel-notification-observed",
+          "time": 1792861874.44611,
+          "pid": 731,
+          "starttime": "23954"
+        },
+        {
+          "event": "tool-handler-left",
+          "time": 1792861874.4535744,
+          "pid": 731,
+          "starttime": "23954",
+          "linuxChildReturncode": null
+        }
+      ],
+      "relayRows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792861871.7391264,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "control": "/home/plumwsl/.g0m5-2aed85d11961/control",
+          "directory": "/home/plumwsl/.g0m5-2aed85d11961",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792861871.9700155,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "peer": {
+            "pid": 729,
+            "starttime": "23915",
+            "pgid": 729,
+            "sid": 729
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792861871.9760284,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "peer": {
+            "pid": 729,
+            "starttime": "23915",
+            "pgid": 729,
+            "sid": 729
+          },
+          "peerUid": 1000,
+          "inode": 1150,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792861871.9841208,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "socket": "/home/plumwsl/.g0m5-2aed85d11961/interop",
+          "directory": "/home/plumwsl/.g0m5-2aed85d11961",
+          "peer": {
+            "pid": 729,
+            "starttime": "23915",
+            "pgid": 729,
+            "sid": 729
+          },
+          "pinned": "/proc/726/fd/9"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792861871.9914253,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861872.0012288,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "operation": false,
+          "bytes": 603,
+          "total": 603
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861872.2028959,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "operation": false
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861872.9517596,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "operation": true,
+          "bytes": 32,
+          "total": 32
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861872.9590585,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "operation": true
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861872.9660373,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "operation": true,
+          "bytes": 591,
+          "total": 591
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792861874.4627516,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792861874.4699183,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "mode": "cancel",
+          "accepted": 3,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 1226,
+          "anyForwarded": true,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 623,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0m5-2aed85d11961"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792861874.5555396,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792861874.563995,
+          "pid": 726,
+          "starttime": "23893",
+          "pgid": 724,
+          "sid": 724,
+          "directoryExists": false
+        }
+      ],
+      "anchorRows": [
+        {
+          "event": "anchor-ready",
+          "time": 1792861871.9596565,
+          "pid": 729,
+          "starttime": "23915",
+          "pgid": 729,
+          "sid": 729,
+          "socket": "/run/WSL/728_interop",
+          "uid": 1000
+        },
+        {
+          "event": "anchor-pinned",
+          "time": 1792861871.9676905,
+          "pid": 729,
+          "starttime": "23915",
+          "pgid": 729,
+          "sid": 729,
+          "inode": 1150
+        },
+        {
+          "event": "anchor-fd-sent",
+          "time": 1792861871.9737563,
+          "pid": 729,
+          "starttime": "23915",
+          "pgid": 729,
+          "sid": 729
+        },
+        {
+          "event": "anchor-eof",
+          "time": 1792861874.5057287,
+          "pid": 729,
+          "starttime": "23915",
+          "pgid": 729,
+          "sid": 729
+        }
+      ],
+      "windowsRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792861871.75958,
+          "carrierPid": 33916,
+          "carrierCreation": 134373354717556818,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "host-verified-transferred-fd-job-binding",
+          "time": 1792861872.1837668,
+          "pid": 36040,
+          "creation": 134373354720299389,
+          "sameCreation": true,
+          "member": true,
+          "waitResult": 258
+        },
+        {
+          "event": "before-job-cancel",
+          "time": 1792861874.5048082,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2968750,
+              "TotalKernelTime": 3281250,
+              "ThisPeriodTotalUserTime": 2968750,
+              "ThisPeriodTotalKernelTime": 3281250,
+              "TotalPageFaultCount": 40616,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 9,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [
+              {
+                "pid": 33916,
+                "exists": true,
+                "creation": 134373354717556818,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\wsl.exe"
+              },
+              {
+                "pid": 18880,
+                "exists": true,
+                "creation": 134373354717626293,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 22356,
+                "exists": true,
+                "creation": 134373354718156544,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wslhost.exe"
+              },
+              {
+                "pid": 36776,
+                "exists": true,
+                "creation": 134373354718312090,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 16784,
+                "exists": true,
+                "creation": 134373354729741569,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 26652,
+                "exists": true,
+                "creation": 134373354731296289,
+                "sameIdentity": true,
+                "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+              },
+              {
+                "pid": 36036,
+                "exists": true,
+                "creation": 134373354731375144,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 38708,
+                "exists": true,
+                "creation": 134373354717853873,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wsl.exe"
+              },
+              {
+                "pid": 9552,
+                "exists": true,
+                "creation": 134373354731541350,
+                "sameIdentity": true,
+                "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+              }
+            ],
+            "held": [
+              {
+                "pid": 33916,
+                "creation": 134373354717556818,
+                "waitResult": 258
+              },
+              {
+                "pid": 18880,
+                "creation": 134373354717626293,
+                "waitResult": 258
+              },
+              {
+                "pid": 38708,
+                "creation": 134373354717853873,
+                "waitResult": 258
+              },
+              {
+                "pid": 22356,
+                "creation": 134373354718156544,
+                "waitResult": 258
+              },
+              {
+                "pid": 36776,
+                "creation": 134373354718312090,
+                "waitResult": 258
+              },
+              {
+                "pid": 23504,
+                "creation": 134373354720059504,
+                "waitResult": 0
+              },
+              {
+                "pid": 37956,
+                "creation": 134373354720148279,
+                "waitResult": 0
+              },
+              {
+                "pid": 36040,
+                "creation": 134373354720299389,
+                "waitResult": 0
+              },
+              {
+                "pid": 38608,
+                "creation": 134373354729653702,
+                "waitResult": 0
+              },
+              {
+                "pid": 16784,
+                "creation": 134373354729741569,
+                "waitResult": 258
+              },
+              {
+                "pid": 17732,
+                "creation": 134373354729908612,
+                "waitResult": 258
+              },
+              {
+                "pid": 26652,
+                "creation": 134373354731296289,
+                "waitResult": 258
+              },
+              {
+                "pid": 36036,
+                "creation": 134373354731375144,
+                "waitResult": 258
+              },
+              {
+                "pid": 9552,
+                "creation": 134373354731541350,
+                "waitResult": 258
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        },
+        {
+          "event": "windows-scope-joined",
+          "time": 1792861874.5145001,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2968750,
+              "TotalKernelTime": 3281250,
+              "ThisPeriodTotalUserTime": 2968750,
+              "ThisPeriodTotalKernelTime": 3281250,
+              "TotalPageFaultCount": 40616,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 33916,
+                "creation": 134373354717556818,
+                "waitResult": 0
+              },
+              {
+                "pid": 18880,
+                "creation": 134373354717626293,
+                "waitResult": 0
+              },
+              {
+                "pid": 38708,
+                "creation": 134373354717853873,
+                "waitResult": 0
+              },
+              {
+                "pid": 22356,
+                "creation": 134373354718156544,
+                "waitResult": 0
+              },
+              {
+                "pid": 36776,
+                "creation": 134373354718312090,
+                "waitResult": 0
+              },
+              {
+                "pid": 23504,
+                "creation": 134373354720059504,
+                "waitResult": 0
+              },
+              {
+                "pid": 37956,
+                "creation": 134373354720148279,
+                "waitResult": 0
+              },
+              {
+                "pid": 36040,
+                "creation": 134373354720299389,
+                "waitResult": 0
+              },
+              {
+                "pid": 38608,
+                "creation": 134373354729653702,
+                "waitResult": 0
+              },
+              {
+                "pid": 16784,
+                "creation": 134373354729741569,
+                "waitResult": 0
+              },
+              {
+                "pid": 17732,
+                "creation": 134373354729908612,
+                "waitResult": 0
+              },
+              {
+                "pid": 26652,
+                "creation": 134373354731296289,
+                "waitResult": 0
+              },
+              {
+                "pid": 36036,
+                "creation": 134373354731375144,
+                "waitResult": 0
+              },
+              {
+                "pid": 9552,
+                "creation": 134373354731541350,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": true
+          }
+        }
+      ],
+      "peRows": [
+        {
+          "event": "pe-start",
+          "time": 1792861873.1284852,
+          "pid": 17732,
+          "role": "parent",
+          "scenario": "cancel",
+          "creation": 134373354729908612,
+          "inJob": true
+        },
+        {
+          "event": "pe-start",
+          "time": 1792861873.2950962,
+          "pid": 9552,
+          "role": "child",
+          "scenario": "cancel",
+          "creation": 134373354731541350,
+          "inJob": true
+        },
+        {
+          "event": "child-ready",
+          "time": 1792861873.2956133,
+          "pid": 9552
+        }
+      ],
+      "observed": true,
+      "cleanupWindows": {
+        "accounting": {
+          "TotalUserTime": 2968750,
+          "TotalKernelTime": 3281250,
+          "ThisPeriodTotalUserTime": 2968750,
+          "ThisPeriodTotalKernelTime": 3281250,
+          "TotalPageFaultCount": 40616,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 33916,
+            "creation": 134373354717556818,
+            "waitResult": 0
+          },
+          {
+            "pid": 18880,
+            "creation": 134373354717626293,
+            "waitResult": 0
+          },
+          {
+            "pid": 38708,
+            "creation": 134373354717853873,
+            "waitResult": 0
+          },
+          {
+            "pid": 22356,
+            "creation": 134373354718156544,
+            "waitResult": 0
+          },
+          {
+            "pid": 36776,
+            "creation": 134373354718312090,
+            "waitResult": 0
+          },
+          {
+            "pid": 23504,
+            "creation": 134373354720059504,
+            "waitResult": 0
+          },
+          {
+            "pid": 37956,
+            "creation": 134373354720148279,
+            "waitResult": 0
+          },
+          {
+            "pid": 36040,
+            "creation": 134373354720299389,
+            "waitResult": 0
+          },
+          {
+            "pid": 38608,
+            "creation": 134373354729653702,
+            "waitResult": 0
+          },
+          {
+            "pid": 16784,
+            "creation": 134373354729741569,
+            "waitResult": 0
+          },
+          {
+            "pid": 17732,
+            "creation": 134373354729908612,
+            "waitResult": 0
+          },
+          {
+            "pid": 26652,
+            "creation": 134373354731296289,
+            "waitResult": 0
+          },
+          {
+            "pid": 36036,
+            "creation": 134373354731375144,
+            "waitResult": 0
+          },
+          {
+            "pid": 9552,
+            "creation": 134373354731541350,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": true
+      }
+    },
+    {
+      "label": "candidate-server-crash-6df57087",
+      "scenario": "server-crash",
+      "candidate": true,
+      "windowsAtMcpOwnerClose": {
+        "accounting": {
+          "TotalUserTime": 2187500,
+          "TotalKernelTime": 2656250,
+          "ThisPeriodTotalUserTime": 2187500,
+          "ThisPeriodTotalKernelTime": 2656250,
+          "TotalPageFaultCount": 40524,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 9920,
+            "creation": 134373354765367109,
+            "waitResult": 0
+          },
+          {
+            "pid": 35396,
+            "creation": 134373354765430163,
+            "waitResult": 0
+          },
+          {
+            "pid": 33044,
+            "creation": 134373354765620510,
+            "waitResult": 0
+          },
+          {
+            "pid": 31632,
+            "creation": 134373354765958428,
+            "waitResult": 0
+          },
+          {
+            "pid": 36796,
+            "creation": 134373354766117925,
+            "waitResult": 0
+          },
+          {
+            "pid": 33940,
+            "creation": 134373354767832367,
+            "waitResult": 0
+          },
+          {
+            "pid": 22704,
+            "creation": 134373354767907256,
+            "waitResult": 0
+          },
+          {
+            "pid": 31444,
+            "creation": 134373354768057549,
+            "waitResult": 0
+          },
+          {
+            "pid": 1468,
+            "creation": 134373354776883442,
+            "waitResult": 0
+          },
+          {
+            "pid": 36516,
+            "creation": 134373354776956991,
+            "waitResult": 0
+          },
+          {
+            "pid": 32512,
+            "creation": 134373354777123444,
+            "waitResult": 0
+          },
+          {
+            "pid": 34420,
+            "creation": 134373354778530524,
+            "waitResult": 0
+          },
+          {
+            "pid": 34408,
+            "creation": 134373354778611840,
+            "waitResult": 0
+          },
+          {
+            "pid": 38384,
+            "creation": 134373354778767499,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": true
+      },
+      "ownerProcess": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "mcpRows": [
+        {
+          "event": "probe-started",
+          "time": 1792861876.3499336,
+          "pid": 740,
+          "starttime": "24223",
+          "candidate": true,
+          "scenario": "server-crash"
+        },
+        {
+          "event": "real-credential-guard-entered",
+          "time": 1792861876.357878,
+          "locked": true
+        },
+        {
+          "event": "actual-stdio-sink-inside-credential-guard",
+          "time": 1792861876.3641634,
+          "candidate": true
+        },
+        {
+          "event": "scope-prepare-entered",
+          "time": 1792861876.3712914,
+          "scope": "mcp-session",
+          "receiverPid": 742
+        },
+        {
+          "event": "scope-fd-bound",
+          "time": 1792861876.7707052,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "scope-operation-admitted",
+          "time": 1792861876.9693203,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "real-stdio-process-created",
+          "time": 1792861876.9765878,
+          "pid": 747,
+          "starttime": "24430",
+          "guardStillLocked": true
+        },
+        {
+          "event": "real-supervisor-ready-and-permit-accepted",
+          "time": 1792861877.6604328,
+          "protocol": "2026-07-28",
+          "effect": "EXTERNAL_EFFECT",
+          "supportsParallel": false
+        },
+        {
+          "event": "exact-mcp-server-crash-injected",
+          "time": 1792861878.0268857,
+          "pid": 747,
+          "starttime": "24430"
+        },
+        {
+          "event": "real-tool-outcome",
+          "time": 1792861878.0344913,
+          "state": "SYSTEM_ERROR",
+          "content": "{\"error\":\"MCP_CALL_FAILED\",\"guidance\":\"The remote operation may have executed. Do not assume success or that nothing happened. Before repeating an operation with side effects, verify its outcome or idempotency; otherwise ask the user. You may continue with independent work or another read-only source.\",\"message\":\"MCPError: Connection closed\",\"remote_outcome\":\"UNKNOWN\",\"retry_performed\":false}",
+          "permitState": "RELEASED"
+        },
+        {
+          "event": "scoped-transport-close-entered",
+          "time": 1792861878.04124,
+          "mode": "cancel"
+        },
+        {
+          "event": "scope-cancel-requested",
+          "time": 1792861878.0487897,
+          "scope": "mcp-session"
+        },
+        {
+          "event": "relay-ack-observed",
+          "time": 1792861878.0671487,
+          "scope": "mcp-session",
+          "snapshot": {
+            "mode": "cancel",
+            "accepted": 3,
+            "taskCount": 0,
+            "writerCount": 0,
+            "forwardedBytes": 1246,
+            "anyForwarded": true,
+            "operationAccepted": 2,
+            "operationForwardedBytes": 633,
+            "operationAnyForwarded": true,
+            "socketExists": true,
+            "directory": "/home/plumwsl/.g0m5-a24590f91ff5"
+          },
+          "crossDomainOutcome": "unknown"
+        },
+        {
+          "event": "retained-socket-late-caller-rejected",
+          "time": 1792861878.0750694,
+          "scope": "mcp-session",
+          "pid": 751,
+          "exit": 1,
+          "stdout": "",
+          "stderr": "<3>WSL (751 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+          "socketStillExists": true,
+          "groupAlive": false
+        },
+        {
+          "event": "relay-ack-remains-stable",
+          "time": 1792861878.0839286,
+          "scope": "mcp-session",
+          "mode": "cancel",
+          "operationForwardedBytes": 633
+        },
+        {
+          "event": "scoped-transport-physical-joined",
+          "time": 1792861878.1155775,
+          "mode": "cancel",
+          "linuxGroupAlive": false,
+          "stdioTasksDone": true,
+          "windows": {
+            "accounting": {
+              "TotalUserTime": 2187500,
+              "TotalKernelTime": 2656250,
+              "ThisPeriodTotalUserTime": 2187500,
+              "ThisPeriodTotalKernelTime": 2656250,
+              "TotalPageFaultCount": 40524,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 9920,
+                "creation": 134373354765367109,
+                "waitResult": 0
+              },
+              {
+                "pid": 35396,
+                "creation": 134373354765430163,
+                "waitResult": 0
+              },
+              {
+                "pid": 33044,
+                "creation": 134373354765620510,
+                "waitResult": 0
+              },
+              {
+                "pid": 31632,
+                "creation": 134373354765958428,
+                "waitResult": 0
+              },
+              {
+                "pid": 36796,
+                "creation": 134373354766117925,
+                "waitResult": 0
+              },
+              {
+                "pid": 33940,
+                "creation": 134373354767832367,
+                "waitResult": 0
+              },
+              {
+                "pid": 22704,
+                "creation": 134373354767907256,
+                "waitResult": 0
+              },
+              {
+                "pid": 31444,
+                "creation": 134373354768057549,
+                "waitResult": 0
+              },
+              {
+                "pid": 1468,
+                "creation": 134373354776883442,
+                "waitResult": 0
+              },
+              {
+                "pid": 36516,
+                "creation": 134373354776956991,
+                "waitResult": 0
+              },
+              {
+                "pid": 32512,
+                "creation": 134373354777123444,
+                "waitResult": 0
+              },
+              {
+                "pid": 34420,
+                "creation": 134373354778530524,
+                "waitResult": 0
+              },
+              {
+                "pid": 34408,
+                "creation": 134373354778611840,
+                "waitResult": 0
+              },
+              {
+                "pid": 38384,
+                "creation": 134373354778767499,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": true
+          }
+        },
+        {
+          "event": "original-supervisor-close-returned",
+          "time": 1792861878.1229637,
+          "clientClosed": true,
+          "processReturncode": -9,
+          "stdioTasksDone": true,
+          "linuxGroupAlive": false,
+          "permitState": "RELEASED",
+          "spawnCount": 1,
+          "guardEntries": 1
+        },
+        {
+          "event": "retirement-after-real-mcp-owner-close",
+          "time": 1792861878.133003,
+          "transportsClosed": true,
+          "stdioTasksDone": true
+        },
+        {
+          "event": "scope-receiver-retired",
+          "time": 1792861878.1698596,
+          "scope": "mcp-session",
+          "exit": 0,
+          "output": "",
+          "directoryExists": false
+        },
+        {
+          "event": "probe-finished",
+          "time": 1792861878.1784933,
+          "spawnCount": 1,
+          "guardEntries": 1
+        }
+      ],
+      "serverRows": [
+        {
+          "event": "sdk-server-started",
+          "time": 1792861877.614872,
+          "pid": 747,
+          "starttime": "24430"
+        },
+        {
+          "event": "tool-entered",
+          "time": 1792861877.664223,
+          "pid": 747,
+          "starttime": "24430",
+          "mode": "hold"
+        },
+        {
+          "event": "tool-created-interop-child",
+          "time": 1792861877.6717222,
+          "pid": 747,
+          "starttime": "24430",
+          "childPid": 750
+        }
+      ],
+      "relayRows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792861876.521288,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "control": "/home/plumwsl/.g0m5-a24590f91ff5/control",
+          "directory": "/home/plumwsl/.g0m5-a24590f91ff5",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792861876.7466106,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "peer": {
+            "pid": 745,
+            "starttime": "24393",
+            "pgid": 745,
+            "sid": 745
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792861876.753941,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "peer": {
+            "pid": 745,
+            "starttime": "24393",
+            "pgid": 745,
+            "sid": 745
+          },
+          "peerUid": 1000,
+          "inode": 1164,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792861876.7609203,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "socket": "/home/plumwsl/.g0m5-a24590f91ff5/interop",
+          "directory": "/home/plumwsl/.g0m5-a24590f91ff5",
+          "peer": {
+            "pid": 745,
+            "starttime": "24393",
+            "pgid": 745,
+            "sid": 745
+          },
+          "pinned": "/proc/742/fd/9"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792861876.7684076,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861876.7785707,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "operation": false,
+          "bytes": 613,
+          "total": 613
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861876.9674132,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "operation": false
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861877.673338,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "operation": true,
+          "bytes": 32,
+          "total": 32
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792861877.6810343,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "operation": true
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792861877.6877875,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "operation": true,
+          "bytes": 601,
+          "total": 601
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792861878.0476024,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792861878.054772,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "mode": "cancel",
+          "accepted": 3,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 1246,
+          "anyForwarded": true,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 633,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0m5-a24590f91ff5"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792861878.137609,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792861878.14485,
+          "pid": 742,
+          "starttime": "24370",
+          "pgid": 740,
+          "sid": 740,
+          "directoryExists": false
+        }
+      ],
+      "anchorRows": [
+        {
+          "event": "anchor-ready",
+          "time": 1792861876.7369292,
+          "pid": 745,
+          "starttime": "24393",
+          "pgid": 745,
+          "sid": 745,
+          "socket": "/run/WSL/744_interop",
+          "uid": 1000
+        },
+        {
+          "event": "anchor-pinned",
+          "time": 1792861876.744611,
+          "pid": 745,
+          "starttime": "24393",
+          "pgid": 745,
+          "sid": 745,
+          "inode": 1164
+        },
+        {
+          "event": "anchor-fd-sent",
+          "time": 1792861876.7518568,
+          "pid": 745,
+          "starttime": "24393",
+          "pgid": 745,
+          "sid": 745
+        },
+        {
+          "event": "anchor-eof",
+          "time": 1792861878.0895355,
+          "pid": 745,
+          "starttime": "24393",
+          "pgid": 745,
+          "sid": 745
+        }
+      ],
+      "windowsRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792861876.5402246,
+          "carrierPid": 9920,
+          "carrierCreation": 134373354765367109,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "host-verified-transferred-fd-job-binding",
+          "time": 1792861876.9504473,
+          "pid": 31444,
+          "creation": 134373354768057549,
+          "sameCreation": true,
+          "member": true,
+          "waitResult": 258
+        },
+        {
+          "event": "before-job-cancel",
+          "time": 1792861878.0883565,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2187500,
+              "TotalKernelTime": 2656250,
+              "ThisPeriodTotalUserTime": 2187500,
+              "ThisPeriodTotalKernelTime": 2656250,
+              "TotalPageFaultCount": 40524,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 11,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [
+              {
+                "pid": 9920,
+                "exists": true,
+                "creation": 134373354765367109,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\wsl.exe"
+              },
+              {
+                "pid": 35396,
+                "exists": true,
+                "creation": 134373354765430163,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 31632,
+                "exists": true,
+                "creation": 134373354765958428,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wslhost.exe"
+              },
+              {
+                "pid": 36796,
+                "exists": true,
+                "creation": 134373354766117925,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 1468,
+                "exists": true,
+                "creation": 134373354776883442,
+                "sameIdentity": true,
+                "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+              },
+              {
+                "pid": 36516,
+                "exists": true,
+                "creation": 134373354776956991,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 34420,
+                "exists": true,
+                "creation": 134373354778530524,
+                "sameIdentity": true,
+                "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+              },
+              {
+                "pid": 34408,
+                "exists": true,
+                "creation": 134373354778611840,
+                "sameIdentity": true,
+                "image": "C:\\Windows\\System32\\conhost.exe"
+              },
+              {
+                "pid": 33044,
+                "exists": true,
+                "creation": 134373354765620510,
+                "sameIdentity": true,
+                "image": "C:\\Program Files\\WSL\\wsl.exe"
+              },
+              {
+                "pid": 32512,
+                "exists": true,
+                "creation": 134373354777123444,
+                "sameIdentity": true,
+                "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+              },
+              {
+                "pid": 38384,
+                "exists": true,
+                "creation": 134373354778767499,
+                "sameIdentity": true,
+                "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+              }
+            ],
+            "held": [
+              {
+                "pid": 9920,
+                "creation": 134373354765367109,
+                "waitResult": 258
+              },
+              {
+                "pid": 35396,
+                "creation": 134373354765430163,
+                "waitResult": 258
+              },
+              {
+                "pid": 33044,
+                "creation": 134373354765620510,
+                "waitResult": 258
+              },
+              {
+                "pid": 31632,
+                "creation": 134373354765958428,
+                "waitResult": 258
+              },
+              {
+                "pid": 36796,
+                "creation": 134373354766117925,
+                "waitResult": 258
+              },
+              {
+                "pid": 33940,
+                "creation": 134373354767832367,
+                "waitResult": 0
+              },
+              {
+                "pid": 22704,
+                "creation": 134373354767907256,
+                "waitResult": 0
+              },
+              {
+                "pid": 31444,
+                "creation": 134373354768057549,
+                "waitResult": 0
+              },
+              {
+                "pid": 1468,
+                "creation": 134373354776883442,
+                "waitResult": 258
+              },
+              {
+                "pid": 36516,
+                "creation": 134373354776956991,
+                "waitResult": 258
+              },
+              {
+                "pid": 32512,
+                "creation": 134373354777123444,
+                "waitResult": 258
+              },
+              {
+                "pid": 34420,
+                "creation": 134373354778530524,
+                "waitResult": 258
+              },
+              {
+                "pid": 34408,
+                "creation": 134373354778611840,
+                "waitResult": 258
+              },
+              {
+                "pid": 38384,
+                "creation": 134373354778767499,
+                "waitResult": 258
+              }
+            ],
+            "terminateJobCalled": false
+          }
+        },
+        {
+          "event": "windows-scope-joined",
+          "time": 1792861878.1031966,
+          "facts": {
+            "accounting": {
+              "TotalUserTime": 2187500,
+              "TotalKernelTime": 2656250,
+              "ThisPeriodTotalUserTime": 2187500,
+              "ThisPeriodTotalKernelTime": 2656250,
+              "TotalPageFaultCount": 40524,
+              "TotalProcesses": 14,
+              "ActiveProcesses": 0,
+              "TotalTerminatedProcesses": 0
+            },
+            "members": [],
+            "held": [
+              {
+                "pid": 9920,
+                "creation": 134373354765367109,
+                "waitResult": 0
+              },
+              {
+                "pid": 35396,
+                "creation": 134373354765430163,
+                "waitResult": 0
+              },
+              {
+                "pid": 33044,
+                "creation": 134373354765620510,
+                "waitResult": 0
+              },
+              {
+                "pid": 31632,
+                "creation": 134373354765958428,
+                "waitResult": 0
+              },
+              {
+                "pid": 36796,
+                "creation": 134373354766117925,
+                "waitResult": 0
+              },
+              {
+                "pid": 33940,
+                "creation": 134373354767832367,
+                "waitResult": 0
+              },
+              {
+                "pid": 22704,
+                "creation": 134373354767907256,
+                "waitResult": 0
+              },
+              {
+                "pid": 31444,
+                "creation": 134373354768057549,
+                "waitResult": 0
+              },
+              {
+                "pid": 1468,
+                "creation": 134373354776883442,
+                "waitResult": 0
+              },
+              {
+                "pid": 36516,
+                "creation": 134373354776956991,
+                "waitResult": 0
+              },
+              {
+                "pid": 32512,
+                "creation": 134373354777123444,
+                "waitResult": 0
+              },
+              {
+                "pid": 34420,
+                "creation": 134373354778530524,
+                "waitResult": 0
+              },
+              {
+                "pid": 34408,
+                "creation": 134373354778611840,
+                "waitResult": 0
+              },
+              {
+                "pid": 38384,
+                "creation": 134373354778767499,
+                "waitResult": 0
+              }
+            ],
+            "terminateJobCalled": true
+          }
+        }
+      ],
+      "peRows": [
+        {
+          "event": "pe-start",
+          "time": 1792861877.8518918,
+          "pid": 32512,
+          "role": "parent",
+          "scenario": "cancel",
+          "creation": 134373354777123444,
+          "inJob": true
+        },
+        {
+          "event": "pe-start",
+          "time": 1792861878.01295,
+          "pid": 38384,
+          "role": "child",
+          "scenario": "cancel",
+          "creation": 134373354778767499,
+          "inJob": true
+        },
+        {
+          "event": "child-ready",
+          "time": 1792861878.01295,
+          "pid": 38384
+        }
+      ],
+      "observed": true,
+      "cleanupWindows": {
+        "accounting": {
+          "TotalUserTime": 2187500,
+          "TotalKernelTime": 2656250,
+          "ThisPeriodTotalUserTime": 2187500,
+          "ThisPeriodTotalKernelTime": 2656250,
+          "TotalPageFaultCount": 40524,
+          "TotalProcesses": 14,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [
+          {
+            "pid": 9920,
+            "creation": 134373354765367109,
+            "waitResult": 0
+          },
+          {
+            "pid": 35396,
+            "creation": 134373354765430163,
+            "waitResult": 0
+          },
+          {
+            "pid": 33044,
+            "creation": 134373354765620510,
+            "waitResult": 0
+          },
+          {
+            "pid": 31632,
+            "creation": 134373354765958428,
+            "waitResult": 0
+          },
+          {
+            "pid": 36796,
+            "creation": 134373354766117925,
+            "waitResult": 0
+          },
+          {
+            "pid": 33940,
+            "creation": 134373354767832367,
+            "waitResult": 0
+          },
+          {
+            "pid": 22704,
+            "creation": 134373354767907256,
+            "waitResult": 0
+          },
+          {
+            "pid": 31444,
+            "creation": 134373354768057549,
+            "waitResult": 0
+          },
+          {
+            "pid": 1468,
+            "creation": 134373354776883442,
+            "waitResult": 0
+          },
+          {
+            "pid": 36516,
+            "creation": 134373354776956991,
+            "waitResult": 0
+          },
+          {
+            "pid": 32512,
+            "creation": 134373354777123444,
+            "waitResult": 0
+          },
+          {
+            "pid": 34420,
+            "creation": 134373354778530524,
+            "waitResult": 0
+          },
+          {
+            "pid": 34408,
+            "creation": 134373354778611840,
+            "waitResult": 0
+          },
+          {
+            "pid": 38384,
+            "creation": 134373354778767499,
+            "waitResult": 0
+          }
+        ],
+        "terminateJobCalled": true
+      }
+    },
+    {
+      "label": "candidate-guard-deny-85cf08c5",
+      "scenario": "guard-deny",
+      "candidate": true,
+      "ownerProcess": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "mcpRows": [
+        {
+          "event": "probe-started",
+          "time": 1792861821.0367124,
+          "pid": 528,
+          "starttime": "18681",
+          "candidate": true,
+          "scenario": "guard-deny"
+        },
+        {
+          "event": "real-credential-guard-entered",
+          "time": 1792861821.044363,
+          "locked": true
+        },
+        {
+          "event": "guard-denied-before-spawn",
+          "time": 1792861821.0513992,
+          "error": "ValueError: MCP stdio admission contains a caller credential",
+          "spawnCount": 0,
+          "scopePrepared": false
+        },
+        {
+          "event": "probe-finished",
+          "time": 1792861821.0579555,
+          "spawnCount": 0,
+          "guardEntries": 1
+        }
+      ],
+      "serverRows": [],
+      "relayRows": [],
+      "anchorRows": [],
+      "windowsRows": [],
+      "peRows": [],
+      "observed": true,
+      "cleanupWindows": {
+        "accounting": {
+          "TotalUserTime": 0,
+          "TotalKernelTime": 0,
+          "ThisPeriodTotalUserTime": 0,
+          "ThisPeriodTotalKernelTime": 0,
+          "TotalPageFaultCount": 0,
+          "TotalProcesses": 0,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": [],
+        "held": [],
+        "terminateJobCalled": false
+      }
+    }
+  ]
+}

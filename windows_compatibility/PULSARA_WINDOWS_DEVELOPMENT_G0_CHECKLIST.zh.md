@@ -4,7 +4,7 @@
 
 2026-10-24 按用户授权修订：Ubuntu发行版本号不限，接入已有发行版及默认非root用户，保留interop、Windows PATH和自动挂载，不要求新建`Pulsara`/`pulsara`。本清单命令以已观察到的`Ubuntu`/`plumwsl`及`/home/plumwsl`为示例，其他用户须替换成实际确认目标，不能把示例当固定命名要求。依赖pins、ext4应用数据和完整G0验收仍适用；原四方审阅仅覆盖修订前清单。
 
-**本文件是 Windows 接手操作说明，不是完整Windows验收记录。** Phase A代码与Mac实证冻结范围保持，原生Ubuntu x64/arm64与GUI仍待验收，Phase B未进入。首轮环境、资源、控制/PG/TLS等子项实测见第9节与[报告](research/2026-10-24/root/g0-w-initial/report.zh.md)；普通Windows后代取消有已复现缺口，完整G0未通过。允许在自有隔离目录和`output/`写探针，不实现生产安装器、WslHostOperations、正式picker或TLS/OAuth桥，不改用户共享发行版配置。
+**本文件是 Windows 接手操作说明。2026-10-25本机所选矩阵G0-W机制可行性已通过，当前验收看第11节及[最终报告](research/2026-10-25/root/g0-w-final/report.zh.md)。** 前面保留可复用操作模板及阶段记录，未打勾的模板不是当前门状态。Phase A代码与Mac实证冻结范围保持，原生Ubuntu x64/arm64与GUI按用户要求延期，Phase B未进入。生产仍有已记录的跨域缺口，研究候选通过不代表生产已修复。实验只在自有隔离目录和output，不实现生产安装器、WslHostOperations、正式picker或TLS/OAuth桥，不改用户共享发行版配置。
 
 ## 1. 先看懂两边分工
 
@@ -389,9 +389,36 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 ## 10. 本清单交付检查
 
-最新进展见[第四轮报告](research/2026-10-25/root/g0-w-round4/report.zh.md)：复用原三位subagent，完成选定真实terminal合成与PG owner失联边界研究，保留新失败及output内修正。第三轮的独立机制证据见[历史报告](research/2026-10-25/root/g0-w-round3/report.zh.md)，第二轮原反例仍见[取消/PG死亡记录](research/2026-10-24/root/g0-w-round2/report.zh.md)。当前仍不能把有限成功扩成整个G0-C/P、原生Ubuntu资格或Phase B通过；MCP/hooks、GUI/宿主全链和其他缺项继续待验。
+最新已归档进展见[spec第21节](PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md#21-第五六轮剩余g0机制与gui实证2026-10-25)及[第五轮文件/HTTP报告](research/2026-10-25/root/g0-w-round5/report.zh.md)：MCP/hooks/environment真实跨域研究、PG剩余独立边界、目标发现/离线payload与真实kernel控制链已有记录。前三、四轮保留其当时待验状态，不反写历史。正式生产接入与安装GUI属于B；原生Ubuntu按用户要求延期，不阻塞本轮G0研究，也未被WSL结果替代。
+
+| 本轮新增证据 | 当前验收范围 |
+| --- | --- |
+| MCP 6场景/21原测试；hooks/environment 12场景/55原测试 | 原提前结算反例、真实scope研究修正、call/session不同生命周期、guard先于spawn |
+| PG 29物理case | ext4检索/搬移/reset、有限framing及三类执行结果、initdb/stop/remove剩余边界；不声称全故障排列 |
+| kernel 22次运行/18完成观测/4探针失败保留，12原测试 | 正常EOF关闭顺序；原child清空后异常误判与候选；强退宿主无aclose仍须收敛，不能报clean |
+| 默认目标与完整payload | 真实显式身份/非root/离线安装、写点ENOSPC与中断保数据；未改系统默认或假造WSL未装 |
+| Windows目录与真实文件/HTTP | 图形浏览/创建/选择/取消、用户选择/拖放逐字节、路径竞态/挂载拒绝、原HTML/image/PDF/下载owners；fixture边界见报告 |
+
+整发行版外部终止仅用明确新建可丢弃故障环境；不能终止用户Ubuntu。本节归档时持续网络退休/证书时间、真实OAuth、睡眠恢复及完整门审阅尚待补齐，未提前勾整门；最终已补结果见第11节。interop与Hiddify TUN持续开启。真实Notion授权及睡眠唤醒由用户现场参与。
 
 原root与三位`gpt-6.1-sol high` subagents批准的是修订前的专用发行版清单，历史记录保留在research。原示例JS语法检查及Mac纯测试5/5不证明本次共享WSL/interop方案。当前用户授权修订了活动规范和操作步骤；本机已有基础环境/interop观察，但Windows后代生命周期、正式picker/helper/TLS/OAuth等仍须实测，不沿用历史批准宣称完整G0或B通过。
 
 
 活动实施目录入口：[README.md](README.md)。本文及冻结spec原位于仓库根，现统一存放`windows_compatibility/`；本文命令仍从对应系统的**仓库根**执行，不能先cd到本文件目录再运行。
+
+## 11. 本机G0最终验收状态（2026-10-25）
+
+以下只对[最终报告](research/2026-10-25/root/g0-w-final/report.zh.md)记录的Windows11 25H2/WSL2.7.11.0/Ubuntu26.04.1/plumwsl/ext4/Electron44.9.0/nat/Hiddify TUN矩阵成立，Ubuntu数字版本不限，interop/挂载不关闭。
+
+- [x] **D**：真实已有目标发现/显式重开、非root/ext4、完整私有payload离线安装及有限失败保数据。默认变化仅输入阴性；未安装/需重启环境未伪造，ENOSPC为真实写点故障。
+- [x] **C**：terminal/MCP/hooks/environment实际owner的跨域scope/取消/结算；真实kernel/原main关闭顺序、异常退出误判候选、SIGHUP/EOF收尾、可见窗口关闭、独立发行版故障与实际睡眠。
+- [x] **P**：PG两锁/typed结果、剩余29个物理case、ext4 clean-v0/检索/搬移/reset；补[原样PGDATA dirty恢复](research/2026-10-25/terminal/distro-recovery-round7/report.zh.md)，PG自行redo、同canonical记录可读、原Quit收尾。
+- [x] **F**：真实图形目录、路径/挂载/替换/unknown、Windows选择/拖放副本与权限、原预览/下载；大小写/NFC/NFD与UNC保持不同identity，真实另存为取消/拒绝覆盖/确认覆盖。
+- [x] **N**：精确TLS/旧服务拒绝、自然证书有效期与在途流退休；88.493秒真实睡眠恢复、同kernel/PG/证书，SSE一次只读重连；用户现场Notion授权/握手/list_tools65，补callback陌生服务rebind负控。
+- [x] 原失败/修正前探针、秘密边界、清理和三方交叉审阅均保留；root核must-have后才给整门结论。两次临时故障发行版均不用于日常部署，不替换用户Ubuntu。
+- [ ] **Phase B与Windows激活**：用户本轮明确不进入。生产接入、正式setup/NSIS/完整GUI、更新卸载、真实provider长程和受影响平台回归仍未实施/验收。
+- [ ] **原生Ubuntu资格**：用户延期，不拿WSL代证，不纳入本轮Windows G0阻塞。
+
+Notion仅本地测试grant/home已删除，远端授权/DCR未撤销。闲置Electron profile清理遭自动审批拒绝，保留ignored output、不归档；不绕过删除。R7注销后曾观测共享Ubuntu Stopped，原要求Running的探针失败原样保留，未猜原因或主动终止用户发行版；后续显式Git同步启动与该历史观察分别记。
+
+下一步只在用户明确要求后讨论Phase B实施：按最终报告列出的真实接缝做生产hard cut，并保留后续独立资格门。本轮G0通过不自动启动这些工作，也不宣布已支持Windows发行。

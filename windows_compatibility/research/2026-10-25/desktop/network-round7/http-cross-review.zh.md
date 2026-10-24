@@ -1,0 +1,11 @@
+# root 第五轮文件/HTTP候选只读交叉审查
+
+已读root/round5的files_guest.py、http_guest.py、http_host.cjs及结果范围；未改root文件、未重跑其GUI。第五轮hooks及第六轮D的报告/清理记录齐全，记录范围残留为空。以下是候选范围意见，不替代root自己执行的13项HTTP或现场GUI证据。
+
+PDF准入方向准确：固定Chromium内置PDF extension ID；chrome://resources仅允许来自该extension frame的请求，后端仍为精确HTTPS origin且验证完整cert。没有放开任意chrome-extension、file或外部网络。它仅覆盖该锁定Electron的内置PDF资源链，不是一般extension信任规则。DownloadItem.updated内同步cancel的native reentrancy原失败保留，改到setImmediate退出native observer回调后cancel并观察干净退出0，属于窄SDK使用修正。
+
+实际LocalHttpServer、RendererBridge、LocalImport、FilePreviews/FilePreviewHttp的数据路径、Host/Origin/Fetch-Site、controller/generation和read token仍被使用；但sessions/protocol依赖由SimpleNamespace/预置connection提供，没有完整kernel/session attach/close或生产main换Window/Session。因此手动file_previews.revoke、slots/pending=0和retired flag后4个新请求拒绝，只支持所测文件预览撤销与新准入，不能宣称持续SSE、慢upload/download和已接纳pending请求已随真实owner退休结算。后者是本轮N需补的物理层子项；也不能用closeAllConnections替代WebContents/IPC sender销毁的完整产品合同。
+
+files_guest最初未拒绝所有'.'/空组件歧义，Path归一化会掩盖输入。root已在其output候选修正Linux/UNC两类组件检查，并以最终candidate的9条WindowsHTTPS→Linux有限调用补证；原v2 GUI记录不重写。held fd/no-follow、mount事实与最终同inode复查继续有效。这是研究目录服务，不等于生产backend-paths parser或正式create-session流程已实现。
+
+用户现场拖放、原文件逐字节/UID/模式/ext4核验与GUI关闭结果由root持有原始证据，本审查不把读报告当现场操作。当前报告可按上述有限范围归档，完整product owner retirement、网络时间/休眠及剩余G0仍须单独记实证或未验。

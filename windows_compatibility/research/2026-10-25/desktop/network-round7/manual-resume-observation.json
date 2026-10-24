@@ -1,0 +1,21 @@
+{
+  "userReportViaRoot": "实际睡眠约1–2分钟，当前已唤醒",
+  "powerMonitorSuspendMs": 1792864428598,
+  "powerMonitorResumeMs": 1792864517091,
+  "eventIntervalMs": 88493,
+  "beforeContinue": {
+    "time": 1792864618903,
+    "state": {
+      "count": 2844,
+      "opens": 2,
+      "errors": 1,
+      "last": {
+        "pid": 678,
+        "seq": 2845,
+        "timeMs": 1792864618864
+      }
+    }
+  },
+  "kernelPgAuxiliary": "output/windows-g0/interop_tasks_r3/round6/sleep-076aee0b-result.json",
+  "kernelPgInspectedBeforeContinue": true
+}

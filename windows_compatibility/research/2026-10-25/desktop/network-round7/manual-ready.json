@@ -1,0 +1,14 @@
+{
+  "ready": true,
+  "label": "n7-47fc4a8b-8034-46b3-afc6-27a27259df1e",
+  "results": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round7\\n7-47fc4a8b-8034-46b3-afc6-27a27259df1e-results.json",
+  "continueFile": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round7\\n7-47fc4a8b-8034-46b3-afc6-27a27259df1e.continue",
+  "stopFile": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round7\\n7-47fc4a8b-8034-46b3-afc6-27a27259df1e.stop",
+  "windowsPid": 7032,
+  "linuxPid": 678,
+  "linuxStarttime": "28429",
+  "home": "/home/plumwsl/.g0-http-20sxvi2d",
+  "origin": "https://127.0.0.1:42167",
+  "validTo": "Oct 24 17:50:59 2026 GMT",
+  "actions": "Use Windows Start > Power > Sleep, wait briefly, wake; do not shut down or change VPN. Root coordinates this action."
+}

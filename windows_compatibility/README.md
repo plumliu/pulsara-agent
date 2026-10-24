@@ -10,10 +10,14 @@
 4. [第二轮取消/PG异常死亡实验](research/2026-10-24/root/g0-w-round2/report.zh.md)：无breakaway Job及每任务私有socket转发取得局部实证；裸WSL_INTEROP回退与PG helper晚启动反例已确认。
 5. [第三轮PG替代准入/启动取消竞态/真实任务集成](research/2026-10-25/root/g0-w-round3/report.zh.md)：独立PG生命周期锁、有限子命令继承原锁、真实拒删/删除重建取得正证；SCM_RIGHTS首次绑定和Windows/Linux组合取消有机制证据；真实terminal内存候选14项通过，完整组合仍待验。
 6. [第四轮真实任务合成/PG owner失联](research/2026-10-25/root/g0-w-round4/report.zh.md)：首次绑定、取消和真实terminal启动预约/回滚已合成；补齐存活/结果冻结接缝。真实TS PG owner完成双锁reset及EOF/失联实测，原owner误认领未提交启动的反例与两行研究修正均有证据。
+7. [第五轮文件与真实HTTP owner](research/2026-10-25/root/g0-w-round5/report.zh.md)：真实Windows图形目录、用户文件选择/拖放、逐字节导入、HTML/image/PDF及下载；保留目录竞态、PDF白屏和研究启动器EPIPE等原失败及修正。
+8. [MCP跨域回收](research/2026-10-25/terminal/mcp-round5/report.zh.md)、[hooks/environment跨域回收](research/2026-10-25/terminal/hooks-environment-round5/report.zh.md)、[PG其余失联边界](research/2026-10-25/backend/pg-boundaries-round5/report.zh.md)：真实产品owner研究集成、会话与调用范围区分、双锁与有限协议、ext4检索/搬移/reset实证。
+9. [目标发现与离线payload](research/2026-10-25/desktop/discovery-payload-round6/report.zh.md)、[真实kernel控制链](research/2026-10-25/terminal/kernel-control-round6/report.zh.md)：用户原环境不变；有限安装失败保数据；正常EOF关闭顺序与异常退出误判反例。该阶段尚待的整发行版故障、OAuth及睡眠恢复已在下一项最终验收中补齐。
+10. **[Windows WSL2 G0最终验收](research/2026-10-25/root/g0-w-final/report.zh.md)**：本机所选矩阵D/C/P/F/N机制可行性通过；补齐实际宿主SIGHUP/窗口退出、88.493秒睡眠恢复、Notion授权与callback rebind、原样PGDATA的真实dirty恢复。原失败、探针局限及生产待实施项均保留。
 
-当前状态：Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI仍待验收；Windows回收和PG双锁已有真实owner研究集成实证，尚未接入生产或通过完整C/P门。原terminal仍缺跨域存活/结算边界，原PG owner仍缺未提交/unknown错误分类；output内修正不代表生产已修复。完整G0未过，Phase B未实施，Windows支持未激活。
+当前状态：**2026-10-25本机Windows WSL2所选矩阵的G0-W机制可行性验收通过；Phase B未实施，Windows支持未激活。** Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI按用户要求延期，不作为本轮Windows G0验收的前置，也未被WSL结果替代。原terminal仍缺跨域存活/结算边界，原PG owner仍缺未提交/unknown分类，原Runtime在child清空后可能漏查异常退出；output候选实证不代表生产已修复。正式setup/安装器/完整产品界面、真实provider长程及发布资格仍按B与激活矩阵验收。
 
-2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，Windows后代生命周期等完整G0仍待验证。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
+2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，当时Windows后代生命周期等完整G0待验证，后续本机结论见最终报告。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
 
 ## 四方过程材料
 

@@ -1,0 +1,379 @@
+{
+  "passed": true,
+  "root": "/home/plumwsl/.g0d6-45137e347ce8",
+  "records": [
+    {
+      "args": [
+        "pack",
+        "/home/plumwsl/.g0d6-45137e347ce8"
+      ],
+      "offlineNetworkNamespace": false,
+      "exit": 0,
+      "rows": [
+        {
+          "event": "packaged-local-artifact",
+          "pid": 2035,
+          "starttime": "87081",
+          "uid": 1000,
+          "archive": "/home/plumwsl/.g0d6-45137e347ce8/provided-payload.tar",
+          "bytes": 1595002880,
+          "sha256": "2cbb3716aa0783445349b40dc94aaab68b98e0d2b933c0826215a3e2129f97b9",
+          "pins": {
+            "postgres": "17.9",
+            "vector": "0.8.1",
+            "pg_search": "0.26.1"
+          },
+          "target": [
+            "linux",
+            "x86_64"
+          ],
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          },
+          "mount": "ext4 /dev/sdd /"
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "event": "windows-pipe-transfer",
+      "sent": 1595002880,
+      "producerExit": 0,
+      "receiverExit": 0,
+      "producerStderr": "",
+      "receiverStderr": "",
+      "rows": [
+        {
+          "event": "stdin-artifact-verified",
+          "pid": 2055,
+          "starttime": "88375",
+          "uid": 1000,
+          "archive": "/home/plumwsl/.g0d6-45137e347ce8/cache/artifact.tar",
+          "bytes": 1595002880,
+          "sha256": "2cbb3716aa0783445349b40dc94aaab68b98e0d2b933c0826215a3e2129f97b9",
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ]
+    },
+    {
+      "args": [
+        "install",
+        "/home/plumwsl/.g0d6-45137e347ce8",
+        "offline",
+        "2cbb3716aa0783445349b40dc94aaab68b98e0d2b933c0826215a3e2129f97b9",
+        "none"
+      ],
+      "offlineNetworkNamespace": true,
+      "exit": 0,
+      "rows": [
+        {
+          "event": "resource-version-published",
+          "pid": 2063,
+          "starttime": "89077",
+          "uid": 1000,
+          "case": "offline",
+          "published": "/home/plumwsl/.g0d6-45137e347ce8/installed/offline/0.1.0-alpha.6",
+          "mode": "0o700",
+          "imported": {
+            "python": "3.12.15",
+            "package": "/home/plumwsl/.g0d6-45137e347ce8/stages/offline/payload/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+            "version": "0.1.0a6",
+            "rg": "/home/plumwsl/.g0d6-45137e347ce8/stages/offline/payload/python/lib/python3.12/site-packages/pulsara_agent/_vendor/ripgrep/rg"
+          },
+          "networkNamespace": "net:[4026532222]",
+          "networkConnectErrno": 101,
+          "recipeDownloadCalls": [],
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "args": [
+        "install",
+        "/home/plumwsl/.g0d6-45137e347ce8",
+        "missing",
+        "2cbb3716aa0783445349b40dc94aaab68b98e0d2b933c0826215a3e2129f97b9",
+        "missing"
+      ],
+      "offlineNetworkNamespace": true,
+      "exit": 2,
+      "rows": [
+        {
+          "event": "installation-rejected",
+          "pid": 2327,
+          "starttime": "91626",
+          "uid": 1000,
+          "case": "missing",
+          "type": "FileNotFoundError",
+          "message": "[Errno 2] provided offline artifact missing: '/home/plumwsl/.g0d6-45137e347ce8/cache/missing.tar'",
+          "errno": 2,
+          "published": false,
+          "stageExists": false,
+          "injected": [],
+          "networkConnectErrno": 101,
+          "recipeDownloadCalls": [],
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "args": [
+        "install",
+        "/home/plumwsl/.g0d6-45137e347ce8",
+        "bad-digest",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "none"
+      ],
+      "offlineNetworkNamespace": true,
+      "exit": 2,
+      "rows": [
+        {
+          "event": "installation-rejected",
+          "pid": 2330,
+          "starttime": "91663",
+          "uid": 1000,
+          "case": "bad-digest",
+          "type": "RuntimeError",
+          "message": "Cached upstream archive checksum mismatch: /home/plumwsl/.g0d6-45137e347ce8/cache/artifact.tar",
+          "errno": null,
+          "published": false,
+          "stageExists": false,
+          "injected": [],
+          "networkConnectErrno": 101,
+          "recipeDownloadCalls": [],
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "args": [
+        "install",
+        "/home/plumwsl/.g0d6-45137e347ce8",
+        "enospc",
+        "2cbb3716aa0783445349b40dc94aaab68b98e0d2b933c0826215a3e2129f97b9",
+        "enospc"
+      ],
+      "offlineNetworkNamespace": true,
+      "exit": 2,
+      "rows": [
+        {
+          "event": "native-enospc-sink-injected",
+          "pid": 2333,
+          "starttime": "91779",
+          "uid": 1000,
+          "target": "/home/plumwsl/.g0d6-45137e347ce8/stages/enospc/payload/desktop-launch.json",
+          "device": "/dev/full"
+        },
+        {
+          "event": "installation-rejected",
+          "pid": 2333,
+          "starttime": "91779",
+          "uid": 1000,
+          "case": "enospc",
+          "type": "OSError",
+          "message": "[Errno 28] No space left on device",
+          "errno": 28,
+          "published": false,
+          "stageExists": true,
+          "injected": [
+            "/home/plumwsl/.g0d6-45137e347ce8/stages/enospc/payload/desktop-launch.json"
+          ],
+          "networkConnectErrno": 101,
+          "recipeDownloadCalls": [],
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "event": "interrupted-at-real-extract-write",
+      "gate": {
+        "event": "real-member-written-before-interruption",
+        "pid": 2336,
+        "starttime": "91983",
+        "uid": 1000,
+        "target": "/home/plumwsl/.g0d6-45137e347ce8/stages/interrupt/payload/desktop-launch.json",
+        "published": false
+      }
+    },
+    {
+      "event": "extract-helper-exactly-killed",
+      "facts": {
+        "pid": 2336,
+        "starttime": "91983",
+        "pidfdKilled": true
+      },
+      "carrierExit": 9,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "install",
+        "/home/plumwsl/.g0d6-45137e347ce8",
+        "interrupt",
+        "2cbb3716aa0783445349b40dc94aaab68b98e0d2b933c0826215a3e2129f97b9",
+        "none"
+      ],
+      "offlineNetworkNamespace": true,
+      "exit": 2,
+      "rows": [
+        {
+          "event": "installation-rejected",
+          "pid": 2343,
+          "starttime": "92106",
+          "uid": 1000,
+          "case": "interrupt",
+          "type": "FileNotFoundError",
+          "message": "[Errno 2] No such file or directory: '/home/plumwsl/.g0d6-45137e347ce8/stages/interrupt/payload/postgres/bin/pg_config'",
+          "errno": 2,
+          "published": false,
+          "stageExists": true,
+          "injected": [],
+          "networkConnectErrno": 101,
+          "recipeDownloadCalls": [],
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "args": [
+        "clear-interrupted-stage",
+        "/home/plumwsl/.g0d6-45137e347ce8"
+      ],
+      "offlineNetworkNamespace": false,
+      "exit": 0,
+      "rows": [
+        {
+          "event": "explicit-self-owned-stage-cleared",
+          "pid": 2347,
+          "starttime": "92220",
+          "uid": 1000,
+          "stage": "/home/plumwsl/.g0d6-45137e347ce8/stages/interrupt",
+          "exists": false,
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "args": [
+        "install",
+        "/home/plumwsl/.g0d6-45137e347ce8",
+        "interrupt",
+        "2cbb3716aa0783445349b40dc94aaab68b98e0d2b933c0826215a3e2129f97b9",
+        "none"
+      ],
+      "offlineNetworkNamespace": true,
+      "exit": 0,
+      "rows": [
+        {
+          "event": "resource-version-published",
+          "pid": 2350,
+          "starttime": "92257",
+          "uid": 1000,
+          "case": "interrupt",
+          "published": "/home/plumwsl/.g0d6-45137e347ce8/installed/interrupt/0.1.0-alpha.6",
+          "mode": "0o700",
+          "imported": {
+            "python": "3.12.15",
+            "package": "/home/plumwsl/.g0d6-45137e347ce8/stages/interrupt/payload/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+            "version": "0.1.0a6",
+            "rg": "/home/plumwsl/.g0d6-45137e347ce8/stages/interrupt/payload/python/lib/python3.12/site-packages/pulsara_agent/_vendor/ripgrep/rg"
+          },
+          "networkNamespace": "net:[4026532229]",
+          "networkConnectErrno": 101,
+          "recipeDownloadCalls": [],
+          "sentinels": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "args": [
+        "cleanup",
+        "/home/plumwsl/.g0d6-45137e347ce8"
+      ],
+      "offlineNetworkNamespace": false,
+      "exit": 0,
+      "rows": [
+        {
+          "event": "private-experiment-cleaned",
+          "pid": 2637,
+          "starttime": "93675",
+          "uid": 1000,
+          "root": "/home/plumwsl/.g0d6-45137e347ce8",
+          "exists": false,
+          "sentinelsBeforeCleanup": {
+            "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+            "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+            "home/workspaces/keep": "fixture workspace sentinel\n"
+          }
+        }
+      ],
+      "stderr": ""
+    }
+  ],
+  "cleanup": {
+    "args": [
+      "cleanup",
+      "/home/plumwsl/.g0d6-45137e347ce8"
+    ],
+    "offlineNetworkNamespace": false,
+    "exit": 0,
+    "rows": [
+      {
+        "event": "private-experiment-cleaned",
+        "pid": 2637,
+        "starttime": "93675",
+        "uid": 1000,
+        "root": "/home/plumwsl/.g0d6-45137e347ce8",
+        "exists": false,
+        "sentinelsBeforeCleanup": {
+          "home/.pulsara/local-settings.yaml": "fixture settings sentinel\n",
+          "home/.pulsara/desktop/postgres/keep": "fixture data sentinel\n",
+          "home/workspaces/keep": "fixture workspace sentinel\n"
+        }
+      }
+    ],
+    "stderr": ""
+  }
+}

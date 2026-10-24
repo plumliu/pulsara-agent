@@ -1,0 +1,1 @@
+{"passed": true, "target": {"distro": "Ubuntu", "user": "plumwsl", "uid": 1000, "home": "/home/plumwsl"}, "missingDistroExit": 4294967295, "unknownUserExit": 4294967295, "rootRejectedBeforeLaunch": "ROOT_TARGET_REJECTED"}

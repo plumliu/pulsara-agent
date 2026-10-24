@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "discoveryTarget": {
+    "distro": "Ubuntu",
+    "user": "plumwsl",
+    "uid": 1000,
+    "home": "/home/plumwsl"
+  },
+  "artifactBytes": 1595002880,
+  "offlineNamespaceReal": true,
+  "missingArtifactRejected": true,
+  "badDigestRejected": true,
+  "nativeEnospcAtInjectedTarWrite": true,
+  "interruptedPartialRejectedOnReopen": true,
+  "explicitCleanupThenFreshInstall": true,
+  "postPublishActualRuntime": true,
+  "sentinelsPreserved": true,
+  "privateRootsRemoved": true
+}

@@ -1,0 +1,98 @@
+{
+  "mode": "mock",
+  "records": [
+    {
+      "event": "electron-ready",
+      "time": 1792864018065,
+      "mode": "mock",
+      "electron": "44.9.0",
+      "node": "v24.22.0",
+      "platform": "win32"
+    },
+    {
+      "event": "guest-carrier",
+      "time": 1792864018072,
+      "pid": 20472,
+      "executable": "C:\\WINDOWS\\System32\\wsl.exe",
+      "argv": [
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round6/guest.py",
+        "mock"
+      ]
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864019532,
+      "record": {
+        "type": "guest-ready",
+        "mode": "mock",
+        "home": "/home/plumwsl/.g0oauth6-8_0gdw89",
+        "uid": 1000,
+        "device": 2096,
+        "sdk": "2.1.0"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864019540,
+      "record": {
+        "type": "case-start",
+        "case": "success"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864019562,
+      "requestId": "1",
+      "case": "success",
+      "reachable": false,
+      "errorCode": "ECONNREFUSED"
+    },
+    {
+      "event": "oauth-open-refused-or-failed",
+      "time": 1792864019562,
+      "requestId": "1",
+      "case": "success"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864019563,
+      "record": {
+        "type": "host-pipe-settled",
+        "pending_count": 0
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864019563,
+      "record": {
+        "type": "guest-cleaned",
+        "home": "/home/plumwsl/.g0oauth6-8_0gdw89",
+        "removed": true
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864019564,
+      "record": {
+        "type": "guest-failure",
+        "error_type": "AssertionError"
+      }
+    },
+    {
+      "event": "guest-carrier-closed",
+      "time": 1792864019759,
+      "code": 1,
+      "signal": null,
+      "stderrBytes": 0,
+      "partialFrame": false
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+[
+  {
+    "Name": "VMware Network Adapter VMnet1",
+    "InterfaceDescription": "VMware Virtual Ethernet Adapter for VMnet1",
+    "Status": "Up"
+  },
+  {
+    "Name": "WLAN",
+    "InterfaceDescription": "Intel(R) Wi-Fi 6 AX200 160MHz",
+    "Status": "Up"
+  },
+  {
+    "Name": "vEthernet (WSL (Hyper-V firewall))",
+    "InterfaceDescription": "Hyper-V Virtual Ethernet Adapter",
+    "Status": "Up"
+  },
+  {
+    "Name": "VMware Network Adapter VMnet8",
+    "InterfaceDescription": "VMware Virtual Ethernet Adapter for VMnet8",
+    "Status": "Up"
+  },
+  {
+    "Name": "tun0",
+    "InterfaceDescription": "sing-tun Tunnel",
+    "Status": "Up"
+  }
+]

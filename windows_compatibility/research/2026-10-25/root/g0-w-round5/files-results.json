@@ -1,0 +1,145 @@
+{
+  "events": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:35677",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUJSjXODQIAcKUdv3g0ZUNcH9RIR0wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3MTU1OFoXDTI2MTAy\nNTE3MTU1OFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAtH6UGDPbqMcMp91T5zAeGXu5cYT4YPQgNQfXNLoMklrq\nwZO4r7pwxPdPnKIVLnTNl6Q2VxmpuMr28aNytaPo1yruC3XdUhQ6ZYI8hfeeEEIC\nZY8J7ufWazlMHbasMtt1qLKd3db94cEKj6kCy9EySSLSN+wlrUQns7+NbgwsplLO\np47gpRV8Y89yk5SmXhnfVoNdiaVrverBtaoImadIesV2vg1DrMvZrJiKC/gi7Bfw\nYcBefkkZ/i9uzOV7kyRfrXKtSFzbLH2gR8G6mMNX8pIyOjLp9g9bIK/ZZeuxze0m\ngQVKXbn/J3kfZpYpr8SocxxUv+tvMWDQ9+GCKpx63wIDAQABo1MwUTAdBgNVHQ4E\nFgQU0uaRGP5p3I2pmWpbTBfzfqrPlPUwHwYDVR0jBBgwFoAU0uaRGP5p3I2pmWpb\nTBfzfqrPlPUwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAYQXm\n98XU8bOeqTouuLlKsOtnHo6zgnxEEM5U1a7cnj9PC9pokkytA+aiPMcAk7k1Y/Cz\n5O3OMB/sP01Z6UBM+5achHkMQATve3mbyLGcdq+GimNa7lXtln9B4po4vmyQn1fE\nftkk3HrQYzeAuouKHSTPBVpiZ/mgnkpfCkmfG+ktyAlDGQcINCBiPxzzbLQszAF6\nKDXnS0i2XZsNPkO3tNpm3YSX/lwymyt/3zehiLqfD+EtVijR2O781OJSBqzdivV/\n4jvEor6byLgLuVvyRnj288iV7aHUFzCvHvxwCf+t8SbssiEGgCpT/ztsUpFHNKec\nqPbDlKBun40C6Pr9WA==\n-----END CERTIFICATE-----\n",
+      "home": "/home/plumwsl/.g0-files-7gizwyeo",
+      "root": "/home/plumwsl/workspaces",
+      "pid": 431,
+      "uid": 1000
+    },
+    {
+      "event": "directory",
+      "operation": "list",
+      "result": {
+        "path": "/home/plumwsl/workspaces",
+        "names": [
+          "pulsara_agent",
+          "中文 工程 G0-20261024",
+          "中文 工程 G0-R5"
+        ],
+        "next": null
+      },
+      "mount": {
+        "target": "/",
+        "fstype": "ext4",
+        "source": "/dev/sdd"
+      }
+    },
+    {
+      "event": "gui-ready",
+      "activeSession": null
+    },
+    {
+      "event": "renderer-console",
+      "args": [
+        "2",
+        "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged.",
+        "2",
+        "node:electron/js2c/sandbox_bundle"
+      ]
+    },
+    {
+      "event": "imported",
+      "path": "/home/plumwsl/.g0-files-7gizwyeo/imports/d7c22b75e7e94f33aef4975c683d49c1/Windows 中文附件.bin",
+      "name": "Windows 中文附件.bin",
+      "bytes": 285
+    },
+    {
+      "event": "imported",
+      "path": "/home/plumwsl/.g0-files-7gizwyeo/imports/980da893a0734cb8b3ef47eb2c159e02/Windows 中文附件.bin",
+      "name": "Windows 中文附件.bin",
+      "bytes": 285
+    },
+    {
+      "event": "imported",
+      "path": "/home/plumwsl/.g0-files-7gizwyeo/imports/a936ad2def1c40989040e3709f62db0d/Windows 中文附件.bin",
+      "name": "Windows 中文附件.bin",
+      "bytes": 285
+    },
+    {
+      "event": "stopped",
+      "home": "/home/plumwsl/.g0-files-7gizwyeo",
+      "imports": [
+        "/home/plumwsl/.g0-files-7gizwyeo/imports/d7c22b75e7e94f33aef4975c683d49c1/Windows 中文附件.bin",
+        "/home/plumwsl/.g0-files-7gizwyeo/imports/a936ad2def1c40989040e3709f62db0d/Windows 中文附件.bin",
+        "/home/plumwsl/.g0-files-7gizwyeo/imports/980da893a0734cb8b3ef47eb2c159e02/Windows 中文附件.bin"
+      ]
+    },
+    {
+      "event": "carrier-close",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "event": "host-stopped"
+    }
+  ],
+  "requests": [
+    {
+      "url": "https://127.0.0.1:35677/",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:35677/directories",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:35677/import",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:35677/import",
+      "allow": true
+    },
+    {
+      "url": "https://127.0.0.1:35677/import",
+      "allow": true
+    }
+  ],
+  "certificates": [
+    {
+      "hostname": "127.0.0.1",
+      "same": true
+    },
+    {
+      "hostname": "redirector.gvt1.com",
+      "same": false
+    }
+  ],
+  "started": "2026-10-24T17:15:55.189Z",
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  }
+}

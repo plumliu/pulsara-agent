@@ -1,0 +1,636 @@
+{
+  "mode": "mock",
+  "records": [
+    {
+      "event": "electron-ready",
+      "time": 1792864163929,
+      "mode": "mock",
+      "electron": "44.9.0",
+      "node": "v24.22.0",
+      "platform": "win32"
+    },
+    {
+      "event": "guest-carrier",
+      "time": 1792864163935,
+      "pid": 38768,
+      "executable": "C:\\WINDOWS\\System32\\wsl.exe",
+      "argv": [
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round6/guest.py",
+        "mock"
+      ]
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864165016,
+      "record": {
+        "type": "guest-ready",
+        "mode": "mock",
+        "home": "/home/plumwsl/.g0oauth6-i403lko4",
+        "uid": 1000,
+        "device": 2096,
+        "sdk": "2.1.0"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864165022,
+      "record": {
+        "type": "case-start",
+        "case": "success"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864165692,
+      "requestId": "1",
+      "case": "success",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864165692,
+      "requestId": "1",
+      "case": "success",
+      "origin": "http://127.0.0.1:35227"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864165726,
+      "requestId": "1",
+      "case": "success",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864165793,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "success",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864166497,
+      "record": {
+        "type": "callback-response-observed",
+        "case": "success",
+        "status": 200,
+        "outcome": "success"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864166499,
+      "record": {
+        "type": "case-result",
+        "case": "success",
+        "state": "authorized",
+        "grant_present": true,
+        "callback_statuses": [
+          200
+        ],
+        "callback_outcomes": [
+          "success"
+        ],
+        "token_requests": 1,
+        "pkce_valid": true,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:49549"
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864166502,
+      "case": "success",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864166506,
+      "record": {
+        "type": "case-start",
+        "case": "state"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864166644,
+      "requestId": "2",
+      "case": "state",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864166644,
+      "requestId": "2",
+      "case": "state",
+      "origin": "http://127.0.0.1:46097"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864166656,
+      "requestId": "2",
+      "case": "state",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864166717,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "state",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864166726,
+      "record": {
+        "type": "callback-response-observed",
+        "case": "state",
+        "status": 400,
+        "outcome": "error"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864166727,
+      "record": {
+        "type": "case-result",
+        "case": "state",
+        "state": "cancelled",
+        "grant_present": false,
+        "callback_statuses": [
+          400
+        ],
+        "callback_outcomes": [
+          "error"
+        ],
+        "token_requests": 0,
+        "pkce_valid": null,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:43265"
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864166729,
+      "case": "state",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864166734,
+      "record": {
+        "type": "case-start",
+        "case": "issuer"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864167729,
+      "requestId": "3",
+      "case": "issuer",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864167729,
+      "requestId": "3",
+      "case": "issuer",
+      "origin": "http://127.0.0.1:36071"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864167741,
+      "requestId": "3",
+      "case": "issuer",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864167802,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "issuer",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864167808,
+      "record": {
+        "type": "callback-response-observed",
+        "case": "issuer",
+        "status": 200,
+        "outcome": "error"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864167808,
+      "record": {
+        "type": "case-result",
+        "case": "issuer",
+        "state": "failed",
+        "grant_present": false,
+        "callback_statuses": [
+          200
+        ],
+        "callback_outcomes": [
+          "error"
+        ],
+        "token_requests": 0,
+        "pkce_valid": null,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:49069"
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864167811,
+      "case": "issuer",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864167815,
+      "record": {
+        "type": "case-start",
+        "case": "pkce"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864168706,
+      "requestId": "4",
+      "case": "pkce",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864168706,
+      "requestId": "4",
+      "case": "pkce",
+      "origin": "http://127.0.0.1:38345"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864168719,
+      "requestId": "4",
+      "case": "pkce",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864168771,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "pkce",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864168783,
+      "record": {
+        "type": "callback-response-observed",
+        "case": "pkce",
+        "status": 200,
+        "outcome": "error"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864168784,
+      "record": {
+        "type": "case-result",
+        "case": "pkce",
+        "state": "failed",
+        "grant_present": false,
+        "callback_statuses": [
+          200
+        ],
+        "callback_outcomes": [
+          "error"
+        ],
+        "token_requests": 1,
+        "pkce_valid": true,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:57745"
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864168790,
+      "case": "pkce",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864168793,
+      "record": {
+        "type": "case-start",
+        "case": "reuse"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864169681,
+      "requestId": "5",
+      "case": "reuse",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864169681,
+      "requestId": "5",
+      "case": "reuse",
+      "origin": "http://127.0.0.1:45671"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864169694,
+      "requestId": "5",
+      "case": "reuse",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864169757,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "reuse",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864169807,
+      "record": {
+        "type": "callback-response-observed",
+        "case": "reuse",
+        "status": 400,
+        "outcome": "error"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864169818,
+      "record": {
+        "type": "callback-response-observed",
+        "case": "reuse",
+        "status": 200,
+        "outcome": "success"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864169822,
+      "record": {
+        "type": "case-result",
+        "case": "reuse",
+        "state": "authorized",
+        "grant_present": true,
+        "callback_statuses": [
+          400,
+          200
+        ],
+        "callback_outcomes": [
+          "error",
+          "success"
+        ],
+        "token_requests": 1,
+        "pkce_valid": true,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:37197"
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864169824,
+      "case": "reuse",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864169830,
+      "record": {
+        "type": "case-start",
+        "case": "cancel"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864170714,
+      "requestId": "6",
+      "case": "cancel",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864170715,
+      "requestId": "6",
+      "case": "cancel",
+      "origin": "http://127.0.0.1:36419"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864170727,
+      "requestId": "6",
+      "case": "cancel",
+      "opened": true
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864170783,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "cancel",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864170784,
+      "record": {
+        "type": "case-result",
+        "case": "cancel",
+        "state": "cancelled",
+        "grant_present": false,
+        "callback_statuses": [],
+        "callback_outcomes": [],
+        "token_requests": 0,
+        "pkce_valid": null,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:48499"
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864170786,
+      "case": "cancel",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864170793,
+      "record": {
+        "type": "case-start",
+        "case": "port-conflict"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864170810,
+      "record": {
+        "type": "case-result",
+        "case": "port-conflict",
+        "state": "failed",
+        "grant_present": false,
+        "callback_statuses": [],
+        "callback_outcomes": [],
+        "token_requests": 0,
+        "pkce_valid": null,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:49197"
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864170811,
+      "case": "port-conflict",
+      "reachable": false,
+      "errorCode": "ECONNREFUSED"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864170816,
+      "record": {
+        "type": "case-start",
+        "case": "pipe-loss"
+      }
+    },
+    {
+      "event": "listener-present-before-open",
+      "time": 1792864171696,
+      "requestId": "7",
+      "case": "pipe-loss",
+      "reachable": true,
+      "status": 404
+    },
+    {
+      "event": "shell-open-external-submitted",
+      "time": 1792864171696,
+      "requestId": "7",
+      "case": "pipe-loss",
+      "origin": "http://127.0.0.1:34863"
+    },
+    {
+      "event": "shell-open-external-returned",
+      "time": 1792864171712,
+      "requestId": "7",
+      "case": "pipe-loss",
+      "opened": true
+    },
+    {
+      "event": "host-control-pipe-eof",
+      "time": 1792864171773,
+      "case": "pipe-loss"
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864171773,
+      "record": {
+        "type": "mock-authorization-visited",
+        "case": "pipe-loss",
+        "pkce_method": "S256"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864171774,
+      "record": {
+        "type": "case-result",
+        "case": "pipe-loss",
+        "state": "cancelled",
+        "grant_present": false,
+        "callback_statuses": [],
+        "callback_outcomes": [],
+        "token_requests": 0,
+        "pkce_valid": null,
+        "listener_closed": true,
+        "pending_count": 0,
+        "callback_origin": "http://127.0.0.1:46901"
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864171775,
+      "record": {
+        "type": "host-pipe-settled",
+        "pending_count": 0
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864171775,
+      "record": {
+        "type": "matrix-complete",
+        "cases": 8
+      }
+    },
+    {
+      "event": "guest-event",
+      "time": 1792864171775,
+      "record": {
+        "type": "guest-cleaned",
+        "home": "/home/plumwsl/.g0oauth6-i403lko4",
+        "removed": true
+      }
+    },
+    {
+      "event": "listener-after-settlement",
+      "time": 1792864171776,
+      "case": "pipe-loss",
+      "reachable": false,
+      "errorCode": "ECONNRESET"
+    },
+    {
+      "event": "guest-carrier-closed",
+      "time": 1792864172303,
+      "code": 0,
+      "signal": null,
+      "stderrBytes": 0,
+      "partialFrame": false
+    }
+  ]
+}

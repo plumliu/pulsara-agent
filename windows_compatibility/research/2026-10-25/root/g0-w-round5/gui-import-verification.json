@@ -1,0 +1,14 @@
+{
+  "pass": true,
+  "bytes": 285,
+  "path": "/home/plumwsl/.g0-files-7gizwyeo/imports/d7c22b75e7e94f33aef4975c683d49c1/Windows 中文附件.bin",
+  "uid": 1000,
+  "mode": "0o400",
+  "directoryMode": "0o500",
+  "mount": "ext4 /dev/sdd",
+  "nativeWindowsChooser": true,
+  "chooserOperatedBy": "user after tool modal binding failed",
+  "productionOwner": "LocalImport",
+  "sourceBytesComparedExactly": true,
+  "dragDropTested": false
+}

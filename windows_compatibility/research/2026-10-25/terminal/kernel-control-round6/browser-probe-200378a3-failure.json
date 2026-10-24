@@ -1,0 +1,7 @@
+{
+  "label": "window-close-original-electron-200378a3",
+  "verificationFailure": "KeyError: 'hostResult' at browser_probe.py:13",
+  "classification": "research host ended on Electron default window-all-closed before writing final host-result",
+  "rawPreserved": true,
+  "correction": "retain original main window-all-closed no-op policy in the same research Electron shell"
+}

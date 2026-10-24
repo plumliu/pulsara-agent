@@ -1,0 +1,636 @@
+{
+  "tests": [
+    {
+      "name": "actual middleware rejects wrong Origin and Host",
+      "pass": true,
+      "detail": {
+        "origin": {
+          "event": "response",
+          "path": "/api/connections/owner/file-preview",
+          "method": "POST",
+          "status": 403
+        },
+        "hostStatus": 421
+      }
+    },
+    {
+      "name": "production import role and generation boundaries",
+      "pass": true,
+      "detail": [
+        {
+          "error": {
+            "code": "CHAT_CONTROLLER_REQUIRED",
+            "message": "当前窗口没有会话控制权，请重新连接。",
+            "retryable": true
+          }
+        },
+        {
+          "error": {
+            "code": "CHAT_CONTROLLER_REQUIRED",
+            "message": "当前窗口没有会话控制权，请重新连接。",
+            "retryable": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "real LocalHttpServer import and exact Windows source bytes",
+      "pass": true,
+      "detail": {
+        "path": "/home/plumwsl/.g0-http-xji2tyl1/imports/1b3693675ee74f7e9bfc6ce0d2bfc3bd/Windows 中文附件.bin",
+        "name": "Windows 中文附件.bin",
+        "bytes": 285
+      }
+    },
+    {
+      "name": "real bridge text preview and descriptor byte content",
+      "pass": true,
+      "detail": {
+        "mode": "text",
+        "text": "中文预览 / Windows WSL2\n",
+        "cursor": 0,
+        "next_cursor": null
+      }
+    },
+    {
+      "name": "actual preview rejects another connection token",
+      "pass": true,
+      "detail": {
+        "status": 409,
+        "value": {
+          "error": {
+            "code": "PREVIEW_EXPIRED",
+            "message": "预览已关闭或被替换，请重新打开。",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "name": "real HTML sandbox null Origin resources retain same pinned session",
+      "pass": true,
+      "detail": {
+        "sandbox": {
+          "origin": "null",
+          "g0": true,
+          "node": "undefined",
+          "bridge": "undefined"
+        },
+        "resource": {
+          "value": "中文资源"
+        }
+      }
+    },
+    {
+      "name": "actual image decodes in Windows Chromium",
+      "pass": true,
+      "detail": {
+        "width": 1,
+        "height": 1
+      }
+    },
+    {
+      "name": "PDF object uses original preview URL and Windows renderer",
+      "pass": true,
+      "detail": {
+        "contentUrl": "/api/file-previews/GNZAJICWPizfveYK_GxPwca5yvxoJAc1g577NgIxX3I/content",
+        "screenshot": "pdf-render.png",
+        "visualReviewRequired": true
+      }
+    },
+    {
+      "name": "production preview download writes exact Windows bytes",
+      "pass": true,
+      "detail": {
+        "state": "completed",
+        "bytes": 28
+      }
+    },
+    {
+      "name": "failed save destination reports interruption and settles explicit cancel",
+      "pass": true,
+      "detail": {
+        "updates": [
+          {
+            "state": "progressing",
+            "canResume": false,
+            "bytes": 0
+          },
+          {
+            "state": "progressing",
+            "canResume": false,
+            "bytes": 28
+          },
+          {
+            "state": "progressing",
+            "canResume": false,
+            "bytes": 28
+          },
+          {
+            "state": "progressing",
+            "canResume": false,
+            "bytes": 28
+          },
+          {
+            "state": "progressing",
+            "canResume": false,
+            "bytes": 28
+          },
+          {
+            "state": "interrupted",
+            "canResume": true,
+            "bytes": 0
+          }
+        ],
+        "terminal": "cancelled",
+        "retried": false
+      }
+    },
+    {
+      "name": "replacement invalidates held original preview",
+      "pass": true,
+      "detail": {
+        "status": 409,
+        "value": {
+          "error": {
+            "code": "FILE_CHANGED",
+            "message": "文件已发生变化，请重新打开预览。",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "name": "owner revoke retires all preview descriptors and old URLs",
+      "pass": true,
+      "detail": {
+        "event": "revoked",
+        "slots": 0,
+        "pending": 0
+      }
+    },
+    {
+      "name": "Session retirement rejects concurrent fresh requests",
+      "pass": true,
+      "detail": [
+        true,
+        true,
+        true,
+        true
+      ]
+    }
+  ],
+  "events": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:38733",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUJkoejvrszCNmB7KHwWI7y60GouUwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3MjQ0MVoXDTI2MTAy\nNTE3MjQ0MVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAtncafC73SVa+UKPWYkHWb7uPP3tTVBQU57sMtH4cfWZf\nlOFKQwnF2PkGazWxNFBOzX7P/1D7nv6tvInGPGhSWsNc2cA3mbSh2h/mk1eeZdFf\nOupd3fYebtdgNMlrBBY1Oc+Zq8By4xUz89p0IO7+8WFvKG5ek4lgx8A/xln8pw05\n8JxomQXdkDheoarzNmbtwqVUZVoVUsOi1t1OMMIEhdRkl2qwHEQvZqXY/Fw5Hous\nwMRHec/1kiGqM/v9hMncAf8PjPmRPq0/q5ceiCQliXq/9O4W2qjEJ6JVfJTigD2T\ntOaDtudWUIGSbHcGXF04vGkuoxcpGEvJRAaPgQlN7wIDAQABo1MwUTAdBgNVHQ4E\nFgQUdN94kXsCxqj4v0x0jRZdd4X7PmAwHwYDVR0jBBgwFoAUdN94kXsCxqj4v0x0\njRZdd4X7PmAwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAceCf\n/HVFUa+YnVz/Pd6FcpGGC7Ow0tziLJ3yRx4ZnvFsRLMeEDBUSVPQo4CIJ0Ld9PoM\nb1+bmI/mEaj/FapOA728Tuax/EHeXGRmpOeUMHvuv/HUkLsgKIOYQZV9cYVztcDD\ne9inVKpJfgeBUUlA3gNGlKcmOhu3JBUXzTgjbYUj+Vxc0r89vslxGZsI0XhY+q7x\nK2MAgIUTt+2HEIXRVScdiGkVV7bP/XP5Ln39CGZxZX4kM17vqb6vEX24MXIzTChU\nFAj2MS20ZxSewngmoz4el6jluTYmhnW4lA0F5Mhu+8FUqzX9Dzot1uDiC89yF81i\nmrlD19hY5oNOPa6ogw==\n-----END CERTIFICATE-----\n",
+      "home": "/home/plumwsl/.g0-http-xji2tyl1",
+      "workspace": "/home/plumwsl/.g0-http-xji2tyl1/workspace",
+      "uid": 1000,
+      "pid": 3049,
+      "owners": [
+        "LocalHttpServer",
+        "RendererBridge",
+        "LocalImport",
+        "FilePreviewHttp",
+        "FilePreviews"
+      ]
+    },
+    {
+      "event": "response",
+      "path": "/",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview",
+      "method": "POST",
+      "status": 403
+    },
+    {
+      "event": "response",
+      "path": "/healthz",
+      "method": "GET",
+      "status": 421
+    },
+    {
+      "event": "response",
+      "path": "/healthz",
+      "method": "GET",
+      "status": 421
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/observer/import-file",
+      "method": "POST",
+      "status": 409
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/import-file",
+      "method": "POST",
+      "status": 409
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/import-file",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "event": "inspect",
+      "imports": [
+        {
+          "name": "Windows 中文附件.bin",
+          "bytes": 285,
+          "contentBase64": "V2luZG93c+KGkkxpbnV4IOS4reaWh+mZhOS7tgoAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+f4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/",
+          "mode": "0o400",
+          "uid": 1000
+        }
+      ],
+      "stages": [],
+      "slots": 0,
+      "pending": 0
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview/page",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/observer/file-preview/page",
+      "method": "POST",
+      "status": 409
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/Y8MI81CFkMb1WXnHCTvmzD1dnZGj0WOA6ptmgCLSanU/resources/index.html",
+      "method": "GET",
+      "status": 403
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/Y8MI81CFkMb1WXnHCTvmzD1dnZGj0WOA6ptmgCLSanU/resources/index.html",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/Y8MI81CFkMb1WXnHCTvmzD1dnZGj0WOA6ptmgCLSanU/resources/data.json",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/OIjiXSjrUcL_ji69fvujxODF-IrK5e-dsm74MUwr5gk/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/GNZAJICWPizfveYK_GxPwca5yvxoJAc1g577NgIxX3I/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/GNZAJICWPizfveYK_GxPwca5yvxoJAc1g577NgIxX3I/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/2lDoLBMQVfTmGT-l6ErD4UuJaZLESEBdxbIKFOhNA4c/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/2lDoLBMQVfTmGT-l6ErD4UuJaZLESEBdxbIKFOhNA4c/content",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "replaced"
+    },
+    {
+      "event": "response",
+      "path": "/api/connections/owner/file-preview/page",
+      "method": "POST",
+      "status": 409
+    },
+    {
+      "event": "revoked",
+      "slots": 0,
+      "pending": 0
+    },
+    {
+      "event": "response",
+      "path": "/api/file-previews/2lDoLBMQVfTmGT-l6ErD4UuJaZLESEBdxbIKFOhNA4c/content",
+      "method": "GET",
+      "status": 409
+    },
+    {
+      "event": "stopped",
+      "slots": 0,
+      "pending": 0,
+      "home": "/home/plumwsl/.g0-http-xji2tyl1"
+    }
+  ],
+  "requests": [
+    {
+      "url": "https://127.0.0.1:38733/",
+      "allowed": true,
+      "resourceType": "mainFrame",
+      "frameUrl": ""
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/healthz",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/observer/import-file",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/import-file",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/import-file",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/file-preview/page",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/observer/file-preview/page",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/Y8MI81CFkMb1WXnHCTvmzD1dnZGj0WOA6ptmgCLSanU/resources/index.html",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/Y8MI81CFkMb1WXnHCTvmzD1dnZGj0WOA6ptmgCLSanU/resources/index.html",
+      "allowed": true,
+      "resourceType": "subFrame",
+      "frameUrl": ""
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/Y8MI81CFkMb1WXnHCTvmzD1dnZGj0WOA6ptmgCLSanU/resources/data.json",
+      "allowed": true,
+      "resourceType": "xhr",
+      "frameUrl": "https://127.0.0.1:38733/api/file-previews/Y8MI81CFkMb1WXnHCTvmzD1dnZGj0WOA6ptmgCLSanU/resources/index.html"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/OIjiXSjrUcL_ji69fvujxODF-IrK5e-dsm74MUwr5gk/content",
+      "allowed": true,
+      "resourceType": "image",
+      "frameUrl": "https://127.0.0.1:38733/"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/GNZAJICWPizfveYK_GxPwca5yvxoJAc1g577NgIxX3I/content",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/GNZAJICWPizfveYK_GxPwca5yvxoJAc1g577NgIxX3I/content",
+      "allowed": true,
+      "resourceType": "object",
+      "frameUrl": ""
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/pdf_embedder.css",
+      "allowed": true,
+      "resourceType": "stylesheet",
+      "frameUrl": "https://127.0.0.1:38733/api/file-previews/GNZAJICWPizfveYK_GxPwca5yvxoJAc1g577NgIxX3I/content"
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html",
+      "allowed": true,
+      "resourceType": "subFrame",
+      "frameUrl": "about:blank"
+    },
+    {
+      "url": "chrome://resources/css/text_defaults_md.css",
+      "allowed": true,
+      "resourceType": "stylesheet",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.css",
+      "allowed": true,
+      "resourceType": "stylesheet",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/main.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/pdf_viewer_wrapper.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/browser_api.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/shared.rollup.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome://resources/lit/v3_0/lit.rollup.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome://resources/js/load_time_data.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/pdf_scripting_api.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome://resources/mojo/mojo/public/js/bindings.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "chrome://resources/js/assert.js",
+      "allowed": true,
+      "resourceType": "script",
+      "frameUrl": "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/2lDoLBMQVfTmGT-l6ErD4UuJaZLESEBdxbIKFOhNA4c/content?download=1",
+      "allowed": true,
+      "resourceType": "other",
+      "frameUrl": "https://127.0.0.1:38733/"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/2lDoLBMQVfTmGT-l6ErD4UuJaZLESEBdxbIKFOhNA4c/content?download=1",
+      "allowed": true,
+      "resourceType": "other",
+      "frameUrl": "https://127.0.0.1:38733/"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/connections/owner/file-preview/page",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/api/file-previews/2lDoLBMQVfTmGT-l6ErD4UuJaZLESEBdxbIKFOhNA4c/content",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/healthz",
+      "allowed": false,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/healthz",
+      "allowed": false,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/healthz",
+      "allowed": false,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:38733/healthz",
+      "allowed": false,
+      "resourceType": "other"
+    }
+  ],
+  "certChecks": [
+    {
+      "same": false,
+      "hostname": "redirector.gvt1.com"
+    },
+    {
+      "same": true,
+      "hostname": "127.0.0.1"
+    }
+  ],
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  },
+  "carrierExit": {
+    "code": 0,
+    "signal": null
+  },
+  "summary": {
+    "passed": 13,
+    "failed": 0
+  }
+}

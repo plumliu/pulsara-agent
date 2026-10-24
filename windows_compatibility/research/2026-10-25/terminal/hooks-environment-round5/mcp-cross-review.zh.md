@@ -1,0 +1,11 @@
+# 第五轮 MCP 独立只读审查
+
+已读interop_tasks_r3/round5的最终report、mcp_probe.py/mcp_server.py及真实接缝代码。未修改该分支、未重跑MCP。报告的有限结论可归档，没有把MCP调用取消改成terminal/hook的一次性进程语义。
+
+- 真实McpHostSupervisor/executor、BoundedMcpSdkClient、原_BoundedStdioTransport与公开MCPServer/ClientSession承担原协议和permit/session生命周期；研究没有复制framing或工具状态机。
+- scope.prepare发生在真实create_subprocess_exec sink，原credential gate仍持锁且有实际断言；diagnostic精确Job绑定后才真实stdio server spawn。command精确匹配、ContextVar和文件RPC明确只是研究装配。
+- scoped aclose等待原transport Linuxgroup/stdio task与额外Windows范围，client closed发布与path退休有后序约束；正常自然join，取消/故障才Job终止。原baseline清理在supervisor已返回之后，报告未把外层补收当产品正确。
+- call-cancel保原READY session、permit释放/operation lane归零，之后明确supervisor.close才收session范围。timeout/servercrash保原UNKNOWN、retry=false；本轮立即关闭host、不重发tool调用，报告没有宣称所有未来reconnect交错都已验证。
+- 合成credential拒绝、真实server pidfd死亡及Windows子HANDLE观察与所述边界一致。原21项测试与清理审计仅支持其所列范围，没有替代HTTP/TLS/OAuth、全部启动/slot替换交错或GUI宿主失联。
+
+关键剩余接口是生产scope装配/close原因与所有重连新scope的单一创建退休，不由本次按scenario选normal/cancel模式的探针自动完成。报告已明确这些限制，无需新增实验才能归档。

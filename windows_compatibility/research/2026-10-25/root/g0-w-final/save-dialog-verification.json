@@ -1,0 +1,46 @@
+{
+  "passed": true,
+  "hostExit": {
+    "exit": 0,
+    "pid": 41252
+  },
+  "carrierExit": {
+    "code": 0,
+    "signal": null
+  },
+  "tests": [
+    {
+      "name": "cancel-dialog",
+      "pass": true,
+      "detail": {
+        "state": "cancelled",
+        "path": "",
+        "bytes": 0
+      }
+    },
+    {
+      "name": "decline-overwrite",
+      "pass": true,
+      "detail": {
+        "state": "cancelled",
+        "path": "",
+        "bytes": 0
+      }
+    },
+    {
+      "name": "accept-overwrite",
+      "pass": true,
+      "detail": {
+        "state": "completed",
+        "path": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\root\\round6\\save-dialog-existing.txt",
+        "bytes": 28
+      }
+    }
+  ],
+  "cleanup": {
+    "path": "/home/plumwsl/.g0-http-4rn3jx8r",
+    "existsAfter": false,
+    "historicalPidCurrentlyExists": false
+  },
+  "profile": "idle output cache retained; excluded from archive"
+}

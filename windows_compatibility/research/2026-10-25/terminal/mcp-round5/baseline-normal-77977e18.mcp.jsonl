@@ -1,0 +1,17 @@
+{"event": "probe-started", "time": 1792861811.226004, "pid": 500, "starttime": "17686", "candidate": false, "scenario": "normal"}
+{"event": "scope-prepare-entered", "time": 1792861811.2323954, "scope": "mcp-session", "receiverPid": 507}
+{"event": "scope-fd-bound", "time": 1792861811.5753357, "scope": "mcp-session"}
+{"event": "scope-operation-admitted", "time": 1792861811.762205, "scope": "mcp-session"}
+{"event": "real-credential-guard-entered", "time": 1792861811.7679067, "locked": true}
+{"event": "actual-stdio-sink-inside-credential-guard", "time": 1792861811.774586, "candidate": false}
+{"event": "real-stdio-process-created", "time": 1792861811.78195, "pid": 512, "starttime": "17911", "guardStillLocked": true}
+{"event": "real-supervisor-ready-and-permit-accepted", "time": 1792861812.4687338, "protocol": "2026-07-28", "effect": "EXTERNAL_EFFECT", "supportsParallel": false}
+{"event": "real-tool-outcome", "time": 1792861812.8312683, "state": "SUCCESS", "content": "{\"content\":[{\"text\":\"MCP-ACK:h\u00e9llo:0\",\"type\":\"text\"}],\"isError\":false,\"resultType\":\"complete\",\"structuredContent\":{\"result\":\"MCP-ACK:h\u00e9llo:0\"}}", "permitState": "RELEASED"}
+{"event": "original-supervisor-close-returned", "time": 1792861812.837999, "clientClosed": true, "processReturncode": -15, "stdioTasksDone": true, "linuxGroupAlive": false, "permitState": "RELEASED", "spawnCount": 1, "guardEntries": 1}
+{"event": "baseline-external-research-cleanup-entered", "time": 1792861812.846778}
+{"event": "relay-ack-observed", "time": 1792861812.8627014, "scope": "mcp-session", "snapshot": {"mode": "normal", "accepted": 3, "taskCount": 0, "writerCount": 0, "forwardedBytes": 1218, "anyForwarded": true, "operationAccepted": 2, "operationForwardedBytes": 619, "operationAnyForwarded": true, "socketExists": true, "directory": "/home/plumwsl/.g0m5-ed22dec7d08e"}, "crossDomainOutcome": "unknown"}
+{"event": "retained-socket-late-caller-rejected", "time": 1792861812.870678, "scope": "mcp-session", "pid": 516, "exit": 1, "stdout": "", "stderr": "<3>WSL (516 - ) ERROR: UtilConnectUnix:535: connect failed 111\n", "socketStillExists": true, "groupAlive": false}
+{"event": "relay-ack-remains-stable", "time": 1792861812.8794525, "scope": "mcp-session", "mode": "normal", "operationForwardedBytes": 619}
+{"event": "retirement-after-real-mcp-owner-close", "time": 1792861818.8257399, "transportsClosed": true, "stdioTasksDone": true}
+{"event": "scope-receiver-retired", "time": 1792861818.8611574, "scope": "mcp-session", "exit": 0, "output": "", "directoryExists": false}
+{"event": "probe-finished", "time": 1792861818.8691907, "spawnCount": 1, "guardEntries": 1}

@@ -1,0 +1,798 @@
+{
+  "label": "n7-47fc4a8b-8034-46b3-afc6-27a27259df1e",
+  "manual": true,
+  "windowsPid": 7032,
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  },
+  "events": [
+    {
+      "event": "manual-suspend-ready",
+      "time": 1792864260223,
+      "readyFile": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round7\\manual-ready.json"
+    },
+    {
+      "event": "retire-admission-sealed",
+      "time": 1792864620540
+    },
+    {
+      "event": "webcontents-destroyed",
+      "time": 1792864620544
+    },
+    {
+      "event": "connections-closed",
+      "time": 1792864620558
+    }
+  ],
+  "requests": [
+    {
+      "label": "launch",
+      "time": 1792864244245,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864244788,
+      "url": "https://127.0.0.1:42167/",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864244844,
+      "url": "https://127.0.0.1:42167/g0/sse",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864260201,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": true
+    },
+    {
+      "label": "natural-expired-new-context",
+      "time": 1792864260206,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864517090,
+      "url": "https://127.0.0.1:42167/g0/sse",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864619914,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864619932,
+      "url": "https://127.0.0.1:42167/api/connections/owner/import-file",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864619932,
+      "url": "https://127.0.0.1:42167/g0/download",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864619932,
+      "url": "https://127.0.0.1:42167/g0/pending",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864619933,
+      "url": "https://127.0.0.1:42167/g0/pending",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864619933,
+      "url": "https://127.0.0.1:42167/g0/pending",
+      "allow": true
+    },
+    {
+      "label": "launch",
+      "time": 1792864620576,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": false
+    },
+    {
+      "label": "launch",
+      "time": 1792864620576,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": false
+    },
+    {
+      "label": "launch",
+      "time": 1792864620576,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": false
+    },
+    {
+      "label": "launch",
+      "time": 1792864620576,
+      "url": "https://127.0.0.1:42167/healthz",
+      "allow": false
+    }
+  ],
+  "checks": [
+    {
+      "label": "launch",
+      "time": 1792864244406,
+      "same": false,
+      "allow": false,
+      "errorCode": 0,
+      "verificationResult": "net::OK"
+    },
+    {
+      "label": "launch",
+      "time": 1792864244762,
+      "same": true,
+      "allow": true,
+      "errorCode": -202,
+      "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID"
+    },
+    {
+      "label": "natural-expired-new-context",
+      "time": 1792864260212,
+      "same": true,
+      "allow": true,
+      "errorCode": -202,
+      "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID"
+    }
+  ],
+  "tests": [
+    {
+      "name": "natural certificate boundary with same live guest and SSE",
+      "passed": true,
+      "detail": {
+        "before": {
+          "count": 5,
+          "opens": 1,
+          "errors": 0,
+          "last": {
+            "pid": 678,
+            "seq": 5,
+            "timeMs": 1792864245248
+          }
+        },
+        "after": {
+          "count": 153,
+          "opens": 1,
+          "errors": 0,
+          "last": {
+            "pid": 678,
+            "seq": 153,
+            "timeMs": 1792864260104
+          }
+        },
+        "newContextChecks": [
+          {
+            "label": "natural-expired-new-context",
+            "time": 1792864260212,
+            "same": true,
+            "allow": true,
+            "errorCode": -202,
+            "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID"
+          }
+        ],
+        "guestPid": 678,
+        "guestSpawns": 1,
+        "clockChanged": false
+      }
+    },
+    {
+      "name": "actual powerMonitor suspend and resume observed",
+      "passed": true,
+      "detail": {
+        "powers": [
+          {
+            "event": "suspend",
+            "time": 1792864428598
+          },
+          {
+            "event": "resume",
+            "time": 1792864517091
+          }
+        ],
+        "state": {
+          "count": 2854,
+          "opens": 2,
+          "errors": 1,
+          "last": {
+            "pid": 678,
+            "seq": 2855,
+            "timeMs": 1792864619868
+          }
+        },
+        "samePid": true,
+        "sameCertificate": true,
+        "guestSpawns": 1
+      }
+    },
+    {
+      "name": "old Session retires SSE slow import download and concurrent pending",
+      "passed": true,
+      "detail": {
+        "before": {
+          "event": "inspect",
+          "pid": 678,
+          "starttime": "28429",
+          "timeMs": 1792864620539,
+          "imports": [
+            {
+              "name": "n7-slow.bin",
+              "bytes": 393216,
+              "mode": "0o600",
+              "uid": 1000
+            }
+          ],
+          "stages": [
+            ".import-07e7f33b2f3f4d80b7a52a6733429550"
+          ],
+          "slots": 0,
+          "pending": 0
+        },
+        "after": {
+          "event": "inspect",
+          "pid": 678,
+          "starttime": "28429",
+          "timeMs": 1792864620696,
+          "imports": [],
+          "stages": [],
+          "slots": 0,
+          "pending": 0
+        },
+        "retireTime": 1792864620540,
+        "settled": [
+          {
+            "route": "/api/connections/owner/import-file",
+            "bytes": 0,
+            "errors": [],
+            "closed": true
+          },
+          {
+            "route": "/g0/pending",
+            "bytes": 0,
+            "errors": [],
+            "closed": true
+          },
+          {
+            "route": "/g0/pending",
+            "bytes": 0,
+            "errors": [],
+            "closed": true
+          },
+          {
+            "route": "/g0/pending",
+            "bytes": 0,
+            "errors": [],
+            "closed": true
+          },
+          {
+            "state": "cancelled",
+            "bytes": 0
+          }
+        ],
+        "rejected": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "webContentsDestroyed": true,
+        "partialBytesBeforeOwnedCleanup": 0,
+        "oneGuest": true
+      }
+    }
+  ],
+  "powers": [
+    {
+      "event": "suspend",
+      "time": 1792864428598
+    },
+    {
+      "event": "resume",
+      "time": 1792864517091
+    }
+  ],
+  "guestSpawns": 1,
+  "carrierPid": 32680,
+  "ready": {
+    "event": "ready",
+    "pid": 678,
+    "starttime": "28429",
+    "timeMs": 1792864244219,
+    "origin": "https://127.0.0.1:42167",
+    "certificate": "-----BEGIN CERTIFICATE-----\nMIIC1zCCAb+gAwIBAgIUEAasvMC2dZJ8dj8de8qWBMNtytswDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3NDk0NFoXDTI2MTAy\nNDE3NTA1OVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAw8IgXzjX+44dI45F4BBgGcmyxl1OGm9HeFYMrtiY64ic\n2temQm9c/40DkVlEpy6X9QUPKwbepby8FFz4vljrrGd0mfsAsGfhhGluqem0SsAs\nC4+qqQ1808Cap4wa8dtrpi9+UyozSPPR91Nv3gqBX22UWvQg2XmPDQrDIf4F9yBG\nxlyDqJnpleOhRXUU+jnYJ354Q1mm4PPiwZBDLfuRSH3ssoZiEhJgrUj5ITQOOaJY\n2ljo8djrQRA/mqK0dfIK+kYM2zdoJwwE3MCM8xeaAQ06hItZMb3SeVOiSNaBBuIE\ncAV9Dp3vVhcBJDfpv+ufaa+2pzW0CAj2deOjjdurCwIDAQABoyEwHzAdBgNVHQ4E\nFgQUA4XhDnNsAsUsrf3JjxeFqtEVpuAwDQYJKoZIhvcNAQELBQADggEBAJJcuv0G\n1w5Lxi3Xbgc53yrTJcCKh7lbskesj9Gr+qt00fX6rZOZiSbTpBlICAOPIbZwwlP1\nLuGW3sXuyJBS2wdXteop7DHab19YzZKU0BudKzs9gzTAEW+FcCrItqDUNhpLwl1v\nZTqekIEqdeHl6yccwIdav3q9nhzZVTx3fZBuGDYkIb9N+p3U36T6xo4mDvRGsJG+\nm24Vrjayt78V8VKUutROSixUIafyog8V2fd7c1SNcZQ6Ijy2auTE+ovSq0TytQ3X\n7OUbzDjxhqlttw0K+Wnl7Am8oyjqrQuP2NVCaoJ9bUVCESJPRd6kctWN2ovh/9HN\niUc9ELyOIXs2+DM=\n-----END CERTIFICATE-----\n",
+    "home": "/home/plumwsl/.g0-http-20sxvi2d",
+    "workspace": "/home/plumwsl/.g0-http-20sxvi2d/workspace",
+    "uid": 1000,
+    "owners": [
+      "LocalHttpServer",
+      "RendererBridge",
+      "LocalImport",
+      "FilePreviewHttp",
+      "FilePreviews"
+    ]
+  },
+  "validFrom": "Oct 24 17:49:44 2026 GMT",
+  "validTo": "Oct 24 17:50:59 2026 GMT",
+  "manualLatest": {
+    "time": 1792864619913,
+    "state": {
+      "count": 2854,
+      "opens": 2,
+      "errors": 1,
+      "last": {
+        "pid": 678,
+        "seq": 2855,
+        "timeMs": 1792864619868
+      }
+    }
+  },
+  "inflightStates": [
+    {
+      "route": "/api/connections/owner/import-file",
+      "bytes": 0,
+      "errors": [],
+      "closed": true
+    },
+    {
+      "route": "/g0/pending",
+      "bytes": 0,
+      "errors": [],
+      "closed": true
+    },
+    {
+      "route": "/g0/pending",
+      "bytes": 0,
+      "errors": [],
+      "closed": true
+    },
+    {
+      "route": "/g0/pending",
+      "bytes": 0,
+      "errors": [],
+      "closed": true
+    }
+  ],
+  "downloadUpdates": [
+    {
+      "time": 1792864619948,
+      "state": "progressing",
+      "bytes": 0
+    },
+    {
+      "time": 1792864620029,
+      "state": "progressing",
+      "bytes": 0
+    },
+    {
+      "time": 1792864620443,
+      "state": "progressing",
+      "bytes": 393216
+    }
+  ],
+  "carrierExit": {
+    "code": 0,
+    "signal": null
+  },
+  "guestEvents": [
+    {
+      "event": "natural-certificate-window",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864244218,
+      "validFrom": "2026-10-24T17:49:44.209000+00:00",
+      "validTo": "2026-10-24T17:50:59.209000+00:00"
+    },
+    {
+      "event": "ready",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864244219,
+      "origin": "https://127.0.0.1:42167",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIC1zCCAb+gAwIBAgIUEAasvMC2dZJ8dj8de8qWBMNtytswDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3NDk0NFoXDTI2MTAy\nNDE3NTA1OVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAw8IgXzjX+44dI45F4BBgGcmyxl1OGm9HeFYMrtiY64ic\n2temQm9c/40DkVlEpy6X9QUPKwbepby8FFz4vljrrGd0mfsAsGfhhGluqem0SsAs\nC4+qqQ1808Cap4wa8dtrpi9+UyozSPPR91Nv3gqBX22UWvQg2XmPDQrDIf4F9yBG\nxlyDqJnpleOhRXUU+jnYJ354Q1mm4PPiwZBDLfuRSH3ssoZiEhJgrUj5ITQOOaJY\n2ljo8djrQRA/mqK0dfIK+kYM2zdoJwwE3MCM8xeaAQ06hItZMb3SeVOiSNaBBuIE\ncAV9Dp3vVhcBJDfpv+ufaa+2pzW0CAj2deOjjdurCwIDAQABoyEwHzAdBgNVHQ4E\nFgQUA4XhDnNsAsUsrf3JjxeFqtEVpuAwDQYJKoZIhvcNAQELBQADggEBAJJcuv0G\n1w5Lxi3Xbgc53yrTJcCKh7lbskesj9Gr+qt00fX6rZOZiSbTpBlICAOPIbZwwlP1\nLuGW3sXuyJBS2wdXteop7DHab19YzZKU0BudKzs9gzTAEW+FcCrItqDUNhpLwl1v\nZTqekIEqdeHl6yccwIdav3q9nhzZVTx3fZBuGDYkIb9N+p3U36T6xo4mDvRGsJG+\nm24Vrjayt78V8VKUutROSixUIafyog8V2fd7c1SNcZQ6Ijy2auTE+ovSq0TytQ3X\n7OUbzDjxhqlttw0K+Wnl7Am8oyjqrQuP2NVCaoJ9bUVCESJPRd6kctWN2ovh/9HN\niUc9ELyOIXs2+DM=\n-----END CERTIFICATE-----\n",
+      "home": "/home/plumwsl/.g0-http-20sxvi2d",
+      "workspace": "/home/plumwsl/.g0-http-20sxvi2d/workspace",
+      "uid": 1000,
+      "owners": [
+        "LocalHttpServer",
+        "RendererBridge",
+        "LocalImport",
+        "FilePreviewHttp",
+        "FilePreviews"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864244763,
+      "path": "/healthz",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864244792,
+      "path": "/",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "network-handler-opened",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864244846,
+      "kind": "sse",
+      "token": "133728267012864",
+      "active": [
+        "sse"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864244846,
+      "path": "/g0/sse",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864260203,
+      "path": "/healthz",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864260213,
+      "path": "/healthz",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "network-handler-closed",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864506521,
+      "kind": "sse",
+      "token": "133728267012864",
+      "transportClosing": true,
+      "active": []
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864506521,
+      "path": "/g0/sse",
+      "method": "GET",
+      "status": 500
+    },
+    {
+      "event": "network-handler-opened",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864506744,
+      "kind": "sse",
+      "token": "133728267012576",
+      "active": [
+        "sse"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864506744,
+      "path": "/g0/sse",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864619918,
+      "path": "/healthz",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "network-handler-opened",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864619933,
+      "kind": "download",
+      "token": "133728267014448",
+      "active": [
+        "sse",
+        "download"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864619934,
+      "path": "/g0/download",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "event": "network-handler-opened",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864619942,
+      "kind": "pending",
+      "token": "133728267016848",
+      "active": [
+        "sse",
+        "download",
+        "pending"
+      ]
+    },
+    {
+      "event": "network-handler-opened",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864619942,
+      "kind": "pending",
+      "token": "133728267018192",
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending"
+      ]
+    },
+    {
+      "event": "network-handler-opened",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864619944,
+      "kind": "pending",
+      "token": "133728267019248",
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620539,
+      "imports": [
+        {
+          "name": "n7-slow.bin",
+          "bytes": 393216,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-07e7f33b2f3f4d80b7a52a6733429550"
+      ],
+      "slots": 0,
+      "pending": 0
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620541,
+      "path": "/api/connections/owner/import-file",
+      "method": "POST",
+      "status": 400
+    },
+    {
+      "event": "network-handler-closed",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620553,
+      "kind": "pending",
+      "token": "133728267016848",
+      "transportClosing": true,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620553,
+      "path": "/g0/pending",
+      "method": "GET",
+      "status": 500
+    },
+    {
+      "event": "network-handler-closed",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620553,
+      "kind": "pending",
+      "token": "133728267018192",
+      "transportClosing": true,
+      "active": [
+        "sse",
+        "download",
+        "pending"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620553,
+      "path": "/g0/pending",
+      "method": "GET",
+      "status": 500
+    },
+    {
+      "event": "network-handler-closed",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620554,
+      "kind": "pending",
+      "token": "133728267019248",
+      "transportClosing": true,
+      "active": [
+        "sse",
+        "download"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620554,
+      "path": "/g0/pending",
+      "method": "GET",
+      "status": 500
+    },
+    {
+      "event": "network-handler-closed",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620573,
+      "kind": "sse",
+      "token": "133728267012576",
+      "transportClosing": true,
+      "active": [
+        "download"
+      ]
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620573,
+      "path": "/g0/sse",
+      "method": "GET",
+      "status": 500
+    },
+    {
+      "event": "inspect",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620577,
+      "imports": [],
+      "stages": [],
+      "slots": 0,
+      "pending": 0
+    },
+    {
+      "event": "inspect",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620633,
+      "imports": [],
+      "stages": [],
+      "slots": 0,
+      "pending": 0
+    },
+    {
+      "event": "network-handler-closed",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620641,
+      "kind": "download",
+      "token": "133728267014448",
+      "transportClosing": true,
+      "active": []
+    },
+    {
+      "event": "response",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620641,
+      "path": "/g0/download",
+      "method": "GET",
+      "status": 500
+    },
+    {
+      "event": "inspect",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620696,
+      "imports": [],
+      "stages": [],
+      "slots": 0,
+      "pending": 0
+    },
+    {
+      "event": "stopped",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620698,
+      "slots": 0,
+      "pending": 0,
+      "home": "/home/plumwsl/.g0-http-20sxvi2d"
+    },
+    {
+      "event": "network-private-home-cleaned",
+      "pid": 678,
+      "starttime": "28429",
+      "timeMs": 1792864620698,
+      "home": "/home/plumwsl/.g0-http-20sxvi2d",
+      "exists": false
+    }
+  ],
+  "ended": 1792864620916
+}

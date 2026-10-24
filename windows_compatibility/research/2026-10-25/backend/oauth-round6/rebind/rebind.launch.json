@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "C:\\python_workspace\\pulsara-agent\\desktop\\node_modules\\electron\\dist\\electron.exe",
+    "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\round6\\rebind\\electron.cjs",
+    "rebind"
+  ],
+  "exit": 0,
+  "stderrBytes": 0
+}

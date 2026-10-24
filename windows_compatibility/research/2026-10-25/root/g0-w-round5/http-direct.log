@@ -1,0 +1,89 @@
+FAIL actual middleware rejects wrong Origin and Host net::ERR_FAILED
+PASS production import role and generation boundaries
+PASS real LocalHttpServer import and exact Windows source bytes
+PASS real bridge text preview and descriptor byte content
+PASS actual preview rejects another connection token
+PASS real HTML sandbox null Origin resources retain same pinned session
+PASS actual image decodes in Windows Chromium
+(node:30344) electron: Failed to load URL: chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html with error: ERR_BLOCKED_BY_CLIENT
+(Use `electron --trace-warnings ...` to show where the warning was created)
+PASS PDF object uses original preview URL and Windows renderer
+PASS production preview download writes exact Windows bytes
+FAIL failed save destination reports failure without replacing existing file observation deadline: failed save destination reports failure without replacing existing file
+PASS replacement invalidates held original preview
+PASS owner revoke retires all preview descriptors and old URLs
+PASS Session retirement rejects concurrent fresh requests
+{"passed":11,"failed":2}
+FAIL actual middleware rejects wrong Origin and Host Expected values to be strictly equal:
+
+405 !== 403
+
+PASS production import role and generation boundaries
+PASS real LocalHttpServer import and exact Windows source bytes
+PASS real bridge text preview and descriptor byte content
+PASS actual preview rejects another connection token
+PASS real HTML sandbox null Origin resources retain same pinned session
+PASS actual image decodes in Windows Chromium
+PASS PDF object uses original preview URL and Windows renderer
+PASS production preview download writes exact Windows bytes
+PASS failed save destination reports interruption and settles explicit cancel
+PASS replacement invalidates held original preview
+PASS owner revoke retires all preview descriptors and old URLs
+PASS Session retirement rejects concurrent fresh requests
+{"passed":12,"failed":1}
+PASS actual middleware rejects wrong Origin and Host
+PASS production import role and generation boundaries
+PASS real LocalHttpServer import and exact Windows source bytes
+PASS real bridge text preview and descriptor byte content
+PASS actual preview rejects another connection token
+PASS real HTML sandbox null Origin resources retain same pinned session
+PASS actual image decodes in Windows Chromium
+PASS PDF object uses original preview URL and Windows renderer
+PASS production preview download writes exact Windows bytes
+PASS failed save destination reports interruption and settles explicit cancel
+PASS replacement invalidates held original preview
+PASS owner revoke retires all preview descriptors and old URLs
+PASS Session retirement rejects concurrent fresh requests
+{"passed":13,"failed":0}
+PASS actual middleware rejects wrong Origin and Host
+PASS production import role and generation boundaries
+PASS real LocalHttpServer import and exact Windows source bytes
+PASS real bridge text preview and descriptor byte content
+PASS actual preview rejects another connection token
+PASS real HTML sandbox null Origin resources retain same pinned session
+PASS actual image decodes in Windows Chromium
+PASS PDF object uses original preview URL and Windows renderer
+PASS production preview download writes exact Windows bytes
+PASS failed save destination reports interruption and settles explicit cancel
+PASS replacement invalidates held original preview
+PASS owner revoke retires all preview descriptors and old URLs
+PASS Session retirement rejects concurrent fresh requests
+{"passed":13,"failed":0}
+PASS actual middleware rejects wrong Origin and Host
+PASS production import role and generation boundaries
+PASS real LocalHttpServer import and exact Windows source bytes
+PASS real bridge text preview and descriptor byte content
+PASS actual preview rejects another connection token
+PASS real HTML sandbox null Origin resources retain same pinned session
+PASS actual image decodes in Windows Chromium
+PASS PDF object uses original preview URL and Windows renderer
+PASS production preview download writes exact Windows bytes
+PASS failed save destination reports interruption and settles explicit cancel
+PASS replacement invalidates held original preview
+PASS owner revoke retires all preview descriptors and old URLs
+PASS Session retirement rejects concurrent fresh requests
+{"passed":13,"failed":0}
+PASS actual middleware rejects wrong Origin and Host
+PASS production import role and generation boundaries
+PASS real LocalHttpServer import and exact Windows source bytes
+PASS real bridge text preview and descriptor byte content
+PASS actual preview rejects another connection token
+PASS real HTML sandbox null Origin resources retain same pinned session
+PASS actual image decodes in Windows Chromium
+PASS PDF object uses original preview URL and Windows renderer
+PASS production preview download writes exact Windows bytes
+PASS failed save destination reports interruption and settles explicit cancel
+PASS replacement invalidates held original preview
+PASS owner revoke retires all preview descriptors and old URLs
+PASS Session retirement rejects concurrent fresh requests
+{"passed":13,"failed":0}

@@ -1,0 +1,86 @@
+{
+  "passed": true,
+  "cases": [
+    {
+      "label": "hook-baseline-normal-8b1f3335",
+      "kind": "hook",
+      "scenario": "normal",
+      "patched": false,
+      "exactWindowsChildAliveAtOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-baseline-normal-f0d9c279",
+      "kind": "hook",
+      "scenario": "normal",
+      "patched": false,
+      "exactWindowsChildAliveAtOriginalOwnerReturn": true
+    },
+    {
+      "label": "environment-baseline-environment-010fd6f6",
+      "kind": "environment",
+      "scenario": "environment",
+      "patched": false,
+      "exactWindowsChildAliveAtOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-scope-normal-e4396da4",
+      "kind": "hook",
+      "scenario": "normal",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-scope-nonzero-13f9556f",
+      "kind": "hook",
+      "scenario": "nonzero",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-scope-timeout-f4ecb9bd",
+      "kind": "hook",
+      "scenario": "timeout",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-scope-cancel-tail-a013a0fc",
+      "kind": "hook",
+      "scenario": "cancel-tail",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-scope-task-cancel-9b2197bf",
+      "kind": "hook",
+      "scenario": "task-cancel",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-scope-host-close-0b48abf8",
+      "kind": "hook",
+      "scenario": "host-close",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "environment-scope-environment-b16a7028",
+      "kind": "environment",
+      "scenario": "environment",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "environment-scope-close-576be31f",
+      "kind": "environment",
+      "scenario": "close",
+      "patched": true,
+      "windowsJoinedBeforeOriginalOwnerReturn": true
+    },
+    {
+      "label": "hook-scope-guard-828aa917",
+      "guardRejectedBeforeScopeAndSpawn": true
+    }
+  ]
+}

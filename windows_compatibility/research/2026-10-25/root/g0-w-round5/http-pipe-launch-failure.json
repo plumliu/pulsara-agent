@@ -1,0 +1,117 @@
+{
+  "tests": [
+    {
+      "name": "actual middleware rejects wrong Origin and Host",
+      "pass": false,
+      "error": "Error: net::ERR_FAILED\n    at SimpleURLLoaderWrapper.<anonymous> (node:electron/js2c/browser_init:1:138083)\n    at SimpleURLLoaderWrapper.emit (node:events:514:28)"
+    },
+    {
+      "name": "production import role and generation boundaries",
+      "pass": true,
+      "detail": [
+        {
+          "error": {
+            "code": "CHAT_CONTROLLER_REQUIRED",
+            "message": "当前窗口没有会话控制权，请重新连接。",
+            "retryable": true
+          }
+        },
+        {
+          "error": {
+            "code": "CHAT_CONTROLLER_REQUIRED",
+            "message": "当前窗口没有会话控制权，请重新连接。",
+            "retryable": true
+          }
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:44645",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUTjbm8IdVnKCfgQ877cFY0NJZbz8wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE3MTkyMloXDTI2MTAy\nNTE3MTkyMlowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAvtj3B0XH2D6ObjWjjU3aNGSFribPvD0Y106nYRWbs4E4\nBrGz+eRMjJXrdwO+LwiShYjgPiTlZC+y/ZWkAugIskny7YEgxfn0P0D9CCFaXe7i\n4Uce5dlezieFOvLiN9R3fOvgK1N5e6CDDNoPNdRlYUJCgLZ7Maq+Ct2QfJHJApeY\nIKCiRt5vrBi0n36QYgc74fEoPPagtr1x/CzAQbyIv5opoiQNPz2UAB1BbtwrnN+y\n6eI3k0qUIU9IaxrCxp5MMKzbCuc45cg/ua2btS/9EBGP27edQuj5B2uMP6F4i3iP\ng+nZNbpnuZVM5BamJZyUbslmCxN08VYP9aKTjrL0jQIDAQABo1MwUTAdBgNVHQ4E\nFgQUJUZDFjzTw7GG/JTbZqo21BYpSLwwHwYDVR0jBBgwFoAUJUZDFjzTw7GG/JTb\nZqo21BYpSLwwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAQxTO\nssYq9tlEUZdvQOHDU3EbxoGIuMyo8lJI/XxJuQl5EF+VRjuvg+Mhip1sw7piWJrh\nnU1sSDw/KDyc2er2xPsntpB3ZxbSTB1erbv8xeVpHkrrXtgJjlkLahEOkaDK/u1s\ntFKqAHiYwMhMIp1pPh//smDzVB2MJCQqN2mwzOzoDgmyJAuEQ+zvP1w1VuDSQ0YR\n0/DtqhRUEYqGS+TKuwvINSMI4jT/T3gejhkmC9gdNRnij9eWl/W0h5yT1l4oqId3\nFTnTeyTeL4CuM+5Z8gAg7gCGofrxnoUEmyl4evHzAFtpLNTSriNsCgmIqKNZOIGf\njU4vlrvCRC9xNQLKMw==\n-----END CERTIFICATE-----\n",
+      "home": "/home/plumwsl/.g0-http-5jet9x6e",
+      "workspace": "/home/plumwsl/.g0-http-5jet9x6e/workspace",
+      "uid": 1000,
+      "pid": 1824,
+      "owners": [
+        "LocalHttpServer",
+        "RendererBridge",
+        "LocalImport",
+        "FilePreviewHttp",
+        "FilePreviews"
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "url": "https://127.0.0.1:44645/",
+      "allowed": true,
+      "resourceType": "mainFrame"
+    },
+    {
+      "url": "https://127.0.0.1:44645/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:44645/api/connections/owner/file-preview",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:44645/api/connections/observer/import-file",
+      "allowed": true,
+      "resourceType": "other"
+    },
+    {
+      "url": "https://127.0.0.1:44645/api/connections/owner/import-file",
+      "allowed": true,
+      "resourceType": "other"
+    }
+  ],
+  "certChecks": [
+    {
+      "same": false,
+      "hostname": "redirector.gvt1.com"
+    },
+    {
+      "same": true,
+      "hostname": "127.0.0.1"
+    }
+  ],
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "uid": 1000,
+  "root": "/home/plumwsl/workspaces/g0-private-mount-iyzb4tml",
+  "privateMountNamespace": true,
+  "cases": [
+    {
+      "name": "drvfs-target",
+      "mount": {
+        "target": "/home/plumwsl/workspaces/g0-private-mount-iyzb4tml/drvfs-target",
+        "fstype": "9p",
+        "source": "C:\\"
+      },
+      "rejected": "workspace must be native ext4, without a replacement mount"
+    },
+    {
+      "name": "ext4-target",
+      "mount": {
+        "target": "/home/plumwsl/workspaces/g0-private-mount-iyzb4tml/ext4-target",
+        "fstype": "ext4",
+        "source": "/dev/sdd[/home/plumwsl/workspaces/g0-private-mount-iyzb4tml/source]"
+      },
+      "rejected": "workspace must be native ext4, without a replacement mount"
+    }
+  ]
+}

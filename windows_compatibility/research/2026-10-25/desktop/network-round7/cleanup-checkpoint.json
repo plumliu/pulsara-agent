@@ -1,0 +1,71 @@
+{
+  "passed": true,
+  "manualIntentionallyHeld": true,
+  "linux": [
+    {
+      "label": "n7-47fc4a8b-8034-46b3-afc6-27a27259df1e",
+      "pid": 678,
+      "start": "28429",
+      "home": "/home/plumwsl/.g0-http-20sxvi2d",
+      "currentStart": "28429",
+      "exactAlive": true,
+      "homeExists": true
+    },
+    {
+      "label": "n7-4e98c96a-54f9-4e9e-88a3-77cd9cfcc7dc",
+      "pid": 425,
+      "start": "25096",
+      "home": "/home/plumwsl/.g0-http-akmmlgen",
+      "currentStart": null,
+      "exactAlive": false,
+      "homeExists": false
+    },
+    {
+      "label": "n7-60330538-65ea-46f2-97e0-af03b829a1bc",
+      "pid": 328,
+      "start": "268",
+      "home": "/home/plumwsl/.g0-http-u8kthzcj",
+      "currentStart": null,
+      "exactAlive": false,
+      "homeExists": false
+    },
+    {
+      "label": "n7-c8877c9b-b180-4d6e-9d80-f630c6794ef9",
+      "pid": 332,
+      "start": "17510",
+      "home": "/home/plumwsl/.g0-http-6v653tob",
+      "currentStart": null,
+      "exactAlive": false,
+      "homeExists": false
+    }
+  ],
+  "windows": [
+    {
+      "pid": 11540,
+      "creation": 134373378097060528,
+      "executable": "C:\\python_workspace\\pulsara-agent\\desktop\\node_modules\\electron\\dist\\electron.exe",
+      "currentCreation": null,
+      "exactAlive": false
+    },
+    {
+      "pid": 7032,
+      "creation": 134373378430316801,
+      "executable": "C:\\python_workspace\\pulsara-agent\\desktop\\node_modules\\electron\\dist\\electron.exe",
+      "currentCreation": 134373378430316801,
+      "exactAlive": true
+    }
+  ],
+  "historicalCurrentPidQueries": [
+    {
+      "pid": 33136,
+      "currentPidPresent": false,
+      "historicalCreationRecorded": false
+    },
+    {
+      "pid": 35108,
+      "currentPidPresent": false,
+      "historicalCreationRecorded": false
+    }
+  ],
+  "stderr": ""
+}

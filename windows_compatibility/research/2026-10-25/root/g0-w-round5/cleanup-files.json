@@ -1,0 +1,78 @@
+{
+  "liveMatchingServers": [],
+  "homes": [
+    {
+      "path": "/home/plumwsl/.g0-http-4ep2i_ga",
+      "readyRecords": [
+        "http-visible-matrix.json"
+      ],
+      "fixtureTemplateChecked": true
+    },
+    {
+      "path": "/home/plumwsl/.g0-http-5jet9x6e",
+      "readyRecords": [
+        "http-pipe-launch-failure.json"
+      ],
+      "fixtureTemplateChecked": true
+    },
+    {
+      "path": "/home/plumwsl/.g0-files-yjev4s5f",
+      "readyRecords": [
+        "files-first-closed.json",
+        "files-unicode-header-failure.json"
+      ],
+      "fixtureTemplateChecked": false
+    },
+    {
+      "path": "/home/plumwsl/.g0-http-xji2tyl1",
+      "readyRecords": [
+        "http-third-matrix.json"
+      ],
+      "fixtureTemplateChecked": true
+    },
+    {
+      "path": "/home/plumwsl/.g0-files-s2wiqd62",
+      "readyRecords": [
+        "files-hidden-launch.json"
+      ],
+      "fixtureTemplateChecked": false
+    },
+    {
+      "path": "/home/plumwsl/.g0-http-70ycg166",
+      "readyRecords": [
+        "http-second-matrix.json"
+      ],
+      "fixtureTemplateChecked": true
+    },
+    {
+      "path": "/home/plumwsl/.g0-http-b4shi0t6",
+      "readyRecords": [],
+      "fixtureTemplateChecked": true
+    },
+    {
+      "path": "/home/plumwsl/.g0-http-f57bq6k1",
+      "readyRecords": [
+        "http-results.json"
+      ],
+      "fixtureTemplateChecked": true
+    },
+    {
+      "path": "/home/plumwsl/.g0-http-fgvcxh3y",
+      "readyRecords": [
+        "http-first-matrix.json"
+      ],
+      "fixtureTemplateChecked": true
+    },
+    {
+      "path": "/home/plumwsl/.g0-files-7gizwyeo",
+      "readyRecords": [
+        "files-gui-v2-results.json",
+        "files-results.json"
+      ],
+      "fixtureTemplateChecked": false
+    }
+  ],
+  "remainingHomes": [],
+  "workspaceRemoved": true,
+  "scope": "No other prefix-matched directories were removed; ten exact observed paths only."
+}
