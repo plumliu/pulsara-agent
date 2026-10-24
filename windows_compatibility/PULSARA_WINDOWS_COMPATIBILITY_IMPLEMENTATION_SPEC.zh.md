@@ -1,6 +1,8 @@
 # Pulsara Windows 兼容实施规格：Windows Electron + WSL2 内核
 
-日期：2026-10-24。状态：**Windows Electron + WSL2全内核实施规格已冻结。收窄后的Phase A已实现，macOS本机回归和应用包GUI验收通过，本次实现及本机证据已交叉审阅冻结；Ubuntu原生/图形资格按用户要求待验收。Phase B未实施，G0-W未执行，Windows支持未激活。**
+日期：2026-10-24。状态：**Windows Electron + WSL2路线按用户授权修订为接入已有发行版/默认非root用户，保留interop与自动挂载。Phase A代码与Mac证据冻结范围保持；Ubuntu原生/图形资格待验收，Phase B未实施，完整G0-W未通过，Windows支持未激活。原四方冻结审阅属于修订前合同。**
+
+2026-10-24 用户授权修订：删除Ubuntu发行版本号及`Pulsara`/`pulsara`固定命名要求；默认接入用户已有WSL2 Ubuntu及其默认非root用户，允许interop、Windows PATH注入和自动挂载。Ubuntu 26.04.1 LTS可作为候选，实际兼容性由资源与G0-W实测决定。无需另立解冻结流程；历史研究/批准记录保留原貌，本次修订及跨域生命周期仍须实际验证。
 
 调研基线：Git `60e8f21d37ca2c650500ae14438630006d3e62fb`。路线冻结时仅修规格；后续按用户授权实施收窄Phase A，实际记录见第16节。不部署WSL发行版、不修改保存配置、不调用真实provider；真实PG实验仅操作已确认的独立临时实例。冻结规格、完成A、通过G0-W、Windows激活是四个不同状态。
 
@@ -10,9 +12,9 @@
 
 本次完整取代此前原生Win32内核路线与其宽Phase A：**ConPTY/Job、PowerShell载荷、Win32 HANDLE/NTFS全消费者binding、Windows PG DLL、内核named-pipe/Proactor迁移全部退出当前计划。** 不保留两条Windows内核路径，不把旧G0-D/T/F/R或88–154人日总数当当前验收/预算，也不以WSL失败自动回退原生Windows、WSL1、Git Bash、远程PG或Docker Desktop。
 
-首批资格矩阵为Windows 11 25H2 x64普通用户、受支持且固定验证版本的WSL2、Pulsara专用Ubuntu 24.04 x64发行版；记录实际OS build/WSL包及Linux kernel/rootfs版本。26H2、ARM64、Server、WSL1、任意用户发行版、DrvFs/网络盘工程需另行目标验收后才扩声明。选择25H2作为首批测试矩阵不代表它是唯一当前Windows版本。[Windows官方版本信息](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information)
+首批资格矩阵为Windows 11 25H2 x64普通用户、受支持且固定验证版本的WSL2、用户选定的已有Ubuntu x64发行版；Ubuntu不预设发行版本号门槛，记录实际OS build/WSL包及Linux kernel/发行版来源与版本，按实测结果声明支持组合。26H2、ARM64、Server、WSL1、其他Linux发行版、DrvFs/网络盘工程需另行目标验收后才扩声明。选择25H2作为首批测试矩阵不代表它是唯一当前Windows版本。[Windows官方版本信息](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information)
 
-**首版只接应用专用发行版`Pulsara`和非root用户`pulsara`。** 不选择用户默认Ubuntu、不修改其他发行版、不修改全局`.wslconfig`/默认发行版/默认WSL版本。专用环境的部署维护成本明确进入预算；此前“接已有WSL约35–65人日”的下界不能直接套用。专用发行版是部署/执行域边界，不宣称能抵御Windows账户拥有者、Linux root或任意恶意本机程序。
+**首版接入一个用户明确选择的已有WSL2 Ubuntu，首次默认选中用户默认发行版并读取其默认非root用户。** 用户确认的具体发行版/用户名由现有Windows宿主设置owner保存；后续启动显式指定`-d/-u`，不因系统默认值变化静默切换数据。名称可为`Ubuntu`、用户可为`plumwsl`，home由Linux实际解析，不按用户名拼接。目标缺失、用户不存在或为root时显示具体错误，不自动创建/接管其他环境。不修改发行版默认用户、全局`.wslconfig`或系统默认发行版/WSL版本，不把共享发行版视作Pulsara独占资源或安全沙箱。
 
 实施次序为：**收窄后的Phase A先完成现有macOS/Linux桌面宿主接缝及回归，可独立交付；G0-W可与A研究并行；A验收和G0-W全部通过后进入Phase B的WSL部署/跨域闭环；最终原生Windows安装验收才激活。** 不必先重构全部POSIX业务代码。
 
@@ -52,11 +54,11 @@
 Windows Electron（main唯一boot/reset/quit）
   ├─ 原窗口/tray/preload/浏览器隔离、资源管理器、安装入口
   ├─ PythonRuntime + BundledPostgres（唯一生命周期/状态owner）
-  │    └─ WslHostOperations → wsl.exe -d Pulsara -u pulsara --exec …
+  │    └─ WslHostOperations → wsl.exe -d <selected-distro> -u <selected-user> --exec …
   │         ├─ 长连接：Linux desktop_runtime，原JSONL start/ready/shutdown
   │         └─ 短调用：有限Linux PG/文件事实操作，一请求一退出
   └─ 专属workbench Session → 被精确认证的WSL HTTPS origin
-       Pulsara WSL2 / Ubuntu24.04 / user pulsara / ext4
+       选定WSL2 Ubuntu / 默认非root用户 / Linux ext4应用数据
          ├─ 原DesktopApplication、HTTP路由、kernel/model/权限/存储
          ├─ 原Linux terminal/MCP/hooks/Skills/plugins/截图worker
          ├─ 原Protocol-v3 Unix socket、diagnostics、kernel flock
@@ -74,7 +76,7 @@ Windows Electron（main唯一boot/reset/quit）
 | terminal/MCP/hooks/preview文件 | 现有Linux产品owner | 标准库/SDK/OS机制继续复用；不复制PTY/filesystem/protocol框架 |
 | 工作区图形服务 | 原workspace identity/availability owner + 小用户级目录服务 | Linux检查canonical/ext4/权限；前端只分页浏览/提交，不发shell命令 |
 | Linux↔Windows显示路径 | 单一host路径适配 + Linux目标验证 | 固定发行版映射，路径字符串不作授权，也不重建workspace身份 |
-| 发行版/资源安装 | Windows setup owner、现有资源构建owner | 复用WSL注册/import与官方rootfs；安装维护使用有限显式root操作，日常模型不用root |
+| 目标接入/资源安装 | Windows setup owner、现有资源构建owner | 读取WSL注册与默认用户，安装用户私有Linux应用资源；OS依赖由明确维护动作安装，不接管发行版生命周期 |
 
 ### 3.2 文件落点（A已实现；B仍为计划）
 
@@ -86,14 +88,14 @@ Python生产仍在`src/pulsara_agent/`，Electron在`desktop/`，frontend在`fro
 | `desktop/src/host-operations.ts`、`host-posix.ts` | 当前stream child、有限exec、同步home解析、runtime目录与日志；POSIX实现直接复用Node，runtime仍拥有策略与生命周期 | A已实现 |
 | `desktop/src/postgres-operations.ts`、`postgres-posix.ts` | 专用PG物理端口及本机实现；与host执行端口分别直接复用Node，无跨域泛化或重复PG状态 | A已实现 |
 | `desktop/src/{main,runtime,postgres,cli-install}.ts` | 注入上述操作，沿用唯一状态/错误/退出顺序；去除被替代的内联操作 | A；B只加WSL接入 |
-| `desktop/src/host-wsl.ts`、`wsl-setup.ts` | 固定-d/-u/--exec、有限调用结果分类、环境检查/import/provision/安装状态 | B |
+| `desktop/src/host-wsl.ts`、`wsl-setup.ts` | 显式使用已选-d/-u/--exec、有限调用结果分类、目标接纳/资源安装状态 | B |
 | `desktop/src/backend-paths.ts`、`backend-session.ts` | 固定发行版路径映射、系统open/reveal、每次launch专属TLS Session与retire | B |
 | `src/pulsara_agent/desktop_guest_ops.py` | Linux短命有限PG/文件操作；不含模型/任意shell/通用文件RPC，不拥有lifecycle/DDL | B |
 | `desktop_runtime.py`、`desktop_app/{application,http_server}.py` | WSL启动信息/可选TLS装配、原关闭边界；保持同一Linux应用 | B |
 | `desktop_app/application.py`、`conversation_kernel/host.py`、`capability/mcp_management.py`、`desktop_runtime.py`、`desktop/src/runtime.ts` | OAuth-only `open_browser`回调注入贯穿现owner；可信JSONL有限URL请求/结果接Windows系统浏览器，原SDK/回调监听不替换 | B |
 | `desktop_app/workspace_directories.py`及`http_server.py`用户级路由 | 仅实际需要的目录分页/检查/单叶名创建；复用原workspace与文件机制 | B |
 | `frontend/lib/{desktop-host,runtime-adapter,prompt-draft,file-drop,file-preview}.ts`及实际picker组件 | host/执行域分离、Linux图形工作区、导入副本、preview/open/reveal接入 | B |
-| `desktop/scripts/prepare_resources.py`、必要`resource_build/wsl.py`、rootfs recipe、mise、package/release/workflow | Linux guest资源与Windows壳的组合构建/安装/重定位；输入变更及时追踪 | B |
+| `desktop/scripts/prepare_resources.py`、必要`resource_build/wsl.py`、mise、package/release/workflow | Linux guest应用资源与Windows壳的组合构建/安装/重定位；输入变更及时追踪 | B |
 
 名称可合并无独立职责的薄文件，契约仅含真实调用，不建平台容器/插件注册表/动态backend发现。Linux资源路径用明确POSIX操作；Windows路径用host API，不能以Windows`path.resolve`处理`/home/...`。同一owner装配时选一次实现，模型参数不能切发行版/用户/backend。
 
@@ -101,7 +103,7 @@ Python生产仍在`src/pulsara_agent/`，Electron在`desktop/`，frontend在`fro
 
 保留TS `BundledPostgres`，抽出其当前用到的`prepare_layout`、`inspect_version`、`verify_instance`、有限`exec_pg(initdb/status/start/stop)`、`remove_verified_pgdata`事实操作；返回完整typed结果/实际退出码/输出，不用hash或通用receipt。POSIX实现继续现有Node fs/exec，WSL实现调用固定包内Linux helper。helper限制在有效Linux home专用PG根与固定随包PG binary，不接受renderer任意程序/任意路径执行。
 
-helper在同一发行版同一`pulsara`用户内检查uid/mode/realpath/PG_VERSION/postmaster.pid/data-dir/socket并执行现有必要文件操作。Node不能经UNC stat证明Linux0700/uid，也不能按可复用PID猜实例。helper一操作一退出，无daemon、队列、后台重试、自主start/stop/reset或第二`startedHere`；不读/写另一份settings。
+helper在已选发行版同一已解析非root用户内检查uid/mode/realpath/PG_VERSION/postmaster.pid/data-dir/socket并执行现有必要文件操作。Node不能经UNC stat证明Linux0700/uid，也不能按可复用PID猜实例。helper一操作一退出，无daemon、队列、后台重试、自主start/stop/reset或第二`startedHere`；不读/写另一份settings。
 
 **失联时不能只probe一次status=3：旧start可能仍inflight，稍后才起库。** PG物理helper复用现有Linux`kernel.lock`的同一flock，非阻塞取得失败即busy，不排队一个未来start；从布局验证到真实PG子命令settle/readback和本次文件操作结束始终持锁，已运行kernel期间的诊断仍走原Unix socket。锁fd为CLOEXEC，不让常驻PG继承；helper不因结果pipe坏掉放弃仍执行的child。`--wait-owner`是串行屏障，后续helper仍须自己取得锁，不把旧等待结果当操作授权。
 
@@ -111,17 +113,17 @@ helper在同一发行版同一`pulsara`用户内检查uid/mode/realpath/PG_VERSI
 
 ## 4. G0-W：WSL路线可行性闸门
 
-旧原生G0退出；新G0-W在真实Windows 11首批矩阵、普通用户、实际Pulsara发行版执行。Mac单测、native Ubuntu、mock win32、静态扫描不能代替。版本/G0输出放个人`output/`，不成为生产authority。
+旧原生G0退出；新G0-W在真实Windows 11首批矩阵、普通用户、实际选定WSL发行版执行。Mac单测、native Ubuntu、mock win32、静态扫描不能代替。版本/G0输出放个人`output/`，不成为生产authority。
 
 | 闸门 | 必须证明 | 失败时 |
 | --- | --- | --- |
-| G0-W-D 部署/执行域 | 官方rootfs可重现取得并import，固定发行版/用户/资源、WSL2与ext4真实有效；重开仍nonroot；interop与Windows PATH、automount配置实际生效；同名冲突不碰他人发行版；无管理员日常启动 | 不改用户默认发行版、不接现有Ubuntu兜底；明确缺虚拟化/企业策略/WSL版本/rootfs依赖 |
-| G0-W-C 控制/生命周期 | Node直接argv+3条pipe→Linux原JSONL；中文/分段UTF-8/大量stderr/EOF；正常退出码、root/后代范围、启动中取消、Windows进程崩溃、carrier被终止、WSL终止/休眠恢复；原锁/端点能区分未结束/结果不明 | 不以wsl.exe close/taskkill证明Linuxjoin，不加全局shutdown/硬结束预算 |
+| G0-W-D 接入/环境 | 默认目标发现→明确选择→重开显式使用同一发行版/非root用户；实际home/WSL2/ext4和私有资源有效；interop/Windows PATH/自动挂载保持开启，原用户工作不受损；资源安装失败保数据；无管理员日常启动 | 不改系统默认值、不关闭用户互操作、不创建替代发行版兜底；报告实际缺失条件 |
+| G0-W-C 控制/生命周期 | Node直接argv+3条pipe→Linux原JSONL；中文/分段UTF-8/大量stderr/EOF；正常退出码、root/后代范围、启动中取消、Windows进程崩溃、carrier被终止、隔离故障环境的WSL终止/休眠恢复；实际Windows PE及其后代退出/取消/持pipe/脱离行为有证据；原锁/端点能区分未结束/结果不明 | 不以wsl.exe close、Linux PGID消失或taskkill证明Windows后代joined；不通过终止共享发行版回收，不加总寿命cap |
 | G0-W-P PG/资源 | 固定PG17.9/vector0.8.1/pg_search0.26.1及当前Python3.12.15、rg、Playwright在guest实际运行；clean-v0、BM25中英文/代码/snippet/vector、Unix socket、helper结果分类、退出重开/搬移与精确reset | 不换数据库/删搜索/开TCP trust，不通过Windowsfs删除data |
 | G0-W-F GUI/路径/文件 | 无session时图形浏览/新建/选择Linux目录；UNC Explorer操作；同目标路径转换；拒C盘/他发行版/DrvFs/bind-mount替代；中文空格、大小写、Unicode、权限/替换/取消/丢回复；文件导入和preview/另存为 | 不要求用户mkdir补产品功能，不盲replace盘符或把C盘当Linuxworkspace |
 | G0-W-N 网络/身份 | Windows Electron经localhost访问本次Linux服务；精确TLS身份覆盖新连接/SSE/preview/下载；端口占用/rebind/错误服务/旧证书不能误连或泄露内容；原Host/Origin/Fetch-Site、browser隔离、代理/VPN/firewall/OAuth实测 | 不用单次HTTP challenge冒充持续身份，不放宽0.0.0.0、忽略证书或默认另造proxy |
 
-G0-W固定实际可用WSL最低/测试版本、rootfs来源与版本、SDK API和recipe；不以“最新版”漂移运行依赖。标准库/SDK扩展点能满足就复用；确有缺口记录具体要求和最小适配，改变产品/安全/执行合同先修规格再审。官方制品摘要/签名用于真实内容验证可以保留，不生成代码/文档/测试证据SHA。
+G0-W记录实际可用WSL最低/测试版本、已有发行版来源与版本、SDK API和应用payload recipe；不以“最新版”漂移运行依赖。标准库/SDK扩展点能满足就复用；确有缺口记录具体要求和最小适配，改变产品/安全/执行合同先修规格再审。官方制品摘要/签名用于真实内容验证可以保留，不生成代码/文档/测试证据SHA。
 
 ## 5. Linux执行域与终端链路
 
@@ -129,21 +131,23 @@ G0-W固定实际可用WSL最低/测试版本、rootfs来源与版本、SDK API�
 
 manager/environment、原MCP/hooks/screenshot进程机制继续在Linux执行，不创建`_physical_windows.py`、`_shell_windows.py`、pywin32依赖或Windows能力占位。原始byte输出、PTY canonical EOT、PIPE关闭、root/group/drain/worker组合join、取消/输入结果/容量隔离按现行有效合同回归；不把PGID提升为“整个发行版所有进程/任意逃逸后代”保证。
 
-probe继续原default-deny、single-flight/TTL、shell候选、`.venv/bin`与Linux PATH。MCP/hook保留各自credential guard真实spawn、frame/环境/超时/流任务与完成policy；不共享terminal8槽。Linux用户工具由用户在Pulsara环境安装，Windows已有Python/Node/Git/venv不被假称可直接复用。model看到的platform是Linux执行域，desktop-host.platform仍win32以正确显示窗口/快捷键。
+probe继续原default-deny、single-flight/TTL、shell候选、`.venv/bin`与实际用户PATH。MCP/hook保留各自credential guard真实spawn、frame/环境/超时/流任务与完成policy；不共享terminal8槽。应用Linux依赖使用Linux版本，Windows工具调用属于interop，Windowsvenv不被当作Linuxvenv。model看到Linux主执行域及实际可用的Windows互操作能力，desktop-host.platform仍win32；这些说明只在已有合法prefix安装边界进入模型输入。
 
-### 5.2 Linux-only范围与interop
+### 5.2 共用发行版与Windows互操作
 
-专用`/etc/wsl.conf`使用`[user] default=pulsara`、`[interop] enabled=false; appendWindowsPath=false`，以及关闭驱动器自动挂载的明确配置。两个interop开关作用不同，清`WSL_INTEROP`或隐藏PATH不等于禁止Windows进程。G0用绝对Windows exe和真实父子链负测实际生效，Windows UI动作由可信Electron完成，不从Linux执行`explorer.exe`。[微软配置定义](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
+保留并允许`/etc/wsl.conf`的`[interop] enabled=true; appendWindowsPath=true`和`[automount] enabled=true; mountFsTab=true`，未显式设置时沿WSL默认行为；不要求用户写入这些条目，也不自动覆盖其配置。用户显式关闭某项时显示实际能力与手动开启指引，不静默修改或声称已开启。允许用户继续从WSL启动Windows程序、使用Windows PATH和`/mnt/c`；不修改全局网络/内存配置或默认用户。[微软配置定义](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
 
-不修改全局网络/内存配置；用户手动改专用发行版使执行域不再符合条件时，启动给具体错误并提供恢复指导，不静默转为混合Windows工具链。不把这些配置当恶意用户沙箱，不新增通用命令字符串黑名单。
+kernel、私有PG、Protocol-v3和应用资源仍使用Linux机制与ext4。自动挂载可用不扩大workspace/PG的存储接纳范围，首版C盘工程仍按第6/7节显式导入。宿主UI、OAuth、下载/reveal仍经原可信Electron owner，不改为拼接shell调用Windows程序。普通任务可使用互操作能力，受现有权限和副作用规则约束；不以PATH隐藏或通用命令黑名单冒充禁止Windows执行。
 
-Windows launcher用系统实际`wsl.exe`绝对位置、`shell:false`、明确argv、-d/-u/--cd/--exec，stream运行使用pipe而非外层PTY/交互shell。Windows环境不直接作为Linuxenv：清理自动传递的WSLENV/Windows PATH影响，只按原policy安装明确Linux HOME/PATH/locale/资源值；模型key仍Linux settings读取，不进launcher argv/环境。Linux terminal需要PTY时由原manager在guest创建，与外层控制pipe分开。
+**跨域生命周期仍为G0-W-C未闭合项。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。Windows模型任务的取消/关闭范围与可观测机制必须在G0证据中闭合，之后才可进入B；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
+
+Windows launcher仍用系统实际`wsl.exe`绝对位置、`shell:false`、明确已选-d/-u/--cd/--exec和三pipe，不经PowerShell求值。应用入口使用明确Linux可执行文件，不因PATH注入调用同名WindowsPython/Node；模型使用的是已选用户的实际环境，允许Windows PATH项存在。清理本次宿主启动环境的WSLENV自动传递清单，不抹除Linux会话的interop能力；credential仍沿原guard和Linux settings读取，不进launcher argv/宿主日志。Linux PTY仍由guest原manager创建。
 
 ## 6. 图形工作区：无需命令行的产品流程
 
 ### 6.1 唯一主流程与数据范围
 
-首版选择 **Linux-backed工作区picker**，不是同时维护Windows原生目录dialog和Linux目录picker两套默认流程。入口“新建工作区”“打开工作区”在Windows窗口内展示同一Linux目录服务；默认根`/home/pulsara/workspaces`由provision创建，所有首版project workspace位于该根内的实际Linux ext4目录。quick/transient workspace继续原Linux临时目录owner，不强制改成project，也不改变既有清理语义。
+首版选择 **Linux-backed工作区picker**，不是同时维护Windows原生目录dialog和Linux目录picker两套默认流程。入口“新建工作区”“打开工作区”在Windows窗口内展示同一Linux目录服务；默认根为已解析用户home下的`workspaces`，仅该应用目录按用户动作建立，所有首版project workspace位于该根内的实际Linux ext4目录。quick/transient workspace继续原Linux临时目录owner，不强制改成project，也不改变既有清理语义。
 
 picker及服务是用户级，未创建/选择session也能使用。现有session `path-candidates`继续服务会话中的@补全，不借某个active session运行全局浏览/建目录。existing `workspace_identity.py`仍唯一canonical/availability/稳定key owner；WSL profile检查作为目录接纳边界，不给数据库新增Windows路径副本或发行版字段。当前NEW resolver会resolve链接，不能假称现已实现严格接纳；list/选择后在原create-session入场前再次执行同一WSL验证，不能仅前端检查，也不改其他平台resolver语义。首版固定一个执行域，未来多发行版必须另修身份合同。
 
@@ -161,7 +165,7 @@ Linux检查实际挂载/filesystem与canonical包含关系，防止不是`/mnt/c
 
 ### 6.2 资源管理器仍可直接管理
 
-用户可在Windows资源管理器打开`\\wsl.localhost\Pulsara\home\pulsara\workspaces`，新建/复制/重命名目录；默认Linux用户有相应权限即可。Pulsara刷新picker后可选择同一目录，不把“Linux文件系统”解释为只能mkdir。Windows通过WSL共享访问Linux文件采用该发行版默认用户权限，因此provision必须确保default user与执行用户一致。[WSL文件访问与权限](https://learn.microsoft.com/en-us/windows/wsl/file-permissions)
+用户可在Windows资源管理器打开已选发行版及实际home对应的UNC，例如`\\wsl.localhost\Ubuntu\home\plumwsl\workspaces`，新建/复制/重命名目录；默认Linux用户有相应权限即可。Pulsara刷新picker后可选择同一目录，不把“Linux文件系统”解释为只能mkdir。Windows通过WSL共享访问Linux文件采用该发行版默认用户权限；接入时记录默认用户，后续变化时重新观察权限并报告，不自动修改默认用户或换执行用户。[WSL文件访问与权限](https://learn.microsoft.com/en-us/windows/wsl/file-permissions)
 
 工程代码/依赖与应用数据保持Linux磁盘内。C盘工程首版不作为直接workspace：界面明确引导用户经资源管理器复制到上面目录后再选择；不隐式搬家、同步或重写Windowsvenv。用户在Explorer改名/删目录可能让既有会话MISSING，沿当前availability处理，不造目录重定位/同步恢复系统。
 
@@ -171,8 +175,8 @@ Linux检查实际挂载/filesystem与canonical包含关系，防止不是`/mnt/c
 
 | 类型 | 示例 | 使用规则 |
 | --- | --- | --- |
-| Linux canonical | `/home/pulsara/workspaces/demo` | kernel/model/terminal、session/workspace identity、数据库、Skill/plugin来源使用；POSIX区分大小写 |
-| 同发行版Windows访问路径 | `\\wsl.localhost\Pulsara\home\pulsara\workspaces\demo` | 仅host reveal/open或真实选择输入；另一合法别名`\\wsl$\Pulsara\...`经同一解析器归一，不写入canonical字段 |
+| Linux canonical | `/home/plumwsl/workspaces/demo`（示例；使用实际home） | kernel/model/terminal、session/workspace identity、数据库、Skill/plugin来源使用；POSIX区分大小写 |
+| 同发行版Windows访问路径 | `\\wsl.localhost\Ubuntu\home\plumwsl\workspaces\demo`（示例） | 仅host reveal/open或真实选择输入；另一合法别名`\\wsl$\Ubuntu\...`经同一解析器归一，不写入canonical字段 |
 | Windows本机路径 | `C:\Users\alice\Documents\a.txt` | 只属Windows host选择/导入源或另存为目的地，不直接传成Linux路径/模型reference |
 | 资源URL | `https://127.0.0.1:<port>/api/file-previews/<token>/...` | 由现preview生成、由reading-root/token与TLS origin限定，不能反解成任意读文件授权 |
 
@@ -180,7 +184,7 @@ Linux检查实际挂载/filesystem与canonical包含关系，防止不是`/mnt/c
 
 ### 7.2 文件选择、拖放与导出
 
-1. 从同一Pulsara UNC选择/拖入的文件或目录：可信host取得原路径→固定域转换→Linux原文件/preview owner验证→插入Linux reference。renderer粘贴路径同样必须重验，不当作OS来源证明。
+1. 从同一已选发行版UNC选择/拖入的文件或目录：可信host取得原路径→固定域转换→Linux原文件/preview owner验证→插入Linux reference。renderer粘贴路径同样必须重验，不当作OS来源证明。
 2. Windows本机普通文件：用明确“从Windows导入文件”的renderer标准`<input type=file multiple>`取得浏览器File，显示“导入副本”，沿现File原始字节流→`LocalImport` staging/no-clobber→Linux位置→草稿确认后引用。保留现连接generation/controller、请求/资源边界和取消/清理，图片仍走现有accepted media规则。当前`chooseFiles():Promise<string[]>`跨IPC不能返回File，不允许把path字符串标成upload就声称已有字节，也不新增任意Windows路径读IPC/选择tokenregistry。原生UNC选择器仅为Linux文件/目录引用入口，工作区主picker仍为6.1唯一Linux-backed流程；已有drop/clipboard File按来源执行上述转换或副本导入。
 3. Windows目录或其他发行版目录：首版不做隐式递归导入/同步；给出复制到Pulsara工程根的图形指引。不能伪装普通file上传或把C盘目录挂载为Linuxworkspace。
 4. Linux内的模型artifact_export保持现目标/权限/no-clobber/published-unknown语义。用户“下载/另存到Windows”是独立明确host动作，复用token-bound download和Electron标准下载/保存机制，目标由用户图形选择，结果显示Windows路径；不把它伪装为Linux模型export已原子提交。
@@ -188,7 +192,7 @@ Linux检查实际挂载/filesystem与canonical包含关系，防止不是`/mnt/c
 
 ### 7.3 preview与系统打开
 
-Windows Chromium不能把`file:///home/pulsara/...`当作Linux文件。继续使用`FilePreviewHttp`的read_token、reading_root、冻结资源、受限HTML/CSP与sandbox，在工作台专用view中展示text/image/PDF/HTML；截图仍由Linuxworker完成。`frontend/lib/file-preview.ts`的本地链接保持Linux语义，不能把Linux file URL交Windows loadURL。
+Windows Chromium不能把`file:///home/<user>/...`当作Linux文件。继续使用`FilePreviewHttp`的read_token、reading_root、冻结资源、受限HTML/CSP与sandbox，在工作台专用view中展示text/image/PDF/HTML；截图仍由Linuxworker完成。`frontend/lib/file-preview.ts`的本地链接保持Linux语义，不能把Linux file URL交Windows loadURL。
 
 普通BrowserOwner继续禁止控制服务整port及file://，不为WSL放宽白名单；Preview与普通网页隔离保持。可信host执行open/reveal前经原preview action/明确workspace服务确认当前目标和允许文件类型，再映射UNC。外部OS打开依旧是用户明确动作，不承诺外部应用继续受preview冻结控制。web页面、HTML、附件不能调用preload、任意文件RPC或launcher。
 
@@ -196,36 +200,38 @@ Windows Chromium不能把`file:///home/pulsara/...`当作Linux文件。继续使
 
 ### 8.1 图形部署流程与权限
 
-首次界面显示检查/初始化进度及具体失败，顺序：检测系统WSL可用→确认WSL2/虚拟化与版本→检查`Pulsara`注册名→校验固定官方rootfs/应用资源→以明确位置import专用WSL2→受控一次性root provision→设置nonroot/default user/config→重开验证→启动应用。WSL缺失/需OS功能启用或重启时，界面提供明确系统安装动作/指导并等待用户完成，不能自动提权或假报ready。普通用户后续启动/工作均不需要管理员、PowerShell窗口或手敲mkdir。[微软WSL安装](https://learn.microsoft.com/en-us/windows/wsl/install)、[rootfs import与默认root说明](https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro)
+首次界面显示检查/接入进度及具体失败，顺序：检测WSL2/虚拟化→列出已有Ubuntu并默认选中系统默认目标→读取该发行版默认用户、uid和真实home→用户明确确认→检查ext4、应用依赖与资源→在该用户私有应用目录安装固定Linux payload→启动应用。目标选择由现有Windows宿主设置owner保存具体发行版/用户名，不存第二份provider设置。WSL缺失、没有合适发行版或需重启时，提供官方安装指导并等待用户完成；不自动import专用rootfs、不接管现有发行版。[微软WSL安装](https://learn.microsoft.com/en-us/windows/wsl/install)、[目标发行版/用户参数](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
 
-只有专用发行版的初次provision/明确维护使用`-u root`，代码与参数来自随包固定recipe；模型/工具调用入口固定`-u pulsara`，不暴露root launcher给renderer。无需Docker Desktop/WSLg；不默认给agent免密sudo，不启systemd/boot command来另托管PG或kernel。发现同名非Pulsara环境/版本不匹配/部分import残留，显示冲突/状态，保留数据并走明确修复动作，不unregister重建来掩盖失败。
+日常调用固定本次已选非root用户。只在明确系统依赖维护时由用户授权sudo/root安装缺失包，不更改sudoers、系统Python/Node/PG或用户默认shell；用户本已有的sudo权限保持原样，不作为自动提权授权。应用资源仍私有，PG仍由TS owner启动，不接管已有系统PG。保留发行版现有systemd/interop/automount配置，不增boot service托管kernel/PG；不暴露root launcher给renderer。缺依赖或部分安装失败时保数据、显示具体错误，不unregister、重建或改接其他目标。无需Docker Desktop/WSLg。
 
 ### 8.2 两个home与版本布局
 
 | 位置 | 拥有的数据 | 约束 |
 | --- | --- | --- |
-| Windows标准每用户应用数据根 | Electron UI prefs、Windows安装/宿主日志、专用WSL磁盘文件的安装位置 | 原Electron owner管理，不存provider配置/第二数据库或canonical workspace；卸载不能误删保留中的WSL磁盘 |
-| Linux `/home/pulsara/.pulsara` | 唯一LocalSettingsStore、PG data/socket、历史/记忆、原应用持久数据 | 原Linux owner/权限；不放DrvFs，不从Windows raw settings复制secret |
-| Linux `/home/pulsara/workspaces` | 用户工程 | 与runtime安装根、PG数据根分离，应用更新不覆盖 |
-| Linux固定版本资源根（如`/opt/pulsara/runtime/<app-version>`） | 私有Python/PG/extensions/rg/Chromium与应用wheel | root provision安装/验证，日常pulsara只读使用；准确布局由recipe/locator共同定义，不运行时下载latest |
+| Windows标准每用户应用数据根 | Electron UI prefs、已选发行版/用户名、Windows安装/宿主日志 | 原Electron owner管理，不存provider配置/第二数据库或canonical workspace，不管理用户WSL磁盘 |
+| Linux实际home下的 `.pulsara` | 唯一LocalSettingsStore、PG data/socket、历史/记忆、原应用持久数据 | 原Linux resolver/权限；不放DrvFs，不从Windows raw settings复制secret |
+| Linux实际home下的 `workspaces` | 用户工程 | 与runtime安装根、PG数据根分离，应用更新不覆盖 |
+| Linux用户私有版本资源根（如`~/.local/share/pulsara/runtime/<app-version>`） | 私有Python/PG/extensions/rg/Chromium与应用wheel | 已选用户安装/验证，不覆盖系统或其他应用资源；准确绝对路径由recipe/locator共同定义，不运行时下载latest |
 
-Windows host home与Linux有效`PULSARA_HOME`是两个不同typed值；Windows用户环境里的`C:\...`不能直接当Linux home。首版Linux home固定默认，现有Linux resolver仍唯一，若显式允许Linux home override则必须先验证ext4/私有权限/Unix socket长度并让全链一致，不默默取Windows环境同名变量。为了少建配置，首版安装UI不提供自由发行版/用户/跨盘home配置。Windows资源安装根与保留数据根分开：专用VHD放每用户保留目录（例如LocalAppData下Pulsara/Data/wsl），不放版本化安装目录或会随Electron缓存清理删除的位置。
+Windows host home与Linux有效`PULSARA_HOME`是两个不同typed值；Windows用户环境里的`C:\...`不能直接当Linux home。现有Linux resolver仍唯一，实际home不写死为`/home/<username>`；显式Linux home override须验证ext4/私有权限/Unix socket长度并全链一致，不默默取Windows环境同名变量。首版一次只接一个已确认目标，不提供运行中跨发行版/用户切换；修改选择前须原owner正常结算，并明确新目标有独立数据，不自动搬迁或合并历史。用户默认发行版/用户改变不静默改变已保存目标；用户WSL磁盘始终由用户/WSL管理。
 
-model/service连接在设置页写Linux现有owner；Windows壳不读取并缓存一套credentials。PG仍private Unix socket、原local auth/host reject；不需要原生Windows方案的postgres-auth.json/TCP SCRAM。首次缺模型连接展示现有设置页，不能因为系统已安装就宣称provider可用。Linux工具链安装状态如实展示，Windows用户工具不加入Linux PATH。
+model/service连接在设置页写Linux现有owner；Windows壳不读取并缓存一套credentials。PG仍private Unix socket、原local auth/host reject；不需要原生Windows方案的postgres-auth.json/TCP SCRAM。首次缺模型连接展示现有设置页，不能因为系统已安装就宣称provider可用。Linux工具链与Windows互操作能力分别如实展示；Windows PATH可保留，应用私有入口仍用Linux绝对路径。
 
 ### 8.3 构建、更新和卸载
 
-固定Canonical官方Ubuntu24.04 WSL rootfs的具体build、来源、摘要/签名和许可，可重现recipe不以浮动latest/current目录、用户已有Ubuntu或任意容器镜像替代；G0-D记录确切受支持制品。安装包携带已验证rootfs及对应Linuxpayload，支持离线import；WSL engine缺失是单独系统前提，界面明确在线/离线官方安装路径。基镜像定制/再分发与品牌义务在release前按官方政策核实，不能把自改镜像继续冒称未修改官方发行物。[Canonical定制说明](https://ubuntu.com/wsl/docs/latest/howto/custom-ubuntu-distro/)、[再分发政策](https://canonical.com/legal/intellectual-property-policy)
+首版安装包携带固定、已验证的Linux应用payload，接入用户已有WSL2 Ubuntu，不携带/定制/再分发rootfs，也不拥有发行版升级。记录实际发行版来源、版本与系统包，以及payload制品版本/摘要/许可；摘要仅用于真实制品内容边界。已有合格WSL环境上的payload支持离线安装；WSL engine、发行版和缺失OS依赖是单独系统前提，缺项须如实显示。Ubuntu发行版本号不预先限定，实际ABI/依赖兼容性由构建和G0验证。
 
-Linux x64 guest包使用现有Linux private resources和当前pins；Windows仅Electron/必要host资源，不构建win_amd64 Python wheel、Windowspg_search DLL或捆pwsh。interop/automount关闭后，部署通过明确stdin制品流/固定解包命令等支持途径传输资源，不能依赖`/mnt/c`或Linux调用Windows程序；权限、symlink和架构由Linuxrecipe验证，不在Windowszip解压后假称rootfs等价。拆recipe须在当片更新mise sources/outputs/cache fixture；内容校验沿既有真实制品边界，不增hash registry。
+按用户后续授权，`desktop/scripts/prepare_resources.py`的`target_platform()`已删除Ubuntu发行版本号检查，原生Linux与WSL共用此路径；Ubuntu发行版身份、目标架构、依赖pins与资源验证继续保留。pg_search仍使用已固定的noble制品，CI/容器仍保留各自构建基线；版本准入取消不等于这些资源在其他Ubuntu版本上已通过实测，也不等于G0通过。
 
-沿现build owner分开目标：native Ubuntu x64构建/验证guest wheel和Linuxpayload/rootfs制品，Windows原生runner构建Electron/NSIS并装入同版本已验证制品；不能在Windows误跑Mac/Linux native recipe，不能把Windows壳平台写成guest wheel平台。跨job传递保留既有不可变制品验证/版本完整性，mise分别声明rootfs/payload/host输入与输出，新模块变更立即失效。开发构建脚本如需Python仍用该平台仓库uv环境（Windows为`.venv/Scripts/python.exe`），这是构建依赖而非Windows内核。release集合在原`release_artifacts.py`加入精确`Pulsara-${version}-windows-x64.exe`，同步package/mise/workflow/文档和许可，保留DMG/两个deb及手动触发/发布权限；验证构建publish never，不自行bump/tag/publish。
+Linux x64 guest包使用现有Linux private resources和当前pins；Windows仅Electron/必要host资源，不构建win_amd64 Python wheel、Windowspg_search DLL或捆pwsh。应用部署仍用明确stdin制品流/固定Linux解包入口传输到用户私有ext4资源根；即使automount开启，也不把`/mnt/c`当Linux资源运行位置。权限、symlink和架构由Linuxrecipe验证。拆recipe须在当片更新mise sources/outputs/cache fixture；内容校验沿既有真实制品边界，不增hash registry。
 
-更新为手动发布/安装：先正常Quit、确认原kernel/PG已按合同结算且无未解决状态，再安装新版本Linux资源并验证，最后使用新版本。数据/工程保持；不覆盖运行中的Python/PG/Chromium文件。失败保留原数据与错误，不能自动清库、重建发行版或引入双版本运行fallback。旧资源只在确无live owner使用且新安装成功后清理；不增加持久更新journal/恢复job。PG major/rootfs跨版本升级不冒充资源替换，须另定数据维护合同；安全更新使用明确固定发布recipe并负担Linux基础包持续维护。
+沿现build owner分开目标：native Ubuntu x64构建/验证guest wheel和Linux payload，Windows原生runner构建Electron/NSIS并装入同版本已验证制品；不能在Windows误跑Mac/Linux native recipe，不能把Windows壳平台写成guest wheel平台。跨job传递保留既有不可变制品验证/版本完整性，mise分别声明payload/host输入与输出，新模块变更立即失效。开发构建脚本如需Python仍用该平台仓库uv环境（Windows为`.venv/Scripts/python.exe`），这是构建依赖而非Windows内核。release集合在原`release_artifacts.py`加入精确`Pulsara-${version}-windows-x64.exe`，同步package/mise/workflow/文档和许可，保留DMG/两个deb及手动触发/发布权限；验证构建publish never，不自行bump/tag/publish。
 
-普通卸载移除Windows应用入口，**保留Pulsara发行版、Linux settings/DB/workspaces与备份**，界面明确空间占用和重新安装可复用。彻底删除专用Linux环境是另一个破坏性用户操作：显示固定发行版/数据/工程范围、备份指引，完成精确正常关闭后再明确确认；不借卸载默认unregister，不对其他发行版执行命令。WSL export可作为用户选择的离线备份机制，不当自动checkpoint或唯一恢复authority。
+更新为手动发布/安装：先正常Quit、确认原kernel/PG及已支持interop任务按合同结算且无未解决状态，再安装新版本Linux应用资源并验证，最后使用新版本。数据/工程保持；不覆盖运行中的Python/PG/Chromium文件。失败保留原数据与错误，不自动清库、升级/重建发行版或引入双版本运行fallback。旧应用资源只在确无live owner使用且新安装成功后清理；不增加持久更新journal/恢复job。PG major升级须另定数据维护合同；发行版和系统包升级由用户管理，Pulsara检测兼容性变化并报告，不替用户执行dist-upgrade。
 
-NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckAppRunning扩展，替换默认强杀行为。运行/收尾/unknown时等待用户正常Quit、取消或明确失败，不taskkill main/wsl/PG后继续覆盖/卸载。Windows全局控制台CLI不在首版：Linux `pulsara`管理/诊断入口在专用发行版可用；设置页明确展示“WSL内CLI”，不自动改Windows PATH。Linux `pulsara app`因interop关闭不能沿原manifest启动Windowsexe，首版明确提示从Windows图标启动/聚焦，不开interop、不造反向常驻RPC；Linux现有平台的app入口保持原行为，WSL实现沿明确执行域装配。需LinuxCLI直接聚焦WindowsGUI或Windows全局CLI时另修产品合同，而不是静默fallback。
+普通卸载移除Windows应用入口，**保留用户发行版、Linux settings/DB/workspaces与备份**，界面说明应用资源/数据位置和重新安装复用方式。清理Linux应用资源或应用数据须单独明确范围并确认原owner已正常结算；不得删除整套发行版、整个home或用户其他软件/工程。Pulsara不提供注销共享发行版的卸载动作，不执行`wsl --unregister`。用户自行管理WSL备份，不引入自动checkpoint或恢复authority。
+
+NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckAppRunning扩展，替换默认强杀行为。运行/收尾/unknown时等待用户正常Quit、取消或明确失败，不taskkill main/wsl/PG后继续覆盖/卸载。Windows全局控制台CLI不在首版：Linux `pulsara`管理/诊断入口在已选发行版可用，设置页明确展示“WSL内CLI”，不自动改Windows PATH。首版Linux `pulsara app`仍提示从Windows图标启动/聚焦；interop开启本身不实现这条产品接入，不新增反向常驻RPC。现有Linux/macOS平台app入口保持原行为；扩展WSL CLI聚焦能力需另定有限宿主动作合同。
 
 ## 9. 启动、关闭、失联与恢复的具体合同
 
@@ -255,9 +261,9 @@ NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckApp
 | 整个WSL/发行版被外部终止、OS关机 | 如实断开/unknown；下次启动由PostgreSQL恢复与现canonical数据决定可读状态，process-local观察丢失按原合同接受 | 不添加durable执行恢复日志，不假造所有工具成功/未执行 |
 | 睡眠/恢复、VPN/代理/转发暂断 | UI显示失联并封相关新动作；只可重新验证同一live启动身份/连接，保留原任务；无法确认则按unknown+原锁重开路径 | 不把网络断连当用户取消/任务完成，不在后台再spawn第二个kernel |
 | PG/helper可能执行但lost reply | 不采用未闭合回复；保PG/data，报告unknown；重新进入须锁与当前精确实例验证 | 不重放start/delete、复制startedHere、用旧postmaster.pid或Windowsstat作authority |
-| 用户改WSL配置/挂载/root身份 | 明确环境不合格，封本次启动/维护；只有专用环境的明确修复流程可修改 | 不改其他发行版/默认设置，不隐藏降级Windows进程混域 |
+| 用户改WSL配置/挂载/root身份 | 重新观察实际目标/能力/ext4/权限；不合格项给具体错误，root执行拒绝，默认用户改变不自动换已保存身份 | 不覆盖用户配置，不把interop/自动挂载开启判作不合格，不静默切其他目标 |
 
-正常Quit不关掉整个发行版，更不执行`wsl --shutdown`。仅专用环境安装配置生效/明确彻底删除且所有应用owner已正常退出时，才可在显示范围后针对`Pulsara`执行必要发行版维护；不得波及用户其他WSL工作。外部强制终止是故障输入，不作为Pulsara正常cleanup实现。[WSL命令范围](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
+正常Quit、reset、升级和卸载均不终止用户共享发行版，不执行`wsl --terminate`、`--shutdown`或`--unregister`；只处理已确认归本应用所有的进程/资源。外部强制终止仅为故障输入，其破坏性实验在另备可丢弃环境执行，不拿用户日常Ubuntu试杀后宣称cleanup成功。[WSL命令范围](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
 
 WSL官方启动实现区分pipe/terminal/file relay，并描述root退出后的IO与exit-code转发；carrier异常结束不能由此推出Linux后代全回收。G0-W-C必须验证真实所锁版本、EOF和原kernel锁生命周期，而非只mock Node child close。[WSL启动与relay](https://wsl.dev/technical-documentation/boot-process/)
 
@@ -283,7 +289,7 @@ TLS证明server身份，不把本机同用户进程当远程攻击沙箱；现�
 
 win32加入真实host类型，frontend同时知道host平台与Linux执行域，不能`platform!=='darwin'`就把路径当Windows或把所有非macOS当Linux控件。验证Windows窗口控制/拖动/snap/DPI、tray失败可恢复入口、Ctrl/AltGr/中文IME、文件选择/拖放、PDF/image/HTML与正常后台退出。图形用户不会因选择Linux执行域被要求开terminal窗口。
 
-OAuth授权仍原Linux loopback owner和已锁SDK拥有PKCE/state/issuer及token。实际`LocalMcpManagementService`已有async `open_browser`注入点，但当前默认`webbrowser.open`在guest执行，禁interop/无WSLg后不会自动打开Windows浏览器；必须经`DesktopApplication`→`KernelHostCore.production`/构造→management贯穿注入唯一OAuth-only host callback，不能只写“由host打开”而保留原guest调用。
+OAuth授权仍原Linux loopback owner和已锁SDK拥有PKCE/state/issuer及token。实际`LocalMcpManagementService`已有async `open_browser`注入点；即使interop开启，guest默认`webbrowser.open`也不作为Windows系统浏览器成功打开的证明。仍经`DesktopApplication`→`KernelHostCore.production`/构造→management贯穿注入唯一OAuth-only host callback，明确由可信Electron打开并回实际结果。
 
 本路线固定采用现可信JSONL的有限`open-oauth-browser`请求/结果（本次requestId、已由原OAuth owner验证的HTTP(S)授权URL、实际打开成功/失败）；Node `PythonRuntime`只为当前live launch校验请求、无userinfo/非HTTP(S)拒绝，并用`main`受限动作调用Windows `shell.openExternal`回实际结果。Linux先安装原callback listener再请求打开，Node在真实打开sink检查本地已知close/retire，拒绝其late请求。Linux发出请求后取消只关闭原flow/pending await并拒绝晚回调/结果，不能保证另一eventloop尚未获知的取消会撤销已排队或已打开的系统浏览器；打开结果不明如实保留，不自动再开，不为此增加跨域cancel协议/registry。回调/state/token裁决仍原OAuth owner；请求完成/取消/管道失联后原pending future与listener按现owner清理，无durable任务或通用反向执行RPC，code/token/client secret不经这个host通道。
 
@@ -310,8 +316,8 @@ A的Python production通常无需结构变化，最多因真实测试注入调�
 
 | 顺序 | 具体动作 | 完成条件 |
 | --- | --- | --- |
-| B0 闸门封闭 | G0-W-D/C/P/F/N各项原生证据，固定WSL/rootfs/SDK版本与窄缺口 | A验收完成，G0-W全过；新语义先修规格，不用探针作生产依赖 |
-| B1 部署/资源 | 专用发行版import/provision、Linux资源/有效home、win host数据分离；setup图形进度、保数据维护 | 非root/interop/ext4实际符合；同名/失败残留/离线/磁盘满均不误删/改用户环境 |
+| B0 闸门封闭 | G0-W-D/C/P/F/N各项原生证据，记录WSL/已有发行版/SDK版本及共享环境和interop窄缺口 | A验收完成，G0-W全过；新语义先修规格，不用探针作生产依赖 |
+| B1 接入/资源 | 已有发行版/默认用户发现与明确选择、用户私有Linux资源/有效home、win host数据分离；setup图形进度、保数据维护 | 非root/ext4实际符合；保留interop/自动挂载和其他用户工作；目标变动/失败/离线/磁盘满不误删或改环境 |
 | B2 载体/PG/网络 | WslHostOperations + Linux finite helper，接原runtime/PG顺序；TLS/session/HTTP origin同片接齐 | stream EOF/取消/真实PG实例/unknown不回归；同一kernel endpoint每连接身份、旧sessionretire成立 |
 | B3 工作区/路径/传输 | 用户级Linux picker/API、新建/选择/最近目录、固定域路径转换/reveal、Windows文件导入/下载 | 全程图形创建到同一Linux工作区；不混C盘/他发行版；preview/HTML隔离、最终文件与失败结算实测 |
 | B4 Windows壳/安装 | frontend host类型/窗口/tray/IME/OAuth、per-user NSIS/无强杀、CLI状态、组合资源cache/release矩阵 | 图标启动→Linux服务ready→工作→Quit/重开；卸载保data；实际资源版本/许可证/架构一致 |
@@ -321,24 +327,11 @@ A的Python production通常无需结构变化，最多因真实测试注入调�
 
 ## 12. 成本、取舍与维护预算
 
-以下为熟悉仓库的资深工程师人日规划，不是模型运行时长或承诺；G0-W尚未执行，置信度低到中。新估算已包含专用发行版生命周期，而非只在用户已有Ubuntu里跑一条命令。
+原专用rootfs路线的50–95人日及含余量63–129人日仅为历史估算，详见research的wsl-first记录；本次改为已有发行版接入且保留互操作后，不继续把该数字作为当前预算。发行版import/rootfs再分发与整套OS维护退出产品范围，目标接纳、共享环境不干扰和interop跨域生命周期的实际成本待G0证据后重新估计，不直接扣减旧数字或拼接各专题报价。
 
-| 工作包 | 初步人日 | 归属/条件 |
-| --- | ---: | --- |
-| G0-W原生spike | 5–9 | 部署/载体/PG/GUI/网络依赖API与失败证据 |
-| 收窄A | 4–8 | Node locator/宿主与PG物理接缝、POSIX对应回归；不计全库fd/terminal重构 |
-| 专用WSL部署与资源维护 | 9–16 | rootfs许可/recipe、provision、版本化资源、保数据更新/卸载 |
-| runtime/PG/身份网络 | 9–17 | 真实pipe/EOF/unknown、Linux有限操作、TLS/session/origin与生命周期 |
-| GUI工作区/路径/文件 | 8–15 | 用户级picker/创建/验证、UNC/reveal、导入/另存/preview闭环 |
-| Windows壳/安装发布 | 6–12 | 原生UI/IME/tray/OAuth、NSIS/cache/组合产物/文档 |
-| 整体资格与收口 | 9–18 | 已安装、故障、真实provider/长程、Mac/Linux受影响回归与review |
-| **合计** | **50–95** | 不需长期上游fork/新增执行域产品的前提 |
+当前工作包为：G0-W、既有A资格补证、已有目标接入/私有资源安装、runtime/PG/TLS、Linux图形工作区/文件传输、Windows壳/安装及真实provider/长程/受影响POSIX回归。G0-W尤其先验证共享环境中的Windows后代观测/取消缺口；若现依赖不能满足原结算要求，明确最小机制与成本后修订，不把未知上游工作藏入reserve。相同验证只计一次，硬件/签名/下载/重启与测试机排队另计日历成本。
 
-另留25%–35%不确定性，规划约63–129人日；硬件/签名采购、下载/OS重启、企业策略与测试机排队另计日历成本。原35–65+专用环境15–30仅为前轮路线粗估，本表是当前统一分配，不再相加；原生88–154及旧宽A退出。新成本降低来自复用Linux机制，不能因用户不喜欢pwsh就忽略rootfs和桥维护。
-
-A与B的同一验证不重复计费；新增独立阶段安装/review劳动据实际差异单列。首批环境不可得/依赖缺扩展/需要proxy或rootfs迁移产品时重估，不把无界上游fork塞入reserve。持续成本包括Windows/WSL更新、Linux基础包与Python/PG扩展/Chromium安全更新、磁盘空间与备份指导、跨域路径/网络/休眠回归，仍低于维护两套内核/文件/PTY语义的范围。
-
-原生Win32内核、任意已有WSL发行版、混合Windows命令、C盘直接workspace不是同期开关。未来需要时另立范围/身份/资源回收合同并重新估算，不在本次留可自动选择的fallback。
+仍不扩大为原生Win32 Python内核、任意Linux发行版、多目标同时运行或C盘直接workspace。interop允许日常Windows程序互操作，模型任务的支持范围与回收机制须通过§5.2/§4的G0门；不因Windows程序能启动便宣称所有跨域任务已受控。
 
 ## 13. 验证矩阵与完成条件
 
@@ -356,9 +349,9 @@ A不因薄宿主抽取强制重跑未触及的全部terminal/filesystem/provider
 
 | 层级 | 必需场景/现有基础 | 证据边界 |
 | --- | --- | --- |
-| 部署 | WSL未装/不可用/需重启、同名冲突、root import后nonroot、离线/磁盘满/失败重开、更新保data与卸载保留 | 真实普通用户/WSL包与专用发行版；假rootfs/mock不能证明 |
+| 接入/部署 | WSL未装/不可用/需重启、默认目标发现/明确选择、默认用户变动、目标缺失/root拒绝、用户私有payload离线安装/磁盘满/失败重开、更新保data与卸载保留 | 真实普通用户及已有WSL目标；保留其他工作/配置，不import或注销用户环境，mock不能证明 |
 | 控制与PG | 当前`test_desktop_runtime.py`和TS runtime/PG tests；真实3pipe/UTF8、invalid/partialframe、start前后EOF、pg_ctl失联/stop/status/reset、同home旧锁 | Windowscarrier状态、Linuxroot退出、kernel flock、精确PG状态分别观察；不taskkill/全局shutdown收尾 |
-| Linux工具 | `test_round2_terminal_*`、`test_pr03_process_termination.py`、`test_stage2_terminal_host_lifetime.py`、`test_terminal_cognitive_subtraction.py`；MCP/hooks/preview suites | 真实WSL PIPE/PTY、root先退/后代持stdout、8槽、输入/取消、drain/join、credential guard；Windowsexe负测符合Linux-only，不假称任意树全部受控 |
+| Linux工具/interop | `test_round2_terminal_*`、`test_pr03_process_termination.py`、`test_stage2_terminal_host_lifetime.py`、`test_terminal_cognitive_subtraction.py`；MCP/hooks/preview suites及Windows PE探针 | 真实WSL PIPE/PTY、root先退/后代持stdout、8槽、输入/取消、drain/join、credential guard；Windows程序正测、后代退出/取消/失联及unknown边界另验，不用Linux PGID证明Windows树结算 |
 | 图形工作区 | 无session浏览/新建/选中/建会话；Explorer新建后刷新；取消/冲突/中文空格/权限/失联/替换/挂载变化/重开missing | 不使用mkdir补UI；同一Linuxcanonical目标与旧identity/availability合同 |
 | 文件与网络 | 当前settings/Skill/plugin/no-follow/no-clobber、`test_local_file_import.py`、`test_session_file_preview.py`、`test_artifact_export.py`、HTML/image测试；真实WindowsFile/drop/保存目标 | Linuxext4与host文件域分开；read-at/held锁/published-unknown不改；端口重绑定/TLS旧cert/iframe/SSE/下载/普通Browser隔离实测 |
 | 安装GUI | 图标冷暖启动→Linux PG/kernel ready→图形workspace→模型工具→附件/HTML→后台/tray→正常Quit/重开；IME/DPI/快捷键/OAuth | Windows11实际NSIS安装，ServerCI不等于桌面；不只npm start/wheel smoke |
@@ -368,13 +361,13 @@ A不因薄宿主抽取强制重跑未触及的全部terminal/filesystem/provider
 
 ### 13.3 真实provider、长程与激活
 
-在实际Windows Electron+Pulsara WSL2环境通过Linux LocalSettingsStore只读加载保存连接，在已核实本地disposable DB/隔离home中用原注入；不改保存设置、不导出key或source.env。保留实际prompt、SYSTEM/tools完整值、provider响应、工具结果、进程/线程/FD与故障观察，只精确删除实际credential。不生成代码/文档/激活证据hash。
+在实际Windows Electron+已选WSL2环境通过Linux LocalSettingsStore只读加载保存连接，在已核实本地disposable DB/隔离home中用原注入；不改保存设置、不导出key或source.env。保留实际prompt、SYSTEM/tools完整值、provider响应、工具结果、进程/线程/FD与故障观察，只精确删除实际credential。不生成代码/文档/激活证据hash。
 
 至少覆盖：中文空格工程、Linuxvenv/Python/Git/Node工具、独立命令与running后继续工作、PIPE/PTY交互/end-input、monitor唤醒/输出截断补读、文件导入/HTML/image/导出、MCP stdio/HTTP与hook、subagent scope和compaction期间process跟进、正常/异常关闭后历史/memory检索。按既有长程合同验证，不限制总轮数/任务寿命；进程本地观察丢失不变成durable恢复产品。
 
 复用terminal/subagent/artifact等dogfood前先读runner当前API/连接/DB前置。artifact runner的`--phase baseline`会删tool，不能作为本次前后基线；两份代码均使用完整生产tool面的candidate，仅输出目录分before/after。部分DB helper只接受loopback根dbname=pulsara，不能直接套WSL managed Unix socket；修测试harness到已授权本地隔离方式或报告缺项，不为runner开PG TCP/改settings。硬编码输出须原样归档避免覆盖。
 
-**A完成条件**为11.1及13.1实际适用验收/review全部通过。**Windows激活条件**为A完成、G0-W全过、B1–B5代码/旧路径hard cut完成、实际安装/图形工作区/路径/部署/生命周期/TLS/真实provider长程与受影响POSIX回归通过、无权限/数据/副作用未解P0/P1、原oracle与prefix不变、安装界面/文档如实声明专用WSL/Linux工具链/数据保留合同。任何缺项均不可宣称Windows支持完成；规格可先冻结，但不冒充执行证据。
+**A完成条件**为11.1及13.1实际适用验收/review全部通过。**Windows激活条件**为A完成、G0-W全过（含共享环境不干扰及interop生命周期闭合）、B1–B5代码/旧路径hard cut完成、实际安装/图形工作区/路径/部署/生命周期/TLS/真实provider长程与受影响POSIX回归通过、无权限/数据/副作用未解P0/P1、原oracle与prefix不变、安装界面/文档如实声明已有WSL接入、实际任务回收范围与数据保留合同。任何缺项均不可宣称Windows支持完成；文档修订不冒充执行证据。
 
 ## 14. 参考依据、采用与撤出
 
@@ -384,7 +377,7 @@ A不因薄宿主抽取强制重跑未触及的全部terminal/filesystem/provider
 
 官方依据在相应章节近旁链接；文档证明平台能力/依赖扩展点，不证明Pulsara集成已通过。下载/布局/API须检查实际锁定版本实现，禁止拿别的agent产品已发Windows包推断本产品PG、物理join、文件授权或prefix已成立。
 
-## 15. 工作区、交叉审阅与冻结记录
+## 15. 历史工作区、交叉审阅与冻结记录（用户本次修订前）
 
 本轮使用原三位`gpt-6.1-sol / high` subagents，在`windows_compatibility/research/2026-10-24/{root,terminal,backend,desktop}/wsl-first/`分别研究；root唯一汇总根spec，agent只在个人目录写提案/审阅。此前native/代码组织/宽POSIX-A审阅属于已取代版本，不能批准本次新路线。
 

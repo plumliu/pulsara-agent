@@ -71,7 +71,7 @@ def assemble(root: Path, artifacts: Path, output: Path, tag: str, repository: st
     template = (root / "desktop/release-notes.md").read_text()
     downloads = "\n".join(
         f"- [{label}](https://github.com/{repository}/releases/download/{tag}/{name})"
-        for label, name in zip(("macOS 15+，Apple Silicon", "Ubuntu 24.04，amd64", "Ubuntu 24.04，arm64"), expected)
+        for label, name in zip(("macOS 15+，Apple Silicon", "Ubuntu，amd64", "Ubuntu，arm64"), expected)
     )
     (output / "release-notes.md").write_text(template.replace("{{version}}", version).replace("{{downloads}}", downloads))
     return [output / name for name in expected]

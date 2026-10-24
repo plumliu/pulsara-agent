@@ -4,10 +4,12 @@
 
 ## 当前入口
 
-1. [冻结实施 spec](PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md)：路线、所有权、G0-W、Phase A/B 边界与验收矩阵；第16节是本次 Phase A 实施记录。
-2. [Windows 开发准备与 G0-W 操作清单](PULSARA_WINDOWS_DEVELOPMENT_G0_CHECKLIST.zh.md)：第一次接手时按第3节开始准备 Windows 本机工具、专用 WSL2、两份仓库与独立实验。
+1. [当前实施 spec](PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md)：路线、所有权、G0-W、Phase A/B边界与验收矩阵；原冻结路线按用户授权修订为已有WSL接入，第16节保留Phase A历史实证。
+2. [Windows 开发准备与 G0-W 操作清单](PULSARA_WINDOWS_DEVELOPMENT_G0_CHECKLIST.zh.md)：按第3节准备Windows工具、确认已有WSL2/默认非root用户，再准备双仓库与独立实验。
 
 当前状态：Phase A 代码及 Mac 本机/应用包 GUI 实证已冻结；原生 Ubuntu x64/arm64 与 Ubuntu GUI 仍待验收；G0-W 待 Windows 实测，Phase B 未实施，Windows 支持未激活。整理目录不改变这些状态。
+
+2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，Windows后代生命周期等完整G0仍待验证。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
 
 ## 四方过程材料
 
@@ -23,7 +25,7 @@
 各个人目录的阶段含义：
 
 - 顶层`report.md`、`code-organization/`、`posix-first/`：早期原生Windows/较宽POSIX抽象方案的历史研究，已被当前路线取代，不作为实施authority。
-- `wsl-first/`：当前WSL主路线及收窄Phase A的提案、交叉审阅和路线冻结过程。root内的`previous-native-posix-spec.zh.md`/`candidate.zh.md`是历史快照，仍以本目录顶层spec为准。
+- `wsl-first/`：原专用WSL路线及收窄Phase A的提案、交叉审阅和冻结过程；接入已有发行版/保留interop的后续用户修订以顶层当前spec为准。root内的`previous-native-posix-spec.zh.md`/`candidate.zh.md`均为历史快照。
 - `phase-a-implementation/`：改前/改后验证、实际POSIX抽取、真实PG/内核/GUI实验及四方冻结记录。
 - `windows-handoff/`：Windows环境准备/G0清单的建议、示例语法检查与全文交叉审阅。
 

@@ -82,7 +82,7 @@ jobs:
           mise run --jobs 1 desktop:resources
           npm --prefix desktop test
           node --test desktop/scripts/linux-hooks.test.cjs
-          .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py
+          .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py desktop/scripts/test_build_platform.py
       - name: Verify native Linux dependency collection
         if: runner.os == 'Linux'
         run: uv run --no-sync python desktop/scripts/test_linux_dependencies.py

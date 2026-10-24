@@ -20,9 +20,9 @@ Open the DMG, drag Pulsara into Applications, eject the DMG, then launch the ins
 
 ## Ubuntu
 
-优先按[源码构建指南](DEVELOPMENT.md)在 Ubuntu 24.04 本机或容器内构建，再安装生成的 deb；两种方式均支持 amd64 和 arm64。构建所需的工具与步骤见该指南。alpha.6 未发布 Ubuntu deb，alpha.2 包不包含最新修复。
+优先按[源码构建指南](DEVELOPMENT.md)在 Ubuntu 本机或容器内构建，再安装生成的 deb；两种方式均支持 amd64 和 arm64，不强制Ubuntu发行版本号。构建所需的工具与步骤见该指南，实际依赖兼容性须验证。alpha.6 未发布 Ubuntu deb，alpha.2 包不包含最新修复。
 
-Build the current source on Ubuntu 24.04, either natively or in a container, then install the resulting deb. Both amd64 and arm64 are supported by the [build guide](DEVELOPMENT.md), which lists the required tools and commands. No Ubuntu deb was published for alpha.6; alpha.2 packages lack the latest fixes.
+Build the current source on Ubuntu, either natively or in a container, then install the resulting deb. Ubuntu release numbers are not enforced; actual dependency compatibility must be verified. Both amd64 and arm64 are supported by the [build guide](DEVELOPMENT.md), which lists the required tools and commands. No Ubuntu deb was published for alpha.6; alpha.2 packages lack the latest fixes.
 
 如果仍需安装旧版 alpha.2，用软件安装器打开对应架构的 deb，或在下载目录执行：
 

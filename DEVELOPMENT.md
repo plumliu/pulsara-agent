@@ -38,7 +38,11 @@ uv installs with copy mode and compiles dependency and application bytecode usin
 
 The same dependency preparation runs the bundled CPython's `compileall` with forced checked-hash invalidation for the standard library. This replaces upstream timestamp caches that would otherwise become stale when electron-builder copies resources. `site-packages` remains uv's compilation responsibility. Source files and content validation remain intact; no runtime loader or Python entry point is replaced.
 
-### Ubuntu 24.04 native build
+### Ubuntu native build
+
+Ubuntu releases are not version-gated, including WSL builds. CI and the build
+container retain their pinned baseline; package availability and native resource
+compatibility must be checked on the actual build host.
 
 Install `mise` first, then run the following as your normal desktop user. Use `sudo` only for system dependencies and the final package installation. The same steps work on amd64 and arm64; ARM64 users should change the final filename to `Pulsara-0.1.0-alpha.6-linux-arm64.deb`. The build includes the latest source and does not publish anything.
 
@@ -72,7 +76,7 @@ To prepare only the fixed environment, use `--target environment --load -t pulsa
 Build-cache regressions run through the real mise task engine and real uv wheel builds:
 
 ```bash
-mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py
+mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py desktop/scripts/test_build_platform.py
 ```
 
 Backend checks use the repository environment; desktop shell checks use Node's test runner:
@@ -123,7 +127,9 @@ uv 使用复制模式安装，并在打包时用目标随包 Python 预编译依
 
 同一依赖准备步骤还使用随包 CPython 的 `compileall`，以 force 和 checked-hash 模式预编译标准库，替换会在 electron-builder 资源复制后失效的上游时间戳缓存。`site-packages` 继续由 uv 编译。源码及内容校验保留，不替换运行时 loader 或 Python 启动入口。
 
-### Ubuntu 24.04 本机构建
+### Ubuntu 本机构建
+
+Ubuntu发行版本号不作为构建准入条件，WSL构建同样适用。CI和构建容器保留各自固定基线；系统包可用性和原生资源兼容性以实际构建机验证为准。
 
 先安装 `mise`，再以普通桌面用户执行以下命令，仅安装系统依赖和最终 deb 时使用 `sudo`。amd64 和 arm64 步骤相同；ARM64 用户把最后的文件名改为 `Pulsara-0.1.0-alpha.6-linux-arm64.deb`。生成的安装包包含最新源码，不会执行发布。
 
@@ -157,7 +163,7 @@ docker buildx build --platform linux/arm64 --target installer \
 缓存回归使用真实 mise 任务引擎与真实 uv wheel 构建：
 
 ```bash
-mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py
+mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py desktop/scripts/test_build_platform.py
 ```
 
 后端检查使用仓库环境，桌面壳检查使用 Node 测试运行器：

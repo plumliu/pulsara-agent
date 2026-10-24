@@ -1,20 +1,22 @@
 # Windows 开发准备与 G0-W 操作清单
 
-日期：2026-10-24。面向第一次做平台迁移的开发者。依据：[冻结实施 spec](PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md) §4、§11、§13、§16。
+日期：2026-10-24。面向第一次做平台迁移的开发者。依据：[当前实施 spec](PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md) §4、§11、§13、§16。
 
-**本文件是 Windows 接手操作说明，不是已执行的 Windows 验收记录。** Phase A 代码与 Mac 实证已冻结，原生 Ubuntu x64/arm64 与 Ubuntu GUI 仍待验收；G0-W 全部尚待 Windows 实测，Phase B 未进入。这里允许手工准备一次性实验发行版和 `output/` 内探针，不实现产品安装器、WslHostOperations、正式目录 picker、TLS/OAuth 桥或任何生产 fallback。
+2026-10-24 按用户授权修订：Ubuntu发行版本号不限，接入已有发行版及默认非root用户，保留interop、Windows PATH和自动挂载，不要求新建`Pulsara`/`pulsara`。本清单命令以已观察到的`Ubuntu`/`plumwsl`及`/home/plumwsl`为示例，其他用户须替换成实际确认目标，不能把示例当固定命名要求。依赖pins、ext4应用数据和完整G0验收仍适用；原四方审阅仅覆盖修订前清单。
+
+**本文件是 Windows 接手操作说明，不是完整Windows验收记录。** Phase A代码与Mac实证冻结范围保持，原生Ubuntu x64/arm64与GUI仍待验收，Phase B未进入。当前Windows已有Ubuntu 26.04.1/非root身份/ext4、版本准入及基础互操作观察；完整G0仍待执行。允许在自有隔离目录和`output/`写探针，不实现生产安装器、WslHostOperations、正式picker或TLS/OAuth桥，不改用户共享发行版配置。
 
 ## 1. 先看懂两边分工
 
 Windows 是桌面宿主；WSL2 是里面的一套 Linux 环境。Windows Terminal 是终端窗口，可以打开“命令提示符”或指定 Linux 发行版，它本身不是执行环境。
 
-| 项目 | Windows 本机 | 专用 WSL2 / Ubuntu 24.04 |
+| 项目 | Windows 本机 | 已选 WSL2 / Ubuntu |
 | --- | --- | --- |
 | 做什么 | Electron、Windows UI、wsl.exe 载体与网络探针 | Python 内核、Linux 终端、文件、PG、Playwright、Linux 资源构建 |
 | 必需工具 | Git for Windows、mise、Windows Node/npm；WSL 系统组件 | Linux Git/curl/编译工具、mise、Linux Node/npm、uv/Python、protoc |
-| 仓库建议位置 | `%USERPROFILE%\src\pulsara_agent`，本机普通目录 | `/home/pulsara/workspaces/pulsara_agent`，真实 ext4 |
+| 仓库建议位置 | `%USERPROFILE%\src\pulsara_agent`，本机普通目录 | `$HOME/workspaces/pulsara_agent`，真实 ext4 |
 | 私有依赖 | 这份仓库自己的 `desktop\node_modules` 和 `desktop\dist` | 这份仓库自己的 `.venv/`、node_modules、dist、resources、build |
-| 默认身份 | 普通 Windows 用户 | `pulsara`，非 root；只有明确安装维护进入 root |
+| 默认身份 | 普通 Windows 用户 | 已有默认非root用户，本机为`plumwsl`；仅明确OS依赖维护使用sudo |
 | 编辑器 | 现有编辑器即可；可选 VS Code + WSL 扩展 | 经编辑器的 Windows 侧“连接到指定发行版”功能，或直接 Linux 编辑器 |
 
 两份仓库是**同一项目的两个独立 clone**，用 Git 同步源码；不是维护两套业务代码。不要同时编辑同一个工作目录，也不跨系统复制 `.venv`、node_modules、resources、build、dist 或缓存。不要把 WSL 仓库放在 `/mnt/c`，不要把 Windows Electron 当 Linux Electron 运行。[微软文件系统说明](https://learn.microsoft.com/en-us/windows/wsl/filesystems)、[Electron Windows 开发说明](https://www.electronjs.org/docs/latest/tutorial/tutorial-first-app)
@@ -25,13 +27,13 @@ Windows 仓库避开 OneDrive/桌面同步目录；如果用户目录本身是�
 
 | 工具/资源 | 当前值 | 真相来源 |
 | --- | --- | --- |
-| 首批目标 | Windows 11 25H2 x64、WSL2、Ubuntu 24.04 x64 | spec §1；其他 Windows 版本先记录差异，不自动扩大资格 |
+| 首批目标 | Windows 11 25H2 x64、WSL2、Ubuntu x64；Ubuntu发行版本号不限 | spec §1；记录实际Ubuntu版本并实测，其他Windows版本先记录差异，不自动扩大资格 |
 | Node / uv / protoc | 22.23.3 / 0.13.4 / 34.0 | `mise.toml` |
 | Python | 3.12.15 | `.python-version`；由 uv 管理，不用 Ubuntu 系统 Python 代替项目环境 |
 | mise | Linux脚本固定2026.10.15；Windows WinGet记录实际安装版本，须不低于2026.7.18 | 当前 desktop workflow 与 `mise.toml`；不把WinGet当固定版本下载 |
 | Electron / electron-builder / TypeScript | 44.9.0 / 26.15.3 / 5.9.3 | `desktop/package-lock.json`，用 npm ci 安装 |
 | PostgreSQL / vector / pg_search | 17.9 / 0.8.1 / 0.26.1 | `desktop/scripts/prepare_resources.py`，不可换成 PG16 或 PG18 的扩展 |
-| WSL 包、kernel、rootfs | **还没有本项目验证版本** | 第一次 G0 记录实际版本/来源；通过后再固定支持组合 |
+| WSL包、kernel、已有发行版 | 尚无完整G0资格组合；本机版本已可观察 | 记录实际版本/来源，通过完整G0后声明支持组合 |
 
 Windows 暂时不需要 Python、uv、系统 PostgreSQL、Docker Desktop、Rust/pgrx、整套 Visual Studio C++。Linux 构建当前直接使用固定 pg_search 官方 `.deb`，不要求自己编译 pgrx。若真实 npm/native 依赖报出编译缺口，再记录具体包并补它需要的工具；不要先装一套无关工具链。WSLg/Linux 图形应用不是 Windows Electron 的替代验收。
 
@@ -51,7 +53,7 @@ wsl --status
 wsl --list --verbose
 ```
 
-原有默认发行版、其他发行版、全局 `%USERPROFILE%\.wslconfig` 都保持原样。若已存在名为 `Pulsara` 的发行版，先停止本清单的 import 步骤并查明归属；不 unregister、不覆盖、不把它默认为本次空实验环境。
+保留系统默认发行版、所有已有发行版和全局`%USERPROFILE%\.wslconfig`。首次默认选中当前默认Ubuntu，经用户明确确认后记录具体发行版/默认用户名；不新建专用用户、不覆盖同名对象，不unregister或自动改接另一个发行版。
 
 ### 3.2 安装 Windows 工具
 
@@ -105,7 +107,7 @@ mise exec node@22.23.3 -- node --test desktop\dist\browser-policy.test.js deskto
 
 **现在不要在 Windows clone 执行 `npm start`、`npm run package` 或 `mise run desktop:verify/package`。** 当前 `main.ts` 仍装配 posixHostOperations/本机 PG；资源配方只接受 Mac/Ubuntu，且用 `.venv/bin/python`，安装配置仍只有 DMG/deb。tsc 成功不等于 Windows 主程序已接通；接通属于 Phase B。
 
-## 4. 手工准备 G0 专用发行版（不是实现产品安装器）
+## 4. 接入已有 WSL 环境（不是实现产品安装器）
 
 ### 4.1 安装/确认 WSL2
 
@@ -115,99 +117,66 @@ mise exec node@22.23.3 -- node --test desktop\dist\browser-policy.test.js deskto
 wsl --install --no-distribution
 ```
 
-重开后再运行 `wsl --version`、`wsl --status`。现有安装需更新时可用 `wsl --update`，记录更新前后及重启状态；不执行 `wsl --set-default` 或 `--set-default-version`。首轮只使用明确带 `--version 2` 的本次 import。[微软安装说明](https://learn.microsoft.com/en-us/windows/wsl/install)、[WSL 命令定义](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
+重开后再运行`wsl --version`、`wsl --status`。现有安装需更新时显式记录更新前后及重启状态；不执行`--set-default`或`--set-default-version`。没有合适Ubuntu时由用户按官方入口安装，再回到目标确认；Pulsara不自动import或转换现有发行版。[微软安装说明](https://learn.microsoft.com/en-us/windows/wsl/install)、[WSL命令定义](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
 
-### 4.2 下载并核验 Ubuntu 24.04 x64 rootfs
+### 4.2 确认发行版、默认用户和实际home
 
-本次采用 Canonical 官方 WSL rootfs。已核查的入口为 [Ubuntu 24.04 WSL 镜像目录](https://cloud-images.ubuntu.com/wsl/releases/24.04/current/)，其中有 `ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz`、SHA256SUMS 和签名。`current` 是浮动目录，**不把这个 URL 当已冻结的镜像版本**：第一次实验必须保存实际制品、下载日期、摘要文件/签名和实际 rootfs/包版本，后续重现使用同一已验证制品，不重新漂移下载“最新版”。
-
-Windows 命令提示符示例，下载到自己新建的实验目录：
+先从`wsl --status`/`--list --verbose`确认目标。本机已观察到`Ubuntu`为WSL2，默认用户`plumwsl`、UID1000、home为`/home/plumwsl`；其他机器先观察再替换下面示例。
 
 ```cmd
-mkdir "%USERPROFILE%\Downloads\pulsara-g0-rootfs"
-cd /d "%USERPROFILE%\Downloads\pulsara-g0-rootfs"
-curl.exe -fLO https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz
-curl.exe -fLO https://cloud-images.ubuntu.com/wsl/releases/24.04/current/SHA256SUMS
-curl.exe -fLO https://cloud-images.ubuntu.com/wsl/releases/24.04/current/SHA256SUMS.gpg
-certutil -hashfile ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz SHA256
-findstr /C:"ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz" SHA256SUMS
+wsl -d Ubuntu --exec /usr/bin/id
+wsl -d Ubuntu --exec /usr/bin/getent passwd plumwsl
+wsl -d Ubuntu -u plumwsl --cd /home/plumwsl --exec /bin/bash -l
 ```
 
-- [ ] 人工比对两处摘要一致；不一致或下载中断就停止 import。
-- [ ] 按 [Ubuntu Cloud Images 官方校验说明](https://ubuntu.com/docs/public-images/public-images-how-to/verify-image-checksum/)用可信来源的完整 signing-key fingerprint 验证 SHA256SUMS.gpg；注意这是WSL/cloud image，不要照通用ISO教程抄CD-image key ID，也不要把签名里的任意key自动视为可信。官方提供的 [cloud image keyring说明](https://ubuntu.com/docs/public-images/public-images-reference/artifacts/)可用于已有可信Ubuntu环境验证；Windows也可使用Git安装自带且已确认可用的gpg。保存公钥完整fingerprint及 `gpg --verify` 实际结果；来源/签名尚未确认就先停在下载步骤，不执行下面import，不把未验证写成通过。
-- [ ] 摘要允许用于此处真实下载内容边界；不要给代码、spec 或实验输出新建 SHA 证据系统。
+默认用户须非root，实际home最终沿Linux原resolver解析，不能仅靠拼用户名推断。选择确认后所有应用调用显式给出目标；以后系统默认值改变不自动换目标。此次不下载/导入rootfs、不改默认用户、不新建`pulsara`用户，也不管理用户VHD。
 
-若入口迁移/文件不可用，先到 Canonical 官方目录重新确定24.04 x64制品及校验材料，更新本次记录；不换26.04、不用第三方 rootfs 或自己的默认 Ubuntu 兜底。
+### 4.3 保留互操作与挂载
 
-### 4.3 普通 Windows 用户 import
+只读观察`/etc/wsl.conf`及实际行为。允许并保留下面WSL配置值（缺省时沿WSL默认值），不是要求覆盖用户文件：
 
-再次确认 `wsl --list --verbose` 没有同名 `Pulsara`，并且 `%LOCALAPPDATA%\Pulsara-G0\WSL` 不包含已有数据。本地目录用于 WSL 自己的虚拟磁盘，**不等于把 Linux 工作区变成 C 盘目录**。
+```ini
+[interop]
+enabled=true
+appendWindowsPath=true
 
-```cmd
-mkdir "%LOCALAPPDATA%\Pulsara-G0"
-wsl --import Pulsara "%LOCALAPPDATA%\Pulsara-G0\WSL" "%USERPROFILE%\Downloads\pulsara-g0-rootfs\ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz" --version 2
-wsl --list --verbose
-wsl -d Pulsara -u root --cd / --exec /bin/bash
+[automount]
+enabled=true
+mountFsTab=true
 ```
 
-应看到本次 `Pulsara` 为 VERSION 2。最后一条只进入这套新实验发行版的 root 维护 shell；如果 import 失败，保留错误及目录现状，不自动 unregister 重试。`--unregister` 会永久删除发行版，本清单没有自动清库/删发行版命令。[微软 import 与注销语义](https://learn.microsoft.com/en-us/windows/wsl/basic-commands#import-a-distribution)
+用户显式关闭时报告实际能力，提供手动开启指引，不自动修改、重启或终止其发行版。保留其他配置节、全局`.wslconfig`和用户工作。`/mnt/c`及Windows PATH可用不代表它们已通过Linux工作区/PG存储接纳；这些仍要求实际ext4。[微软配置定义](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
 
-### 4.4 一次 root 维护：用户、基础工具及执行域
+本机已有基础观察：四项均开启（含未显式设置时的WSL默认值），Windows PATH存在，`/mnt/c/Windows/System32/cmd.exe /c ver`退出0。这只证明基本互操作可用，不证明Windows后代回收或整个G0通过。
 
-以下只在刚创建的 **Pulsara root shell** 运行。若发现已有同名用户或不明数据，先核来源，不重置密码/改归属覆盖。
+### 4.4 当前用户开发依赖
+
+以下在已选用户的bash执行；只有明确OS依赖安装使用sudo，不改sudoers、不以root运行uv/npm/initdb/模型，也不替换用户已有系统Python/Node/PG。
 
 ```bash
 cat /etc/os-release
 id -u
-useradd --create-home --shell /bin/bash pulsara
-install -d -m 0750 -o pulsara -g pulsara /home/pulsara/workspaces
-apt-get update
-apt-get install -y ca-certificates curl git build-essential bison flex pkg-config binutils patchelf libopenblas0 xz-utils
+mkdir -p "$HOME/workspaces"
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git build-essential bison flex pkg-config binutils patchelf libopenblas0 xz-utils
 ```
 
-预期 Ubuntu24.04；不要给 `pulsara` 免密 sudo，不以 root 运行 uv/npm、initdb 或模型。上述 Linux 构建依赖来自当前 `.github/workflows/desktop-package.yml` / `build_environment.py`，不用旧 Linux 手册里的 PG16/Docker/web_app 路线。
-
-先查看 `/etc/wsl.conf` 和 `/etc/fstab`，已有文件先复制为本次实验的before备份，勿覆盖已有备份。在这个新发行版的root shell可执行 `apt-get install -y nano`、`nano /etc/wsl.conf`；编辑后按Ctrl-O、Enter保存，Ctrl-X退出。nano仅是可选开发编辑器，不是产品运行依赖。相关节各保留一份：
-
-```ini
-[user]
-default=pulsara
-
-[interop]
-enabled=false
-appendWindowsPath=false
-
-[automount]
-enabled=false
-mountFsTab=false
-```
-
-只改本次发行版，不改 Windows 全局 `.wslconfig`。保留并记录原文件中其他有依据的设置，不盲目追加重复 section。配置含义与重启生效规则见 [微软 wsl.conf 文档](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)。
-
-输入 `exit` 退出维护 shell。确认本次尚未启动测试任务/PG，且所有本次 shell 都已退出，才在 **Windows 普通终端**执行：
-
-```cmd
-wsl --terminate Pulsara
-wsl -d Pulsara --cd /home/pulsara --exec /usr/bin/id
-wsl -d Pulsara -u pulsara --cd /home/pulsara --exec /bin/bash -l
-```
-
-这里 terminate 仅用于尚无工作的本次配置生效/后续显式故障实验，**不是产品 Quit 或测试卡住时的日常清理手段**；不使用全局 `wsl --shutdown`。不带 `-u` 的 id 应已经是 pulsara，带 `-u pulsara` 的后续命令仍明确目标。
+依赖来自当前workflow/build_environment，所选Ubuntu上的包名/可用性须实际检查。现有sudo权限保留，不自动获取或保存用户密码。用户已有其他任务/服务均不停止；应用payload和各clone的依赖留在各自目录。
 
 ## 5. WSL 非 root 开发环境与仓库
 
-以下在 **Pulsara / pulsara 的 bash**，先确认身份和真实文件系统：
+以下在 **已选Ubuntu / 默认非root用户的bash**（本机为Ubuntu/plumwsl），先确认身份和真实文件系统：
 
 ```bash
 whoami
 id -u
 uname -a
 cat /etc/os-release
-findmnt -T /home/pulsara/workspaces -o TARGET,SOURCE,FSTYPE,OPTIONS
+findmnt -T "$HOME/workspaces" -o TARGET,SOURCE,FSTYPE,OPTIONS
 printf '%s\n' "$PATH"
 ```
 
-应为非0 UID、Ubuntu24.04/x86_64，工程根位于真实 ext4，不是 DrvFs/9p/CIFS。PATH 不应含 Windows 驱动器目录。`/mnt/c` 不存在本身**不能证明** interop 禁止；真正 PE 负测见 G0-D。
+应为非0 UID、Ubuntu/x86_64并记录实际发行版本，工程根位于真实ext4，不是DrvFs/9p/CIFS。PATH允许Windows目录；`command -v`仍须确认构建用的是锁定Linux工具。记录实际挂载和interop正测，后代/取消/断连边界另见G0-C。
 
 Linux mise 使用和当前 CI 相同的版本，安装脚本先保存/查看再执行：
 
@@ -217,7 +186,7 @@ less /tmp/pulsara-mise-install.sh
 MISE_VERSION=v2026.10.15 sh /tmp/pulsara-mise-install.sh
 export PATH="$HOME/.local/bin:$PATH"
 mise --version
-cd /home/pulsara/workspaces
+cd "$HOME/workspaces"
 git -c core.autocrlf=false clone https://github.com/plumliu/pulsara-agent.git pulsara_agent
 cd pulsara_agent
 git config core.autocrlf false
@@ -238,17 +207,19 @@ uv sync --locked --dev --no-install-project --default-index https://pypi.org/sim
 Playwright 的 OS 库需一次 root 维护。先退出到 Windows 终端，再明确进入这一个发行版执行：
 
 ```cmd
-wsl -d Pulsara -u root --cd /home/pulsara/workspaces/pulsara_agent --exec /home/pulsara/workspaces/pulsara_agent/.venv/bin/python -m playwright install-deps chromium
+wsl -d Ubuntu -u plumwsl --cd /home/plumwsl/workspaces/pulsara_agent --exec sudo /home/plumwsl/workspaces/pulsara_agent/.venv/bin/python -m playwright install-deps chromium
 ```
 
-这一步只装 OS 库；浏览器资源、venv 和构建仍由 pulsara 用户拥有。编辑器连接禁 interop 的发行版时从 Windows 侧选择具体 distro，不依赖 Linux 的 `code .` 或 `explorer.exe .`，失败也不要为编辑方便悄悄打开 interop。
+这一步只装OS库，sudo需要时由用户在交互终端认证；浏览器资源、venv和构建仍由已选用户拥有。编辑器可从Windows侧连接已选发行版，也可按用户现有interop工具工作；编辑器是否可用与Pulsara应用接入资格分别记录。
 
 ## 6. 先验证 Linux 构建，再碰跨域链路
 
-回到 **Pulsara / pulsara**，仓库根且 mise 已激活：
+回到 **已选Ubuntu / 非root用户**，仓库根且mise已激活：
+
+生产构建器`desktop/scripts/prepare_resources.py::target_platform()`已按用户授权删除Ubuntu发行版本号检查，原生Linux与WSL共用此路径；Ubuntu身份、架构与依赖校验仍保留。pg_search仍取固定noble制品，所选Ubuntu版本上的实际资源兼容性由下列构建和smoke验证，不能将版本准入取消记作实测通过。
 
 ```bash
-cd /home/pulsara/workspaces/pulsara_agent
+cd "$HOME/workspaces/pulsara_agent"
 mise run --jobs 1 desktop:verify
 .venv/bin/python -m pytest -q tests/test_desktop_runtime.py tests/test_desktop_launch_directory.py tests/test_desktop_release.py
 .venv/bin/python -m ruff check
@@ -258,7 +229,7 @@ mise run --jobs 1 desktop:verify
 
 这些结果只证明 **WSL 中原 Linux 代码/资源的相应场景**；不能消掉 Phase A 尚欠的原生 Ubuntu 双架构/图形资格。`npm run test:startup/browser` 若借WSLg运行，也不等于Windows Electron GUI。
 
-每次PG/内核实验建立独立短路径home，例如 `/home/pulsara/g0-homes/r01`，目录仅当前用户可访问；运行前记录 realpath/uid/socket与目标，完成后通过原owner停止并确认无进程/锁owner，再清理自己刚创建的目录。不要把saved生产配置复制到实验目录，不连接用户现有数据库，不打印credential。G0不要求真实provider；后续真实provider门继续适用spec的只读settings注入规则。
+每次PG/内核实验建立当前用户私有短路径home，例如`$HOME/g0-homes/r01`；先记录展开后的realpath/uid/socket和目标，完成后通过原owner停止并确认无进程/锁owner，再清理自己新建的目录。保留其他用户任务/软件/数据库；不复制saved生产配置、不打印credential。G0不要求真实provider；后续真实provider门继续适用spec只读settings注入规则。
 
 ## 7. 开始 G0-W：先做小探针，再做完整闸门
 
@@ -277,10 +248,11 @@ const env = {...process.env};
 for (const key of Object.keys(env)) {
   if (key.toUpperCase() === 'WSLENV') delete env[key];
 }
-const repo = '/home/pulsara/workspaces/pulsara_agent';
+// 本机已确认目标示例；其他机器替换为自己已确认的发行版、用户和实际repo。
+const repo = '/home/plumwsl/workspaces/pulsara_agent';
 const code = 'import sys; data=sys.stdin.buffer.read(); sys.stderr.buffer.write(b"x"*(2*1024*1024)); sys.stderr.buffer.flush(); sys.stdout.buffer.write(data); sys.stdout.buffer.flush(); sys.exit(7)';
 const child = spawn(path.join(process.env.SystemRoot, 'System32', 'wsl.exe'),
-  ['-d', 'Pulsara', '-u', 'pulsara', '--cd', repo, '--exec',
+  ['-d', 'Ubuntu', '-u', 'plumwsl', '--cd', repo, '--exec',
    repo + '/.venv/bin/python', '-u', '-c', code],
   {shell:false, stdio:['pipe','pipe','pipe'], env});
 const payload = Buffer.concat([Buffer.from('中文 空格\r\n'), Buffer.alloc(1024*1024, 0x61)]);
@@ -312,25 +284,26 @@ echo %ERRORLEVEL%
 
 紧接命令执行的`echo %ERRORLEVEL%`应为0，日志中应有PASS；把两者都保存才能勾选这个子项。2MiB/1MiB是本次探针输入规模，不是新产品输出/寿命cap。它只证明基本byte/EOF/stderr drain/退出码；**没有证明 JSONL framing、kernel关闭、后代join、取消或整个G0-C通过**。卡住时从另一个终端观察确切进程/锁/pipe并保留证据，不给probe加自动taskkill/global shutdown。
 
-### 7.2 G0-W-D：部署与 Linux-only 执行域
+### 7.2 G0-W-D：已有目标接入与共享环境
 
-- [ ] 保存本次 Windows/WSL/kernel/rootfs/软件包版本及Git提交，确认不是默认Ubuntu、WSL1或其他用户发行版。
-- [ ] import前后发行版清单、同名冲突/失败import残留都可解释；重启后默认身份与显式 `-u pulsara` 都非root。
-- [ ] `/home/pulsara/workspaces`及实验home真实ext4；automount/Windows PATH配置实际有效，非只看配置文本。
-- [ ] **准备已知真实 Windows PE 的正/负对照探针**：Windows确实可运行的测试PE，经受控字节导入放入自己的ext4探针目录，确认同一文件存在/可读，再观察guest执行被拒。绝不能把禁automount后 `/mnt/c/...exe` 的ENOENT，或清WSL_INTEROP变量，记作“禁止interop通过”。若缺正对照能力，本项保持待验证，不临时开放用户磁盘或全局interop凑结果。
-- [ ] 普通Windows用户可启动上述实验，无日常UAC；没有修改其他发行版/默认值/全局配置。
+- [ ] 保存Windows/WSL/kernel/发行版来源和软件包版本及Git提交；已选目标实际为WSL2 Ubuntu，允许使用默认发行版。
+- [ ] 发现默认发行版/用户→明确确认→重开显式使用同一目标；默认值改变、目标缺失、root或未知用户均不静默换环境。
+- [ ] 实际home下的workspaces和实验home真实ext4；记录interop/Windows PATH/自动挂载实际状态，Windows程序正测可复现。
+- [ ] 准备已知Windows PE及后代探针，基本启动/退出作为本门子项；跨域取消、持pipe/父先退/失联和关闭结算按G0-C单独验证，不用Linux PGID推断。
+- [ ] 普通Windows用户可启动，无日常UAC；安装payload不替换用户系统工具/PG、不修改用户配置或终止其他工作；安装失败/离线/磁盘满保留用户数据。
 
-G0-D既包含手工环境事实，也要验证未来安装路线的可重现性/失败边界；一次手工import成功并不代表产品provision完成。
+G0-D还须验证未来目标接纳和用户私有payload安装的失败边界；默认Ubuntu能登录或基本interop成功均不代表整门通过。当前不要求rootfs下载/import，也不自动创建用户。
 
 ### 7.3 G0-W-C：控制、EOF、取消与物理生命周期
 
-继续在 `output/windows-g0/`写有限实验，不把“给python前面加wsl.exe”接入生产。正式载体仍须 `shell:false`、固定distro/user、明确Linuxcwd/可执行文件、三pipe；不让PowerShell文本管道替代byte relay，不混入模型key/WindowsPATH。
+继续在`output/windows-g0/`写有限实验，不把“给python前面加wsl.exe”接入生产。正式载体仍须`shell:false`、显式已选distro/user、明确Linuxcwd/可执行文件及三pipe；不让PowerShell文本管道替代byte relay，不传模型key。保留用户已有Windows PATH/interop能力，应用入口通过绝对Linux路径选定。
 
 - [ ] 扩展7.1到真实随包 `desktop_runtime`：收到原start帧前不接触数据库；只用本次Linuxhome与本次PG DSN启动，不复用生产配置。
 - [ ] 覆盖中文分段UTF-8、JSONL分段/畸形/partial frame、大stderr、stdin EOF前后、pipe失联；核实原事件/exit/锁owner。
 - [ ] 正常shutdown：真实Linux kernel先结算/退出、锁释放，才允许原main/PG顺序；carrier close不是完成authority。
 - [ ] startup等待、start帧发送前后、取消、Windows Node崩溃、仅载体退出、root先退/后代仍持stdout分别观察；不得把结果不明改报未执行/clean success。
-- [ ] 在**确认为可丢弃且无用户工作**的本次发行版，明确标注地做发行版外部终止、Windows睡眠/恢复实验；保留unknown事实，不把强制终止做默认清理策略。
+- [ ] Windows PE、父先退/后代继续、持stdout、取消、Node/载体失联及Quit有独立Windows事实；无法确认的结果保留unknown，不升级clean success，不自动重发或关闭interop放行。
+- [ ] 发行版外部终止实验另备明确可丢弃、无用户工作的故障环境并记录与实际目标的差异；不在用户日常Ubuntu试杀。睡眠/恢复提前留好用户工作，保留unknown，不把强制终止做默认清理。
 - [ ] 沿spec §5/§13对Linux PIPE/PTY、输入/end-input、PGID/drain/worker join、8槽、monitor、MCP/hook相关行为挑选真实受影响合同；单个echo探针不能证明整条终端工具链。
 
 当前 `PythonRuntime` 仍只有本机POSIX实现，B中才增加WSL实现与carrier观察。G0需要编写临时探针，不是修改它的生产状态机来求探针绿。相关真实测试导航：`tests/test_desktop_runtime.py`、`desktop/src/runtime.test.ts`及spec §13列出的terminal suites；先核各runner前置，不能假造一条“全部G0已跑”命令。
@@ -349,7 +322,7 @@ G0-D既包含手工环境事实，也要验证未来安装路线的可重现性/
 
 先做不改生产的Windows Electron/有限Linux目录探针；这个GUI探针当前也需要在`output/`编写。
 
-- [ ] Windows资源管理器地址栏打开 `\\wsl.localhost\Pulsara\home\pulsara\workspaces`；图形新建“中文 工程”，在guest观察同一个canonical ext4目标。Windows UI启动资源管理器，不从Linux执行explorer.exe。
+- [ ] Windows资源管理器打开实际选定目标的UNC（本机示例`\\wsl.localhost\Ubuntu\home\plumwsl\workspaces`）；图形新建“中文 工程”，guest观察同一个canonical ext4目标。产品reveal仍由可信Windows UI owner执行；用户日常可继续在WSL使用explorer.exe。
 - [ ] 再在无active session的Windows Electron实验picker中图形浏览/新建/选择目标；要真实有限目录服务，不能用终端mkdir替代这个产品可行性验证。
 - [ ] 固定发行版UNC↔Linux域转换校验同目标；拒其他发行版/C盘/DrvFs/网络盘/bind mount替代、越界、链接/替换、权限错误、重名、取消及丢回复，路径字符串不作授权。
 - [ ] 真实Windows选择/拖入文件按字节导入Linux副本；preview/HTML/附件/另存为保持原owner与隔离，验证失败/部分写入/unknown。
@@ -361,9 +334,9 @@ Explorer能新建仅证明Explorer子场景；当前正式Linux picker尚未实�
 先在guest用自己的空目录开一个**仅供网络诊断**的loopback server：
 
 ```bash
-cd /home/pulsara/workspaces/pulsara_agent
-install -d -m 0700 /home/pulsara/g0-net-empty
-.venv/bin/python -m http.server 18765 --bind 127.0.0.1 --directory /home/pulsara/g0-net-empty
+cd "$HOME/workspaces/pulsara_agent"
+install -d -m 0700 "$HOME/g0-net-empty"
+.venv/bin/python -m http.server 18765 --bind 127.0.0.1 --directory "$HOME/g0-net-empty"
 ```
 
 Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`。完成用Linux该终端Ctrl-C关闭确切server；端口已占用就记录并选本次其他空端口，不抢占别的服务。Windows→WSL localhost是官方支持场景，但本机VPN/代理/firewall/网络模式仍需实测。[微软网络说明](https://learn.microsoft.com/en-us/windows/wsl/networking)
@@ -382,7 +355,7 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 两份clone各在 `output/windows-g0/<个人名>/<一次实验名>/`记证据，别互相覆盖；此目录被Git忽略，**不会随本次提交自动带到Windows**。本次已归整的Mac文字研究/原始日志/探针在本目录`research/2026-10-24/`随Git提供，spec §16携带结论；其中应用包/pytest临时数据等生成物仅原机器保留，不会通过clone出现，也不能在Windows复用Mac应用包。后续新G0的output仍不会自动提交。
 
-每个闸门保留：Git commit、Windows/WSL/rootfs/SDK来源和版本、运行用户、实际repo/home/PG/socket/端口、完整命令/退出码/输入输出、确切进程与锁/文件观察、截图、清理结果。官方制品校验digest可保留；其他代码/文档/证据不另造hash。实际credential精确删除，保留其他有用错误/响应，不提交raw settings、token或dump凭据。
+每个闸门保留：Git commit、Windows/WSL/已有发行版/SDK来源和版本、运行用户、实际repo/home/PG/socket/端口、完整命令/退出码/输入输出、确切进程与锁/文件观察、截图、清理结果。官方制品校验digest可保留；其他代码/文档/证据不另造hash。实际credential精确删除，保留其他有用错误/响应，不提交raw settings、token或dump凭据。
 
 | 状态 | 什么时候用 |
 | --- | --- |
@@ -393,12 +366,12 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 开始写实验前可建开发分支 `codex/windows-g0`；一次只在选定clone提交一片源码，再经Git推送/另一端fetch同步同一提交。不共用一个node_modules或靠文件复制同步；有dirty时先处理自己的工作，不使用reset --hard/force push抹掉另一端变化。若阶段产出只在output，另将非敏感结论整理进受版本控制的报告；不要为了推送报告`git add -f output`夹带巨大资源或凭据。
 
-每日退出按实际owner关闭自己的probe、kernel和PG，观察确切PID/pipe/锁是否结束；暂时不明就保留并记录，不把杀wsl.exe/terminate发行版当“正常关闭通过”。不自动unregister；需要删这套实验发行版时另核全量数据归属和明确删除决定。
+每日退出按实际owner关闭自己的probe、kernel和PG，观察确切PID/pipe/锁及受支持Windows后代是否结束；暂时不明就保留并记录，不把杀wsl.exe/终止发行版当正常关闭通过。共享Ubuntu不terminate/shutdown/unregister；清理仅限本次已验证归属的应用目录和进程。
 
 ## 9. 接手第一轮完成到哪里
 
 - [ ] Windows本机Git/mise/Node/Electron版本可确认，tsc及选定纯测试有实际结果。
-- [ ] 只有本次`Pulsara`被import/配置，默认及显式身份非root，ext4/interop/挂载事实开始验证。
+- [ ] 已有目标和默认用户已明确确认，后续显式使用同一非root身份；ext4/interop/挂载有观察，其他用户工作和配置保留。
 - [ ] 两份clone同一Git提交；Linux pins/资源构建与聚焦回归有日志。
 - [ ] 至少完成7.1三pipe基础probe及7.6基本可达诊断，结果如实限定；有失败先保留具体错误。
 - [ ] G0-D/C/P/F/N逐项建立待验证清单，明确哪些需要后续临时probe，Ubuntu原生资格继续待验收。
@@ -408,7 +381,7 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 ## 10. 本清单交付检查
 
-root与三位`gpt-6.1-sol high` subagents已对照冻结spec、当前代码/锁文件、官方平台文档交叉审阅本清单，均同意交付。已采纳WSLENV大小写清理、Windows Node实际平台/架构/路径观测、明确退出码、mise版本来源和cloud-image签名/编辑步骤修正。示例JS做过`node --check`，列出的三个纯测试文件在Mac本机5/5通过；**这些不是Windows运行证据，G0-W状态仍为待实测**。本轮没有部署WSL或进入Phase B。
+原root与三位`gpt-6.1-sol high` subagents批准的是修订前的专用发行版清单，历史记录保留在research。原示例JS语法检查及Mac纯测试5/5不证明本次共享WSL/interop方案。当前用户授权修订了活动规范和操作步骤；本机已有基础环境/interop观察，但Windows后代生命周期、正式picker/helper/TLS/OAuth等仍须实测，不沿用历史批准宣称完整G0或B通过。
 
 
 活动实施目录入口：[README.md](README.md)。本文及冻结spec原位于仓库根，现统一存放`windows_compatibility/`；本文命令仍从对应系统的**仓库根**执行，不能先cd到本文件目录再运行。

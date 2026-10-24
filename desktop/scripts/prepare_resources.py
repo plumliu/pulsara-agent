@@ -3,7 +3,7 @@
 Upstream PostgreSQL owns its relocatable layout, PGXS builds pgvector, pkgutil /
 dpkg-deb extract the exact ParadeDB release without running installer scripts,
 and dylibbundler / the native Linux loader / patchelf own dependency relocation.
-Run natively on macOS ARM64 or Ubuntu 24.04 x86_64/ARM64; no cross compilation.
+Run natively on macOS ARM64 or Ubuntu x86_64/ARM64; no cross compilation.
 """
 
 from __future__ import annotations
@@ -65,11 +65,11 @@ def output(args, **kwargs):
 def target_platform():
     target = (sys.platform, platform.machine())
     if target not in SEARCH_ASSETS:
-        raise RuntimeError("Build natively on macOS ARM64 or Ubuntu 24.04 x86_64/ARM64")
+        raise RuntimeError("Build natively on macOS ARM64 or Ubuntu x86_64/ARM64")
     if sys.platform == "linux":
         release = platform.freedesktop_os_release()
-        if (release.get("ID"), release.get("VERSION_ID")) != ("ubuntu", "24.04"):
-            raise RuntimeError("Linux desktop payloads must be built on Ubuntu 24.04")
+        if release.get("ID") != "ubuntu":
+            raise RuntimeError("Linux desktop payloads must be built on Ubuntu")
     elif int(platform.mac_ver()[0].split(".")[0]) < 15:
         raise RuntimeError(
             "The pinned pg_search Sequoia payload requires macOS 15 or newer"
@@ -672,7 +672,7 @@ def validate_resources():
                 "python": python_version,
                 "minimum_os": "macOS 15"
                 if sys.platform == "darwin"
-                else "Ubuntu 24.04",
+                else "Ubuntu",
             },
             indent=2,
         )

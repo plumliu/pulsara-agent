@@ -51,6 +51,8 @@ def test_assembly_requires_and_copies_exactly_three_installers(release_root, tmp
     notes = (output / "release-notes.md").read_text()
     assert "{{" not in notes
     assert all(f"/releases/download/{tag}/{name}" in notes for name in names)
+    assert "Ubuntu，amd64" in notes and "Ubuntu，arm64" in notes
+    assert "Ubuntu 24.04" not in notes
     assert "自动化检查不代替完整图形桌面验收" in notes
     extra = source / "unsupported.AppImage"
     extra.write_bytes(b"unexpected")
