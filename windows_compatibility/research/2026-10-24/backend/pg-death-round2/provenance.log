@@ -1,0 +1,21 @@
+/home/plumwsl/workspaces/pulsara_agent
+fb2c57da12d24ddda32da1320db1d7c645b5ebb6
+uid=1000(plumwsl) gid=1000(plumwsl) groups=1000(plumwsl),27(sudo)
+fstype=ext2/ext3 mount=?
+Python 3.12.15
+pg_ctl (PostgreSQL) 17.9
+flock from util-linux 2.41.3
+/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl
+PRETTY_NAME="Ubuntu 26.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="26.04"
+VERSION="26.04.1 LTS (Resolute Raccoon)"
+VERSION_CODENAME=resolute
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=resolute
+LOGO=ubuntu-logo

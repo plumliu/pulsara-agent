@@ -1,0 +1,7 @@
+TARGET SOURCE FSTYPE OPTIONS
+/tmp   tmpfs  tmpfs  rw,nosuid,nodev,size=8002384k,nr_inodes=1048576
+TARGET SOURCE   FSTYPE OPTIONS
+/      /dev/sdd ext4   rw,relatime,discard,errors=remount-ro,data=ordered
+Filesystem     Type   1K-blocks    Used Available Use% Mounted on
+tmpfs          tmpfs    8002384       0   8002384   0% /tmp
+/dev/sdd       ext4  1055762868 7586440 994472956   1% /

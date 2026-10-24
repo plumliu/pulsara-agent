@@ -1,0 +1,50 @@
+[
+  {
+    "argv": [
+      "git",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit": 0,
+    "stdout": "fb2c57da12d24ddda32da1320db1d7c645b5ebb6\n",
+    "stderr": ""
+  },
+  {
+    "argv": [
+      "git",
+      "status",
+      "--short",
+      "--branch"
+    ],
+    "exit": 0,
+    "stdout": "## codex/windows-g0\n",
+    "stderr": ""
+  },
+  {
+    "argv": [
+      "C:/Windows/System32/wsl.exe",
+      "--version"
+    ],
+    "exit": 0,
+    "stdout": "WSL 版本: 2.7.11.0\r\n内核版本: 6.18.33.2-2\r\nWSLg 版本: 1.0.73.2\r\nMSRDC 版本: 1.2.7214\r\nDirect3D 版本: 1.611.1-81528511\r\nDXCore 版本: 10.0.26100.1-240331-1435.ge-release\r\nWindows: 10.0.26200.9711\r\n",
+    "stderr": ""
+  },
+  {
+    "argv": [
+      "C:/Windows/System32/wsl.exe",
+      "-d",
+      "Ubuntu",
+      "-u",
+      "plumwsl",
+      "--cd",
+      "/home/plumwsl/workspaces/pulsara_agent",
+      "--exec",
+      "/bin/bash",
+      "-c",
+      "git rev-parse HEAD; git status --short --branch; id; cat /proc/sys/fs/binfmt_misc/WSLInterop; cat /etc/wsl.conf; findmnt -T . -o TARGET,SOURCE,FSTYPE"
+    ],
+    "exit": 0,
+    "stdout": "fb2c57da12d24ddda32da1320db1d7c645b5ebb6\n## codex/windows-g0...windows-source/codex/windows-g0\nuid=1000(plumwsl) gid=1000(plumwsl) groups=1000(plumwsl),27(sudo)\nenabled\ninterpreter /init\nflags: P\noffset 0\nmagic 4d5a\n[boot]\nsystemd=true\nTARGET SOURCE   FSTYPE\n/      /dev/sdd ext4\n",
+    "stderr": ""
+  }
+]

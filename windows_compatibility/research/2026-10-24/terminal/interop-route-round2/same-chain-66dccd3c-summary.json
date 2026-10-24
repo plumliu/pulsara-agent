@@ -1,0 +1,83 @@
+{
+  "label": "same-chain-66dccd3c",
+  "args": [
+    "C:\\WINDOWS\\System32\\wsl.exe",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--cd",
+    "/home/plumwsl/workspaces/pulsara_agent",
+    "--exec",
+    "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+    "-u",
+    "-c",
+    "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-u','-c',sys.argv[1],*sys.argv[2:]],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); time.sleep(90)",
+    "import json,os,subprocess,sys,time\nrecord,gate=sys.argv[1:3]\nf=open(record,'a',buffering=1)\nf.write(json.dumps(dict(event='worker-ready',pid=os.getpid(),ppid=os.getppid(),starttime=open('/proc/self/stat').read().split()[21],socket=os.environ.get('WSL_INTEROP')))+'\\n')\ndeadline=time.monotonic()+20\nwhile not os.path.exists(gate):\n if time.monotonic()>deadline: raise TimeoutError('gate')\n time.sleep(.02)\nf.write(json.dumps(dict(event='worker-after-death',pid=os.getpid(),ppid=os.getppid(),socketExists=os.path.exists(os.environ['WSL_INTEROP'])))+'\\n')\np=subprocess.Popen(sys.argv[3:],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nf.write(json.dumps(dict(event='worker-done',code=p.wait()))+'\\n')\n",
+    "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_review/round2/same-chain-66dccd3c.jsonl.linux",
+    "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_review/round2/same-chain-66dccd3c.go",
+    "/mnt/c/python_workspace/pulsara-agent/.venv/Scripts/python.exe",
+    "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_review\\round2\\socket_probe.py",
+    "pe",
+    "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_review\\round2\\same-chain-66dccd3c.jsonl",
+    "Local\\PulsaraG0Socket-same-chain-66dccd3c",
+    "Local\\PulsaraG0Socket-same-chain-66dccd3c-B",
+    "parent",
+    "0",
+    ".2"
+  ],
+  "ready": {
+    "event": "worker-ready",
+    "pid": 1563,
+    "ppid": 1562,
+    "starttime": "45453",
+    "socket": "/run/WSL/1561_interop"
+  },
+  "linux": [
+    {
+      "event": "worker-ready",
+      "pid": 1563,
+      "ppid": 1562,
+      "starttime": "45453",
+      "socket": "/run/WSL/1561_interop"
+    },
+    {
+      "event": "worker-after-death",
+      "pid": 1563,
+      "ppid": 1,
+      "socketExists": false
+    },
+    {
+      "event": "worker-done",
+      "code": 0
+    }
+  ],
+  "facts": [
+    {
+      "role": "parent",
+      "fact": {
+        "pid": 10248,
+        "exists": false,
+        "error": 87
+      },
+      "memberships": {
+        "Local\\PulsaraG0Socket-same-chain-66dccd3c": false,
+        "Local\\PulsaraG0Socket-same-chain-66dccd3c-B": false
+      }
+    },
+    {
+      "role": "child",
+      "fact": {
+        "pid": 35680,
+        "exists": false,
+        "creation": 134373308982997087,
+        "sameIdentity": true
+      },
+      "memberships": {
+        "Local\\PulsaraG0Socket-same-chain-66dccd3c": false,
+        "Local\\PulsaraG0Socket-same-chain-66dccd3c-B": false
+      }
+    }
+  ],
+  "fallbackCounterexampleObserved": true
+}

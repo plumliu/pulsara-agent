@@ -1,0 +1,17 @@
+{
+  "ext4.results.json": {
+    "cases": 7,
+    "failures": [],
+    "allHomesRemoved": true
+  },
+  "ext4-supplement.results.json": {
+    "cases": 3,
+    "failures": [],
+    "allHomesRemoved": true
+  },
+  "pythonSyntaxFiles": 16,
+  "nodeSyntaxFiles": 2,
+  "originalProbeAstEquivalent": true,
+  "normalJoinObserved": true,
+  "normalJoinActiveProcesses": 0
+}

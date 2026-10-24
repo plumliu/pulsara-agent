@@ -1,0 +1,86 @@
+{
+  "label": "pin-36e45fe3",
+  "live": {
+    "returncode": 0,
+    "stdout": "",
+    "stderr": "",
+    "linux": [
+      {
+        "event": "pin-ready",
+        "pid": 557,
+        "starttime": "39678",
+        "socket": "/run/WSL/550_interop",
+        "pin": "/proc/557/fd/4",
+        "inode": 981,
+        "fd": 4
+      },
+      {
+        "event": "before-pe",
+        "pinExists": true,
+        "originalExists": true,
+        "statLinks": 1
+      },
+      {
+        "event": "after-pe",
+        "code": 0,
+        "pinExists": true
+      }
+    ],
+    "facts": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 34888,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-pin-36e45fe3-A": true,
+          "Local\\PulsaraG0Socket-pin-36e45fe3-B": false
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 31384,
+          "exists": false,
+          "creation": 134373308399749351,
+          "sameIdentity": true
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-pin-36e45fe3-A": true,
+          "Local\\PulsaraG0Socket-pin-36e45fe3-B": false
+        }
+      }
+    ]
+  },
+  "afterAnchorDeath": {
+    "returncode": 0,
+    "stdout": "",
+    "stderr": "<3>WSL (569 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+    "linux": [
+      {
+        "event": "pin-ready",
+        "pid": 568,
+        "starttime": "39761",
+        "socket": "/run/WSL/550_interop",
+        "pin": "/proc/568/fd/4",
+        "inode": 981,
+        "fd": 4
+      },
+      {
+        "event": "before-pe",
+        "pinExists": true,
+        "originalExists": false,
+        "statLinks": 0
+      },
+      {
+        "event": "after-pe",
+        "code": 1,
+        "pinExists": true
+      }
+    ],
+    "peFacts": []
+  },
+  "passedObservedBoundary": true
+}

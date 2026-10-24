@@ -1,0 +1,413 @@
+[
+  {
+    "label": "native-cancel-36f40351",
+    "mode": "native",
+    "action": "cancel",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 1388,
+          "exists": true,
+          "creation": 134373305747950002,
+          "sameIdentity": true
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34932,
+          "exists": true,
+          "creation": 134373305750030102,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 1388,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34932,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "native-crash-a5636171",
+    "mode": "native",
+    "action": "crash",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 34116,
+          "exists": true,
+          "creation": 134373305761474328,
+          "sameIdentity": true
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34584,
+          "exists": true,
+          "creation": 134373305763491063,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 34116,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34584,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "native-rootexit-crash-42dfdcf9",
+    "mode": "native",
+    "action": "rootexit-crash",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38104,
+          "exists": false,
+          "error": 87
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 20052,
+          "exists": true,
+          "creation": 134373305776878380,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38104,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 20052,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "carrier-cancel-4b66ec95",
+    "mode": "carrier",
+    "action": "cancel",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 8488,
+          "exists": true,
+          "creation": 134373305815321598,
+          "sameIdentity": true
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 6372,
+          "exists": true,
+          "creation": 134373305817438285,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 8488,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 6372,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "carrier-crash-5f9d17dc",
+    "mode": "carrier",
+    "action": "crash",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 12564,
+          "exists": true,
+          "creation": 134373305830105661,
+          "sameIdentity": true
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 1516,
+          "exists": true,
+          "creation": 134373305832248277,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 12564,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 1516,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "carrier-rootexit-crash-6a645d30",
+    "mode": "carrier",
+    "action": "rootexit-crash",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38480,
+          "exists": false,
+          "error": 87
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 38436,
+          "exists": true,
+          "creation": 134373305846769649,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38480,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 38436,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "enroll-cancel-2c5e0e49",
+    "mode": "enroll",
+    "action": "cancel",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 18880,
+          "exists": true,
+          "creation": 134373305863999822,
+          "sameIdentity": true
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 33276,
+          "exists": true,
+          "creation": 134373305865998170,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 18880,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 33276,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "enroll-crash-e3a14c30",
+    "mode": "enroll",
+    "action": "crash",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 35256,
+          "exists": true,
+          "creation": 134373305878576190,
+          "sameIdentity": true
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 12948,
+          "exists": true,
+          "creation": 134373305880643236,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 35256,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 12948,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  },
+  {
+    "label": "enroll-rootexit-crash-c5787e8d",
+    "mode": "enroll",
+    "action": "rootexit-crash",
+    "before": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38292,
+          "exists": false,
+          "error": 87
+        },
+        "inJob": true
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34248,
+          "exists": true,
+          "creation": 134373305894946717,
+          "sameIdentity": true
+        },
+        "inJob": true
+      }
+    ],
+    "after": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38292,
+          "exists": false,
+          "error": 87
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34248,
+          "exists": false,
+          "error": 87
+        }
+      }
+    ],
+    "passedObservation": true
+  }
+]

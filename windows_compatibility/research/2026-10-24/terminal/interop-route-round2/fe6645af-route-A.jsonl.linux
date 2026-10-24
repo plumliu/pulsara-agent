@@ -1,0 +1,2 @@
+{"event": "runner-start", "pid": 424, "starttime": "25983", "originalSocket": "/run/WSL/423_interop", "targetSocket": "/run/WSL/307_interop"}
+{"event": "runner-exit", "code": 0}

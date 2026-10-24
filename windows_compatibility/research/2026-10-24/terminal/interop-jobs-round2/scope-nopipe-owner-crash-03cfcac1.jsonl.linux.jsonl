@@ -1,0 +1,3 @@
+{"event": "linux-start", "pid": 1426, "starttime": "44679"}
+{"event": "proxy-start", "pid": 1430, "starttime": "44681"}
+{"event": "linux-wait", "returncode": 0}

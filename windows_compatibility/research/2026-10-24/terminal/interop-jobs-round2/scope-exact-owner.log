@@ -1,0 +1,62 @@
+[
+  {
+    "record": "scope-cancel-b5ba8159.jsonl",
+    "action": "cancel",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-crash-b0899328.jsonl",
+    "action": "crash",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-nopipe-owner-crash-03cfcac1.jsonl",
+    "action": "owner-crash",
+    "membersWaited": 3,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-nopipe-crash-49072130.jsonl",
+    "action": "crash",
+    "membersWaited": 3,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-node-nopipe-crash-4604282f.jsonl",
+    "action": "crash",
+    "membersWaited": 3,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-electron-nopipe-crash-3dc6b797.jsonl",
+    "action": "crash",
+    "membersWaited": 3,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "isolation-A-fdb10f09.jsonl",
+    "action": "cancel",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "isolationBStillAliveAfterACancel": true,
+    "members": 11
+  },
+  {
+    "record": "isolation-B-572d5ad8.jsonl",
+    "action": "cancel",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  }
+]

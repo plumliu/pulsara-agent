@@ -1,0 +1,2 @@
+{"event": "runner-start", "pid": 448, "starttime": "437", "originalSocket": "/run/WSL/447_interop", "targetSocket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-c7_h7wbp/interop"}
+{"event": "runner-exit", "code": 1}

@@ -1,0 +1,77 @@
+{
+  "label": "4613808b",
+  "anchors": {
+    "A": {
+      "event": "anchor-ready",
+      "pid": 1384,
+      "starttime": "23420",
+      "socket": "/run/WSL/1383_interop"
+    },
+    "B": {
+      "event": "anchor-ready",
+      "pid": 1387,
+      "starttime": "23427",
+      "socket": "/run/WSL/1386_interop"
+    }
+  },
+  "beforeCancel": {
+    "A": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 37136,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-4613808b-A": true,
+          "Local\\PulsaraG0Socket-4613808b-B": false
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 36664,
+          "exists": true,
+          "creation": 134373306775491029,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-4613808b-A": true,
+          "Local\\PulsaraG0Socket-4613808b-B": false
+        }
+      }
+    ],
+    "B": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 31976,
+          "exists": true,
+          "creation": 134373306778856035,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-4613808b-A": false,
+          "Local\\PulsaraG0Socket-4613808b-B": true
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 22716,
+          "exists": true,
+          "creation": 134373306781764810,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-4613808b-A": false,
+          "Local\\PulsaraG0Socket-4613808b-B": true
+        }
+      }
+    ]
+  }
+}

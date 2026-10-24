@@ -1,0 +1,195 @@
+{
+  "label": "fe6645af",
+  "anchors": {
+    "A": {
+      "event": "anchor-ready",
+      "pid": 310,
+      "starttime": "25909",
+      "socket": "/run/WSL/307_interop"
+    },
+    "B": {
+      "event": "anchor-ready",
+      "pid": 421,
+      "starttime": "25977",
+      "socket": "/run/WSL/420_interop"
+    }
+  },
+  "beforeCancel": {
+    "A": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 36000,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": true,
+          "Local\\PulsaraG0Socket-fe6645af-B": false
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 35396,
+          "exists": true,
+          "creation": 134373307030302094,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": true,
+          "Local\\PulsaraG0Socket-fe6645af-B": false
+        }
+      }
+    ],
+    "B": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 32264,
+          "exists": true,
+          "creation": 134373307033431451,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": false,
+          "Local\\PulsaraG0Socket-fe6645af-B": true
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 26316,
+          "exists": true,
+          "creation": 134373307035540274,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": false,
+          "Local\\PulsaraG0Socket-fe6645af-B": true
+        }
+      }
+    ]
+  },
+  "afterCancel": {
+    "A": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 36000,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": true,
+          "Local\\PulsaraG0Socket-fe6645af-B": false
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 35396,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": true,
+          "Local\\PulsaraG0Socket-fe6645af-B": false
+        }
+      }
+    ],
+    "B": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 32264,
+          "exists": true,
+          "creation": 134373307033431451,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": false,
+          "Local\\PulsaraG0Socket-fe6645af-B": true
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 26316,
+          "exists": true,
+          "creation": 134373307035540274,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": false,
+          "Local\\PulsaraG0Socket-fe6645af-B": true
+        }
+      }
+    ]
+  },
+  "normalBFinished": [
+    {
+      "event": "pe-finished",
+      "time": 1792857112.7378,
+      "pid": 26316,
+      "role": "child"
+    },
+    {
+      "event": "pe-finished",
+      "time": 1792857112.7486632,
+      "pid": 32264,
+      "role": "parent"
+    }
+  ],
+  "missingSocket": {
+    "code": 0,
+    "stdout": "",
+    "stderr": "",
+    "peFacts": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 30820,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": false,
+          "Local\\PulsaraG0Socket-fe6645af-B": false
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 31648,
+          "exists": false,
+          "creation": 134373307130914196,
+          "sameIdentity": true
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-fe6645af-A": false,
+          "Local\\PulsaraG0Socket-fe6645af-B": false
+        }
+      }
+    ],
+    "linux": [
+      {
+        "event": "runner-start",
+        "pid": 447,
+        "starttime": "26988",
+        "originalSocket": "/run/WSL/446_interop",
+        "targetSocket": "/run/WSL/307_interop"
+      },
+      {
+        "event": "runner-exit",
+        "code": 0
+      }
+    ]
+  },
+  "observed": true
+}

@@ -1,0 +1,22 @@
+{
+  "files": [
+    "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\audit.py",
+    "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\control.py",
+    "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\harness.py",
+    "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\helper.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor_smoke.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\job_anchor.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\job_probe.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\job_scope_checks.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\normal-join-probe.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\verify_cleanup.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pinned_socket_probe.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay_probe.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\runtime_environment.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same_chain_probe.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\socket_probe.py",
+    "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\verify_cleanup.py"
+  ],
+  "parsedBehaviorEqual": true,
+  "changes": "Formatting, ordered import splitting, local lint comments only; original output files unchanged."
+}

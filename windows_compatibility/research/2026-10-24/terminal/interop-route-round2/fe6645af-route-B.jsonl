@@ -1,0 +1,7 @@
+{"event": "pe-start", "time": 1792857103.5326502, "pid": 32264, "role": "parent", "ppid": 4684, "creation": 134373307033431451, "memberships": {"Local\\PulsaraG0Socket-fe6645af-A": false, "Local\\PulsaraG0Socket-fe6645af-B": true}}
+{"event": "pe-start", "time": 1792857103.7371025, "pid": 26316, "role": "child", "ppid": 7220, "creation": 134373307035540274, "memberships": {"Local\\PulsaraG0Socket-fe6645af-A": false, "Local\\PulsaraG0Socket-fe6645af-B": true}}
+{"event": "child-ready", "time": 1792857103.7371025, "pid": 26316}
+{"event": "pe-finished", "time": 1792857112.7378, "pid": 26316, "role": "child"}
+{"event": "pe-finished", "time": 1792857112.7486632, "pid": 32264, "role": "parent"}
+{"event": "cleanup-exact-pe", "time": 1792857113.5159173, "pid": 5848, "fact": {"pid": 32264, "exists": false, "error": 87}}
+{"event": "cleanup-exact-pe", "time": 1792857113.5159173, "pid": 5848, "fact": {"pid": 26316, "exists": false, "error": 87}}

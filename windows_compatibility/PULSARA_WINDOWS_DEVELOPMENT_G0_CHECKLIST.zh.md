@@ -318,6 +318,8 @@ G0-D还须验证未来目标接纳和用户私有payload安装的失败边界；
 
 有限操作helper仍需G0探针验证其锁/EOF/取消/未知结果是否满足spec §3.3；**生产`desktop_guest_ops.py`尚未实现**。Linux本地PG成功只覆盖P的一部分，不能跳过Windows→Linux调用及故障结算证据。
 
+第二轮已将helper自身死亡从待验补成反例：ext4下真实pg_ctl/postgres仍可在helper死后晚启动，而另一helper已能持同锁读到status3。当前CLOEXEC单helper持锁候选不可用于reset准入；直接继承锁给PG也因常驻持锁被否决。见spec §18及[第二轮报告](research/2026-10-24/root/g0-w-round2/report.zh.md)。今后实验home先用findmnt核真实ext4；本机/tmp实为tmpfs，不能拿旧/tmp结果冒称ext4资格。
+
 ### 7.5 G0-W-F：图形目录、路径与文件
 
 先做不改生产的Windows Electron/有限Linux目录探针；这个GUI探针当前也需要在`output/`编写。
@@ -380,6 +382,8 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 
 ## 10. 本清单交付检查
+
+第二轮进展见[取消/PG死亡报告](research/2026-10-24/root/g0-w-round2/report.zh.md)：Windows Job/每任务私有socket候选取得局部实证，裸socket回退与PG晚启动反例确认；正常join/绑定与取消竞态、PG替代维护准入仍待验证。未改生产或进入B，不能因此勾选整个G0-C/P。
 
 原root与三位`gpt-6.1-sol high` subagents批准的是修订前的专用发行版清单，历史记录保留在research。原示例JS语法检查及Mac纯测试5/5不证明本次共享WSL/interop方案。当前用户授权修订了活动规范和操作步骤；本机已有基础环境/interop观察，但Windows后代生命周期、正式picker/helper/TLS/OAuth等仍须实测，不沿用历史批准宣称完整G0或B通过。
 

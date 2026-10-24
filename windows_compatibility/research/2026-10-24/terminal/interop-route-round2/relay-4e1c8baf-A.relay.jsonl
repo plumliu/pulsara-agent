@@ -1,0 +1,4 @@
+{"event": "relay-ready", "pid": 426, "starttime": "304", "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-9w095y5v/interop", "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-9w095y5v", "mode": "0o700", "upstream": "/run/WSL/304_interop", "pinned": "/proc/426/fd/6", "inode": 870}
+{"event": "relay-connection-complete", "counts": [499, 0]}
+{"event": "relay-connection-error", "type": "ConnectionRefusedError", "message": "[Errno 111] Connection refused"}
+{"event": "cleanup-private-socket", "time": 1792857542.1745477, "pid": 36880, "code": 0, "output": "removed exact private socket and directory after runners completed\n", "stderr": ""}

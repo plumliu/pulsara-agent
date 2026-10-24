@@ -1,0 +1,3 @@
+{"event": "worker-ready", "pid": 1563, "ppid": 1562, "starttime": "45453", "socket": "/run/WSL/1561_interop"}
+{"event": "worker-after-death", "pid": 1563, "ppid": 1, "socketExists": false}
+{"event": "worker-done", "code": 0}

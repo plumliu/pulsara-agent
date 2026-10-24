@@ -1,0 +1,38 @@
+[
+  {
+    "record": "anchor-eof-c926b67f.jsonl",
+    "action": "eof",
+    "guest": {
+      "event": "anchor-ready",
+      "pid": 538,
+      "starttime": "38829",
+      "socket": "/run/WSL/537_interop",
+      "uid": 1000
+    },
+    "membersWaited": 5
+  },
+  {
+    "record": "anchor-cancel-ee75d4e4.jsonl",
+    "action": "cancel",
+    "guest": {
+      "event": "anchor-ready",
+      "pid": 541,
+      "starttime": "38870",
+      "socket": "/run/WSL/540_interop",
+      "uid": 1000
+    },
+    "membersWaited": 5
+  },
+  {
+    "record": "anchor-crash-3504333a.jsonl",
+    "action": "crash",
+    "guest": {
+      "event": "anchor-ready",
+      "pid": 544,
+      "starttime": "38898",
+      "socket": "/run/WSL/543_interop",
+      "uid": 1000
+    },
+    "membersWaited": 5
+  }
+]

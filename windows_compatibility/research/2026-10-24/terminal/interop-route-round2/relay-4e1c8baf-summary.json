@@ -1,0 +1,271 @@
+{
+  "label": "relay-4e1c8baf",
+  "relayReady": {
+    "A": {
+      "event": "relay-ready",
+      "pid": 426,
+      "starttime": "304",
+      "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-9w095y5v/interop",
+      "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-9w095y5v",
+      "mode": "0o700",
+      "upstream": "/run/WSL/304_interop",
+      "pinned": "/proc/426/fd/6",
+      "inode": 870
+    },
+    "B": {
+      "event": "relay-ready",
+      "pid": 428,
+      "starttime": "317",
+      "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-d_opdqp2/interop",
+      "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-d_opdqp2",
+      "mode": "0o700",
+      "upstream": "/run/WSL/422_interop",
+      "pinned": "/proc/428/fd/6",
+      "inode": 901
+    }
+  },
+  "beforeAnchorDeath": {
+    "A": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 488,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": true,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": false
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34232,
+          "exists": true,
+          "creation": 134373311165659073,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": true,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": false
+        }
+      }
+    ],
+    "B": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38588,
+          "exists": true,
+          "creation": 134373311167827954,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 21452,
+          "exists": true,
+          "creation": 134373311168968091,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+        }
+      }
+    ]
+  },
+  "afterAnchorDeath": {
+    "A": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 488,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": true,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": false
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 34232,
+          "exists": false,
+          "error": 87
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": true,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": false
+        }
+      }
+    ],
+    "B": [
+      {
+        "role": "parent",
+        "fact": {
+          "pid": 38588,
+          "exists": true,
+          "creation": 134373311167827954,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+        }
+      },
+      {
+        "role": "child",
+        "fact": {
+          "pid": 21452,
+          "exists": true,
+          "creation": 134373311168968091,
+          "sameIdentity": true,
+          "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+        },
+        "memberships": {
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+          "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+        }
+      }
+    ],
+    "relaySocket": {
+      "path": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-9w095y5v/interop",
+      "exists": true,
+      "isSocket": true
+    }
+  },
+  "deadAnchorAttempt": {
+    "linux": [
+      {
+        "event": "runner-start",
+        "pid": 439,
+        "starttime": "434",
+        "originalSocket": "/run/WSL/438_interop",
+        "targetSocket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-9w095y5v/interop"
+      },
+      {
+        "event": "runner-exit",
+        "code": 1
+      }
+    ],
+    "stdout": "",
+    "stderr": "<3>WSL (440 - ) ERROR: UtilAcceptVsock:273: accept4 failed 110\n",
+    "facts": []
+  },
+  "BBeforeRelayKill": [
+    {
+      "role": "parent",
+      "fact": {
+        "pid": 38588,
+        "exists": true,
+        "creation": 134373311167827954,
+        "sameIdentity": true,
+        "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+      },
+      "memberships": {
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+      }
+    },
+    {
+      "role": "child",
+      "fact": {
+        "pid": 21452,
+        "exists": true,
+        "creation": 134373311168968091,
+        "sameIdentity": true,
+        "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+      },
+      "memberships": {
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+      }
+    }
+  ],
+  "relayKilled": {
+    "output": "{\"pid\": 428, \"starttime\": \"317\", \"sameIdentity\": true}\n",
+    "stderr": "",
+    "code": 0,
+    "path": {
+      "path": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-d_opdqp2/interop",
+      "exists": true,
+      "isSocket": true
+    }
+  },
+  "BAfterRelayKill": [
+    {
+      "role": "parent",
+      "fact": {
+        "pid": 38588,
+        "exists": true,
+        "creation": 134373311167827954,
+        "sameIdentity": true,
+        "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+      },
+      "memberships": {
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+      }
+    },
+    {
+      "role": "child",
+      "fact": {
+        "pid": 21452,
+        "exists": true,
+        "creation": 134373311168968091,
+        "sameIdentity": true,
+        "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+      },
+      "memberships": {
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-A": false,
+        "Local\\PulsaraG0Socket-relay-4e1c8baf-B": true
+      }
+    }
+  ],
+  "deadRelayAttempt": {
+    "linux": [
+      {
+        "event": "runner-start",
+        "pid": 463,
+        "starttime": "1457",
+        "originalSocket": "/run/WSL/462_interop",
+        "targetSocket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-d_opdqp2/interop"
+      },
+      {
+        "event": "runner-exit",
+        "code": 1
+      }
+    ],
+    "stdout": "",
+    "stderr": "<3>WSL (464 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+    "facts": []
+  },
+  "BFinished": [
+    {
+      "event": "pe-finished",
+      "time": 1792857541.9878328,
+      "pid": 21452,
+      "role": "child"
+    },
+    {
+      "event": "pe-finished",
+      "time": 1792857541.9972274,
+      "pid": 38588,
+      "role": "parent"
+    }
+  ],
+  "passedObservedBoundaries": true
+}

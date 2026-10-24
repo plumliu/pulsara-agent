@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_jobs\round2\job_probe.py", line 174, in <module>
+    if len(sys.argv)==1: run()
+                         ^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_jobs\round2\job_probe.py", line 159, in run
+    assert all(x["inJobAfter"]==expected for x in starts),(mode,starts)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('carrier', [{'event': 'pe-start', 'time': 1792856935.9910884, 'pid': 29896, 'role': 'parent', 'ppid': 9420, 'creation': 134373305358124632, 'inJobBefore': True, 'inJobAfter': True, 'python': '3.12.13 (main, Jun 11 2026, 04:05:29) [MSC v.1944 64 bit (AMD64)]'}, {'event': 'pe-start', 'time': 1792856936.1949503, 'pid': 38168, 'role': 'child', 'ppid': 5316, 'creation': 134373305360123353, 'inJobBefore': True, 'inJobAfter': True, 'python': '3.12.13 (main, Jun 11 2026, 04:05:29) [MSC v.1944 64 bit (AMD64)]'}])

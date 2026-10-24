@@ -12,6 +12,8 @@
 
 本次完整取代此前原生Win32内核路线与其宽Phase A：**ConPTY/Job、PowerShell载荷、Win32 HANDLE/NTFS全消费者binding、Windows PG DLL、内核named-pipe/Proactor迁移全部退出当前计划。** 不保留两条Windows内核路径，不把旧G0-D/T/F/R或88–154人日总数当当前验收/预算，也不以WSL失败自动回退原生Windows、WSL1、Git Bash、远程PG或Docker Desktop。
 
+上段排除的是原生Windows内核的整套迁移。保留interop后的G0研究已实测用于Windows普通后代回收的窄Job候选（§18）；这不恢复ConPTY/原生kernel路线，也不批准生产Job/relay适配或进入B。
+
 首批资格矩阵为Windows 11 25H2 x64普通用户、受支持且固定验证版本的WSL2、用户选定的已有Ubuntu x64发行版；Ubuntu不预设发行版本号门槛，记录实际OS build/WSL包及Linux kernel/发行版来源与版本，按实测结果声明支持组合。26H2、ARM64、Server、WSL1、其他Linux发行版、DrvFs/网络盘工程需另行目标验收后才扩声明。选择25H2作为首批测试矩阵不代表它是唯一当前Windows版本。[Windows官方版本信息](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information)
 
 **首版接入一个用户明确选择的已有WSL2 Ubuntu，首次默认选中用户默认发行版并读取其默认非root用户。** 用户确认的具体发行版/用户名由现有Windows宿主设置owner保存；后续启动显式指定`-d/-u`，不因系统默认值变化静默切换数据。名称可为`Ubuntu`、用户可为`plumwsl`，home由Linux实际解析，不按用户名拼接。目标缺失、用户不存在或为root时显示具体错误，不自动创建/接管其他环境。不修改发行版默认用户、全局`.wslconfig`或系统默认发行版/WSL版本，不把共享发行版视作Pulsara独占资源或安全沙箱。
@@ -111,6 +113,8 @@ helper在已选发行版同一已解析非root用户内检查uid/mode/realpath/P
 
 完整有效回复与carrier正常结束才可采用操作结果；wsl启动失败、截断、EOF、丢回复与pg_ctl真实非零不同。可能已经生效但未收全结果时返回本次结果不明，保留PG/data，不自动重发start/reset/delete或继续初始化。重新进入由TS先等原kernel锁，再通过当前Linux事实验证；不做跨重启操作重放。
 
+**第二轮实测否定了当前候选在helper自身死亡下的充分性（§18）。** 真实pg_ctl fork子已setsid或真实postgres已exec时，杀helper后新helper可持同锁读到status3，而旧进程恢复后仍启动同一库。故本节锁/ready方案不能作为已获资格的维护准入；wait-owner/瞬时status不能放行reset。直接继承fd又使常驻PG持有kernel.lock，正常路径也阻断kernel，不能作为修复。以上目标语义保留，替代机制须另做G0验证，尚无生产WSL helper。
+
 ## 4. G0-W：WSL路线可行性闸门
 
 旧原生G0退出；新G0-W在真实Windows 11首批矩阵、普通用户、实际选定WSL发行版执行。Mac单测、native Ubuntu、mock win32、静态扫描不能代替。版本/G0输出放个人`output/`，不成为生产authority。
@@ -140,6 +144,8 @@ probe继续原default-deny、single-flight/TTL、shell候选、`.venv/bin`与实
 kernel、私有PG、Protocol-v3和应用资源仍使用Linux机制与ext4。自动挂载可用不扩大workspace/PG的存储接纳范围，首版C盘工程仍按第6/7节显式导入。宿主UI、OAuth、下载/reveal仍经原可信Electron owner，不改为拼接shell调用Windows程序。普通任务可使用互操作能力，受现有权限和副作用规则约束；不以PATH隐藏或通用命令黑名单冒充禁止Windows执行。
 
 **跨域生命周期仍为G0-W-C未闭合项。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。Windows模型任务的取消/关闭范围与可观测机制必须在G0证据中闭合，之后才可进入B；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
+
+§18记录的无breakaway Job、专属anchor及私有socket字节转发只通过明确的机制子场景。裸WSL_INTEROP失效会回退；固定socket残留候选可阻止所测回退，但首次绑定、半请求/丢回复、正常join及socket退休仍待验。不得把这些实验直接import到生产，或将取消时TerminateJob当作正常任务成功结算。
 
 Windows launcher仍用系统实际`wsl.exe`绝对位置、`shell:false`、明确已选-d/-u/--cd/--exec和三pipe，不经PowerShell求值。应用入口使用明确Linux可执行文件，不因PATH注入调用同名WindowsPython/Node；模型使用的是已选用户的实际环境，允许Windows PATH项存在。清理本次宿主启动环境的WSLENV自动传递清单，不抹除Linux会话的interop能力；credential仍沿原guard和Linux settings读取，不进launcher argv/宿主日志。Linux PTY仍由guest原manager创建。
 
@@ -474,3 +480,16 @@ Windows接手的环境安装、双仓库落点及G0-W逐项操作见[PULSARA_WIN
 **完整G0-W未通过，B未进入。** 普通非detached Windows后代在Linux进程组取消、Linux root及carrier结束后仍运行的反例已重复，现Linux PGID不能作为跨域结算证明；G0-W-C该项不通过。PG helper自身死亡在真实pg_ctl各阶段的结算仍未验证，其他接纳/GUI/网络/OAuth/休眠等矩阵仍待补；不以Linux源码测试或fixture代替生产集成，不用这些WSL结果替代原生Ubuntu资格。
 
 范围、精确失败输入、原始证据、测试profile清理拒绝与保留产物见[首轮报告](research/2026-10-24/root/g0-w-initial/report.zh.md)。本节为实际观察记录，不重新宣称修订前冻结批准覆盖新路线，也不授权提前实现生产WSL/安装器。
+
+## 18. 第二轮取消与helper死亡证据（2026-10-24启动，跨日至25收尾）
+
+用户再次授权三位gpt-6.1-sol/high并行研究，受测源码fb2c57da，两份clone一致，interop保持开启，未改生产代码或进入B。详细报告及各方交叉审阅见[第二轮报告](research/2026-10-24/root/g0-w-round2/report.zh.md)。
+
+- Windows无breakaway Job在wsl.exe开始运行前绑定，实际覆盖interop普通Windows PE及后代。取消、实际Job owner/Node/Electron宿主崩溃、父先退且后代不持pipe、A/B隔离均有Windows句柄/Job事实；不是只看LinuxPGID或carrier结束。
+- 专属anchor可给不同Linux父链提供每任务interop路由，但裸WSL_INTEROP路径失效会回退到其他入口，已有真实反例。私有0700 ext4 socket+标准双向byte转发+上游O_PATH固定inode候选，在所测anchor/转发进程死亡后拒绝新PE且未观察回退；不复制WSL协议，不关闭互操作，不把Python ctypes研究探针当生产依赖。
+- 最后独立补测中，anchor正常EOF后无pipe普通Windows子仍运行并自然finished；保持Job handle至ActiveProcesses0、TotalTerminatedProcesses0且全成员handle signaled后才关闭，未调用TerminateJob。此项补上正常回收机制正控，但尚未组合私有relay封准入/退休和原Linux owner。
+- 此候选尚未完成首次绑定/半请求/失联/反复spawn取消竞态、完整正常join与socket退休及真实terminal/MCP/hook owner集成。因此仅有机制子项正证，整个G0-C不通过；正常完成不得借TerminateJob冒充success。
+- PG在实际ext4上完成7项主矩阵与3项补充。真实pg_ctl fork子已setsid或postgres已exec时，helper死亡释放锁；后续helper持同锁status3之后，旧启动恢复仍会起同一库。当前§3.3的CLOEXEC单helper持锁候选明确未通过；直接继承fd又让常驻PG占住kernel.lock，阻断正常kernel/维护。替代准入方案未批准，禁止由瞬时status继续reset。
+- 存储审计确认本机/tmp为tmpfs。首轮及本轮早期/tmp PG记录只保留其行为含义；本轮最终矩阵已在/home/plumwsl的ext4重跑，不改写旧日志，也不代替原生Ubuntu资格。
+
+完整G0、原生Ubuntu/GUI资格、Windows激活仍待验收。活动规范记录以上新证据和不合格候选，不恢复旧原生Windows内核方案、不自动放行Phase B。

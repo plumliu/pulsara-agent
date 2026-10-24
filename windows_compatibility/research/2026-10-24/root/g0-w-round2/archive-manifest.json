@@ -1,0 +1,902 @@
+[
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-cancel-ee75d4e4.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-cancel-ee75d4e4.jsonl",
+    "bytes": 3319
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-cancel-ee75d4e4.jsonl.ready.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-cancel-ee75d4e4.jsonl.ready.json",
+    "bytes": 106
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-crash-3504333a.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-crash-3504333a.jsonl",
+    "bytes": 2781
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-crash-3504333a.jsonl.ready.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-crash-3504333a.jsonl.ready.json",
+    "bytes": 106
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-eof-c926b67f.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-eof-c926b67f.jsonl",
+    "bytes": 2812
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-eof-c926b67f.jsonl.ready.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-eof-c926b67f.jsonl.ready.json",
+    "bytes": 106
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-smoke.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-smoke.log",
+    "bytes": 810
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor-summary.json",
+    "bytes": 808
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\anchor_smoke.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\anchor_smoke.py",
+    "bytes": 1905
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-cancel-4b66ec95.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-cancel-4b66ec95.jsonl",
+    "bytes": 3368
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-cancel-4b66ec95.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-cancel-4b66ec95.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-cancel-90a88fd7.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-cancel-90a88fd7.jsonl",
+    "bytes": 3385
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-cancel-90a88fd7.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-cancel-90a88fd7.jsonl.linux.jsonl",
+    "bytes": 116
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-crash-5f9d17dc.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-crash-5f9d17dc.jsonl",
+    "bytes": 3206
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-crash-5f9d17dc.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-crash-5f9d17dc.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-rootexit-crash-6a645d30.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-rootexit-crash-6a645d30.jsonl",
+    "bytes": 3269
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\carrier-rootexit-crash-6a645d30.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\carrier-rootexit-crash-6a645d30.jsonl.linux.jsonl",
+    "bytes": 159
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\cleanup-final.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\cleanup-final.json",
+    "bytes": 56796
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\cleanup-final.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\cleanup-final.log",
+    "bytes": 102
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\cleanup.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\cleanup.log",
+    "bytes": 102
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\electron_owner.cjs",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\electron_owner.cjs",
+    "bytes": 750
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\enroll-cancel-2c5e0e49.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\enroll-cancel-2c5e0e49.jsonl",
+    "bytes": 3378
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\enroll-cancel-2c5e0e49.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\enroll-cancel-2c5e0e49.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\enroll-crash-e3a14c30.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\enroll-crash-e3a14c30.jsonl",
+    "bytes": 3212
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\enroll-crash-e3a14c30.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\enroll-crash-e3a14c30.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\enroll-rootexit-crash-c5787e8d.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\enroll-rootexit-crash-c5787e8d.jsonl",
+    "bytes": 3270
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\enroll-rootexit-crash-c5787e8d.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\enroll-rootexit-crash-c5787e8d.jsonl.linux.jsonl",
+    "bytes": 159
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\environment.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\environment.json",
+    "bytes": 566
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\evidence-list.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\evidence-list.md",
+    "bytes": 823
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-A-c9c3f0ba.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-A-c9c3f0ba.jsonl",
+    "bytes": 6553
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-A-c9c3f0ba.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-A-c9c3f0ba.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-A-d234e922.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-A-d234e922.jsonl",
+    "bytes": 6579
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-A-d234e922.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-A-d234e922.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-A-fdb10f09.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-A-fdb10f09.jsonl",
+    "bytes": 6583
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-A-fdb10f09.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-A-fdb10f09.jsonl.linux.jsonl",
+    "bytes": 120
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-B-572d5ad8.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-B-572d5ad8.jsonl",
+    "bytes": 8521
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-B-572d5ad8.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-B-572d5ad8.jsonl.linux.jsonl",
+    "bytes": 120
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-B-bd00e4af.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-B-bd00e4af.jsonl",
+    "bytes": 8498
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-B-bd00e4af.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-B-bd00e4af.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-B-c1b00ab6.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-B-c1b00ab6.jsonl",
+    "bytes": 8524
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\isolation-B-c1b00ab6.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\isolation-B-c1b00ab6.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\job_anchor.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\job_anchor.py",
+    "bytes": 2993
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\job_probe.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\job_probe.py",
+    "bytes": 12662
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\job_scope_checks.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\job_scope_checks.py",
+    "bytes": 4069
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\matrix-repeat.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\matrix-repeat.log",
+    "bytes": 8289
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\matrix-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\matrix-summary.json",
+    "bytes": 8287
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\matrix.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\matrix.log",
+    "bytes": 991
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\native-cancel-1d2e95ad.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\native-cancel-1d2e95ad.jsonl",
+    "bytes": 2599
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\native-cancel-36f40351.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\native-cancel-36f40351.jsonl",
+    "bytes": 2591
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\native-crash-86772d74.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\native-crash-86772d74.jsonl",
+    "bytes": 2518
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\native-crash-a5636171.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\native-crash-a5636171.jsonl",
+    "bytes": 2429
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\native-rootexit-crash-42dfdcf9.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\native-rootexit-crash-42dfdcf9.jsonl",
+    "bytes": 2485
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\native-rootexit-crash-d93560a4.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\native-rootexit-crash-d93560a4.jsonl",
+    "bytes": 2485
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\node_owner.cjs",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\node_owner.cjs",
+    "bytes": 496
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\pg-cross-review.zh.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\pg-cross-review.zh.md",
+    "bytes": 2857
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\report.zh.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\report.zh.md",
+    "bytes": 11435
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-cancel-1e8810bd.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-cancel-1e8810bd.jsonl",
+    "bytes": 6582
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-cancel-1e8810bd.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-cancel-1e8810bd.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-cancel-731505d8.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-cancel-731505d8.jsonl",
+    "bytes": 6560
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-cancel-731505d8.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-cancel-731505d8.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-cancel-b5ba8159.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-cancel-b5ba8159.jsonl",
+    "bytes": 6582
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-cancel-b5ba8159.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-cancel-b5ba8159.jsonl.linux.jsonl",
+    "bytes": 120
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-crash-2bfa9dd0.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-crash-2bfa9dd0.jsonl",
+    "bytes": 6039
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-crash-2bfa9dd0.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-crash-2bfa9dd0.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-crash-b0899328.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-crash-b0899328.jsonl",
+    "bytes": 6060
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-crash-b0899328.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-crash-b0899328.jsonl.linux.jsonl",
+    "bytes": 120
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-crash-b2323f7b.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-crash-b2323f7b.jsonl",
+    "bytes": 6062
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-crash-b2323f7b.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-crash-b2323f7b.jsonl.linux.jsonl",
+    "bytes": 118
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-electron-nopipe-crash-3208509f.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-electron-nopipe-crash-3208509f.jsonl",
+    "bytes": 3776
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-electron-nopipe-crash-3208509f.jsonl.host-output",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-electron-nopipe-crash-3208509f.jsonl.host-output",
+    "bytes": 828
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-electron-nopipe-crash-3208509f.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-electron-nopipe-crash-3208509f.jsonl.linux.jsonl",
+    "bytes": 159
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-electron-nopipe-crash-3dc6b797.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-electron-nopipe-crash-3dc6b797.jsonl",
+    "bytes": 3775
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-electron-nopipe-crash-3dc6b797.jsonl.host-output",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-electron-nopipe-crash-3dc6b797.jsonl.host-output",
+    "bytes": 828
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-electron-nopipe-crash-3dc6b797.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-electron-nopipe-crash-3dc6b797.jsonl.linux.jsonl",
+    "bytes": 161
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-exact-owner.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-exact-owner.log",
+    "bytes": 1400
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-final.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-final.log",
+    "bytes": 1224
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-0ec0fde9.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-0ec0fde9.jsonl",
+    "bytes": 3784
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-0ec0fde9.jsonl.host-output",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-0ec0fde9.jsonl.host-output",
+    "bytes": 167
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-0ec0fde9.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-0ec0fde9.jsonl.linux.jsonl",
+    "bytes": 159
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-4604282f.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-4604282f.jsonl",
+    "bytes": 3807
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-4604282f.jsonl.host-output",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-4604282f.jsonl.host-output",
+    "bytes": 167
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-4604282f.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-4604282f.jsonl.linux.jsonl",
+    "bytes": 161
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-f0e99f15.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-f0e99f15.jsonl",
+    "bytes": 3805
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-f0e99f15.jsonl.host-output",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-f0e99f15.jsonl.host-output",
+    "bytes": 167
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-node-nopipe-crash-f0e99f15.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-node-nopipe-crash-f0e99f15.jsonl.linux.jsonl",
+    "bytes": 159
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-crash-49072130.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-crash-49072130.jsonl",
+    "bytes": 3719
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-crash-49072130.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-crash-49072130.jsonl.linux.jsonl",
+    "bytes": 161
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-crash-950077cf.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-crash-950077cf.jsonl",
+    "bytes": 3718
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-crash-950077cf.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-crash-950077cf.jsonl.linux.jsonl",
+    "bytes": 159
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-crash-b664e88d.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-crash-b664e88d.jsonl",
+    "bytes": 3696
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-crash-b664e88d.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-crash-b664e88d.jsonl.linux.jsonl",
+    "bytes": 159
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-owner-crash-03cfcac1.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-owner-crash-03cfcac1.jsonl",
+    "bytes": 3783
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-nopipe-owner-crash-03cfcac1.jsonl.linux.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-nopipe-owner-crash-03cfcac1.jsonl.linux.jsonl",
+    "bytes": 161
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope-summary.json",
+    "bytes": 1398
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\scope.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\scope.log",
+    "bytes": 1051
+  },
+  {
+    "source": "output\\windows-g0\\interop_jobs\\round2\\verify_cleanup.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-jobs-round2\\verify_cleanup.py",
+    "bytes": 2631
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\4613808b-A.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\4613808b-A.anchor.jsonl",
+    "bytes": 1053
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\4613808b-B.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\4613808b-B.anchor.jsonl",
+    "bytes": 1051
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\4613808b-route-A.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\4613808b-route-A.jsonl",
+    "bytes": 1061
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\4613808b-route-A.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\4613808b-route-A.jsonl.linux",
+    "bytes": 181
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\4613808b-route-B.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\4613808b-route-B.jsonl",
+    "bytes": 1185
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\4613808b-route-B.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\4613808b-route-B.jsonl.linux",
+    "bytes": 182
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\4613808b-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\4613808b-summary.json",
+    "bytes": 2108
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\cleanup-final.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\cleanup-final.json",
+    "bytes": 5882
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\environment.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\environment.json",
+    "bytes": 2641
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\evidence-list.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\evidence-list.md",
+    "bytes": 1503
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-A.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-A.anchor.jsonl",
+    "bytes": 1048
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-B.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-B.anchor.jsonl",
+    "bytes": 1048
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-missing-socket.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-missing-socket.jsonl",
+    "bytes": 999
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-missing-socket.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-missing-socket.jsonl.linux",
+    "bytes": 178
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-route-A.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-route-A.jsonl",
+    "bytes": 859
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-route-A.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-route-A.jsonl.linux",
+    "bytes": 178
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-route-B.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-route-B.jsonl",
+    "bytes": 953
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-route-B.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-route-B.jsonl.linux",
+    "bytes": 178
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\fe6645af-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\fe6645af-summary.json",
+    "bytes": 5056
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\pin-36e45fe3-A.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pin-36e45fe3-A.anchor.jsonl",
+    "bytes": 1056
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\pin-36e45fe3-after-anchor-death.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pin-36e45fe3-after-anchor-death.jsonl.linux",
+    "bytes": 274
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\pin-36e45fe3-B.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pin-36e45fe3-B.anchor.jsonl",
+    "bytes": 1056
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\pin-36e45fe3-live.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pin-36e45fe3-live.jsonl",
+    "bytes": 1015
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\pin-36e45fe3-live.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pin-36e45fe3-live.jsonl.linux",
+    "bytes": 273
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\pin-36e45fe3-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pin-36e45fe3-summary.json",
+    "bytes": 1951
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\pinned_socket_probe.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\pinned_socket_probe.py",
+    "bytes": 3880
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-A.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-A.anchor.jsonl",
+    "bytes": 1058
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-A.relay.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-A.relay.jsonl",
+    "bytes": 747
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-B.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-B.anchor.jsonl",
+    "bytes": 1059
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-B.relay.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-B.relay.jsonl",
+    "bytes": 573
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-dead-anchor.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-dead-anchor.jsonl.linux",
+    "bytes": 262
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-dead-relay.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-dead-relay.jsonl.linux",
+    "bytes": 263
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-live-A.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-live-A.jsonl",
+    "bytes": 879
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-live-A.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-live-A.jsonl.linux",
+    "bytes": 262
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-live-B.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-live-B.jsonl",
+    "bytes": 1024
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-live-B.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-live-B.jsonl.linux",
+    "bytes": 262
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-4e1c8baf-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-4e1c8baf-summary.json",
+    "bytes": 8270
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-A.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-A.anchor.jsonl",
+    "bytes": 1057
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-A.relay.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-A.relay.jsonl",
+    "bytes": 746
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-B.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-B.anchor.jsonl",
+    "bytes": 1057
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-B.relay.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-B.relay.jsonl",
+    "bytes": 631
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-dead-anchor.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-dead-anchor.jsonl.linux",
+    "bytes": 262
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-dead-relay.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-dead-relay.jsonl.linux",
+    "bytes": 263
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-live-A.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-live-A.jsonl",
+    "bytes": 883
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-live-A.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-live-A.jsonl.linux",
+    "bytes": 262
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-live-B.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-live-B.jsonl",
+    "bytes": 979
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-live-B.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-live-B.jsonl.linux",
+    "bytes": 262
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay-ca30a7c3-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay-ca30a7c3-summary.json",
+    "bytes": 6390
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\relay_probe.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\relay_probe.py",
+    "bytes": 7290
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\report.zh.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\report.zh.md",
+    "bytes": 16034
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\runtime_environment.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\runtime_environment.py",
+    "bytes": 1490
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same-chain-3c90111a-B.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same-chain-3c90111a-B.anchor.jsonl",
+    "bytes": 1074
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same-chain-3c90111a-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same-chain-3c90111a-summary.json",
+    "bytes": 2242
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same-chain-3c90111a.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same-chain-3c90111a.jsonl.linux",
+    "bytes": 157
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same-chain-66dccd3c-B.anchor.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same-chain-66dccd3c-B.anchor.jsonl",
+    "bytes": 1074
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same-chain-66dccd3c-summary.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same-chain-66dccd3c-summary.json",
+    "bytes": 3169
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same-chain-66dccd3c.jsonl",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same-chain-66dccd3c.jsonl",
+    "bytes": 1043
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same-chain-66dccd3c.jsonl.linux",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same-chain-66dccd3c.jsonl.linux",
+    "bytes": 225
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\same_chain_probe.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\same_chain_probe.py",
+    "bytes": 3399
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\socket_probe.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\socket_probe.py",
+    "bytes": 8054
+  },
+  {
+    "source": "output\\windows-g0\\interop_review\\round2\\verify_cleanup.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\terminal\\interop-route-round2\\verify_cleanup.py",
+    "bytes": 2426
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\audit-input.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\audit-input.json",
+    "bytes": 728
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\audit.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\audit.py",
+    "bytes": 1073
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\cleanup-audit.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\cleanup-audit.json",
+    "bytes": 853
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\control.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\control.py",
+    "bytes": 5343
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\cross-review-interop.zh.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\cross-review-interop.zh.md",
+    "bytes": 7011
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\ext4-supplement.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\ext4-supplement.log",
+    "bytes": 93807
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\ext4-supplement.results.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\ext4-supplement.results.json",
+    "bytes": 142239
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\ext4.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\ext4.log",
+    "bytes": 266782
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\ext4.results.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\ext4.results.json",
+    "bytes": 397876
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\fault.c",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\fault.c",
+    "bytes": 1892
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\first-run.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\first-run.log",
+    "bytes": 16134
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\first-run.results.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\first-run.results.json",
+    "bytes": 24648
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\harness.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\harness.py",
+    "bytes": 4572
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\helper.py",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\helper.py",
+    "bytes": 2333
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\provenance.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\provenance.log",
+    "bytes": 727
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\report.zh.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\report.zh.md",
+    "bytes": 10148
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\second-run-version-probe-cleanup.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\second-run-version-probe-cleanup.log",
+    "bytes": 148
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\second-run.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\second-run.log",
+    "bytes": 98537
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\second-run.results.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\second-run.results.json",
+    "bytes": 144868
+  },
+  {
+    "source": "output\\windows-g0\\pg_death\\round2\\storage.log",
+    "archive": "windows_compatibility\\research\\2026-10-24\\backend\\pg-death-round2\\storage.log",
+    "bytes": 386
+  },
+  {
+    "source": "output\\windows-g0\\root\\round2\\baseline.json",
+    "archive": "windows_compatibility\\research\\2026-10-24\\root\\g0-w-round2\\baseline.json",
+    "bytes": 1473
+  },
+  {
+    "source": "output\\windows-g0\\root\\round2\\report.zh.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\root\\g0-w-round2\\report.zh.md",
+    "bytes": 8464
+  },
+  {
+    "source": "output\\windows-g0\\root\\round2\\review-boundaries.zh.md",
+    "archive": "windows_compatibility\\research\\2026-10-24\\root\\g0-w-round2\\review-boundaries.zh.md",
+    "bytes": 2442
+  }
+]

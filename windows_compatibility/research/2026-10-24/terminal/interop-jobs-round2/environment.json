@@ -1,0 +1,7 @@
+{
+  "windowsPython": "3.12.13 (main, Jun 11 2026, 04:05:29) [MSC v.1944 64 bit (AMD64)]",
+  "windowsPythonExe": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe",
+  "commit": "fb2c57da12d24ddda32da1320db1d7c645b5ebb6",
+  "wslVersion": "WSL 版本: 2.7.11.0\r\n内核版本: 6.18.33.2-2\r\nWSLg 版本: 1.0.73.2\r\nMSRDC 版本: 1.2.7214\r\nDirect3D 版本: 1.611.1-81528511\r\nDXCore 版本: 10.0.26100.1-240331-1435.ge-release\r\nWindows: 10.0.26200.9711\r\n",
+  "description": "Read-only configuration; no settings/provider/database access"
+}

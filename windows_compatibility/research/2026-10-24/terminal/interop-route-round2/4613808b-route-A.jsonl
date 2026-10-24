@@ -1,0 +1,6 @@
+{"event": "pe-start", "time": 1792857077.5254178, "pid": 37136, "role": "parent", "ppid": 38304, "creation": 134373306773211275, "memberships": {"Local\\PulsaraG0Socket-4613808b-A": true, "Local\\PulsaraG0Socket-4613808b-B": false}}
+{"event": "pe-start", "time": 1792857077.7670646, "pid": 36664, "role": "child", "ppid": 19440, "creation": 134373306775491029, "memberships": {"Local\\PulsaraG0Socket-4613808b-A": true, "Local\\PulsaraG0Socket-4613808b-B": false}}
+{"event": "child-ready", "time": 1792857077.7670646, "pid": 36664}
+{"event": "parent-early-exit", "time": 1792857077.7891803, "pid": 37136}
+{"event": "cleanup-exact-pe", "time": 1792857078.622428, "pid": 36632, "fact": {"pid": 37136, "exists": false, "error": 87}}
+{"event": "cleanup-exact-pe", "time": 1792857078.624783, "pid": 36632, "fact": {"pid": 36664, "exists": true, "creation": 134373306775491029, "sameIdentity": true, "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe", "terminatedExactHandle": true, "waitResult": 0}}

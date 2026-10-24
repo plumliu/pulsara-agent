@@ -1,0 +1,4 @@
+{"event": "anchor-ready", "pid": 328, "starttime": "260", "socket": "/run/WSL/327_interop", "uid": 1000}
+{"event": "runner-start", "pid": 427, "starttime": "322", "socket": "/run/WSL/327_interop"}
+{"event": "runner-exit", "pid": 427, "returncode": 0}
+{"event": "anchor-eof", "pid": 328, "bytes": 0}

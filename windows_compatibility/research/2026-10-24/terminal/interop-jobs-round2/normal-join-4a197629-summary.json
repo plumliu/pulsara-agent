@@ -1,0 +1,140 @@
+{
+  "label": "normal-join-4a197629",
+  "passedObservedBoundary": true,
+  "accounting": {
+    "TotalUserTime": 625000,
+    "TotalKernelTime": 2812500,
+    "ThisPeriodTotalUserTime": 625000,
+    "ThisPeriodTotalKernelTime": 2812500,
+    "TotalPageFaultCount": 29987,
+    "TotalProcesses": 11,
+    "ActiveProcesses": 0,
+    "TotalTerminatedProcesses": 0
+  },
+  "members": [],
+  "held": [
+    {
+      "pid": 36456,
+      "exists": true,
+      "creation": 134373315110815973,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\wsl.exe",
+      "role": "anchor-carrier",
+      "waitResult": 0
+    },
+    {
+      "pid": 7632,
+      "exists": true,
+      "creation": 134373315110873926,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\conhost.exe",
+      "role": "infrastructure-conhost.exe",
+      "waitResult": 0
+    },
+    {
+      "pid": 34124,
+      "exists": true,
+      "creation": 134373315140221960,
+      "sameIdentity": true,
+      "image": "C:\\Program Files\\WSL\\wslhost.exe",
+      "role": "infrastructure-wslhost.exe",
+      "waitResult": 0
+    },
+    {
+      "pid": 33964,
+      "exists": true,
+      "creation": 134373315140374122,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\conhost.exe",
+      "role": "infrastructure-conhost.exe",
+      "waitResult": 0
+    },
+    {
+      "pid": 32232,
+      "exists": true,
+      "creation": 134373315148065660,
+      "sameIdentity": true,
+      "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe",
+      "role": "windows-child-venv-launcher",
+      "waitResult": 0
+    },
+    {
+      "pid": 8416,
+      "exists": true,
+      "creation": 134373315148133826,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\conhost.exe",
+      "role": "infrastructure-conhost.exe",
+      "waitResult": 0
+    },
+    {
+      "pid": 22368,
+      "exists": true,
+      "creation": 134373315111036235,
+      "sameIdentity": true,
+      "image": "C:\\Program Files\\WSL\\wsl.exe",
+      "role": "infrastructure-wsl.exe",
+      "waitResult": 0
+    },
+    {
+      "pid": 37504,
+      "exists": true,
+      "creation": 134373315148279197,
+      "sameIdentity": true,
+      "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe",
+      "role": "windows-child",
+      "waitResult": 0
+    }
+  ],
+  "naturalFinished": [
+    {
+      "event": "pe-finished",
+      "time": 1792857939.9309566,
+      "pid": 37504,
+      "role": "child"
+    }
+  ],
+  "linux": [
+    {
+      "pid": 328,
+      "expectedStarttime": "260",
+      "starttime": null,
+      "role": "anchor",
+      "sameIdentity": false
+    },
+    {
+      "pid": 427,
+      "expectedStarttime": "322",
+      "starttime": null,
+      "role": "runner",
+      "sameIdentity": false
+    }
+  ],
+  "cleanupAccounting": {
+    "TotalUserTime": 625000,
+    "TotalKernelTime": 2812500,
+    "ThisPeriodTotalUserTime": 625000,
+    "ThisPeriodTotalKernelTime": 2812500,
+    "TotalPageFaultCount": 29987,
+    "TotalProcesses": 11,
+    "ActiveProcesses": 0,
+    "TotalTerminatedProcesses": 0
+  },
+  "cleanupMembers": [],
+  "cleanupLinux": [
+    {
+      "pid": 328,
+      "expectedStarttime": "260",
+      "starttime": null,
+      "role": "anchor",
+      "sameIdentity": false
+    },
+    {
+      "pid": 427,
+      "expectedStarttime": "322",
+      "starttime": null,
+      "role": "runner",
+      "sameIdentity": false
+    }
+  ]
+}

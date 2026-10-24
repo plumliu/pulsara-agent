@@ -1,0 +1,3 @@
+{"event": "relay-ready", "pid": 437, "starttime": "319", "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-8k_i2w9i/interop", "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_review/round2/byte-relay-8k_i2w9i", "mode": "0o700", "upstream": "/run/WSL/431_interop", "pinned": "/proc/437/fd/6", "inode": 907}
+{"event": "relay-connection-complete", "counts": [498, 0]}
+{"event": "cleanup-private-socket", "time": 1792857428.9646597, "pid": 8496, "code": 0, "output": "removed exact private socket and directory after runners completed\n", "stderr": ""}

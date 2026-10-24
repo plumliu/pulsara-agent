@@ -1,0 +1,2241 @@
+{
+  "windows": [
+    {
+      "source": "anchor-cancel-ee75d4e4.jsonl",
+      "expectedCreation": 134373308315882650,
+      "pid": 36560,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-cancel-ee75d4e4.jsonl",
+      "expectedCreation": 134373308314060532,
+      "pid": 36700,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-cancel-ee75d4e4.jsonl",
+      "expectedCreation": 134373308315932957,
+      "pid": 13232,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-cancel-ee75d4e4.jsonl",
+      "expectedCreation": 134373308316321633,
+      "pid": 13804,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-cancel-ee75d4e4.jsonl",
+      "expectedCreation": 134373308316461621,
+      "pid": 37432,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-cancel-ee75d4e4.jsonl",
+      "expectedCreation": 134373308316091175,
+      "pid": 34632,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-crash-3504333a.jsonl",
+      "expectedCreation": 134373308318731256,
+      "pid": 33964,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-crash-3504333a.jsonl",
+      "expectedCreation": 134373308316921129,
+      "pid": 30956,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-crash-3504333a.jsonl",
+      "expectedCreation": 134373308318793909,
+      "pid": 35484,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-crash-3504333a.jsonl",
+      "expectedCreation": 134373308319184575,
+      "pid": 12136,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-crash-3504333a.jsonl",
+      "expectedCreation": 134373308319306955,
+      "pid": 6236,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-crash-3504333a.jsonl",
+      "expectedCreation": 134373308318951183,
+      "pid": 34564,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-eof-c926b67f.jsonl",
+      "expectedCreation": 134373308311744216,
+      "pid": 10156,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-eof-c926b67f.jsonl",
+      "expectedCreation": 134373308309877565,
+      "pid": 33052,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-eof-c926b67f.jsonl",
+      "expectedCreation": 134373308311800608,
+      "pid": 8364,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-eof-c926b67f.jsonl",
+      "expectedCreation": 134373308312192279,
+      "pid": 25104,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-eof-c926b67f.jsonl",
+      "expectedCreation": 134373308312322397,
+      "pid": 14076,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "anchor-eof-c926b67f.jsonl",
+      "expectedCreation": 134373308311960956,
+      "pid": 31332,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-cancel-4b66ec95.jsonl",
+      "expectedCreation": 134373305793068056,
+      "pid": 35056,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-cancel-4b66ec95.jsonl",
+      "expectedCreation": 134373305791228544,
+      "pid": 37264,
+      "exists": true,
+      "creation": 134373308602055842,
+      "sameIdentity": false,
+      "image": "C:\\Windows\\System32\\conhost.exe"
+    },
+    {
+      "source": "carrier-cancel-4b66ec95.jsonl",
+      "expectedCreation": 134373305815321598,
+      "pid": 8488,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-cancel-4b66ec95.jsonl",
+      "expectedCreation": 134373305817438285,
+      "pid": 6372,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-cancel-90a88fd7.jsonl",
+      "expectedCreation": 134373305356813727,
+      "pid": 36352,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-cancel-90a88fd7.jsonl",
+      "expectedCreation": 134373305355057925,
+      "pid": 36124,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-cancel-90a88fd7.jsonl",
+      "expectedCreation": 134373305358124632,
+      "pid": 29896,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-cancel-90a88fd7.jsonl",
+      "expectedCreation": 134373305360123353,
+      "pid": 38168,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-crash-5f9d17dc.jsonl",
+      "expectedCreation": 134373305828977701,
+      "pid": 22368,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-crash-5f9d17dc.jsonl",
+      "expectedCreation": 134373305827150687,
+      "pid": 9968,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-crash-5f9d17dc.jsonl",
+      "expectedCreation": 134373305830105661,
+      "pid": 12564,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-crash-5f9d17dc.jsonl",
+      "expectedCreation": 134373305832248277,
+      "pid": 1516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-rootexit-crash-6a645d30.jsonl",
+      "expectedCreation": 134373305843526043,
+      "pid": 21144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-rootexit-crash-6a645d30.jsonl",
+      "expectedCreation": 134373305841562580,
+      "pid": 37864,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-rootexit-crash-6a645d30.jsonl",
+      "expectedCreation": 134373305844648473,
+      "pid": 38480,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "carrier-rootexit-crash-6a645d30.jsonl",
+      "expectedCreation": 134373305846769649,
+      "pid": 38436,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-cancel-2c5e0e49.jsonl",
+      "expectedCreation": 134373305862900550,
+      "pid": 31552,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-cancel-2c5e0e49.jsonl",
+      "expectedCreation": 134373305861094017,
+      "pid": 38060,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-cancel-2c5e0e49.jsonl",
+      "expectedCreation": 134373305863999822,
+      "pid": 18880,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-cancel-2c5e0e49.jsonl",
+      "expectedCreation": 134373305865998170,
+      "pid": 33276,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-crash-e3a14c30.jsonl",
+      "expectedCreation": 134373305877437629,
+      "pid": 37940,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-crash-e3a14c30.jsonl",
+      "expectedCreation": 134373305875659709,
+      "pid": 35572,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-crash-e3a14c30.jsonl",
+      "expectedCreation": 134373305878576190,
+      "pid": 35256,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-crash-e3a14c30.jsonl",
+      "expectedCreation": 134373305880643236,
+      "pid": 12948,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-rootexit-crash-c5787e8d.jsonl",
+      "expectedCreation": 134373305891860432,
+      "pid": 38460,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-rootexit-crash-c5787e8d.jsonl",
+      "expectedCreation": 134373305890044870,
+      "pid": 14184,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-rootexit-crash-c5787e8d.jsonl",
+      "expectedCreation": 134373305892946185,
+      "pid": 38292,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "enroll-rootexit-crash-c5787e8d.jsonl",
+      "expectedCreation": 134373305894946717,
+      "pid": 34248,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307264886959,
+      "pid": 34664,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307263072275,
+      "pid": 2492,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307265959452,
+      "pid": 16320,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307267969669,
+      "pid": 22368,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307264951810,
+      "pid": 6372,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307265344589,
+      "pid": 38600,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307265477383,
+      "pid": 34356,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307265763644,
+      "pid": 12564,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307265831857,
+      "pid": 34576,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307267750389,
+      "pid": 3880,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307267819340,
+      "pid": 36536,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-c9c3f0ba.jsonl",
+      "expectedCreation": 134373307265107179,
+      "pid": 38876,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308043333945,
+      "pid": 32612,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308041469907,
+      "pid": 36732,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308044566946,
+      "pid": 34036,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308046627298,
+      "pid": 24516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308043488936,
+      "pid": 33864,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308043926886,
+      "pid": 38292,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308044061412,
+      "pid": 38084,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308044369506,
+      "pid": 4308,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308044431738,
+      "pid": 34444,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308046431471,
+      "pid": 33848,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308046498122,
+      "pid": 11548,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-d234e922.jsonl",
+      "expectedCreation": 134373308043657551,
+      "pid": 3364,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308941206156,
+      "pid": 4272,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308939393909,
+      "pid": 28720,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308942379921,
+      "pid": 14380,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308944554722,
+      "pid": 12748,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308941363015,
+      "pid": 11944,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308941752463,
+      "pid": 35780,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308941881366,
+      "pid": 19364,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308942171424,
+      "pid": 20832,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308942236856,
+      "pid": 37188,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308944346918,
+      "pid": 30136,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308944418958,
+      "pid": 35340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-A-fdb10f09.jsonl",
+      "expectedCreation": 134373308941526439,
+      "pid": 26112,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308948485806,
+      "pid": 33908,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308946696780,
+      "pid": 34824,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308949644315,
+      "pid": 14788,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308951700052,
+      "pid": 34684,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308948624864,
+      "pid": 32152,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308949025259,
+      "pid": 34600,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308949148755,
+      "pid": 10616,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308949457185,
+      "pid": 5316,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308949519383,
+      "pid": 36432,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308951500653,
+      "pid": 37008,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308951567912,
+      "pid": 30968,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-572d5ad8.jsonl",
+      "expectedCreation": 134373308948774775,
+      "pid": 33264,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307271871661,
+      "pid": 18680,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307270098099,
+      "pid": 35008,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307272966253,
+      "pid": 35748,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307274943798,
+      "pid": 31368,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307271940753,
+      "pid": 33928,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307272375478,
+      "pid": 14192,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307272497716,
+      "pid": 34672,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307272779972,
+      "pid": 35948,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307272841034,
+      "pid": 31264,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307274740572,
+      "pid": 1768,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307274808071,
+      "pid": 36712,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-bd00e4af.jsonl",
+      "expectedCreation": 134373307272089870,
+      "pid": 35144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308050361736,
+      "pid": 33968,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308048552744,
+      "pid": 31164,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308051562350,
+      "pid": 25132,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308053538949,
+      "pid": 34368,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308050501880,
+      "pid": 14652,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308050904074,
+      "pid": 14500,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308051024878,
+      "pid": 33516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308051370145,
+      "pid": 25772,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308051432016,
+      "pid": 11516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308053338557,
+      "pid": 34388,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308053409548,
+      "pid": 36212,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "isolation-B-c1b00ab6.jsonl",
+      "expectedCreation": 134373308050656626,
+      "pid": 35396,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-1d2e95ad.jsonl",
+      "expectedCreation": 134373305311542035,
+      "pid": 2400,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-1d2e95ad.jsonl",
+      "expectedCreation": 134373305309790402,
+      "pid": 34848,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-1d2e95ad.jsonl",
+      "expectedCreation": 134373305311732798,
+      "pid": 28008,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-1d2e95ad.jsonl",
+      "expectedCreation": 134373305313727545,
+      "pid": 37272,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-36f40351.jsonl",
+      "expectedCreation": 134373305747761014,
+      "pid": 37248,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-36f40351.jsonl",
+      "expectedCreation": 134373305745955409,
+      "pid": 38340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-36f40351.jsonl",
+      "expectedCreation": 134373305747950002,
+      "pid": 1388,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-cancel-36f40351.jsonl",
+      "expectedCreation": 134373305750030102,
+      "pid": 34932,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-86772d74.jsonl",
+      "expectedCreation": 134373305325186433,
+      "pid": 20052,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-86772d74.jsonl",
+      "expectedCreation": 134373305323263123,
+      "pid": 31368,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-86772d74.jsonl",
+      "expectedCreation": 134373305325386654,
+      "pid": 18832,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-86772d74.jsonl",
+      "expectedCreation": 134373305327417676,
+      "pid": 23220,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-a5636171.jsonl",
+      "expectedCreation": 134373305761276576,
+      "pid": 34868,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-a5636171.jsonl",
+      "expectedCreation": 134373305759477290,
+      "pid": 37240,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-a5636171.jsonl",
+      "expectedCreation": 134373305761474328,
+      "pid": 34116,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-crash-a5636171.jsonl",
+      "expectedCreation": 134373305763491063,
+      "pid": 34584,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-42dfdcf9.jsonl",
+      "expectedCreation": 134373305774682053,
+      "pid": 33224,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-42dfdcf9.jsonl",
+      "expectedCreation": 134373305772847302,
+      "pid": 15320,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-42dfdcf9.jsonl",
+      "expectedCreation": 134373305774870590,
+      "pid": 38104,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-42dfdcf9.jsonl",
+      "expectedCreation": 134373305776878380,
+      "pid": 20052,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-d93560a4.jsonl",
+      "expectedCreation": 134373305338450979,
+      "pid": 29728,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-d93560a4.jsonl",
+      "expectedCreation": 134373305336662765,
+      "pid": 33448,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-d93560a4.jsonl",
+      "expectedCreation": 134373305338647223,
+      "pid": 33260,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "native-rootexit-crash-d93560a4.jsonl",
+      "expectedCreation": 134373305340625101,
+      "pid": 36924,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307996027984,
+      "pid": 32156,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307994203642,
+      "pid": 34456,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307997289417,
+      "pid": 36380,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307999335911,
+      "pid": 35384,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307996164114,
+      "pid": 35244,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307996623051,
+      "pid": 33264,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307996749682,
+      "pid": 35340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307997086132,
+      "pid": 6092,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307997158795,
+      "pid": 21208,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307999128818,
+      "pid": 8424,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307999196182,
+      "pid": 37472,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-1e8810bd.jsonl",
+      "expectedCreation": 134373307996319362,
+      "pid": 32928,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307229769407,
+      "pid": 36412,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307227944933,
+      "pid": 31712,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307230908350,
+      "pid": 30244,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307232970054,
+      "pid": 34668,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307229837336,
+      "pid": 3828,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307230279157,
+      "pid": 38212,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307230403440,
+      "pid": 4076,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307230701228,
+      "pid": 34280,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307230767584,
+      "pid": 33060,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307232763215,
+      "pid": 34216,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307232832754,
+      "pid": 5812,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-731505d8.jsonl",
+      "expectedCreation": 134373307230005421,
+      "pid": 21080,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308880406832,
+      "pid": 31804,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308878266785,
+      "pid": 37684,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308881704436,
+      "pid": 35484,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308883980960,
+      "pid": 5848,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308880549039,
+      "pid": 36144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308880983927,
+      "pid": 34988,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308881123841,
+      "pid": 37988,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308881485186,
+      "pid": 33660,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308881561268,
+      "pid": 34968,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308883776840,
+      "pid": 34264,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308883843840,
+      "pid": 32528,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-cancel-b5ba8159.jsonl",
+      "expectedCreation": 134373308880707692,
+      "pid": 15276,
+      "exists": false,
+      "creation": 134373308880707692,
+      "sameIdentity": true
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307237021507,
+      "pid": 34932,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307235290799,
+      "pid": 33884,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307238117524,
+      "pid": 33572,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307240125091,
+      "pid": 26188,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307237094322,
+      "pid": 38112,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307237495261,
+      "pid": 35796,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307237623998,
+      "pid": 33436,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307237927425,
+      "pid": 9240,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307237989788,
+      "pid": 38556,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307239924957,
+      "pid": 34240,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307239991186,
+      "pid": 13232,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-2bfa9dd0.jsonl",
+      "expectedCreation": 134373307237247741,
+      "pid": 38268,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308888285311,
+      "pid": 36804,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308886393485,
+      "pid": 7032,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308889491083,
+      "pid": 34640,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308891720118,
+      "pid": 37240,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308888424322,
+      "pid": 34016,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308888839179,
+      "pid": 5820,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308888968642,
+      "pid": 12564,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308889289966,
+      "pid": 36812,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308889355926,
+      "pid": 34476,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308891489931,
+      "pid": 13816,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308891565598,
+      "pid": 37868,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b0899328.jsonl",
+      "expectedCreation": 134373308888589546,
+      "pid": 8304,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308003560736,
+      "pid": 8612,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308001807425,
+      "pid": 38280,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308004698215,
+      "pid": 37092,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308006668130,
+      "pid": 34832,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308003686447,
+      "pid": 11344,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308004086226,
+      "pid": 34576,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308004217177,
+      "pid": 36536,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308004511942,
+      "pid": 35776,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308004571130,
+      "pid": 1388,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308006466180,
+      "pid": 35304,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308006534256,
+      "pid": 36612,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-crash-b2323f7b.jsonl",
+      "expectedCreation": 134373308003837247,
+      "pid": 36996,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl",
+      "expectedCreation": 134373308032956525,
+      "pid": 31576,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl",
+      "expectedCreation": 134373308031031584,
+      "pid": 23008,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl",
+      "expectedCreation": 134373308034138421,
+      "pid": 32180,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl",
+      "expectedCreation": 134373308036126281,
+      "pid": 37968,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl",
+      "expectedCreation": 134373308035918075,
+      "pid": 37104,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl",
+      "expectedCreation": 134373308035986594,
+      "pid": 36980,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl",
+      "expectedCreation": 134373308930772704,
+      "pid": 12216,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl",
+      "expectedCreation": 134373308928792211,
+      "pid": 35344,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl",
+      "expectedCreation": 134373308931968215,
+      "pid": 16320,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl",
+      "expectedCreation": 134373308934174427,
+      "pid": 8352,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl",
+      "expectedCreation": 134373308933852598,
+      "pid": 34792,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl",
+      "expectedCreation": 134373308934039571,
+      "pid": 30676,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl",
+      "expectedCreation": 134373307254750362,
+      "pid": 37376,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl",
+      "expectedCreation": 134373307252984714,
+      "pid": 33264,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl",
+      "expectedCreation": 134373307255840889,
+      "pid": 38272,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl",
+      "expectedCreation": 134373307257864286,
+      "pid": 29528,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl",
+      "expectedCreation": 134373307257662742,
+      "pid": 34020,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl",
+      "expectedCreation": 134373307257735409,
+      "pid": 31364,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-4604282f.jsonl",
+      "expectedCreation": 134373308918927003,
+      "pid": 34992,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-4604282f.jsonl",
+      "expectedCreation": 134373308916675341,
+      "pid": 36312,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-4604282f.jsonl",
+      "expectedCreation": 134373308920131604,
+      "pid": 14248,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-4604282f.jsonl",
+      "expectedCreation": 134373308922338661,
+      "pid": 37456,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-4604282f.jsonl",
+      "expectedCreation": 134373308922129704,
+      "pid": 34044,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-4604282f.jsonl",
+      "expectedCreation": 134373308922205953,
+      "pid": 32504,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl",
+      "expectedCreation": 134373308021139338,
+      "pid": 38832,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl",
+      "expectedCreation": 134373308019358748,
+      "pid": 24928,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl",
+      "expectedCreation": 134373308022451743,
+      "pid": 18096,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl",
+      "expectedCreation": 134373308024554623,
+      "pid": 33900,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl",
+      "expectedCreation": 134373308024345173,
+      "pid": 37752,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl",
+      "expectedCreation": 134373308024418791,
+      "pid": 34696,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-49072130.jsonl",
+      "expectedCreation": 134373308907381382,
+      "pid": 16316,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-49072130.jsonl",
+      "expectedCreation": 134373308905543916,
+      "pid": 35216,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-49072130.jsonl",
+      "expectedCreation": 134373308908547783,
+      "pid": 36140,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-49072130.jsonl",
+      "expectedCreation": 134373308910717291,
+      "pid": 36316,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-49072130.jsonl",
+      "expectedCreation": 134373308910504496,
+      "pid": 12856,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-49072130.jsonl",
+      "expectedCreation": 134373308910577385,
+      "pid": 5508,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-950077cf.jsonl",
+      "expectedCreation": 134373308010702813,
+      "pid": 38704,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-950077cf.jsonl",
+      "expectedCreation": 134373308008914404,
+      "pid": 35764,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-950077cf.jsonl",
+      "expectedCreation": 134373308011838822,
+      "pid": 37492,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-950077cf.jsonl",
+      "expectedCreation": 134373308013827523,
+      "pid": 26436,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-950077cf.jsonl",
+      "expectedCreation": 134373308013629270,
+      "pid": 27976,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-950077cf.jsonl",
+      "expectedCreation": 134373308013693312,
+      "pid": 35756,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-b664e88d.jsonl",
+      "expectedCreation": 134373307244186471,
+      "pid": 36408,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-b664e88d.jsonl",
+      "expectedCreation": 134373307242392432,
+      "pid": 2468,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-b664e88d.jsonl",
+      "expectedCreation": 134373307245285506,
+      "pid": 21020,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-b664e88d.jsonl",
+      "expectedCreation": 134373307247261178,
+      "pid": 32628,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-b664e88d.jsonl",
+      "expectedCreation": 134373307247063604,
+      "pid": 38748,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-crash-b664e88d.jsonl",
+      "expectedCreation": 134373307247133055,
+      "pid": 35412,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl",
+      "expectedCreation": 134373308896616929,
+      "pid": 34972,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl",
+      "expectedCreation": 134373308894313022,
+      "pid": 9420,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl",
+      "expectedCreation": 134373308897834590,
+      "pid": 35516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl",
+      "expectedCreation": 134373308900064836,
+      "pid": 38564,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl",
+      "expectedCreation": 134373308899851551,
+      "pid": 38132,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl",
+      "expectedCreation": 134373308899924211,
+      "pid": 8812,
+      "exists": false,
+      "error": 87
+    }
+  ],
+  "uid": 1000,
+  "kernel": "6.18.33.2-microsoft-standard-WSL2",
+  "linux": [
+    {
+      "pid": 541,
+      "expectedStarttime": "38870",
+      "source": "anchor-cancel-ee75d4e4.jsonl.ready.json",
+      "exists": false
+    },
+    {
+      "pid": 544,
+      "expectedStarttime": "38898",
+      "source": "anchor-crash-3504333a.jsonl.ready.json",
+      "exists": false
+    },
+    {
+      "pid": 538,
+      "expectedStarttime": "38829",
+      "source": "anchor-eof-c926b67f.jsonl.ready.json",
+      "exists": false
+    },
+    {
+      "pid": 325,
+      "expectedStarttime": "13799",
+      "source": "carrier-cancel-4b66ec95.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 422,
+      "expectedStarttime": "13857",
+      "source": "carrier-cancel-4b66ec95.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 477,
+      "expectedStarttime": "9280",
+      "source": "carrier-cancel-90a88fd7.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 478,
+      "expectedStarttime": "9285",
+      "source": "carrier-cancel-90a88fd7.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 426,
+      "expectedStarttime": "14001",
+      "source": "carrier-crash-5f9d17dc.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 427,
+      "expectedStarttime": "14004",
+      "source": "carrier-crash-5f9d17dc.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 431,
+      "expectedStarttime": "14147",
+      "source": "carrier-rootexit-crash-6a645d30.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 432,
+      "expectedStarttime": "14149",
+      "source": "carrier-rootexit-crash-6a645d30.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 435,
+      "expectedStarttime": "14340",
+      "source": "enroll-cancel-2c5e0e49.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 436,
+      "expectedStarttime": "14342",
+      "source": "enroll-cancel-2c5e0e49.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 439,
+      "expectedStarttime": "14486",
+      "source": "enroll-crash-e3a14c30.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 440,
+      "expectedStarttime": "14488",
+      "source": "enroll-crash-e3a14c30.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 444,
+      "expectedStarttime": "14630",
+      "source": "enroll-rootexit-crash-c5787e8d.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 445,
+      "expectedStarttime": "14632",
+      "source": "enroll-rootexit-crash-c5787e8d.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 496,
+      "expectedStarttime": "28360",
+      "source": "isolation-A-c9c3f0ba.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 497,
+      "expectedStarttime": "28362",
+      "source": "isolation-A-c9c3f0ba.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 470,
+      "expectedStarttime": "36146",
+      "source": "isolation-A-d234e922.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 471,
+      "expectedStarttime": "36148",
+      "source": "isolation-A-d234e922.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1548,
+      "expectedStarttime": "45124",
+      "source": "isolation-A-fdb10f09.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1549,
+      "expectedStarttime": "45126",
+      "source": "isolation-A-fdb10f09.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1552,
+      "expectedStarttime": "45197",
+      "source": "isolation-B-572d5ad8.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1553,
+      "expectedStarttime": "45199",
+      "source": "isolation-B-572d5ad8.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 500,
+      "expectedStarttime": "28430",
+      "source": "isolation-B-bd00e4af.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 501,
+      "expectedStarttime": "28432",
+      "source": "isolation-B-bd00e4af.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 474,
+      "expectedStarttime": "36216",
+      "source": "isolation-B-c1b00ab6.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 475,
+      "expectedStarttime": "36218",
+      "source": "isolation-B-c1b00ab6.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 443,
+      "expectedStarttime": "35673",
+      "source": "scope-cancel-1e8810bd.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 444,
+      "expectedStarttime": "35675",
+      "source": "scope-cancel-1e8810bd.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 479,
+      "expectedStarttime": "28009",
+      "source": "scope-cancel-731505d8.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 480,
+      "expectedStarttime": "28012",
+      "source": "scope-cancel-731505d8.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1355,
+      "expectedStarttime": "44516",
+      "source": "scope-cancel-b5ba8159.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1356,
+      "expectedStarttime": "44519",
+      "source": "scope-cancel-b5ba8159.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 484,
+      "expectedStarttime": "28082",
+      "source": "scope-crash-2bfa9dd0.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 485,
+      "expectedStarttime": "28084",
+      "source": "scope-crash-2bfa9dd0.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1369,
+      "expectedStarttime": "44595",
+      "source": "scope-crash-b0899328.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1372,
+      "expectedStarttime": "44598",
+      "source": "scope-crash-b0899328.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 453,
+      "expectedStarttime": "35747",
+      "source": "scope-crash-b2323f7b.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 454,
+      "expectedStarttime": "35750",
+      "source": "scope-crash-b2323f7b.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 466,
+      "expectedStarttime": "36042",
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 467,
+      "expectedStarttime": "36044",
+      "source": "scope-electron-nopipe-crash-3208509f.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1544,
+      "expectedStarttime": "45020",
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1545,
+      "expectedStarttime": "45022",
+      "source": "scope-electron-nopipe-crash-3dc6b797.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 492,
+      "expectedStarttime": "28259",
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 493,
+      "expectedStarttime": "28261",
+      "source": "scope-node-nopipe-crash-0ec0fde9.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1530,
+      "expectedStarttime": "44902",
+      "source": "scope-node-nopipe-crash-4604282f.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1531,
+      "expectedStarttime": "44904",
+      "source": "scope-node-nopipe-crash-4604282f.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 462,
+      "expectedStarttime": "35923",
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 463,
+      "expectedStarttime": "35926",
+      "source": "scope-node-nopipe-crash-f0e99f15.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1459,
+      "expectedStarttime": "44786",
+      "source": "scope-nopipe-crash-49072130.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1460,
+      "expectedStarttime": "44788",
+      "source": "scope-nopipe-crash-49072130.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 458,
+      "expectedStarttime": "35819",
+      "source": "scope-nopipe-crash-950077cf.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 459,
+      "expectedStarttime": "35821",
+      "source": "scope-nopipe-crash-950077cf.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 488,
+      "expectedStarttime": "28154",
+      "source": "scope-nopipe-crash-b664e88d.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 489,
+      "expectedStarttime": "28156",
+      "source": "scope-nopipe-crash-b664e88d.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1426,
+      "expectedStarttime": "44679",
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl.linux.jsonl",
+      "exists": false
+    },
+    {
+      "pid": 1430,
+      "expectedStarttime": "44681",
+      "source": "scope-nopipe-owner-crash-03cfcac1.jsonl.linux.jsonl",
+      "exists": false
+    }
+  ]
+}

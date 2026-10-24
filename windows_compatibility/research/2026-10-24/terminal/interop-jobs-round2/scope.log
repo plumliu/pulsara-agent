@@ -1,0 +1,48 @@
+[
+  {
+    "record": "scope-cancel-731505d8.jsonl",
+    "action": "cancel",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-crash-2bfa9dd0.jsonl",
+    "action": "crash",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-nopipe-crash-b664e88d.jsonl",
+    "action": "crash",
+    "membersWaited": 3,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "scope-node-nopipe-crash-0ec0fde9.jsonl",
+    "action": "crash",
+    "membersWaited": 3,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "record": "isolation-A-c9c3f0ba.jsonl",
+    "action": "cancel",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  },
+  {
+    "isolationBStillAliveAfterACancel": true,
+    "members": 11
+  },
+  {
+    "record": "isolation-B-bd00e4af.jsonl",
+    "action": "cancel",
+    "membersWaited": 11,
+    "allSignaled": true,
+    "jobDestroyed": true
+  }
+]
