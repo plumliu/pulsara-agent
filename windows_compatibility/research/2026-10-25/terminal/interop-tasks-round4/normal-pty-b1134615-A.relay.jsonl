@@ -1,0 +1,14 @@
+{"event": "receiver-ready", "time": 1792860398.4665282, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "control": "/home/plumwsl/.g0t4-normal-pty-b1134615-A/control", "directory": "/home/plumwsl/.g0t4-normal-pty-b1134615-A", "mode": "0o700"}
+{"event": "control-peer-accepted", "time": 1792860398.6824942, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "peer": {"pid": 689, "starttime": "86001", "pgid": 689, "sid": 689}, "peerUid": 1000}
+{"event": "fd-received", "time": 1792860398.6893477, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "peer": {"pid": 689, "starttime": "86001", "pgid": 689, "sid": 689}, "peerUid": 1000, "inode": 1026, "recvFlags": 1073741824}
+{"event": "relay-ready", "time": 1792860398.6950023, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "socket": "/home/plumwsl/.g0t4-normal-pty-b1134615-A/interop", "directory": "/home/plumwsl/.g0t4-normal-pty-b1134615-A", "peer": {"pid": 689, "starttime": "86001", "pgid": 689, "sid": 689}, "pinned": "/proc/686/fd/9"}
+{"event": "binding-complete", "time": 1792860398.7018456, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682}
+{"event": "bytes-forwarded", "time": 1792860398.7122452, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "operation": false, "bytes": 585, "total": 585}
+{"event": "connection-settled", "time": 1792860398.9072893, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "operation": false}
+{"event": "bytes-forwarded", "time": 1792860398.918682, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "operation": true, "bytes": 32, "total": 32}
+{"event": "connection-settled", "time": 1792860398.9252539, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "operation": true}
+{"event": "bytes-forwarded", "time": 1792860398.9324808, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "operation": true, "bytes": 573, "total": 573}
+{"event": "connection-settled", "time": 1792860399.271682, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "operation": true}
+{"event": "relay-sealed", "time": 1792860399.2803087, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "mode": "normal", "accepted": 3, "taskCount": 0, "writerCount": 0, "forwardedBytes": 1190, "anyForwarded": true, "operationAccepted": 2, "operationForwardedBytes": 605, "operationAnyForwarded": true, "socketExists": true, "directory": "/home/plumwsl/.g0t4-normal-pty-b1134615-A"}
+{"event": "retire-authorized-by-owner", "time": 1792860405.3261433, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "socketExists": true}
+{"event": "relay-retired", "time": 1792860405.3326492, "pid": 686, "starttime": "85981", "pgid": 682, "sid": 682, "directoryExists": false}

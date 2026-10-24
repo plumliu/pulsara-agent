@@ -1,0 +1,12 @@
+{"event": "receiver-ready", "time": 1792860300.154299, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "control": "/home/plumwsl/.g0t4-normal-pty-588862f5-A/control", "directory": "/home/plumwsl/.g0t4-normal-pty-588862f5-A", "mode": "0o700"}
+{"event": "control-peer-accepted", "time": 1792860300.3656538, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "peer": {"pid": 588, "starttime": "76170", "pgid": 588, "sid": 588}, "peerUid": 1000}
+{"event": "fd-received", "time": 1792860300.371818, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "peer": {"pid": 588, "starttime": "76170", "pgid": 588, "sid": 588}, "peerUid": 1000, "inode": 987, "recvFlags": 1073741824}
+{"event": "relay-ready", "time": 1792860300.3775463, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "socket": "/home/plumwsl/.g0t4-normal-pty-588862f5-A/interop", "directory": "/home/plumwsl/.g0t4-normal-pty-588862f5-A", "peer": {"pid": 588, "starttime": "76170", "pgid": 588, "sid": 588}, "pinned": "/proc/585/fd/9"}
+{"event": "binding-complete", "time": 1792860300.3839061, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581}
+{"event": "bytes-forwarded", "time": 1792860300.3942454, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "operation": false, "bytes": 585, "total": 585}
+{"event": "connection-settled", "time": 1792860300.5849936, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "operation": false}
+{"event": "bytes-forwarded", "time": 1792860300.5968652, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "operation": true, "bytes": 32, "total": 32}
+{"event": "connection-settled", "time": 1792860300.6028013, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "operation": true}
+{"event": "bytes-forwarded", "time": 1792860300.6090548, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "operation": true, "bytes": 573, "total": 573}
+{"event": "connection-settled", "time": 1792860300.9476078, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "operation": true}
+{"event": "seal-unsettled-assertion", "time": 1792860300.9553905, "pid": 585, "starttime": "76150", "pgid": 581, "sid": 581, "tasks": [{"done": true, "cancelled": false, "coroutine": "<coroutine object Fixture.connection at 0x74bbf9d6a200>"}], "writers": []}

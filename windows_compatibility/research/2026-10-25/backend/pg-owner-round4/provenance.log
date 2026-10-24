@@ -1,0 +1,27 @@
+['wsl', '-d', 'Ubuntu', '-u', 'plumwsl', '--cd', '/home/plumwsl/workspaces/pulsara_agent', '--exec', 'git', 'rev-parse', 'HEAD']
+exit=0
+adb3e1dec382b5531eface90b76d4968ec21c0b8
+
+['wsl', '-d', 'Ubuntu', '-u', 'plumwsl', '--cd', '/home/plumwsl/workspaces/pulsara_agent', '--exec', 'id']
+exit=0
+uid=1000(plumwsl) gid=1000(plumwsl) groups=1000(plumwsl),27(sudo)
+
+['wsl', '-d', 'Ubuntu', '-u', 'plumwsl', '--cd', '/home/plumwsl/workspaces/pulsara_agent', '--exec', '.venv/bin/python', '--version']
+exit=0
+Python 3.12.15
+
+['wsl', '-d', 'Ubuntu', '-u', 'plumwsl', '--cd', '/home/plumwsl/workspaces/pulsara_agent', '--exec', 'desktop/resources/postgres/bin/pg_ctl', '--version']
+exit=0
+pg_ctl (PostgreSQL) 17.9
+
+['wsl', '-d', 'Ubuntu', '-u', 'plumwsl', '--cd', '/home/plumwsl/workspaces/pulsara_agent', '--exec', 'findmnt', '-T', '/home/plumwsl', '-o', 'TARGET,SOURCE,FSTYPE']
+exit=0
+TARGET SOURCE   FSTYPE
+/      /dev/sdd ext4
+
+['wsl', '-d', 'Ubuntu', '-u', 'plumwsl', '--cd', '/home/plumwsl/workspaces/pulsara_agent', '--exec', '/bin/cat', '/etc/wsl.conf']
+exit=0
+[boot]
+systemd=true
+
+{"version":"v22.23.3","platform":"win32","arch":"x64","execPath":"C:\\Users\\plumlocal\\AppData\\Local\\mise\\installs\\node\\22.23.3\\node.exe"}

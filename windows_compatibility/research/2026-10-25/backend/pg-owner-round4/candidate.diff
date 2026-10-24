@@ -1,0 +1,11 @@
+--- desktop/src/postgres.ts
++++ output-only/candidate-source/postgres.ts
+@@ -43,6 +43,8 @@
+     try {
+       await this.operations.run('pg_ctl', ['start', '-w', '-D', this.directory, '-l', this.operations.logPath, '-o', options]);
+     } catch (error) {
++      const execution = (error as {postgresExecution?: unknown} | null)?.postgresExecution;
++      if (execution === 'not-submitted' || execution === 'unknown') throw error;
+       // pg_ctl's readiness wait may expire while the server it launched is alive.
+       // Retain ownership only after PostgreSQL confirms this exact private instance.
+       try {

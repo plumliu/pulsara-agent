@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "selectedCaseCount": 16,
+  "stages": {
+    "before-relay-close-fixes": 12,
+    "after-cold-task-writer-fix": 2,
+    "after-task-bookkeeping-and-live-predicate-fix": 2
+  },
+  "startupCases": 4,
+  "upstreamCases": 2,
+  "forwardCases": 3,
+  "threadStartFaults": 2,
+  "inputCases": 2,
+  "sharedOwnerAB": 1,
+  "finalNormalAndTailStatusCases": 2
+}

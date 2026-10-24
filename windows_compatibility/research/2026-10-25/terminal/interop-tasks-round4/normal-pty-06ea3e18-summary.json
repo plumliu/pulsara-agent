@@ -1,0 +1,97 @@
+{
+  "label": "normal-pty-06ea3e18",
+  "scenario": "normal",
+  "tty": true,
+  "gate": null,
+  "fault": null,
+  "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round4\\windows_probe.py\", line 396, in run_case\n    raise TimeoutError(\"whole research experiment observation deadline\")\nTimeoutError: whole research experiment observation deadline\n",
+  "managerStillRunning": true,
+  "cleanupWindows": [
+    {
+      "accounting": {
+        "TotalUserTime": 2343750,
+        "TotalKernelTime": 2500000,
+        "ThisPeriodTotalUserTime": 2343750,
+        "ThisPeriodTotalKernelTime": 2500000,
+        "TotalPageFaultCount": 41204,
+        "TotalProcesses": 14,
+        "ActiveProcesses": 0,
+        "TotalTerminatedProcesses": 0
+      },
+      "members": [],
+      "held": [
+        {
+          "pid": 37552,
+          "creation": 134373337646062907,
+          "waitResult": 0
+        },
+        {
+          "pid": 33044,
+          "creation": 134373337646123450,
+          "waitResult": 0
+        },
+        {
+          "pid": 36148,
+          "creation": 134373337646305728,
+          "waitResult": 0
+        },
+        {
+          "pid": 35868,
+          "creation": 134373337646567999,
+          "waitResult": 0
+        },
+        {
+          "pid": 8900,
+          "creation": 134373337646710541,
+          "waitResult": 0
+        },
+        {
+          "pid": 35976,
+          "creation": 134373337648385068,
+          "waitResult": 0
+        },
+        {
+          "pid": 36516,
+          "creation": 134373337648456959,
+          "waitResult": 0
+        },
+        {
+          "pid": 30820,
+          "creation": 134373337648606736,
+          "waitResult": 0
+        },
+        {
+          "pid": 12096,
+          "creation": 134373337650476591,
+          "waitResult": 0
+        },
+        {
+          "pid": 6376,
+          "creation": 134373337650550956,
+          "waitResult": 0
+        },
+        {
+          "pid": 32124,
+          "creation": 134373337650692379,
+          "waitResult": 0
+        },
+        {
+          "pid": 8120,
+          "creation": 134373337651930821,
+          "waitResult": 0
+        },
+        {
+          "pid": 15340,
+          "creation": 134373337652002801,
+          "waitResult": 0
+        },
+        {
+          "pid": 31188,
+          "creation": 134373337652147100,
+          "waitResult": 0
+        }
+      ],
+      "terminateJobCalled": true
+    }
+  ]
+}

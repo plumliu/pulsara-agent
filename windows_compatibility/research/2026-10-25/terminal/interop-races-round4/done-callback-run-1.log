@@ -1,0 +1,20 @@
+{"kind": "standard-asyncio-done-callback-queued", "passed": false, "error": "AssertionError()", "tasks": [{"done": true, "cancelled": false}], "rows": [{"event": "seal-unsettled-assertion", "time": 1792860379.404902, "pid": 652, "starttime": "84072", "pgid": 652, "sid": 652, "tasks": [{"done": true, "cancelled": false, "coroutine": "<coroutine object sleep at 0x79a82fc82840>"}], "writers": []}]}
+Traceback (most recent call last):
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/done_callback_check.py", line 35, in <module>
+    if __name__=="__main__": asyncio.run(main())
+                             ^^^^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/done_callback_check.py", line 20, in main
+    await fixture.seal(False)
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/relay_fixture.py", line 275, in seal
+    assert not self.tasks and not self.writers
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

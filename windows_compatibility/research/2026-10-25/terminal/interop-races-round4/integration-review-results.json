@@ -1,0 +1,354 @@
+{
+  "kind": "read-only-real-manager-evidence-review",
+  "passed": true,
+  "cases": [
+    {
+      "label": "normal-pty-b1134615",
+      "gate": null,
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": true,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "normal",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 605,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 2
+        }
+      ]
+    },
+    {
+      "label": "anchor-before-pin-ef604073",
+      "gate": "anchor-before-pin",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 0,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "anchor-after-pin-bea3d2b7",
+      "gate": "anchor-after-pin",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 0,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "before-bind-77e26c6b",
+      "gate": "before-bind",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 0,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "after-bind-82333dab",
+      "gate": "after-bind",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 0,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "before-forward-82fd44ff",
+      "gate": "before-forward",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 2,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 0,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "after-forwarded-3fb9894f",
+      "gate": "after-forwarded",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 620,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "before-upstream-d6c33081",
+      "gate": "before-upstream",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 2,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 0,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "after-upstream-bda47393",
+      "gate": "after-upstream",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 2,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 0,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "reader-start-a97f6810",
+      "gate": null,
+      "fault": "reader-start",
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 611,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "input-pipe-79a6d726",
+      "gate": null,
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "normal",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 604,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 2
+        }
+      ]
+    },
+    {
+      "label": "input-pty-2e57a2bf",
+      "gate": null,
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "normal",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 601,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 2
+        }
+      ]
+    },
+    {
+      "label": "shared-ab-100da06a",
+      "gate": null,
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "B",
+          "sealMode": "normal",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 602,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 2
+        },
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 602,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 2
+        }
+      ]
+    },
+    {
+      "label": "watcher-start-2d54c333",
+      "gate": null,
+      "fault": "watcher-start",
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 32,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "half-forwarded-888767a0",
+      "gate": "half-forwarded",
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": false,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 2,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 1,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 0
+        }
+      ]
+    },
+    {
+      "label": "tail-cancel-c584858c",
+      "gate": null,
+      "fault": null,
+      "ownerReleasedWithZeroReservations": true,
+      "freshPhysicalStatusPolled": true,
+      "scopes": [
+        {
+          "name": "A",
+          "sealMode": "cancel",
+          "accepted": 3,
+          "operationAccepted": 2,
+          "operationForwardedBytes": 608,
+          "bytesStableAfterAck": true,
+          "sealPrecedesWindowsStop": true,
+          "windowsExactJoin": true,
+          "retireAfterOwnerJoin": true,
+          "modelPeStarts": 2
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: failed readiness keeps a verified started server owned for explicit shutdown
+ok 1 - failed readiness keeps a verified started server owned for explicit shutdown
+  ---
+  duration_ms: 20.256735
+  type: 'test'
+  ...
+# Subtest: start accepts the resolved instance directory while reset requires its exact saved spelling
+ok 2 - start accepts the resolved instance directory while reset requires its exact saved spelling
+  ---
+  duration_ms: 0.922192
+  type: 'test'
+  ...
+# Subtest: only a numeric status code 3 permits a start and failed readiness preserves the original error
+ok 3 - only a numeric status code 3 permits a start and failed readiness preserves the original error
+  ---
+  duration_ms: 0.422293
+  type: 'test'
+  ...
+# Subtest: first initialization retains the original argv and only updates state after successful physical commands
+ok 4 - first initialization retains the original argv and only updates state after successful physical commands
+  ---
+  duration_ms: 0.51583
+  type: 'test'
+  ...
+# Subtest: reset never removes data after a stop failure and clears ownership only after removal succeeds
+ok 5 - reset never removes data after a stop failure and clears ownership only after removal succeeds
+  ---
+  duration_ms: 0.482026
+  type: 'test'
+  ...
+# Subtest: the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+ok 6 - the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+  ---
+  duration_ms: 0.226941
+  type: 'test'
+  ...
+# Subtest: POSIX reset refuses a linked data directory and preserves its actual target
+ok 7 - POSIX reset refuses a linked data directory and preserves its actual target
+  ---
+  duration_ms: 4.702896
+  type: 'test'
+  ...
+# Subtest: reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+ok 8 - reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+  ---
+  duration_ms: 33.970496
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 106.518299

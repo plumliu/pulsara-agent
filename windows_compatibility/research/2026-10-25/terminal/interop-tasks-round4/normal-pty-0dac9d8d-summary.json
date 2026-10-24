@@ -1,0 +1,66 @@
+{
+  "label": "normal-pty-0dac9d8d",
+  "scenario": "normal",
+  "tty": true,
+  "gate": null,
+  "fault": null,
+  "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round4\\windows_probe.py\", line 359, in run_case\n    scope.tick()\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round4\\windows_probe.py\", line 248, in tick\n    self.log(\"host-verified-transferred-fd-job-binding\", **fact)\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round4\\windows_probe.py\", line 143, in log\n    J.emit(self.config[\"windows_record\"], event, **facts)\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_jobs\\round2\\job_probe.py\", line 62, in emit\n    f.write(json.dumps(dict(event=event,time=time.time(),pid=os.getpid(),**kw))+\"\\n\")\n                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: dict() got multiple values for keyword argument 'pid'\n",
+  "cleanupWindows": [
+    {
+      "accounting": {
+        "TotalUserTime": 781250,
+        "TotalKernelTime": 1093750,
+        "ThisPeriodTotalUserTime": 781250,
+        "ThisPeriodTotalKernelTime": 1093750,
+        "TotalPageFaultCount": 21944,
+        "TotalProcesses": 8,
+        "ActiveProcesses": 0,
+        "TotalTerminatedProcesses": 0
+      },
+      "members": [],
+      "held": [
+        {
+          "pid": 31144,
+          "creation": 134373333136495174,
+          "waitResult": 258
+        },
+        {
+          "pid": 16140,
+          "creation": 134373333136555969,
+          "waitResult": 258
+        },
+        {
+          "pid": 6440,
+          "creation": 134373333136733564,
+          "waitResult": 258
+        },
+        {
+          "pid": 33104,
+          "creation": 134373333137012638,
+          "waitResult": 258
+        },
+        {
+          "pid": 33304,
+          "creation": 134373333137150541,
+          "waitResult": 258
+        },
+        {
+          "pid": 35744,
+          "creation": 134373333139473345,
+          "waitResult": 258
+        },
+        {
+          "pid": 33340,
+          "creation": 134373333139549901,
+          "waitResult": 258
+        },
+        {
+          "pid": 38036,
+          "creation": 134373333139714898,
+          "waitResult": 258
+        }
+      ],
+      "terminateJobCalled": true
+    }
+  ]
+}

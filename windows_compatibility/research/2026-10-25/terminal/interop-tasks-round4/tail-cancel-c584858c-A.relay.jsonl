@@ -1,0 +1,15 @@
+{"event": "receiver-ready", "time": 1792860406.6804893, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "control": "/home/plumwsl/.g0t4-tail-cancel-c584858c-A/control", "directory": "/home/plumwsl/.g0t4-tail-cancel-c584858c-A", "mode": "0o700"}
+{"event": "control-peer-accepted", "time": 1792860406.8881915, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "peer": {"pid": 749, "starttime": "86823", "pgid": 749, "sid": 749}, "peerUid": 1000}
+{"event": "fd-received", "time": 1792860406.8952944, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "peer": {"pid": 749, "starttime": "86823", "pgid": 749, "sid": 749}, "peerUid": 1000, "inode": 1042, "recvFlags": 1073741824}
+{"event": "relay-ready", "time": 1792860406.9010248, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "socket": "/home/plumwsl/.g0t4-tail-cancel-c584858c-A/interop", "directory": "/home/plumwsl/.g0t4-tail-cancel-c584858c-A", "peer": {"pid": 749, "starttime": "86823", "pgid": 749, "sid": 749}, "pinned": "/proc/746/fd/9"}
+{"event": "binding-complete", "time": 1792860406.9076235, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742}
+{"event": "bytes-forwarded", "time": 1792860406.9178593, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "operation": false, "bytes": 588, "total": 588}
+{"event": "connection-settled", "time": 1792860407.1158745, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "operation": false}
+{"event": "bytes-forwarded", "time": 1792860407.1277387, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "operation": true, "bytes": 32, "total": 32}
+{"event": "connection-settled", "time": 1792860407.1341748, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "operation": true}
+{"event": "bytes-forwarded", "time": 1792860407.1405478, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "operation": true, "bytes": 576, "total": 576}
+{"event": "connection-settled", "time": 1792860407.4780362, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "operation": true}
+{"event": "relay-sealed", "time": 1792860407.4874775, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "mode": "normal", "accepted": 3, "taskCount": 0, "writerCount": 0, "forwardedBytes": 1196, "anyForwarded": true, "operationAccepted": 2, "operationForwardedBytes": 608, "operationAnyForwarded": true, "socketExists": true, "directory": "/home/plumwsl/.g0t4-tail-cancel-c584858c-A"}
+{"event": "relay-sealed", "time": 1792860407.4998875, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "mode": "cancel", "accepted": 3, "taskCount": 0, "writerCount": 0, "forwardedBytes": 1196, "anyForwarded": true, "operationAccepted": 2, "operationForwardedBytes": 608, "operationAnyForwarded": true, "socketExists": true, "directory": "/home/plumwsl/.g0t4-tail-cancel-c584858c-A"}
+{"event": "retire-authorized-by-owner", "time": 1792860407.6101084, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "socketExists": true}
+{"event": "relay-retired", "time": 1792860407.6180136, "pid": 746, "starttime": "86802", "pgid": 742, "sid": 742, "directoryExists": false}

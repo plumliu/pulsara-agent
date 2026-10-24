@@ -1,0 +1,108 @@
+[
+  {
+    "label": "normal-pty-06ea3e18",
+    "windows": [
+      {
+        "pid": 37552,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 33044,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 36148,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 35868,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 8900,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 35976,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 36516,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 30820,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 12096,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 6376,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 32124,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 8120,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 15340,
+        "exists": false,
+        "error": 87
+      },
+      {
+        "pid": 31188,
+        "exists": false,
+        "error": 87
+      }
+    ],
+    "linux": {
+      "identities": [
+        {
+          "pid": 457,
+          "expectedStarttime": "62595",
+          "actualStarttime": "62595",
+          "sameIdentity": true,
+          "exactFailedFixtureTeardown": true,
+          "pidfdSignalled": true
+        },
+        {
+          "pid": 453,
+          "expectedStarttime": "62548",
+          "actualStarttime": "62548",
+          "sameIdentity": true,
+          "exactFailedFixtureTeardown": true,
+          "pidfdSignalled": true
+        },
+        {
+          "pid": 460,
+          "expectedStarttime": "62614",
+          "actualStarttime": null,
+          "sameIdentity": false
+        }
+      ],
+      "removed": [
+        "/home/plumwsl/.g0t4-normal-pty-06ea3e18-A/interop",
+        "/home/plumwsl/.g0t4-normal-pty-06ea3e18-A/control"
+      ],
+      "remainingDirectories": []
+    }
+  }
+]

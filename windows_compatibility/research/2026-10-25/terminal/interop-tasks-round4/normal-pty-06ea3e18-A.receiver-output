@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/relay_fixture.py", line 339, in <module>
+    main()
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/relay_fixture.py", line 335, in main
+    asyncio.run(fixture.receiver())
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/relay_fixture.py", line 312, in receiver
+    await sealing
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/relay_fixture.py", line 273, in seal
+    assert not self.tasks and not self.writers
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "normalCases": 1,
+  "protocolCases": 6,
+  "deathCases": 3,
+  "foreignBaselineCases": 1,
+  "typedCandidateCases": 2,
+  "finalPhysicalCases": 13,
+  "preAdmissionOperationWritten": 0,
+  "spawnErrorSelfCheck": true
+}

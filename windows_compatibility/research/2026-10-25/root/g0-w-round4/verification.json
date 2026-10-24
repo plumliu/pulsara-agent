@@ -1,0 +1,16 @@
+{
+  "recordChecksPassed": true,
+  "pgPhysicalCases": 13,
+  "terminalSelectedCases": 16,
+  "terminalStages": [
+    12,
+    2,
+    2
+  ],
+  "unixOnlySelfchecks": 11,
+  "oldFailuresRetained": true,
+  "exactOwnedCleanupSettled": true,
+  "currentPidQueryLimitations": 1,
+  "documentLinksChecked": 45,
+  "scope": "Read-only record validation; no new runtime case or G0 qualification."
+}

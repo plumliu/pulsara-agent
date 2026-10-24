@@ -1,0 +1,67 @@
+{
+  "windows": [
+    {
+      "pid": 15276,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 5720,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 21208,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32784,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33032,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34572,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36120,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31880,
+      "exists": false,
+      "error": 87
+    }
+  ],
+  "linux": {
+    "exactIdentities": [
+      {
+        "pid": 1327,
+        "expectedStarttime": "29231",
+        "actualStarttime": null,
+        "sameIdentity": false
+      },
+      {
+        "pid": 1347,
+        "expectedStarttime": "29288",
+        "actualStarttime": null,
+        "sameIdentity": false
+      }
+    ],
+    "remainingMatchingProcesses": [],
+    "exactPidfdCleanup": [],
+    "removed": [
+      "/home/plumwsl/.g0t4-watcher-start-8a547091-A/interop",
+      "/home/plumwsl/.g0t4-watcher-start-8a547091-A/control"
+    ],
+    "directoryExists": false
+  }
+}

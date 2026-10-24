@@ -1,0 +1,1829 @@
+{
+  "windowsIdentityCount": 254,
+  "linuxIdentityCount": 73,
+  "privateDirectoryCount": 25,
+  "remainingWindows": [],
+  "unknownWindows": [
+    {
+      "pid": 33468,
+      "exists": null,
+      "error": 5
+    }
+  ],
+  "remainingLinux": [],
+  "remainingDirectories": [],
+  "retainedCorruptFixtureLines": [
+    {
+      "path": "normal-pty-0f801224.manager.jsonl",
+      "line": 18,
+      "error": "Expecting value: line 1 column 1 (char 0)"
+    }
+  ],
+  "windowsFacts": [
+    {
+      "pid": 1084,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 1516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 1744,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 2292,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 2624,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 3260,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 3384,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 3684,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 4156,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 4892,
+      "exists": true,
+      "creation": 134373335493516258,
+      "sameIdentity": false,
+      "image": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    },
+    {
+      "pid": 4984,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 5316,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 5316,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 5720,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 5880,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 6096,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 6096,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 6136,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 6376,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 6440,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 6460,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 7040,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8120,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8304,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8364,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8440,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8480,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8504,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8636,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8880,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8900,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 8908,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 9380,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 9696,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 9756,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 9984,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 10200,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 10476,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 10960,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 11520,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 11660,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 12096,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 12652,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 12652,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 12748,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 12844,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 13020,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 14084,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 14788,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 15276,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 15276,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 15340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 15404,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 16140,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 16380,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 16512,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 16956,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 16992,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 17796,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 18684,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 19372,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 20616,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 21084,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 21208,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 22340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 22500,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 23004,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 23220,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 23460,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 24240,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 24516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 24544,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 25580,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 25868,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 25960,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 27124,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 29040,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 29080,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 29204,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 29528,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30096,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30168,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30276,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30492,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30644,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30820,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30912,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 30940,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31064,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31164,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31188,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31196,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31272,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31276,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31384,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31444,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31504,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31548,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31548,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31572,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31636,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31732,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31848,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 31880,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32008,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32068,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32092,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32124,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32268,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32268,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32356,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32412,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32420,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32460,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32464,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32536,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32544,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32612,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32680,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32692,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32756,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32772,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32784,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32812,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32864,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 32972,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33012,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33032,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33044,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33104,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33128,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33196,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33256,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33280,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33304,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33320,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33336,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33376,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33456,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33468,
+      "exists": null,
+      "error": 5
+    },
+    {
+      "pid": 33576,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33580,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33664,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33740,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33744,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33860,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33920,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34004,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34036,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34072,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34132,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34180,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34256,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34388,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34424,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34432,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34472,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34564,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34572,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34600,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34644,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34776,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34780,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34836,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34872,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34888,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34888,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34952,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34956,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 34992,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35208,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35244,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35256,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35272,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35300,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35412,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35436,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35492,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35500,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35504,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35508,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35568,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35684,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35704,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35736,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35744,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35760,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35772,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35852,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35868,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35868,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35900,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35960,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35976,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36120,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36148,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36328,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36328,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36360,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36380,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36424,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36456,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36468,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36480,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36516,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36676,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36756,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36828,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36884,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36908,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 36964,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37004,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37048,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37096,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37172,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37204,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37208,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37348,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37392,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37416,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37472,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37500,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37528,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37552,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37560,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37588,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37704,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37760,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 37884,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38036,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38076,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38088,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38112,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38196,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38244,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38300,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38380,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38420,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38428,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38480,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38520,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38532,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38608,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38680,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38772,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38776,
+      "exists": false,
+      "error": 87
+    }
+  ],
+  "linuxFacts": [
+    {
+      "pid": 324,
+      "expectedStarttime": "45116",
+      "actualStarttime": "263",
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 327,
+      "expectedStarttime": "62127",
+      "actualStarttime": "264",
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 411,
+      "expectedStarttime": "17492",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 413,
+      "expectedStarttime": "45209",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 414,
+      "expectedStarttime": "17519",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 416,
+      "expectedStarttime": "45229",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 423,
+      "expectedStarttime": "45328",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 427,
+      "expectedStarttime": "45372",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 427,
+      "expectedStarttime": "62247",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 430,
+      "expectedStarttime": "45389",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 430,
+      "expectedStarttime": "62267",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 437,
+      "expectedStarttime": "45442",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 438,
+      "expectedStarttime": "62372",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 441,
+      "expectedStarttime": "45488",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 442,
+      "expectedStarttime": "62418",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 444,
+      "expectedStarttime": "45506",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 445,
+      "expectedStarttime": "62437",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 450,
+      "expectedStarttime": "22162",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 453,
+      "expectedStarttime": "62548",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 454,
+      "expectedStarttime": "22210",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 457,
+      "expectedStarttime": "22236",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 457,
+      "expectedStarttime": "62595",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 460,
+      "expectedStarttime": "62614",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 581,
+      "expectedStarttime": "76126",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 585,
+      "expectedStarttime": "76150",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 588,
+      "expectedStarttime": "76170",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 622,
+      "expectedStarttime": "24639",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 642,
+      "expectedStarttime": "24694",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 651,
+      "expectedStarttime": "24727",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 682,
+      "expectedStarttime": "85932",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 686,
+      "expectedStarttime": "85981",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 689,
+      "expectedStarttime": "86001",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 742,
+      "expectedStarttime": "86746",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 746,
+      "expectedStarttime": "86802",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 749,
+      "expectedStarttime": "86823",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 863,
+      "expectedStarttime": "27369",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 872,
+      "expectedStarttime": "27419",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 875,
+      "expectedStarttime": "27447",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 880,
+      "expectedStarttime": "27487",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 884,
+      "expectedStarttime": "27542",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 887,
+      "expectedStarttime": "27601",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 890,
+      "expectedStarttime": "27646",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 894,
+      "expectedStarttime": "27696",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 897,
+      "expectedStarttime": "27724",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 900,
+      "expectedStarttime": "27769",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 907,
+      "expectedStarttime": "27824",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 916,
+      "expectedStarttime": "27854",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 936,
+      "expectedStarttime": "27954",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 951,
+      "expectedStarttime": "28006",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 962,
+      "expectedStarttime": "28034",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 991,
+      "expectedStarttime": "28108",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1011,
+      "expectedStarttime": "28158",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1014,
+      "expectedStarttime": "28187",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1033,
+      "expectedStarttime": "28258",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1057,
+      "expectedStarttime": "28311",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1063,
+      "expectedStarttime": "28341",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1288,
+      "expectedStarttime": "29078",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1303,
+      "expectedStarttime": "29132",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1318,
+      "expectedStarttime": "29161",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1327,
+      "expectedStarttime": "29231",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1347,
+      "expectedStarttime": "29288",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1375,
+      "expectedStarttime": "29327",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1400,
+      "expectedStarttime": "30094",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1404,
+      "expectedStarttime": "30135",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1407,
+      "expectedStarttime": "30161",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1414,
+      "expectedStarttime": "30299",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1418,
+      "expectedStarttime": "30341",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1421,
+      "expectedStarttime": "30368",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1428,
+      "expectedStarttime": "30503",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1432,
+      "expectedStarttime": "30546",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1435,
+      "expectedStarttime": "30577",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1442,
+      "expectedStarttime": "30634",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    },
+    {
+      "pid": 1445,
+      "expectedStarttime": "30665",
+      "actualStarttime": null,
+      "sameIdentity": false,
+      "alive": false
+    }
+  ],
+  "remainingExactOwned": [],
+  "currentPidUnobservable": [
+    {
+      "pid": 33468,
+      "exists": null,
+      "error": 5
+    }
+  ],
+  "historicallyExactJoined": [
+    {
+      "pid": 33468,
+      "creation": 134373340069445234,
+      "waitResult": 0,
+      "source": "tail-cancel-c584858c-A.windows.jsonl",
+      "event": "windows-scope-joined",
+      "time": 1792860407.55415,
+      "currentPidState": "unobservable; no conclusion of absence or reuse"
+    }
+  ],
+  "qualification": "Historical exact owned identities settled; current PID 33468 remains inaccessible. No current PID action performed."
+}

@@ -1,0 +1,28 @@
+{"kind": "standard-unix-unstarted-connection-task", "passed": false, "error": "AssertionError()", "tasks": 0, "writers": 1, "rows": [{"event": "receiver-ready", "time": 1792860045.872968, "pid": 591, "starttime": "50709", "pgid": 591, "sid": 591, "control": "/home/plumwsl/.g0r4check-37esbjmn/scope/control", "directory": "/home/plumwsl/.g0r4check-37esbjmn/scope", "mode": "0o700"}, {"event": "control-peer-accepted", "time": 1792860045.878782, "pid": 591, "starttime": "50709", "pgid": 591, "sid": 591, "peer": {"pid": 591, "starttime": "50709", "pgid": 591, "sid": 591}, "peerUid": 1000}, {"event": "fd-received", "time": 1792860045.8789608, "pid": 591, "starttime": "50709", "pgid": 591, "sid": 591, "peer": {"pid": 591, "starttime": "50709", "pgid": 591, "sid": 591}, "peerUid": 1000, "inode": 145857, "recvFlags": 1073741824}, {"event": "relay-ready", "time": 1792860045.8791223, "pid": 591, "starttime": "50709", "pgid": 591, "sid": 591, "socket": "/home/plumwsl/.g0r4check-37esbjmn/scope/interop", "directory": "/home/plumwsl/.g0r4check-37esbjmn/scope", "peer": {"pid": 591, "starttime": "50709", "pgid": 591, "sid": 591}, "pinned": "/proc/591/fd/11"}, {"event": "binding-complete", "time": 1792860045.8791893, "pid": 591, "starttime": "50709", "pgid": 591, "sid": 591}]}
+Traceback (most recent call last):
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/unstarted_connection_check.py", line 70, in <module>
+    if __name__=="__main__": asyncio.run(main())
+                             ^^^^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/unstarted_connection_check.py", line 40, in main
+    await asyncio.wait_for(wait(),5)
+  File "/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/unstarted_connection_check.py", line 38, in wait
+    if process.done(): await process
+                       ^^^^^^^^^^^^^
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/relay_fixture.py", line 300, in receiver
+    await sealing
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round4/relay_fixture.py", line 261, in seal
+    assert not self.tasks and not self.writers
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

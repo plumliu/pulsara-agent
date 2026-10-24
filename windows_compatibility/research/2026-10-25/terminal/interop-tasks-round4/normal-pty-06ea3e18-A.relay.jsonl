@@ -1,0 +1,11 @@
+{"event": "receiver-ready", "time": 1792860164.5946143, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "control": "/home/plumwsl/.g0t4-normal-pty-06ea3e18-A/control", "directory": "/home/plumwsl/.g0t4-normal-pty-06ea3e18-A", "mode": "0o700"}
+{"event": "control-peer-accepted", "time": 1792860164.7993994, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "peer": {"pid": 460, "starttime": "62614", "pgid": 460, "sid": 460}, "peerUid": 1000}
+{"event": "fd-received", "time": 1792860164.8058858, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "peer": {"pid": 460, "starttime": "62614", "pgid": 460, "sid": 460}, "peerUid": 1000, "inode": 914, "recvFlags": 1073741824}
+{"event": "relay-ready", "time": 1792860164.812915, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "socket": "/home/plumwsl/.g0t4-normal-pty-06ea3e18-A/interop", "directory": "/home/plumwsl/.g0t4-normal-pty-06ea3e18-A", "peer": {"pid": 460, "starttime": "62614", "pgid": 460, "sid": 460}, "pinned": "/proc/457/fd/9"}
+{"event": "binding-complete", "time": 1792860164.8189173, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453}
+{"event": "bytes-forwarded", "time": 1792860164.8346114, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "operation": false, "bytes": 585, "total": 585}
+{"event": "connection-settled", "time": 1792860165.0242274, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "operation": false}
+{"event": "bytes-forwarded", "time": 1792860165.0349116, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "operation": true, "bytes": 32, "total": 32}
+{"event": "connection-settled", "time": 1792860165.0411217, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "operation": true}
+{"event": "bytes-forwarded", "time": 1792860165.0469759, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "operation": true, "bytes": 573, "total": 573}
+{"event": "connection-settled", "time": 1792860165.361187, "pid": 457, "starttime": "62595", "pgid": 453, "sid": 453, "operation": true}

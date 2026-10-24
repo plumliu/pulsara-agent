@@ -1,0 +1,2 @@
+{"event": "pe-start", "time": 1792860407.0778642, "pid": 33468, "role": "diagnostic", "scenario": "normal", "creation": 134373340069445234, "inJob": true}
+{"event": "diagnostic-finished", "time": 1792860407.089775, "pid": 33468}

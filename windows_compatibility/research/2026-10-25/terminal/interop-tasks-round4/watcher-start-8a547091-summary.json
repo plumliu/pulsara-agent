@@ -1,0 +1,71 @@
+{
+  "label": "watcher-start-8a547091",
+  "scenario": "cancel",
+  "tty": true,
+  "gate": null,
+  "fault": "watcher-start",
+  "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round4\\windows_probe.py\", line 384, in run_case\n    raise TimeoutError(\"whole research experiment observation deadline\")\nTimeoutError: whole research experiment observation deadline\n",
+  "failureManagerProcess": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Traceback (most recent call last):\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 522, in run\n    manager.release_owner_and_join(owner)\n  File \"/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/terminal_process/manager.py\", line 1304, in release_owner_and_join\n    results = self.process_registry.release_owner_and_join(owner_host_session_id)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/terminal_process/manager.py\", line 1050, in release_owner_and_join\n    self._abort_foreground_decision(attempt_id)\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 296, in abort\n    original_abort(decision)\n  File \"/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/terminal_process/manager.py\", line 423, in _abort_foreground_decision\n    _terminate_process_group(state)\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 304, in terminate\n    scope.request_cancel()\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 131, in request_cancel\n    wait_until(lambda: self.path(\".sealed.json\").exists())\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 38, in wait_until\n    raise TimeoutError(\"research observation deadline\")\nTimeoutError: research observation deadline\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 547, in <module>\n    run(sys.argv[1])\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 536, in run\n    scope.cancel_and_join()\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 162, in cancel_and_join\n    self.request_cancel()\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 131, in request_cancel\n    wait_until(lambda: self.path(\".sealed.json\").exists())\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 38, in wait_until\n    raise TimeoutError(\"research observation deadline\")\nTimeoutError: research observation deadline\nException in thread Thread-1:\nTraceback (most recent call last):\n  File \"/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/threading.py\", line 1075, in _bootstrap_inner\n    self.run()\n  File \"/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/threading.py\", line 1433, in run\n    self.function(*self.args, **self.kwargs)\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 296, in abort\n    original_abort(decision)\n  File \"/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/terminal_process/manager.py\", line 423, in _abort_foreground_decision\n    _terminate_process_group(state)\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 304, in terminate\n    scope.request_cancel()\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 131, in request_cancel\n    wait_until(lambda: self.path(\".sealed.json\").exists())\n  File \"/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_tasks_r3/round4/manager_probe.py\", line 38, in wait_until\n    raise TimeoutError(\"research observation deadline\")\nTimeoutError: research observation deadline\n"
+  },
+  "cleanupWindows": [
+    {
+      "accounting": {
+        "TotalUserTime": 1093750,
+        "TotalKernelTime": 1718750,
+        "ThisPeriodTotalUserTime": 1093750,
+        "ThisPeriodTotalKernelTime": 1718750,
+        "TotalPageFaultCount": 22249,
+        "TotalProcesses": 8,
+        "ActiveProcesses": 0,
+        "TotalTerminatedProcesses": 0
+      },
+      "members": [],
+      "held": [
+        {
+          "pid": 15276,
+          "creation": 134373334317252932,
+          "waitResult": 0
+        },
+        {
+          "pid": 5720,
+          "creation": 134373334317317129,
+          "waitResult": 0
+        },
+        {
+          "pid": 21208,
+          "creation": 134373334317526993,
+          "waitResult": 0
+        },
+        {
+          "pid": 32784,
+          "creation": 134373334317839979,
+          "waitResult": 0
+        },
+        {
+          "pid": 33032,
+          "creation": 134373334318004643,
+          "waitResult": 0
+        },
+        {
+          "pid": 34572,
+          "creation": 134373334320240602,
+          "waitResult": 0
+        },
+        {
+          "pid": 36120,
+          "creation": 134373334320335896,
+          "waitResult": 0
+        },
+        {
+          "pid": 31880,
+          "creation": 134373334320502007,
+          "waitResult": 0
+        }
+      ],
+      "terminateJobCalled": true
+    }
+  ]
+}

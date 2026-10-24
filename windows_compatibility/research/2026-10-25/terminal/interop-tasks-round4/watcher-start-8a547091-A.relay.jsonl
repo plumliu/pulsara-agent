@@ -1,0 +1,9 @@
+{"event": "receiver-ready", "time": 1792859831.7107809, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "control": "/home/plumwsl/.g0t4-watcher-start-8a547091-A/control", "directory": "/home/plumwsl/.g0t4-watcher-start-8a547091-A", "mode": "0o700"}
+{"event": "control-peer-accepted", "time": 1792859831.9822795, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "peer": {"pid": 1375, "starttime": "29327", "pgid": 1375, "sid": 1375}, "peerUid": 1000}
+{"event": "fd-received", "time": 1792859831.990727, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "peer": {"pid": 1375, "starttime": "29327", "pgid": 1375, "sid": 1375}, "peerUid": 1000, "inode": 1613, "recvFlags": 1073741824}
+{"event": "relay-ready", "time": 1792859831.9969451, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "socket": "/home/plumwsl/.g0t4-watcher-start-8a547091-A/interop", "directory": "/home/plumwsl/.g0t4-watcher-start-8a547091-A", "peer": {"pid": 1375, "starttime": "29327", "pgid": 1375, "sid": 1375}, "pinned": "/proc/1347/fd/9"}
+{"event": "binding-complete", "time": 1792859832.0047457, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327}
+{"event": "bytes-forwarded", "time": 1792859832.0202417, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "operation": false, "bytes": 594, "total": 594}
+{"event": "connection-settled", "time": 1792859832.244062, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "operation": false}
+{"event": "bytes-forwarded", "time": 1792859832.259421, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "operation": true, "bytes": 32, "total": 32}
+{"event": "connection-settled", "time": 1792859832.2680266, "pid": 1347, "starttime": "29288", "pgid": 1327, "sid": 1327, "operation": true}

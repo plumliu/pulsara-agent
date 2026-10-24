@@ -1,0 +1,54 @@
+{
+  "windows": [
+    {
+      "pid": 31144,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 16140,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 6440,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33104,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33304,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 35744,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 33340,
+      "exists": false,
+      "error": 87
+    },
+    {
+      "pid": 38036,
+      "exists": false,
+      "error": 87
+    }
+  ],
+  "managerFinished": true,
+  "linuxAudit": {
+    "matches": [
+      {
+        "pid": 447,
+        "starttime": "22138"
+      }
+    ],
+    "privateDirectoryExists": false
+  }
+}

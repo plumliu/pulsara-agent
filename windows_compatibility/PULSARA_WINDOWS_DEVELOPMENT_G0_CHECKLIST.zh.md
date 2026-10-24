@@ -308,6 +308,8 @@ G0-D还须验证未来目标接纳和用户私有payload安装的失败边界；
 
 当前 `PythonRuntime` 仍只有本机POSIX实现，B中才增加WSL实现与carrier观察。G0需要编写临时探针，不是修改它的生产状态机来求探针绿。相关真实测试导航：`tests/test_desktop_runtime.py`、`desktop/src/runtime.test.ts`及spec §13列出的terminal suites；先核各runner前置，不能假造一条“全部G0已跑”命令。
 
+第四轮已把SCM_RIGHTS绑定、seal/连接结算、Windows Job与Linux group回收接入同一次真实terminal启动预约及rollback研究链路，见[合成报告](research/2026-10-25/root/g0-w-round4/report.zh.md)。额外发现并验证存活/结果冻结也须包含同一scope，仅reader.join不够；冷任务取消及done callback延迟的原失败保留。选定成功案例分实现阶段记录，没有声称最终源码下全矩阵重跑。MCP/hooks/environment、宿主失联/GUI/休眠及更多取消交错仍未覆盖，不勾整个C。
+
 ### 7.4 G0-W-P：真实 Linux PG 与资源
 
 - [ ] 第6节资源smoke通过；记录PG17.9/vector0.8.1/pg_search0.26.1/Python3.12.15/rg/Chromium实际来源，不仅是版本文件。
@@ -321,6 +323,8 @@ G0-D还须验证未来目标接纳和用户私有payload安装的失败边界；
 第二轮已将helper自身死亡从待验补成反例：ext4下真实pg_ctl/postgres仍可在helper死后晚启动，而另一helper已能持同锁读到status3。当时CLOEXEC单helper持锁候选不可用于reset准入；直接继承原kernel锁给PG也因常驻持锁被否决。见spec §18及[第二轮报告](research/2026-10-24/root/g0-w-round2/report.zh.md)。今后实验home先用findmnt核真实ext4；本机/tmp实为tmpfs，不能拿旧/tmp结果冒称ext4资格。
 
 第三轮当前候选见spec §3.3/19及[PG报告](research/2026-10-25/backend/pg-admission-round3/report.zh.md)：原kernel锁串行维护，独立PG生命周期EX由start链继承；有限stop/status继承原锁、initdb继承两锁，reset必须重取两锁并持至删除结束。真实晚启动busy拒绝、stop/initdb helper死亡、同guard拒删与实际删除重建有正证。完整JSONL/EOF/取消/失联、TS owner合成和guard内running→stop→delete分支仍待验，不能勾整个P。
+
+上述第三轮缺项已在第四轮补充[真实TS owner集成](research/2026-10-25/backend/pg-owner-round4/report.zh.md)：原resetConfirmed的running→stop→delete真实成功；ready前后EOF/取消、发帧后EOF、丢result/无末尾换行、helper/carrier/Node死亡有证据。未提交后另一个调用起库时，原start catch会误认领其startedHere；研究typed guard对未提交/unknown直接重抛，对已结算PG非零仍保原readback。该修正未进入生产，完整framing/各操作失联/GUI退出仍待验，不勾整个P。
 
 ### 7.5 G0-W-F：图形目录、路径与文件
 
@@ -385,7 +389,7 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 ## 10. 本清单交付检查
 
-最新进展见[第三轮报告](research/2026-10-25/root/g0-w-round3/report.zh.md)：PG双锁候选取得真实机制正证；首次fd转交绑定四门、Windows Job+Linux PGID组合取消三门与真实terminal内存组合14项已验。仅Windows Job空仍可能留下Linux调用者，半/全请求失联仍unknown。首次绑定、封准入和真实owner启动失败/取消交错尚未合成，MCP/hooks、GUI/宿主全链继续待验。生产未改、B未进入，不能因此勾整个G0-C/P。第二轮原失败仍保留在[历史报告](research/2026-10-24/root/g0-w-round2/report.zh.md)。
+最新进展见[第四轮报告](research/2026-10-25/root/g0-w-round4/report.zh.md)：复用原三位subagent，完成选定真实terminal合成与PG owner失联边界研究，保留新失败及output内修正。第三轮的独立机制证据见[历史报告](research/2026-10-25/root/g0-w-round3/report.zh.md)，第二轮原反例仍见[取消/PG死亡记录](research/2026-10-24/root/g0-w-round2/report.zh.md)。当前仍不能把有限成功扩成整个G0-C/P、原生Ubuntu资格或Phase B通过；MCP/hooks、GUI/宿主全链和其他缺项继续待验。
 
 原root与三位`gpt-6.1-sol high` subagents批准的是修订前的专用发行版清单，历史记录保留在research。原示例JS语法检查及Mac纯测试5/5不证明本次共享WSL/interop方案。当前用户授权修订了活动规范和操作步骤；本机已有基础环境/interop观察，但Windows后代生命周期、正式picker/helper/TLS/OAuth等仍须实测，不沿用历史批准宣称完整G0或B通过。
 

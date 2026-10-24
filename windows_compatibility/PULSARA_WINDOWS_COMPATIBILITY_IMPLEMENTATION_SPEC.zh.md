@@ -117,7 +117,9 @@ reset先取得原kernel锁并核对准确实例，必要时执行有限stop；�
 
 完整有效回复与carrier正常结束才可采用操作结果；wsl启动失败、截断、EOF、丢回复与pg_ctl真实非零不同。可能已经生效但未收全结果时返回本次结果不明，保留PG/data，不自动重发start/reset/delete或继续初始化。重新进入由TS先等原kernel锁，再通过当前Linux事实验证；不做跨重启操作重放。
 
-**第三轮两锁候选取得真实PG机制正证（§19），尚无生产WSL helper。** 已覆盖helper死亡后的晚start拒绝、有限stop/initdb后代持锁、同一guard拒删及双锁内真实删除/重建。完整ready/operation/EOF/取消/失联协议、真实TS owner合成及全部P矩阵仍须验证；不能把机制子项通过当成整门资格。被否定的单helper CLOEXEC方案只作为§18历史反例保留，不再作为当前候选。
+物理错误须向原TS owner区分“本次未提交”“可能执行但结果不明”“子命令已结算非零”，不能都由同一catch读当前status再更新startedHere。第四轮真实反例证明：本次未提交后，其他调用可在合法间隙启动同库，原owner随后status/readInstance会误记startedHere=true。当前候选对未提交/unknown原样抛错，不据此次catch认领实例；已结算PG非零仍保持原readback和原错误。已有startedHere不因新错误被清空，不增第二份状态。研究字段`postgresExecution`及两行guard仅为§20的output合同草案，生产错误接口尚未实现；不能用数值code3或当前同路径实例代替操作执行类别。
+
+**第三、四轮候选已取得真实PG机制与TS owner集成正证（§19–20），尚无生产WSL helper。** 已覆盖helper死亡后的晚start拒绝、有限stop/initdb后代持锁、双锁内删除/重建，以及真实TS running→stop→delete、选定EOF/失联边界。明确未提交必须关闭本次准入、拒晚ready后的写帧并等helper实际退出；发帧后不因EOF撤回副作用。完整framing/所有操作故障/宿主关闭及全部P矩阵仍待验，不能把这些子项当整门资格。被否定的单helper CLOEXEC方案只作§18历史反例保留。
 
 ## 4. G0-W：WSL路线可行性闸门
 
@@ -149,9 +151,11 @@ kernel、私有PG、Protocol-v3和应用资源仍使用Linux机制与ext4。自�
 
 **跨域生命周期仍为G0-W-C未闭合项。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。Windows模型任务的取消/关闭范围与可观测机制必须在G0证据中闭合，之后才可进入B；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
 
-§18–19的无breakaway Job、专属anchor及私有socket字节转发只通过明确的机制子场景。首次绑定候选由anchor自己打开上游O_PATH fd，经标准SCM_RIGHTS转交，以SO_PEERCRED/pidfd及本次可信anchor身份核对，避免另一进程重开旧PID路径；它仍未与真实任务owner全部交错合成。裸WSL_INTEROP失效会回退，私有socket须保留到旧调用者结算，不能由Job空就提前unlink。
+§18–20的无breakaway Job、专属anchor及私有socket字节转发只通过明确的机制/集成子场景。首次绑定候选由anchor自己打开上游O_PATH fd，经标准SCM_RIGHTS转交，以SO_PEERCRED/pidfd及本次可信anchor身份核对，避免另一进程重开旧PID路径。第四轮已把它放进真实terminal的启动预约内，与选定取消门合成；其余交错仍待验。裸WSL_INTEROP失效会回退，私有socket须保留到旧调用者结算，不能由Job空就提前unlink。
 
 第三轮真实terminal baseline已证实Windows后代存活时会提前PHYSICALLY_JOINED并释放槽位；仅透传正确路由不足。未来最小接缝须把每次执行的跨域scope纳入原取消/物理join，原watcher继续唯一发布完成及finalize，Linux group/reader与Windows Job/精确HANDLE均结算后才能释放原槽位。内存实验通过PIPE/PTY正常、取消、输入及同registry A/B子项；没有生产接口或完整MCP/hook集成。正常完成等待自然退出，不用TerminateJob冒充success。取消封新准入并保留路径，还须结算Linux调用者；请求已转发后只有Windows Job空不足以证明其退出。半请求/失联保持unknown，不重发。不得把实验monkeypatch、文件RPC或探针直接import到生产。
+
+第四轮进一步证明，仅延迟join仍不足：原`_status`及终止intent接纳也依赖物理存活谓词，须包含同一跨域scope，否则Linux root/group已退时会提前冻结success，误拒Windows尾部的取消。scope准备、线程启动rollback、存活判断和物理join共同纳入原owner，不能仅钩reader.join。relay seal须停止新准入并真实结算已接纳的connect/forward任务，再发ACK；同步创建而尚未首次执行的任务可能没有进入finally，创建方仍负责其已拥有资源。完成回调尚未调度也不能替代直接join事实。这些是研究接缝要求，生产manager未修改，具体实证范围及原失败见§20。
 
 Windows launcher仍用系统实际`wsl.exe`绝对位置、`shell:false`、明确已选-d/-u/--cd/--exec和三pipe，不经PowerShell求值。应用入口使用明确Linux可执行文件，不因PATH注入调用同名WindowsPython/Node；模型使用的是已选用户的实际环境，允许Windows PATH项存在。清理本次宿主启动环境的WSLENV自动传递清单，不抹除Linux会话的interop能力；credential仍沿原guard和Linux settings读取，不进launcher argv/宿主日志。Linux PTY仍由guest原manager创建。
 
@@ -509,3 +513,15 @@ Windows接手的环境安装、双仓库落点及G0-W逐项操作见[PULSARA_WIN
 - 真实terminal baseline复现Windows尾部仍活时提前完成/释放槽位。内存候选14项通过，覆盖PIPE/PTY正常/取消/输入、原8槽及同registry同owner A/B；原测试47项通过。候选等待自然结束，正常路径未用TerminateJob。它不是生产接口，首次绑定/封准入竞态尚未与此owner全部合成，MCP/hooks/环境probe/启动故障/GUI宿主全链等仍待验。
 
 新增PG锁仅承担无法由原kernel锁同时承担的独立OS物理寿命，不增加durable事件/registry/重放/第二startedHere。探针和文件RPC不得作为生产依赖。以上仅关闭所列研究子项，完整G0-C/P及其他门、原生Ubuntu资格与Windows激活仍未获验收。
+
+## 20. 第四轮真实owner合成与结果分类（2026-10-25）
+
+本轮复用原三位gpt-6.1-sol/high agent，两clone受测基线adb3e1de，保持interop、未改生产、未进入B。完整记录见[第四轮总报告](research/2026-10-25/root/g0-w-round4/report.zh.md)。
+
+- terminal在原foreground decision/launch reservation内完成SCM_RIGHTS绑定和Windows诊断PE精确Job核验，再准入真实任务。选定pin/bind/upstream/forward取消、reader/watcher Thread.start rollback、PIPE/PTY输入、8槽及同owner A/B有同链证据。正常路径等待自然结束，socket在原owner物理join后退休。
+- 真实watcher故障暴露创建后尚未首次运行的连接任务不会执行finally；后续normal故障又确认done callback仍排队时不能据集合非空推定任务未结束。研究seal owner直接结算自己已拥有的任务/streams后才ACK，保留零集断言及全部原失败，不靠sleep或盲清集合。
+- 真实wait/poll反例说明仅延迟physical_completion仍会提前冻结success。研究变体将同state跨域scope纳入原live谓词，最后正常尾部poll为running，尾部取消真实变killed并join/释放槽位。矩阵按原成功、冷任务修后复验及最后done/status修后验证分阶段，不宣称最终源码完整矩阵重跑。
+- PG真实BundledPostgres通过PostgresOperations调用Windows Node→WSL双锁helper，正常start/reuse/reset running→stop→delete/重建查询通过。选定ready前后EOF/取消、发帧后EOF、丢result/未换行结果、helper/carrier/Node死亡有实际锁/进程/owner字段事实。
+- 原PG owner真实负例：本次零operation提交，另一有限调用已起同库后，catch按当前status/readInstance仍设startedHere=true；这不能代表本次启动归属。output机械生成两行guard，对not-submitted/unknown保原错误而不由此次catch更新归属，对已结算PG非零保原readback。两项真实对照及原/研究变体各8测试通过，未修改生产，也未把main Quit条件推导当GUI实测。
+
+本轮没有增加durable receipt、第二startedHere、产品总寿命cap或关闭interop。剩余MCP/hooks/environment、更多启动取消/relay失联、真实Electron退出/休眠、PG全操作framing/失联及其他G0门继续待验；原生Ubuntu资格仍独立。生产尚有已记录缺口，不能激活Windows或放行Phase B。

@@ -1,0 +1,1426 @@
+{
+  "kind": "standard-unix-only-not-wsl-qualification",
+  "cases": [
+    {
+      "gate": "before-upstream",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 1,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 0,
+        "anyForwarded": false,
+        "operationAccepted": 1,
+        "operationForwardedBytes": 0,
+        "operationAnyForwarded": false,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-upstream"
+      },
+      "bytesStableAfterAck": true,
+      "lateConnectionRefused": true,
+      "directoryRemoved": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860063.7207413,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-before-upstream/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-upstream",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860063.721462,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860063.7216253,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860063.7217693,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-before-upstream/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-upstream",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/11"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792860063.7218268,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708
+        },
+        {
+          "event": "gate-reached",
+          "time": 1792860063.7276053,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "gate": "before-upstream"
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792860063.7331502,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860063.7386978,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 1,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 0,
+          "anyForwarded": false,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 0,
+          "operationAnyForwarded": false,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-upstream"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860063.7757084,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860063.775863,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "after-upstream",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 1,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 0,
+        "anyForwarded": false,
+        "operationAccepted": 1,
+        "operationForwardedBytes": 0,
+        "operationAnyForwarded": false,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-upstream"
+      },
+      "bytesStableAfterAck": true,
+      "lateConnectionRefused": true,
+      "directoryRemoved": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860063.7766242,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-after-upstream/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-upstream",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860063.7769656,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860063.7770536,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860063.7771394,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-after-upstream/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-upstream",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/11"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792860063.7771804,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708
+        },
+        {
+          "event": "gate-reached",
+          "time": 1792860063.783,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "gate": "after-upstream"
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792860063.788549,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860063.794048,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 1,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 0,
+          "anyForwarded": false,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 0,
+          "operationAnyForwarded": false,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-upstream"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860063.835957,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860063.8361087,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "before-forward",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 1,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 0,
+        "anyForwarded": false,
+        "operationAccepted": 1,
+        "operationForwardedBytes": 0,
+        "operationAnyForwarded": false,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-forward"
+      },
+      "bytesStableAfterAck": true,
+      "lateConnectionRefused": true,
+      "directoryRemoved": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860063.8368828,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-before-forward/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-forward",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860063.8372262,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860063.8373072,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860063.8374581,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-before-forward/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-forward",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/11"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792860063.8375065,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708
+        },
+        {
+          "event": "gate-reached",
+          "time": 1792860063.8433867,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "gate": "before-forward"
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792860063.8540866,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860063.8542426,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 1,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 0,
+          "anyForwarded": false,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 0,
+          "operationAnyForwarded": false,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-forward"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860063.8961477,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860063.8963006,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "half-forwarded",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 1,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 1,
+        "anyForwarded": true,
+        "operationAccepted": 1,
+        "operationForwardedBytes": 1,
+        "operationAnyForwarded": true,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-half-forwarded"
+      },
+      "bytesStableAfterAck": true,
+      "lateConnectionRefused": true,
+      "directoryRemoved": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860063.8970892,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-half-forwarded/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-half-forwarded",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860063.8974717,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860063.897555,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860063.8976402,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-half-forwarded/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-half-forwarded",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/11"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792860063.897681,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792860063.9033177,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true,
+          "bytes": 1,
+          "total": 1
+        },
+        {
+          "event": "gate-reached",
+          "time": 1792860063.9033833,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "gate": "half-forwarded"
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792860063.9142535,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860063.914378,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 1,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 1,
+          "anyForwarded": true,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 1,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-half-forwarded"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860063.956214,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860063.9563785,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "after-forwarded",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 1,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 21,
+        "anyForwarded": true,
+        "operationAccepted": 1,
+        "operationForwardedBytes": 21,
+        "operationAnyForwarded": true,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-forwarded"
+      },
+      "bytesStableAfterAck": true,
+      "lateConnectionRefused": true,
+      "directoryRemoved": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860063.957176,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-after-forwarded/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-forwarded",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860063.9575865,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860063.9576707,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860063.957792,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-after-forwarded/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-forwarded",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/11"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792860063.9578393,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792860063.9636183,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true,
+          "bytes": 21,
+          "total": 21
+        },
+        {
+          "event": "gate-reached",
+          "time": 1792860063.9637213,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "gate": "after-forwarded"
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792860063.974452,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860063.9745772,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 1,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 21,
+          "anyForwarded": true,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 21,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-forwarded"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860064.0165384,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860064.0167415,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "normal",
+      "ack": {
+        "mode": "normal",
+        "accepted": 1,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 21,
+        "anyForwarded": true,
+        "operationAccepted": 1,
+        "operationForwardedBytes": 21,
+        "operationAnyForwarded": true,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal"
+      },
+      "bytesStableAfterAck": true,
+      "lateConnectionRefused": true,
+      "directoryRemoved": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860064.0177107,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-normal/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860064.0181713,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860064.0182579,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860064.0183585,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-normal/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/11"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792860064.018414,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792860064.0240178,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true,
+          "bytes": 21,
+          "total": 21
+        },
+        {
+          "event": "connection-settled",
+          "time": 1792860064.040039,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860064.0402586,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "normal",
+          "accepted": 1,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 21,
+          "anyForwarded": true,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 21,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860064.0771465,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860064.0772977,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "normal-cancel",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 1,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 21,
+        "anyForwarded": true,
+        "operationAccepted": 1,
+        "operationForwardedBytes": 21,
+        "operationAnyForwarded": true,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal-cancel"
+      },
+      "bytesStableAfterAck": true,
+      "lateConnectionRefused": true,
+      "directoryRemoved": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860064.0781848,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-normal-cancel/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal-cancel",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860064.0785189,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860064.078618,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860064.0787342,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-normal-cancel/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal-cancel",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/11"
+        },
+        {
+          "event": "binding-complete",
+          "time": 1792860064.0787823,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708
+        },
+        {
+          "event": "bytes-forwarded",
+          "time": 1792860064.0843675,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true,
+          "bytes": 21,
+          "total": 21
+        },
+        {
+          "event": "connection-cancelled",
+          "time": 1792860064.1056702,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "operation": true
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860064.1058433,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 1,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 21,
+          "anyForwarded": true,
+          "operationAccepted": 1,
+          "operationForwardedBytes": 21,
+          "operationAnyForwarded": true,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-normal-cancel"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860064.1428826,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860064.143066,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "prepare-accept",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 0,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 0,
+        "anyForwarded": false,
+        "operationAccepted": 0,
+        "operationForwardedBytes": 0,
+        "operationAnyForwarded": false,
+        "socketExists": false,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-accept"
+      },
+      "bindingTaskSettled": true,
+      "noBindingCompleteAfterAck": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860064.1438794,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-accept/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-accept",
+          "mode": "0o700"
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860064.1494226,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 0,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 0,
+          "anyForwarded": false,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "operationAnyForwarded": false,
+          "socketExists": false,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-accept"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860064.1759522,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": false
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860064.1760795,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "prepare-recvmsg",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 0,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 0,
+        "anyForwarded": false,
+        "operationAccepted": 0,
+        "operationForwardedBytes": 0,
+        "operationAnyForwarded": false,
+        "socketExists": false,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-recvmsg"
+      },
+      "bindingTaskSettled": true,
+      "noBindingCompleteAfterAck": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860064.176793,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-recvmsg/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-recvmsg",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860064.182548,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860064.1880202,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 0,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 0,
+          "anyForwarded": false,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "operationAnyForwarded": false,
+          "socketExists": false,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-recvmsg"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860064.2142825,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": false
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860064.2144346,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "prepare-before-bind",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 0,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 0,
+        "anyForwarded": false,
+        "operationAccepted": 0,
+        "operationForwardedBytes": 0,
+        "operationAnyForwarded": false,
+        "socketExists": false,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-bind"
+      },
+      "bindingTaskSettled": true,
+      "noBindingCompleteAfterAck": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860064.2151582,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-before-bind/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-bind",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860064.2211943,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860064.2270532,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "gate-reached",
+          "time": 1792860064.2271101,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "gate": "before-bind"
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860064.2324808,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 0,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 0,
+          "anyForwarded": false,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "operationAnyForwarded": false,
+          "socketExists": false,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-before-bind"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860064.258759,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": false
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860064.2588775,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    },
+    {
+      "gate": "prepare-after-bind",
+      "ack": {
+        "mode": "cancel",
+        "accepted": 0,
+        "taskCount": 0,
+        "writerCount": 0,
+        "forwardedBytes": 0,
+        "anyForwarded": false,
+        "operationAccepted": 0,
+        "operationForwardedBytes": 0,
+        "operationAnyForwarded": false,
+        "socketExists": true,
+        "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-bind"
+      },
+      "bindingTaskSettled": true,
+      "noBindingCompleteAfterAck": true,
+      "rows": [
+        {
+          "event": "receiver-ready",
+          "time": 1792860064.2597208,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "control": "/home/plumwsl/.g0r4check-cbao63ls/s-after-bind/control",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-bind",
+          "mode": "0o700"
+        },
+        {
+          "event": "control-peer-accepted",
+          "time": 1792860064.2653134,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000
+        },
+        {
+          "event": "fd-received",
+          "time": 1792860064.2707932,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "peerUid": 1000,
+          "inode": 145863,
+          "recvFlags": 1073741824
+        },
+        {
+          "event": "relay-ready",
+          "time": 1792860064.2709684,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socket": "/home/plumwsl/.g0r4check-cbao63ls/s-after-bind/interop",
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-bind",
+          "peer": {
+            "pid": 708,
+            "starttime": "52494",
+            "pgid": 708,
+            "sid": 708
+          },
+          "pinned": "/proc/708/fd/12"
+        },
+        {
+          "event": "gate-reached",
+          "time": 1792860064.271086,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "gate": "after-bind"
+        },
+        {
+          "event": "relay-sealed",
+          "time": 1792860064.2766948,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "mode": "cancel",
+          "accepted": 0,
+          "taskCount": 0,
+          "writerCount": 0,
+          "forwardedBytes": 0,
+          "anyForwarded": false,
+          "operationAccepted": 0,
+          "operationForwardedBytes": 0,
+          "operationAnyForwarded": false,
+          "socketExists": true,
+          "directory": "/home/plumwsl/.g0r4check-cbao63ls/s-after-bind"
+        },
+        {
+          "event": "retire-authorized-by-owner",
+          "time": 1792860064.3031673,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "socketExists": true
+        },
+        {
+          "event": "relay-retired",
+          "time": 1792860064.3033485,
+          "pid": 708,
+          "starttime": "52494",
+          "pgid": 708,
+          "sid": 708,
+          "directoryExists": false
+        }
+      ]
+    }
+  ],
+  "passed": true
+}

@@ -1,0 +1,106 @@
+{
+  "label": "normal-pty-0f801224",
+  "scenario": "normal",
+  "tty": true,
+  "gate": null,
+  "fault": null,
+  "managerProcess": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round4\\windows_probe.py\", line 392, in run_case\n    result[\"managerRows\"] = J.rows(manager_record)\n                            ^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_jobs\\round2\\job_probe.py\", line 66, in rows\n    return [json.loads(x) for x in path.read_text(encoding=\"utf-8\").splitlines() if x]\n            ^^^^^^^^^^^^^\n  File \"C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\Lib\\json\\__init__.py\", line 346, in loads\n    return _default_decoder.decode(s)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\Lib\\json\\decoder.py\", line 338, in decode\n    obj, end = self.raw_decode(s, idx=_w(s, 0).end())\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\Lib\\json\\decoder.py\", line 356, in raw_decode\n    raise JSONDecodeError(\"Expecting value\", s, err.value) from None\njson.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)\n",
+  "failureManagerProcess": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "cleanupWindows": [
+    {
+      "accounting": {
+        "TotalUserTime": 2343750,
+        "TotalKernelTime": 3281250,
+        "ThisPeriodTotalUserTime": 2343750,
+        "ThisPeriodTotalKernelTime": 3281250,
+        "TotalPageFaultCount": 41616,
+        "TotalProcesses": 14,
+        "ActiveProcesses": 0,
+        "TotalTerminatedProcesses": 0
+      },
+      "members": [],
+      "held": [
+        {
+          "pid": 30912,
+          "creation": 134373333608300939,
+          "waitResult": 0
+        },
+        {
+          "pid": 32680,
+          "creation": 134373333608360237,
+          "waitResult": 0
+        },
+        {
+          "pid": 22340,
+          "creation": 134373333608546452,
+          "waitResult": 0
+        },
+        {
+          "pid": 33256,
+          "creation": 134373333608811958,
+          "waitResult": 0
+        },
+        {
+          "pid": 35504,
+          "creation": 134373333608964387,
+          "waitResult": 0
+        },
+        {
+          "pid": 32864,
+          "creation": 134373333611192298,
+          "waitResult": 0
+        },
+        {
+          "pid": 16992,
+          "creation": 134373333611262208,
+          "waitResult": 0
+        },
+        {
+          "pid": 14788,
+          "creation": 134373333611420158,
+          "waitResult": 0
+        },
+        {
+          "pid": 34956,
+          "creation": 134373333613358749,
+          "waitResult": 0
+        },
+        {
+          "pid": 35684,
+          "creation": 134373333613432075,
+          "waitResult": 0
+        },
+        {
+          "pid": 16512,
+          "creation": 134373333613587092,
+          "waitResult": 0
+        },
+        {
+          "pid": 37528,
+          "creation": 134373333614935754,
+          "waitResult": 0
+        },
+        {
+          "pid": 35900,
+          "creation": 134373333615012312,
+          "waitResult": 0
+        },
+        {
+          "pid": 25580,
+          "creation": 134373333615165114,
+          "waitResult": 0
+        }
+      ],
+      "terminateJobCalled": false
+    }
+  ]
+}

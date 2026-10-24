@@ -9,8 +9,9 @@
 3. [Windows首轮环境/G0-W实测报告](research/2026-10-24/root/g0-w-initial/report.zh.md)：已有Ubuntu/plumwsl环境、双clone和Linux资源验证完成；记录interop普通Windows后代取消缺口，完整G0未通过，B未进入。
 4. [第二轮取消/PG异常死亡实验](research/2026-10-24/root/g0-w-round2/report.zh.md)：无breakaway Job及每任务私有socket转发取得局部实证；裸WSL_INTEROP回退与PG helper晚启动反例已确认。
 5. [第三轮PG替代准入/启动取消竞态/真实任务集成](research/2026-10-25/root/g0-w-round3/report.zh.md)：独立PG生命周期锁、有限子命令继承原锁、真实拒删/删除重建取得正证；SCM_RIGHTS首次绑定和Windows/Linux组合取消有机制证据；真实terminal内存候选14项通过，完整组合仍待验。
+6. [第四轮真实任务合成/PG owner失联](research/2026-10-25/root/g0-w-round4/report.zh.md)：首次绑定、取消和真实terminal启动预约/回滚已合成；补齐存活/结果冻结接缝。真实TS PG owner完成双锁reset及EOF/失联实测，原owner误认领未提交启动的反例与两行研究修正均有证据。
 
-当前状态：Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI仍待验收；Windows回收和PG替代维护准入已有G0候选实证，尚未接入生产或通过完整C/P门。当前PG候选已替换被否定的单helper持锁方案；Windows真实owner仍有提前完成反例，内存修正不代表生产已修复。完整G0未过，Phase B未实施，Windows支持未激活。
+当前状态：Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI仍待验收；Windows回收和PG双锁已有真实owner研究集成实证，尚未接入生产或通过完整C/P门。原terminal仍缺跨域存活/结算边界，原PG owner仍缺未提交/unknown错误分类；output内修正不代表生产已修复。完整G0未过，Phase B未实施，Windows支持未激活。
 
 2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，Windows后代生命周期等完整G0仍待验证。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
 
