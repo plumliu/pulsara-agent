@@ -1,0 +1,4 @@
+{"event": "anchor-assigned-before-resume", "time": 1792858487.8449314, "pid": 22104, "carrierPid": 37320, "carrierCreation": 134373320878415702, "carrierInJob": true, "guestReadyExists": false}
+{"event": "anchor-ready", "pid": 3723, "starttime": "25138", "socket": "/run/WSL/3722_interop"}
+{"event": "anchor-pinned", "pid": 3723, "starttime": "25138", "inode": 4363}
+{"event": "anchor-fd-sent", "pid": 3723, "starttime": "25138"}

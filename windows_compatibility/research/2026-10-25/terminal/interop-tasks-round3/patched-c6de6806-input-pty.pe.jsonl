@@ -1,0 +1,6 @@
+{"event": "pe-start", "time": 1792858575.107192, "pid": 8908, "role": "parent", "creation": 134373321749878080, "inJob": true}
+{"event": "pe-start", "time": 1792858575.245285, "pid": 35668, "role": "child", "creation": 134373321751297613, "inJob": true}
+{"event": "child-ready", "time": 1792858575.246289, "pid": 35668}
+{"event": "input-eof", "time": 1792858575.3614137, "pid": 8908}
+{"event": "pe-finished", "time": 1792858575.7469544, "pid": 35668, "role": "child"}
+{"event": "pe-finished", "time": 1792858575.7561507, "pid": 8908, "role": "parent"}

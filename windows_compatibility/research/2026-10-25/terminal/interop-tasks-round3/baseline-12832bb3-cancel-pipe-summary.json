@@ -1,0 +1,247 @@
+{
+  "label": "baseline-12832bb3-cancel-pipe",
+  "scenario": "cancel",
+  "tty": false,
+  "patched": false,
+  "ownerObservation": [
+    {
+      "event": "started",
+      "time": 1792858449.539468,
+      "result": {
+        "status": "running",
+        "output": "",
+        "exit_code": -1,
+        "cwd": "/home/plumwsl/workspaces/pulsara_agent",
+        "timed_out": false,
+        "truncated": false,
+        "error": null,
+        "reason": null,
+        "process_id": "process:ts4qnja46e3sobzq352felwtd4",
+        "output_artifact_candidate": {
+          "role": "OUTPUT",
+          "text": "",
+          "source_coverage": "COMPLETE",
+          "source_coverage_reason": null,
+          "original_utf8_bytes": 0,
+          "source_format_hint": "JSON"
+        },
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "output_cursor": "eyJjaGVja3N1bSI6Ijc0M2I4ZTQ2MjY5NzFiNDBmZmU0N2M2MmM4N2RmODBjNWVmMDE2MjgyOWE4MDk0MDlmMDk3Y2Q3MGI0YjI5ZDYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDo0NWFqNnNpeGlhYXJyNXRhNDU1cTN0cm13aSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnRzNHFuamE0NmUzc29ienEzNTJmZWx3dGQ0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06YmJzdWcydXRheHB6NWxjeXgzNmhvcjc0aHkifX0",
+        "retained_from_cursor": "eyJjaGVja3N1bSI6Ijc0M2I4ZTQ2MjY5NzFiNDBmZmU0N2M2MmM4N2RmODBjNWVmMDE2MjgyOWE4MDk0MDlmMDk3Y2Q3MGI0YjI5ZDYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDo0NWFqNnNpeGlhYXJyNXRhNDU1cTN0cm13aSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnRzNHFuamE0NmUzc29ienEzNTJmZWx3dGQ0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06YmJzdWcydXRheHB6NWxjeXgzNmhvcjc0aHkifX0",
+        "gap_before_output": false,
+        "truncated_by_response_bound": false,
+        "source_coverage": "COMPLETE",
+        "shell_diagnostic": {
+          "ripgrep_error": null,
+          "shell_path": "/usr/bin/bash",
+          "shell_name": "bash",
+          "shell_snapshot_used": false,
+          "shell_snapshot_error_code": null,
+          "removed_variable_count": 10,
+          "secret_shaped_value_removed_count": 0,
+          "nearest_venv_path": "/home/plumwsl/workspaces/pulsara_agent/.venv/bin",
+          "path_entry_count": 41
+        },
+        "trusted_process_duration_microseconds": 100936
+      }
+    },
+    {
+      "event": "cancel-owner-result",
+      "time": 1792858449.746035,
+      "result": {
+        "status": "killed",
+        "output": "",
+        "exit_code": -15,
+        "cwd": "/home/plumwsl/workspaces/pulsara_agent",
+        "timed_out": false,
+        "truncated": false,
+        "error": "killed",
+        "reason": null,
+        "process_id": "process:ts4qnja46e3sobzq352felwtd4",
+        "output_artifact_candidate": {
+          "role": "OUTPUT",
+          "text": "",
+          "source_coverage": "COMPLETE",
+          "source_coverage_reason": null,
+          "original_utf8_bytes": 0,
+          "source_format_hint": "JSON"
+        },
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "output_cursor": "eyJjaGVja3N1bSI6Ijc0M2I4ZTQ2MjY5NzFiNDBmZmU0N2M2MmM4N2RmODBjNWVmMDE2MjgyOWE4MDk0MDlmMDk3Y2Q3MGI0YjI5ZDYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDo0NWFqNnNpeGlhYXJyNXRhNDU1cTN0cm13aSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnRzNHFuamE0NmUzc29ienEzNTJmZWx3dGQ0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06YmJzdWcydXRheHB6NWxjeXgzNmhvcjc0aHkifX0",
+        "retained_from_cursor": "eyJjaGVja3N1bSI6Ijc0M2I4ZTQ2MjY5NzFiNDBmZmU0N2M2MmM4N2RmODBjNWVmMDE2MjgyOWE4MDk0MDlmMDk3Y2Q3MGI0YjI5ZDYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDo0NWFqNnNpeGlhYXJyNXRhNDU1cTN0cm13aSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnRzNHFuamE0NmUzc29ienEzNTJmZWx3dGQ0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06YmJzdWcydXRheHB6NWxjeXgzNmhvcjc0aHkifX0",
+        "gap_before_output": false,
+        "truncated_by_response_bound": false,
+        "source_coverage": "COMPLETE",
+        "shell_diagnostic": null,
+        "trusted_process_duration_microseconds": 307018
+      },
+      "rootPid": 2865,
+      "rootReturncode": -15,
+      "readerAlive": false,
+      "watcherAlive": false,
+      "physicalState": "PHYSICALLY_JOINED",
+      "completion": true,
+      "liveCount": 0
+    },
+    {
+      "event": "observation-ready",
+      "time": 1792858449.751795
+    }
+  ],
+  "jobAtOwnerObservation": {
+    "TotalUserTime": 781250,
+    "TotalKernelTime": 1875000,
+    "ThisPeriodTotalUserTime": 781250,
+    "ThisPeriodTotalKernelTime": 1875000,
+    "TotalPageFaultCount": 30673,
+    "TotalProcesses": 11,
+    "ActiveProcesses": 8,
+    "TotalTerminatedProcesses": 0
+  },
+  "exactPeAtOwnerObservation": [
+    {
+      "role": "parent",
+      "fact": {
+        "pid": 6096,
+        "exists": false,
+        "error": 87
+      }
+    },
+    {
+      "role": "child",
+      "fact": {
+        "pid": 35496,
+        "exists": true,
+        "creation": 134373320496117879,
+        "sameIdentity": true,
+        "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+      }
+    }
+  ],
+  "explicitResearchCleanupTermination": true,
+  "jobAfterWindowsJoin": {
+    "TotalUserTime": 781250,
+    "TotalKernelTime": 1875000,
+    "ThisPeriodTotalUserTime": 781250,
+    "ThisPeriodTotalKernelTime": 1875000,
+    "TotalPageFaultCount": 30673,
+    "TotalProcesses": 11,
+    "ActiveProcesses": 0,
+    "TotalTerminatedProcesses": 0
+  },
+  "heldWaits": [
+    {
+      "pid": 14076,
+      "exists": true,
+      "creation": 134373320489372407,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\wsl.exe",
+      "waitResult": 258
+    },
+    {
+      "pid": 35292,
+      "exists": true,
+      "creation": 134373320489418659,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\conhost.exe",
+      "waitResult": 258
+    },
+    {
+      "pid": 36372,
+      "exists": true,
+      "creation": 134373320489817822,
+      "sameIdentity": true,
+      "image": "C:\\Program Files\\WSL\\wslhost.exe",
+      "waitResult": 258
+    },
+    {
+      "pid": 6136,
+      "exists": true,
+      "creation": 134373320489949308,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\conhost.exe",
+      "waitResult": 258
+    },
+    {
+      "pid": 33504,
+      "exists": true,
+      "creation": 134373320495912783,
+      "sameIdentity": true,
+      "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe",
+      "waitResult": 258
+    },
+    {
+      "pid": 38080,
+      "exists": true,
+      "creation": 134373320495976391,
+      "sameIdentity": true,
+      "image": "C:\\Windows\\System32\\conhost.exe",
+      "waitResult": 258
+    },
+    {
+      "pid": 38264,
+      "exists": true,
+      "creation": 134373320489581450,
+      "sameIdentity": true,
+      "image": "C:\\Program Files\\WSL\\wsl.exe",
+      "waitResult": 258
+    },
+    {
+      "pid": 35496,
+      "exists": true,
+      "creation": 134373320496117879,
+      "sameIdentity": true,
+      "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe",
+      "waitResult": 258
+    }
+  ],
+  "peEvents": [
+    {
+      "event": "pe-start",
+      "time": 1792858449.5899928,
+      "pid": 6096,
+      "role": "parent",
+      "creation": 134373320494710553,
+      "inJob": true
+    },
+    {
+      "event": "pe-start",
+      "time": 1792858449.726981,
+      "pid": 35496,
+      "role": "child",
+      "creation": 134373320496117879,
+      "inJob": true
+    },
+    {
+      "event": "child-ready",
+      "time": 1792858449.7279818,
+      "pid": 35496
+    }
+  ],
+  "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 172, in run_case\n    assert all(row[\"waitResult\"] == 0 for row in result[\"heldWaits\"])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n",
+  "managerCleanupExit": {
+    "code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "relayExactPidfdCleanup": {
+    "code": 0,
+    "stderr": ""
+  },
+  "privateSocketCleanup": {
+    "code": 0,
+    "stdout": "removed owned private socket after manager joined\n",
+    "stderr": ""
+  },
+  "cleanupAccounting": {
+    "TotalUserTime": 781250,
+    "TotalKernelTime": 1875000,
+    "ThisPeriodTotalUserTime": 781250,
+    "ThisPeriodTotalKernelTime": 1875000,
+    "TotalPageFaultCount": 30673,
+    "TotalProcesses": 11,
+    "ActiveProcesses": 0,
+    "TotalTerminatedProcesses": 0
+  },
+  "cleanupMembers": []
+}

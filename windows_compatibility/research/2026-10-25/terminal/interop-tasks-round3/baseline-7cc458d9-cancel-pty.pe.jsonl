@@ -1,0 +1,3 @@
+{"event": "pe-start", "time": 1792858579.9026818, "pid": 17188, "role": "parent", "creation": 134373321797805671, "inJob": true}
+{"event": "pe-start", "time": 1792858580.0437746, "pid": 22824, "role": "child", "creation": 134373321799243372, "inJob": true}
+{"event": "child-ready", "time": 1792858580.0437746, "pid": 22824}

@@ -1,0 +1,16 @@
+{
+  "archivedAssertionsPassed": true,
+  "pgCases": [
+    7,
+    3,
+    2,
+    2
+  ],
+  "resetPositiveAndNegativeRetained": true,
+  "bindingGates": 4,
+  "combinedCancelGates": 3,
+  "terminalCases": 14,
+  "cleanupEmpty": true,
+  "documentLinksChecked": 43,
+  "scope": "Read-only validation of captured observations; no new runtime experiment or G0 qualification."
+}

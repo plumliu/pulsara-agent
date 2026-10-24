@@ -1,0 +1,325 @@
+{
+  "facts": {
+    "home": "/home/plumwsl/.g0p3-79tnpki5",
+    "gate": {
+      "home": "/home/plumwsl/.g0p3-79tnpki5",
+      "gate": "postgres-exec 523 520\n",
+      "postmaster_pid": null,
+      "pg_log": "",
+      "data_stat": {
+        "uid": 1000,
+        "mode": "0o700",
+        "device": 2096,
+        "inode": 145675
+      },
+      "processes": [
+        {
+          "pid": 520,
+          "exists": true,
+          "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl",
+          "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl start -w -D /home/plumwsl/.g0p3-79tnpki5/desktop/postgres -l /home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log -o -c listen_addresses='' -k '/home/plumwsl/.g0p3-79tnpki5/desktop/socket' -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries='pg_search,/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/fault.so' ",
+          "status": "Name:\tpg_ctl\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t520\nNgid:\t0\nPid:\t520\nPPid:\t519\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t520\nNSpid:\t520\nNSpgid:\t519\nNSsid:\t519\nKthread:\t0\nVmPeak:\t    2888 kB\nVmSize:\t    2852 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    1980 kB\nVmRSS:\t    1980 kB\nRssAnon:\t     132 kB\nRssFile:\t    1848 kB\nRssShmem:\t       0 kB\nVmData:\t     232 kB\nVmStk:\t     132 kB\nVmExe:\t      36 kB\nVmLib:\t    1832 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000000002\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t7\nnonvoluntary_ctxt_switches:\t0\n",
+          "fds": {
+            "0": "pipe:[94580]",
+            "1": "pipe:[81859]",
+            "2": "pipe:[81860]",
+            "4": "/home/plumwsl/.g0p3-79tnpki5/desktop/pg-lifetime.lock"
+          },
+          "stat": "520 (pg_ctl) S 519 519 519 34816 519 4194304 88 252 1 0 0 0 0 0 20 0 1 0 39038 2920448 478 18446744073709551615 104411823468544 104411823503729 140734244949312 0 0 0 0 0 2 1 0 0 17 11 0 0 0 0 0 104411823536944 104411823538648 104412852740096 140734244954938 140734244955375 140734244955375 140734244958123 0\n"
+        },
+        {
+          "pid": 523,
+          "exists": true,
+          "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres",
+          "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres -D /home/plumwsl/.g0p3-79tnpki5/desktop/postgres -c listen_addresses= -k /home/plumwsl/.g0p3-79tnpki5/desktop/socket -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries=pg_search,/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/fault.so ",
+          "status": "Name:\tpostgres\nUmask:\t0077\nState:\tT (stopped)\nTgid:\t523\nNgid:\t0\nPid:\t523\nPPid:\t520\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t523\nNSpid:\t523\nNSpgid:\t523\nNSsid:\t523\nKthread:\t0\nVmPeak:\t   13864 kB\nVmSize:\t   13840 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    3276 kB\nVmRSS:\t    3276 kB\nRssAnon:\t     348 kB\nRssFile:\t    2928 kB\nRssShmem:\t       0 kB\nVmData:\t     412 kB\nVmStk:\t     132 kB\nVmExe:\t    5684 kB\nVmLib:\t    2472 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+          "fds": {
+            "0": "/dev/null",
+            "1": "/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log",
+            "2": "/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log",
+            "4": "/home/plumwsl/.g0p3-79tnpki5/desktop/pg-lifetime.lock"
+          },
+          "stat": "523 (postgres) T 520 523 523 0 -1 4194304 262 0 0 0 0 0 0 0 20 0 1 0 39039 14172160 796 18446744073709551615 109789579579392 109789585397441 140726857931008 0 0 0 0 0 0 1 0 0 17 12 0 0 0 0 0 109789588500464 109789588745368 109789612220416 140726857937587 140726857937955 140726857937955 140726857940905 19\n"
+        }
+      ]
+    },
+    "busyReset": {
+      "type": "busy-inflight",
+      "status": {
+        "exit": 3,
+        "stdout": "pg_ctl: no server running\n",
+        "stderr": ""
+      },
+      "stop": null,
+      "data_preserved": true,
+      "deleted": false
+    },
+    "busySentinels": {
+      "outside": "outside-sentinel",
+      "data": "data-sentinel",
+      "socket": true,
+      "lock_inode": 146679
+    },
+    "query": {
+      "exit": 2,
+      "stdout": "",
+      "stderr": "psql: error: connection to server on socket \"/home/plumwsl/.g0p3-79tnpki5/desktop/socket/.s.PGSQL.5432\" failed: No such file or directory\n\tIs the server running locally and accepting connections on that socket?\n"
+    }
+  },
+  "failures": [
+    "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\round3\\reset-harness.py\", line 72, in <module>\n    assert facts[\"query\"][\"exit\"] == 0\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+  ],
+  "records": [
+    {
+      "kind": "control",
+      "time_ns": 1792858626682907500,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "setup"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-79tnpki5\", \"uid\": 1000, \"initdb\": {\"exit\": 0, \"stdout\": \"The files belonging to this database system will be owned by user \\\"plumwsl\\\".\\nThis user must also own the server process.\\n\\nThe database cluster will be initialized with locale \\\"C\\\".\\nThe default text search configuration will be set to \\\"english\\\".\\n\\nData page checksums are disabled.\\n\\ncreating directory /home/plumwsl/.g0p3-79tnpki5/desktop/postgres ... ok\\ncreating subdirectories ... ok\\nselecting dynamic shared memory implementation ... posix\\nselecting default \\\"max_connections\\\" ... 100\\nselecting default \\\"shared_buffers\\\" ... 128MB\\nselecting default time zone ... Asia/Singapore\\ncreating configuration files ... ok\\nrunning bootstrap script ... ok\\nperforming post-bootstrap initialization ... ok\\nsyncing data to disk ... ok\\n\\nSuccess. You can now start the database server using:\\n\\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D /home/plumwsl/.g0p3-79tnpki5/desktop/postgres -l logfile start\\n\\n\", \"stderr\": \"\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858626766840500,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "sentinels",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 0,
+      "stdout": "{\"written\": true}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "start-ready",
+      "time_ns": 1792858626888338300,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/home/plumwsl/.g0p3-79tnpki5",
+        "postgres-exec",
+        "separate"
+      ],
+      "frame": {
+        "type": "ready",
+        "lifetime_fd": 4,
+        "pid": 519,
+        "fd": 3,
+        "inheritable": false,
+        "mode": "separate"
+      }
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858626976272700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "observe",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-79tnpki5\", \"gate\": \"postgres-exec 523 520\\n\", \"postmaster_pid\": null, \"pg_log\": \"\", \"data_stat\": {\"uid\": 1000, \"mode\": \"0o700\", \"device\": 2096, \"inode\": 145675}, \"processes\": [{\"pid\": 520, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl start -w -D /home/plumwsl/.g0p3-79tnpki5/desktop/postgres -l /home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log -o -c listen_addresses='' -k '/home/plumwsl/.g0p3-79tnpki5/desktop/socket' -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries='pg_search,/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/fault.so' \", \"status\": \"Name:\\tpg_ctl\\nUmask:\\t0077\\nState:\\tS (sleeping)\\nTgid:\\t520\\nNgid:\\t0\\nPid:\\t520\\nPPid:\\t519\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t520\\nNSpid:\\t520\\nNSpgid:\\t519\\nNSsid:\\t519\\nKthread:\\t0\\nVmPeak:\\t    2888 kB\\nVmSize:\\t    2852 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    1980 kB\\nVmRSS:\\t    1980 kB\\nRssAnon:\\t     132 kB\\nRssFile:\\t    1848 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     232 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t      36 kB\\nVmLib:\\t    1832 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000000000000\\nSigCgt:\\t0000000000000002\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t7\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[94580]\", \"1\": \"pipe:[81859]\", \"2\": \"pipe:[81860]\", \"4\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/pg-lifetime.lock\"}, \"stat\": \"520 (pg_ctl) S 519 519 519 34816 519 4194304 88 252 1 0 0 0 0 0 20 0 1 0 39038 2920448 478 18446744073709551615 104411823468544 104411823503729 140734244949312 0 0 0 0 0 2 1 0 0 17 11 0 0 0 0 0 104411823536944 104411823538648 104412852740096 140734244954938 140734244955375 140734244955375 140734244958123 0\\n\"}, {\"pid\": 523, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres -D /home/plumwsl/.g0p3-79tnpki5/desktop/postgres -c listen_addresses= -k /home/plumwsl/.g0p3-79tnpki5/desktop/socket -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries=pg_search,/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/fault.so \", \"status\": \"Name:\\tpostgres\\nUmask:\\t0077\\nState:\\tT (stopped)\\nTgid:\\t523\\nNgid:\\t0\\nPid:\\t523\\nPPid:\\t520\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t523\\nNSpid:\\t523\\nNSpgid:\\t523\\nNSsid:\\t523\\nKthread:\\t0\\nVmPeak:\\t   13864 kB\\nVmSize:\\t   13840 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    3276 kB\\nVmRSS:\\t    3276 kB\\nRssAnon:\\t     348 kB\\nRssFile:\\t    2928 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     412 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t    5684 kB\\nVmLib:\\t    2472 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000000000000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"/dev/null\", \"1\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"2\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"4\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/pg-lifetime.lock\"}, \"stat\": \"523 (postgres) T 520 523 523 0 -1 4194304 262 0 0 0 0 0 0 0 20 0 1 0 39039 14172160 796 18446744073709551615 109789579579392 109789585397441 140726857931008 0 0 0 0 0 0 1 0 0 17 12 0 0 0 0 0 109789588500464 109789588745368 109789612220416 140726857937587 140726857937955 140726857937955 140726857940905 19\\n\"}]}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858627063710400,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "signal",
+        "/home/plumwsl/.g0p3-79tnpki5",
+        "519",
+        "SIGKILL"
+      ],
+      "exit": 0,
+      "stdout": "{\"signal\": 9, \"process\": {\"pid\": 519, \"exists\": true, \"exe\": \"/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/bin/python3.12\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python /home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/helper.py /home/plumwsl/workspaces/pulsara_agent /home/plumwsl/.g0p3-79tnpki5 postgres-exec separate \", \"status\": \"Name:\\tpython\\nUmask:\\t0022\\nState:\\tS (sleeping)\\nTgid:\\t519\\nNgid:\\t0\\nPid:\\t519\\nPPid:\\t518\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t519\\nNSpid:\\t519\\nNSpgid:\\t519\\nNSsid:\\t519\\nKthread:\\t0\\nVmPeak:\\t   45784 kB\\nVmSize:\\t   45784 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t   23448 kB\\nVmRSS:\\t   23448 kB\\nRssAnon:\\t   13992 kB\\nRssFile:\\t    9456 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t   15844 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t   21876 kB\\nVmLib:\\t       0 kB\\nVmPTE:\\t     116 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000001001000\\nSigCgt:\\t0000000000000002\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t15\\nnonvoluntary_ctxt_switches:\\t1\\n\", \"fds\": {\"0\": \"pipe:[94580]\", \"1\": \"pipe:[94581]\", \"2\": \"pipe:[94582]\", \"3\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/pg-lifetime.lock\", \"5\": \"pipe:[81859]\", \"7\": \"/dev/ptmx\", \"8\": \"pipe:[81860]\"}, \"stat\": \"519 (python) S 518 519 519 34816 519 4194560 4371 0 0 0 7 1 0 0 20 0 1 0 39029 46882816 5835 18446744073709551615 4329472 32388328 140734833585200 0 0 0 0 16781312 2 1 0 0 17 0 0 0 0 0 0 23068672 32388328 859119616 140734833591540 140734833591777 140734833591777 140734833594304 0\\n\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "finite",
+      "time_ns": 1792858627195252800,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/guarded-reset.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 74,
+      "stdout": "{\"type\": \"ready\", \"pid\": 530}\n{\"type\": \"busy-inflight\", \"status\": {\"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\"}, \"stop\": null, \"data_preserved\": true, \"deleted\": false}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858627280852000,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "sentinel-state",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 0,
+      "stdout": "{\"outside\": \"outside-sentinel\", \"data\": \"data-sentinel\", \"socket\": true, \"lock_inode\": 146679}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858627367012700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "resume",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 0,
+      "stdout": "{\"resumed\": 523, \"before\": {\"pid\": 523, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres -D /home/plumwsl/.g0p3-79tnpki5/desktop/postgres -c listen_addresses= -k /home/plumwsl/.g0p3-79tnpki5/desktop/socket -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries=pg_search,/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/fault.so \", \"status\": \"Name:\\tpostgres\\nUmask:\\t0077\\nState:\\tT (stopped)\\nTgid:\\t523\\nNgid:\\t0\\nPid:\\t523\\nPPid:\\t518\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t523\\nNSpid:\\t523\\nNSpgid:\\t523\\nNSsid:\\t523\\nKthread:\\t0\\nVmPeak:\\t   13864 kB\\nVmSize:\\t   13840 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    3276 kB\\nVmRSS:\\t    3276 kB\\nRssAnon:\\t     348 kB\\nRssFile:\\t    2928 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     412 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t    5684 kB\\nVmLib:\\t    2472 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000000000000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"/dev/null\", \"1\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"2\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"4\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/pg-lifetime.lock\"}, \"stat\": \"523 (postgres) T 518 523 523 0 -1 4194304 262 0 0 0 0 0 0 0 20 0 1 0 39039 14172160 796 18446744073709551615 109789579579392 109789585397441 140726857931008 0 0 0 0 0 0 1 0 0 17 12 0 0 0 0 0 109789588500464 109789588745368 109789612220416 140726857937587 140726857937955 140726857937955 140726857940905 19\\n\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "start-finished",
+      "time_ns": 1792858627367012700,
+      "exit": 9,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858627478239000,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "query",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 0,
+      "stdout": "{\"exit\": 2, \"stdout\": \"\", \"stderr\": \"psql: error: connection to server on socket \\\"/home/plumwsl/.g0p3-79tnpki5/desktop/socket/.s.PGSQL.5432\\\" failed: No such file or directory\\n\\tIs the server running locally and accepting connections on that socket?\\n\"}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "failure",
+      "time_ns": 1792858627495028500,
+      "traceback": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\round3\\reset-harness.py\", line 72, in <module>\n    assert facts[\"query\"][\"exit\"] == 0\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858627583680100,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "resume",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 0,
+      "stdout": "{\"resumed\": 523, \"before\": {\"pid\": 523, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres -D /home/plumwsl/.g0p3-79tnpki5/desktop/postgres -c listen_addresses= -k /home/plumwsl/.g0p3-79tnpki5/desktop/socket -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries=pg_search,/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/fault.so \", \"status\": \"Name:\\tpostgres\\nUmask:\\t0077\\nState:\\tD (disk sleep)\\nTgid:\\t523\\nNgid:\\t0\\nPid:\\t523\\nPPid:\\t518\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t256\\nGroups:\\t27 1000 \\nNStgid:\\t523\\nNSpid:\\t523\\nNSpgid:\\t523\\nNSsid:\\t523\\nKthread:\\t0\\nVmPeak:\\t 2674900 kB\\nVmSize:\\t 2674888 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t   29484 kB\\nVmRSS:\\t   29484 kB\\nRssAnon:\\t    3768 kB\\nRssFile:\\t   14768 kB\\nRssShmem:\\t   10948 kB\\nVmData:\\t 2221784 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t    5684 kB\\nVmLib:\\t  113276 kB\\nVmPTE:\\t     256 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t16\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000400000\\nSigIgn:\\t0000000001303000\\nSigCgt:\\t0000000100014a07\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t35\\nnonvoluntary_ctxt_switches:\\t1\\n\", \"fds\": {\"0\": \"/dev/null\", \"1\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"2\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"3\": \"anon_inode:[signalfd]\", \"4\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/pg-lifetime.lock\", \"5\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"6\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"7\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"8\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"9\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"10\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"11\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"12\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"13\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"14\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"15\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"16\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"17\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"18\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"19\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"20\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"21\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"22\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"23\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"24\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"25\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"26\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"27\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"28\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"29\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"30\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"31\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"32\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"33\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"34\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"35\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"36\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"37\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"38\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"39\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"40\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"41\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"42\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"43\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"44\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"45\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"46\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"47\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"48\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"49\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"50\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"51\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"52\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"53\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"54\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"55\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"56\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"57\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"58\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"59\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"60\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"61\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"62\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"63\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"64\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"65\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"66\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"67\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"68\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"69\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"70\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"71\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"72\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"73\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"74\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"75\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"76\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"77\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"78\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"79\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"80\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"81\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"82\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"83\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"84\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"85\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"86\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"87\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"88\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"89\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"90\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"91\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"92\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"93\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"94\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"95\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"96\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"97\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"98\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"99\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"100\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"101\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"102\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"103\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"104\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"105\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"106\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"107\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"108\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"109\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"110\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"111\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"112\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"113\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"114\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"115\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"116\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"117\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"118\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"119\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"120\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"121\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"122\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"123\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"124\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"125\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"126\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"127\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"128\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"129\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"130\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"131\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"132\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"133\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"134\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"135\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"136\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"137\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"138\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"139\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"140\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"141\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"142\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"143\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"144\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"145\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"146\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"147\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"148\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"149\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"150\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"151\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"152\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"153\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"154\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"155\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"156\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"157\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"158\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"159\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"160\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"161\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"162\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"163\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"164\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"165\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"166\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"167\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"168\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"169\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"170\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"171\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"172\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"173\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"174\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"175\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"176\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"177\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"178\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"179\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"180\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"181\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"182\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"183\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"184\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"185\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"186\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"187\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"188\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"189\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"190\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"191\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"192\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"193\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"194\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"195\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"196\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"197\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"198\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"199\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"200\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"201\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"202\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"203\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"204\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"205\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"206\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"207\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"208\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"209\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"210\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"211\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"212\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"213\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"214\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"215\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"216\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"217\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"218\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"219\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"220\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"221\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"222\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"223\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"224\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"225\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"226\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"227\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"228\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"229\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"230\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"231\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"232\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"233\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"234\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"235\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"236\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"237\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"238\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"239\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"240\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"241\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"242\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"243\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"244\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"245\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"246\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"247\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"248\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"249\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"250\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"251\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"252\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"253\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"254\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\", \"255\": \"/home/plumwsl/.g0p3-79tnpki5/desktop/postgres.log\"}, \"stat\": \"523 (postgres) D 518 523 523 0 -1 4194304 4052 0 20 0 103 8 0 0 20 0 16 0 39039 2739085312 7259 18446744073709551615 109789579579392 109789585397441 140726857931008 0 0 0 4194304 19935232 84487 0 0 0 17 11 0 0 0 0 0 109789588500464 109789588745368 109789612220416 140726857937587 140726857937955 140726857937955 140726857940905 0\\n\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858627793752700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "cleanup",
+        "/home/plumwsl/.g0p3-79tnpki5"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-79tnpki5\", \"stop\": {\"exit\": 0, \"stdout\": \"waiting for server to shut down.... done\\nserver stopped\\n\", \"stderr\": \"\"}, \"status\": {\"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\"}, \"matches\": [], \"homeRemoved\": true}\n",
+      "stderr": ""
+    }
+  ]
+}

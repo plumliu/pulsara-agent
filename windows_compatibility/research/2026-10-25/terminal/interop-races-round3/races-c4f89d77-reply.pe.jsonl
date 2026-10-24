@@ -1,0 +1,2 @@
+{"event": "pe-start", "time": 1792858338.2644107, "pid": 38364, "creation": 134373319381651846, "memberships": {"Local\\PulsaraG0Socket-races-c4f89d77-A": true, "Local\\PulsaraG0Socket-races-c4f89d77-B": false}}
+{"event": "pe-finished", "time": 1792858341.2651367, "pid": 38364}

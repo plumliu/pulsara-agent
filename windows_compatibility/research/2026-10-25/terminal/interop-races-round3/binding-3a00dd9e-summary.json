@@ -1,0 +1,37 @@
+{
+  "label": "binding-3a00dd9e",
+  "scenarios": {},
+  "cleanup": {
+    "receivers": [
+      {
+        "pid": 3482,
+        "starttime": "23800",
+        "pidfdSignal": true
+      }
+    ],
+    "anchors": [
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 468750,
+          "TotalKernelTime": 625000,
+          "ThisPeriodTotalUserTime": 468750,
+          "ThisPeriodTotalKernelTime": 625000,
+          "TotalPageFaultCount": 12948,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      }
+    ],
+    "paths": [
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-807_vvtm",
+        "exists": false
+      }
+    ],
+    "windows": []
+  }
+}

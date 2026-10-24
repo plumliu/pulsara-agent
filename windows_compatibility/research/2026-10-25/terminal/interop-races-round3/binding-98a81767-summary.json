@@ -1,0 +1,671 @@
+{
+  "label": "binding-98a81767",
+  "scenarios": {
+    "before-pin": {
+      "jobCancel": {
+        "before": [
+          {
+            "pid": 36984,
+            "exists": true,
+            "creation": 134373321765119673,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 2404,
+            "exists": true,
+            "creation": 134373321765242490,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 38820,
+            "exists": true,
+            "creation": 134373321765693557,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 36316,
+            "exists": true,
+            "creation": 134373321765832675,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 18004,
+            "exists": true,
+            "creation": 134373321765408360,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 0,
+          "TotalKernelTime": 625000,
+          "ThisPeriodTotalUserTime": 0,
+          "ThisPeriodTotalKernelTime": 625000,
+          "TotalPageFaultCount": 12960,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "anchorPidfdKill": {
+        "pid": 823,
+        "exists": false,
+        "pidfdSignal": false
+      },
+      "operationAdmitted": false,
+      "anchorRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792858576.5158336,
+          "pid": 8424,
+          "carrierPid": 36984,
+          "carrierCreation": 134373321765119673,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "anchor-ready",
+          "pid": 823,
+          "starttime": "34006",
+          "socket": "/run/WSL/822_interop"
+        },
+        {
+          "event": "before-pin-gate",
+          "pid": 823,
+          "starttime": "34006"
+        }
+      ],
+      "receiverRows": [
+        {
+          "event": "receiver-ready",
+          "pid": 820,
+          "starttime": "33991",
+          "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-qzfsz2af",
+          "control": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-qzfsz2af/control",
+          "mode": "0o700"
+        }
+      ]
+    },
+    "after-pin": {
+      "jobCancel": {
+        "before": [
+          {
+            "pid": 38576,
+            "exists": true,
+            "creation": 134373321768760520,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 11516,
+            "exists": true,
+            "creation": 134373321768872224,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 10724,
+            "exists": true,
+            "creation": 134373321769299533,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 33372,
+            "exists": true,
+            "creation": 134373321769428202,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 33720,
+            "exists": true,
+            "creation": 134373321769036153,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 312500,
+          "TotalKernelTime": 468750,
+          "ThisPeriodTotalUserTime": 312500,
+          "ThisPeriodTotalKernelTime": 468750,
+          "TotalPageFaultCount": 12978,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "anchorPidfdKill": {
+        "pid": 830,
+        "exists": false,
+        "pidfdSignal": false
+      },
+      "operationAdmitted": false,
+      "anchorRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792858576.8805082,
+          "pid": 8424,
+          "carrierPid": 38576,
+          "carrierCreation": 134373321768760520,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "anchor-ready",
+          "pid": 830,
+          "starttime": "34042",
+          "socket": "/run/WSL/829_interop"
+        },
+        {
+          "event": "anchor-pinned",
+          "pid": 830,
+          "starttime": "34042",
+          "inode": 1225
+        },
+        {
+          "event": "after-pin-gate",
+          "pid": 830,
+          "starttime": "34042"
+        }
+      ],
+      "receiverRows": [
+        {
+          "event": "receiver-ready",
+          "pid": 827,
+          "starttime": "34027",
+          "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-f4_5ugmv",
+          "control": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-f4_5ugmv/control",
+          "mode": "0o700"
+        }
+      ]
+    },
+    "after-send": {
+      "jobCancel": {
+        "before": [
+          {
+            "pid": 34112,
+            "exists": true,
+            "creation": 134373321772306077,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 9168,
+            "exists": true,
+            "creation": 134373321772469610,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 36548,
+            "exists": true,
+            "creation": 134373321772880782,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 29828,
+            "exists": true,
+            "creation": 134373321773015314,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 32124,
+            "exists": true,
+            "creation": 134373321772629787,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 625000,
+          "TotalKernelTime": 312500,
+          "ThisPeriodTotalUserTime": 625000,
+          "ThisPeriodTotalKernelTime": 312500,
+          "TotalPageFaultCount": 12968,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "anchorPidfdKill": {
+        "pid": 837,
+        "exists": false,
+        "pidfdSignal": false
+      },
+      "operationAdmitted": false,
+      "receiverCode": 0,
+      "stdout": "",
+      "stderr": "",
+      "anchorRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792858577.2393293,
+          "pid": 8424,
+          "carrierPid": 34112,
+          "carrierCreation": 134373321772306077,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "anchor-ready",
+          "pid": 837,
+          "starttime": "34078",
+          "socket": "/run/WSL/836_interop"
+        },
+        {
+          "event": "anchor-pinned",
+          "pid": 837,
+          "starttime": "34078",
+          "inode": 1234
+        },
+        {
+          "event": "anchor-fd-sent",
+          "pid": 837,
+          "starttime": "34078"
+        }
+      ],
+      "receiverRows": [
+        {
+          "event": "receiver-ready",
+          "pid": 834,
+          "starttime": "34063",
+          "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-xecverqt",
+          "control": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-xecverqt/control",
+          "mode": "0o700"
+        },
+        {
+          "event": "recvmsg-result",
+          "pid": 834,
+          "starttime": "34063",
+          "data": "F",
+          "flags": 1073741824,
+          "ancillaryCount": 1
+        },
+        {
+          "event": "fd-received",
+          "pid": 834,
+          "starttime": "34063",
+          "peerPid": 837,
+          "peerUid": 1000,
+          "peerStarttime": "34078",
+          "inode": 1234,
+          "pidfdAlive": true
+        },
+        {
+          "event": "receiver-bind-gate",
+          "pid": 834,
+          "starttime": "34063"
+        },
+        {
+          "event": "binding-rejected-anchor-dead",
+          "pid": 834,
+          "starttime": "34063",
+          "operationAdmitted": false
+        }
+      ]
+    },
+    "live": {
+      "windowsOwnerBinding": {
+        "sameCreation": true,
+        "memberOfExactJob": true,
+        "notOtherJob": true
+      },
+      "caller": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "",
+        "pe": [
+          {
+            "event": "pe-start",
+            "time": 1792858577.9892304,
+            "pid": 2468,
+            "creation": 134373321778862811,
+            "memberships": {
+              "Local\\PulsaraG0Fd-binding-98a81767-live": true,
+              "Local\\PulsaraG0Fd-binding-98a81767-before-pin": false
+            }
+          },
+          {
+            "event": "pe-finished",
+            "time": 1792858579.9907637,
+            "pid": 2468
+          }
+        ],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 846,
+            "starttime": "34133",
+            "originalSocket": "/run/WSL/845_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 0
+          }
+        ]
+      },
+      "operationAdmitted": true,
+      "cancelAfterBinding": {
+        "before": [
+          {
+            "pid": 21796,
+            "exists": true,
+            "creation": 134373321776203159,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 30208,
+            "exists": true,
+            "creation": 134373321776307385,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 248,
+            "exists": true,
+            "creation": 134373321776725448,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 37680,
+            "exists": true,
+            "creation": 134373321776856236,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 32512,
+            "exists": true,
+            "creation": 134373321776469307,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 1250000,
+          "TotalKernelTime": 1093750,
+          "ThisPeriodTotalUserTime": 1250000,
+          "ThisPeriodTotalKernelTime": 1093750,
+          "TotalPageFaultCount": 21249,
+          "TotalProcesses": 8,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "attemptAfterCancel": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (905 - ) ERROR: UtilAcceptVsock:273: accept4 failed 110\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 904,
+            "starttime": "34355",
+            "originalSocket": "/run/WSL/903_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      },
+      "anchorRows": [
+        {
+          "event": "anchor-assigned-before-resume",
+          "time": 1792858577.6238098,
+          "pid": 8424,
+          "carrierPid": 21796,
+          "carrierCreation": 134373321776203159,
+          "carrierInJob": true,
+          "guestReadyExists": false
+        },
+        {
+          "event": "anchor-ready",
+          "pid": 844,
+          "starttime": "34116",
+          "socket": "/run/WSL/843_interop"
+        },
+        {
+          "event": "anchor-pinned",
+          "pid": 844,
+          "starttime": "34116",
+          "inode": 1245
+        },
+        {
+          "event": "anchor-fd-sent",
+          "pid": 844,
+          "starttime": "34116"
+        }
+      ],
+      "receiverRows": [
+        {
+          "event": "receiver-ready",
+          "pid": 841,
+          "starttime": "34101",
+          "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-tf4r_v1e",
+          "control": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-tf4r_v1e/control",
+          "mode": "0o700"
+        },
+        {
+          "event": "recvmsg-result",
+          "pid": 841,
+          "starttime": "34101",
+          "data": "F",
+          "flags": 1073741824,
+          "ancillaryCount": 1
+        },
+        {
+          "event": "fd-received",
+          "pid": 841,
+          "starttime": "34101",
+          "peerPid": 844,
+          "peerUid": 1000,
+          "peerStarttime": "34116",
+          "inode": 1245,
+          "pidfdAlive": true
+        },
+        {
+          "event": "receiver-bind-gate",
+          "pid": 841,
+          "starttime": "34101"
+        },
+        {
+          "event": "receiver-bound",
+          "pid": 841,
+          "starttime": "34101",
+          "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-tf4r_v1e/interop",
+          "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-tf4r_v1e",
+          "peerPid": 844,
+          "pinned": "/proc/841/fd/6",
+          "operationAdmitted": true
+        },
+        {
+          "event": "connection-complete",
+          "pid": 841,
+          "starttime": "34101"
+        },
+        {
+          "event": "connection-error",
+          "pid": 841,
+          "starttime": "34101",
+          "kind": "ConnectionRefusedError",
+          "message": "[Errno 111] Connection refused"
+        }
+      ]
+    }
+  },
+  "passedObservedGates": true,
+  "cleanup": {
+    "receivers": [
+      {
+        "pid": 820,
+        "starttime": "33991",
+        "pidfdSignal": true
+      },
+      {
+        "record": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\binding-98a81767-before-pin.receiver.jsonl",
+        "code": 9,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "pid": 827,
+        "starttime": "34027",
+        "pidfdSignal": true
+      },
+      {
+        "record": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\binding-98a81767-after-pin.receiver.jsonl",
+        "code": 9,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "record": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\binding-98a81767-after-send.receiver.jsonl",
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "pid": 841,
+        "starttime": "34101",
+        "pidfdSignal": true
+      },
+      {
+        "record": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\binding-98a81767-live.receiver.jsonl",
+        "code": 9,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "anchors": [
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 0,
+          "TotalKernelTime": 625000,
+          "ThisPeriodTotalUserTime": 0,
+          "ThisPeriodTotalKernelTime": 625000,
+          "TotalPageFaultCount": 12960,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 312500,
+          "TotalKernelTime": 468750,
+          "ThisPeriodTotalUserTime": 312500,
+          "ThisPeriodTotalKernelTime": 468750,
+          "TotalPageFaultCount": 12978,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 625000,
+          "TotalKernelTime": 312500,
+          "ThisPeriodTotalUserTime": 625000,
+          "ThisPeriodTotalKernelTime": 312500,
+          "TotalPageFaultCount": 12968,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 1250000,
+          "TotalKernelTime": 1093750,
+          "ThisPeriodTotalUserTime": 1250000,
+          "ThisPeriodTotalKernelTime": 1093750,
+          "TotalPageFaultCount": 21249,
+          "TotalProcesses": 8,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      }
+    ],
+    "paths": [
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-qzfsz2af",
+        "exists": false
+      },
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-f4_5ugmv",
+        "exists": false
+      },
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-xecverqt",
+        "exists": false
+      },
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/fd-relay-tf4r_v1e",
+        "exists": false
+      }
+    ],
+    "windows": [
+      {
+        "pid": 2468,
+        "exists": false,
+        "error": 87
+      }
+    ]
+  }
+}

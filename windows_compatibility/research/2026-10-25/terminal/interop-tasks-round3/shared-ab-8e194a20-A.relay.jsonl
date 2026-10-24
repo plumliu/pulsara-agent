@@ -1,0 +1,3 @@
+{"event": "relay-ready", "time": 1792858662.1519296, "pid": 780, "starttime": "42556", "socket": "/home/plumwsl/.g0tasks/shared-ab-8e194a20-A/interop", "directory": "/home/plumwsl/.g0tasks/shared-ab-8e194a20-A", "mode": "0o700", "upstream": "/run/WSL/763_interop"}
+{"event": "relay-request-done", "time": 1792858662.7855463}
+{"event": "relay-request-done", "time": 1792858663.2101586}

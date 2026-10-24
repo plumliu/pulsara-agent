@@ -1,0 +1,4 @@
+{"event": "before-pin", "pid": 1455, "upstream": "/run/WSL/1398_interop", "starttime": "10147"}
+{"event": "relay-ready", "pid": 1455, "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-ytenofm8/interop", "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-ytenofm8", "pinned": "/proc/1455/fd/8", "inode": 1955, "mode": "0o700", "starttime": "10147"}
+{"event": "forwarded", "pid": 1455, "bytes": 493, "total": 493}
+{"event": "connection-complete", "pid": 1455}

@@ -1,0 +1,6 @@
+{"windowsIdentities": 116, "linuxIdentities": 83, "privateDirectories": 31, "remainingWindows": [], "unknownWindows": [], "remainingLinux": [{"pid": 980, "expectedStarttime": "46496", "starttime": "46496", "state": "S", "sameIdentity": true, "exists": true}], "remainingPaths": []}
+Traceback (most recent call last):
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\verify_cleanup.py", line 52, in <module>
+    assert not any(result[key] for key in ("remainingWindows","unknownWindows","remainingLinux","remainingPaths"))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

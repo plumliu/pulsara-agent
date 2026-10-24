@@ -1,0 +1,17 @@
+{
+  "label": "tasks-5fb9ff37-normal-pipe",
+  "scenario": "normal",
+  "tty": false,
+  "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 111, in run_case\n    relay = wait_event(relay_record, \"relay-ready\")\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 40, in wait_event\n    raise TimeoutError((str(path), event))\nTimeoutError: ('C:\\\\python_workspace\\\\pulsara-agent\\\\output\\\\windows-g0\\\\interop_tasks_r3\\\\round3\\\\tasks-5fb9ff37-normal-pipe.relay.jsonl', 'relay-ready')\n",
+  "cleanupAccounting": {
+    "TotalUserTime": 781250,
+    "TotalKernelTime": 468750,
+    "ThisPeriodTotalUserTime": 781250,
+    "ThisPeriodTotalKernelTime": 468750,
+    "TotalPageFaultCount": 12854,
+    "TotalProcesses": 5,
+    "ActiveProcesses": 0,
+    "TotalTerminatedProcesses": 0
+  },
+  "cleanupMembers": []
+}

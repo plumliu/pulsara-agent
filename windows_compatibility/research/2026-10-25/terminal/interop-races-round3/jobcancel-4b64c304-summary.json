@@ -1,0 +1,79 @@
+{
+  "label": "jobcancel-4b64c304",
+  "scenarios": {},
+  "cleanup": {
+    "relays": [
+      {
+        "pid": 748,
+        "starttime": "41661",
+        "pidfdSignal": true
+      }
+    ],
+    "jobs": [
+      {
+        "before": [
+          {
+            "pid": 31852,
+            "exists": true,
+            "creation": 134373322529772658,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 8432,
+            "exists": true,
+            "creation": 134373322529828760,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 25812,
+            "exists": true,
+            "creation": 134373322530275302,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 35996,
+            "exists": true,
+            "creation": 134373322530416549,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 33524,
+            "exists": true,
+            "creation": 134373322529989216,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 156250,
+          "TotalKernelTime": 468750,
+          "ThisPeriodTotalUserTime": 156250,
+          "ThisPeriodTotalKernelTime": 468750,
+          "TotalPageFaultCount": 12875,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      }
+    ],
+    "paths": [
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-ymtr9khf",
+        "exists": false
+      }
+    ],
+    "windows": []
+  }
+}

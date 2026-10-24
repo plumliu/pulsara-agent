@@ -1,0 +1,80 @@
+{
+  "label": "jobcancel-69fe839c",
+  "combinedLinuxGroup": true,
+  "scenarios": {},
+  "cleanup": {
+    "relays": [
+      {
+        "pid": 426,
+        "starttime": "65847",
+        "pidfdSignal": true
+      }
+    ],
+    "jobs": [
+      {
+        "before": [
+          {
+            "pid": 38676,
+            "exists": true,
+            "creation": 134373324925852521,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 34872,
+            "exists": true,
+            "creation": 134373324925912584,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 8272,
+            "exists": true,
+            "creation": 134373324943311497,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 19692,
+            "exists": true,
+            "creation": 134373324943460805,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 33396,
+            "exists": true,
+            "creation": 134373324926100363,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 937500,
+          "TotalKernelTime": 156250,
+          "ThisPeriodTotalUserTime": 937500,
+          "ThisPeriodTotalKernelTime": 156250,
+          "TotalPageFaultCount": 12859,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      }
+    ],
+    "paths": [
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-mnpxm2xs",
+        "exists": false
+      }
+    ],
+    "windows": []
+  }
+}

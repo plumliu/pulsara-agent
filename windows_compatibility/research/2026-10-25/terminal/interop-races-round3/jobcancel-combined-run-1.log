@@ -1,0 +1,12 @@
+C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\jobcancel-69fe839c-summary.json
+Traceback (most recent call last):
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\job_cancel_probe.py", line 85, in <module>
+    if __name__=="__main__": run()
+                             ^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\job_cancel_probe.py", line 23, in run
+    caller=R.launch(label+"-"+mode,rr["ready"]["socket"],a,a,seconds=10,owned_group=combined)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\race_probe.py", line 106, in launch
+    S.wait_row(Path(str(record)+".linux"), "caller-ready")
+  File "<string>", line 48, in wait_row
+TimeoutError: (WindowsPath('C:/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round3/jobcancel-69fe839c-before.pe.jsonl.linux'), 'caller-ready')

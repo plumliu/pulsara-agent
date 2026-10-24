@@ -1,0 +1,12 @@
+{
+  "pid": 980,
+  "starttime": "46496",
+  "pidfdSignal": true,
+  "directChildren": [
+    {
+      "pid": 981,
+      "starttime": "46498",
+      "cmdline": "/init /mnt/c/python_workspace/pulsara-agent/.venv/Scripts/python.exe /mnt/c/python_workspace/pulsara-agent/.venv/Scripts/python.exe C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\race_probe.py pe C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\jobcancel-68226f4c-after.pe.jsonl Local\\PulsaraG0Socket-jobcancel-68226f4c-after Local\\PulsaraG0Socket-jobcancel-68226f4c-after 10 "
+    }
+  ]
+}

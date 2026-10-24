@@ -1,0 +1,104 @@
+[
+  {
+    "label": "tasks-5fb9ff37-normal-pipe",
+    "scenario": "normal",
+    "tty": false,
+    "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 111, in run_case\n    relay = wait_event(relay_record, \"relay-ready\")\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 40, in wait_event\n    raise TimeoutError((str(path), event))\nTimeoutError: ('C:\\\\python_workspace\\\\pulsara-agent\\\\output\\\\windows-g0\\\\interop_tasks_r3\\\\round3\\\\tasks-5fb9ff37-normal-pipe.relay.jsonl', 'relay-ready')\n",
+    "cleanupAccounting": {
+      "TotalUserTime": 781250,
+      "TotalKernelTime": 468750,
+      "ThisPeriodTotalUserTime": 781250,
+      "ThisPeriodTotalKernelTime": 468750,
+      "TotalPageFaultCount": 12854,
+      "TotalProcesses": 5,
+      "ActiveProcesses": 0,
+      "TotalTerminatedProcesses": 0
+    },
+    "cleanupMembers": []
+  },
+  {
+    "label": "tasks-5fb9ff37-normal-pty",
+    "scenario": "normal",
+    "tty": true,
+    "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 111, in run_case\n    relay = wait_event(relay_record, \"relay-ready\")\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 40, in wait_event\n    raise TimeoutError((str(path), event))\nTimeoutError: ('C:\\\\python_workspace\\\\pulsara-agent\\\\output\\\\windows-g0\\\\interop_tasks_r3\\\\round3\\\\tasks-5fb9ff37-normal-pty.relay.jsonl', 'relay-ready')\n",
+    "cleanupAccounting": {
+      "TotalUserTime": 156250,
+      "TotalKernelTime": 625000,
+      "ThisPeriodTotalUserTime": 156250,
+      "ThisPeriodTotalKernelTime": 625000,
+      "TotalPageFaultCount": 12845,
+      "TotalProcesses": 5,
+      "ActiveProcesses": 0,
+      "TotalTerminatedProcesses": 0
+    },
+    "cleanupMembers": []
+  },
+  {
+    "label": "tasks-5fb9ff37-cancel-pipe",
+    "scenario": "cancel",
+    "tty": false,
+    "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 111, in run_case\n    relay = wait_event(relay_record, \"relay-ready\")\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 40, in wait_event\n    raise TimeoutError((str(path), event))\nTimeoutError: ('C:\\\\python_workspace\\\\pulsara-agent\\\\output\\\\windows-g0\\\\interop_tasks_r3\\\\round3\\\\tasks-5fb9ff37-cancel-pipe.relay.jsonl', 'relay-ready')\n",
+    "cleanupAccounting": {
+      "TotalUserTime": 312500,
+      "TotalKernelTime": 625000,
+      "ThisPeriodTotalUserTime": 312500,
+      "ThisPeriodTotalKernelTime": 625000,
+      "TotalPageFaultCount": 12929,
+      "TotalProcesses": 5,
+      "ActiveProcesses": 0,
+      "TotalTerminatedProcesses": 0
+    },
+    "cleanupMembers": []
+  },
+  {
+    "label": "tasks-5fb9ff37-cancel-pty",
+    "scenario": "cancel",
+    "tty": true,
+    "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 111, in run_case\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 40, in wait_event\n    time.sleep(0.02)\nTimeoutError: ('C:\\\\python_workspace\\\\pulsara-agent\\\\output\\\\windows-g0\\\\interop_tasks_r3\\\\round3\\\\tasks-5fb9ff37-cancel-pty.relay.jsonl', 'relay-ready')\n",
+    "cleanupAccounting": {
+      "TotalUserTime": 468750,
+      "TotalKernelTime": 312500,
+      "ThisPeriodTotalUserTime": 468750,
+      "ThisPeriodTotalKernelTime": 312500,
+      "TotalPageFaultCount": 12855,
+      "TotalProcesses": 5,
+      "ActiveProcesses": 0,
+      "TotalTerminatedProcesses": 0
+    },
+    "cleanupMembers": []
+  },
+  {
+    "label": "tasks-5fb9ff37-input-pipe",
+    "scenario": "input",
+    "tty": false,
+    "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 111, in run_case\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 40, in wait_event\n    time.sleep(0.02)\nTimeoutError: ('C:\\\\python_workspace\\\\pulsara-agent\\\\output\\\\windows-g0\\\\interop_tasks_r3\\\\round3\\\\tasks-5fb9ff37-input-pipe.relay.jsonl', 'relay-ready')\n",
+    "cleanupAccounting": {
+      "TotalUserTime": 156250,
+      "TotalKernelTime": 468750,
+      "ThisPeriodTotalUserTime": 156250,
+      "ThisPeriodTotalKernelTime": 468750,
+      "TotalPageFaultCount": 12900,
+      "TotalProcesses": 5,
+      "ActiveProcesses": 0,
+      "TotalTerminatedProcesses": 0
+    },
+    "cleanupMembers": []
+  },
+  {
+    "label": "tasks-5fb9ff37-input-pty",
+    "scenario": "input",
+    "tty": true,
+    "failure": "Traceback (most recent call last):\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 111, in run_case\n  File \"C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_tasks_r3\\round3\\task_probe.py\", line 40, in wait_event\n    time.sleep(0.02)\nTimeoutError: ('C:\\\\python_workspace\\\\pulsara-agent\\\\output\\\\windows-g0\\\\interop_tasks_r3\\\\round3\\\\tasks-5fb9ff37-input-pty.relay.jsonl', 'relay-ready')\n",
+    "cleanupAccounting": {
+      "TotalUserTime": 468750,
+      "TotalKernelTime": 468750,
+      "ThisPeriodTotalUserTime": 468750,
+      "ThisPeriodTotalKernelTime": 468750,
+      "TotalPageFaultCount": 12898,
+      "TotalProcesses": 5,
+      "ActiveProcesses": 0,
+      "TotalTerminatedProcesses": 0
+    },
+    "cleanupMembers": []
+  }
+]

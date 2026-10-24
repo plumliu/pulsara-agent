@@ -107,13 +107,17 @@ Python生产仍在`src/pulsara_agent/`，Electron在`desktop/`，frontend在`fro
 
 helper在已选发行版同一已解析非root用户内检查uid/mode/realpath/PG_VERSION/postmaster.pid/data-dir/socket并执行现有必要文件操作。Node不能经UNC stat证明Linux0700/uid，也不能按可复用PID猜实例。helper一操作一退出，无daemon、队列、后台重试、自主start/stop/reset或第二`startedHere`；不读/写另一份settings。
 
-**失联时不能只probe一次status=3：旧start可能仍inflight，稍后才起库。** PG物理helper复用现有Linux`kernel.lock`的同一flock，非阻塞取得失败即busy，不排队一个未来start；从布局验证到真实PG子命令settle/readback和本次文件操作结束始终持锁，已运行kernel期间的诊断仍走原Unix socket。锁fd为CLOEXEC，不让常驻PG继承；helper不因结果pipe坏掉放弃仍执行的child。`--wait-owner`是串行屏障，后续helper仍须自己取得锁，不把旧等待结果当操作授权。
+**失联时不能只probe一次status=3：旧start可能仍inflight，稍后才起库。** 当前G0候选采用两种独立的OS生命周期锁：原`kernel.lock`继续串行kernel与维护；PGDATA外的`<home>/desktop/pg-lifetime.lock`以EX flock保护启动链/常驻PG及数据维护。新增锁的独立必要性是：helper独占原锁会在自身死亡时失去旧start保护，直接把原锁传给常驻PG又会阻断正常kernel（§18）。它只是空文件上的内核锁，不是持久状态、操作receipt、第二份startedHere或实例身份。两锁按kernel→PG顺序非阻塞取得；busy不排队未来操作。已运行kernel期间的诊断仍走原Unix socket。
 
-为排除“旧helper尚未取得锁、父已死、稍后进入锁空窗才执行”这一实际边界，有限调用沿现kernel start帧模式：helper先取锁并发本次ready，Node收到后才发送一个有限operation帧；helper取锁前不接纳/缓存操作。Node在发帧的真实不可逆点再次检查原取消/close准入，取消不能留下晚到帧；operation帧写出前的任何取消（含已ready但尚未发帧）必须结束本次stdin并等helper实际退出，不只reject一个Promise。ready前父EOF则无操作退出；operation已发时物理锁已持有，失联仍待真实子命令结算/readback才释放，不能把发帧后的取消改报未发生。整个过程仅当前私有pipe/锁生命周期，无durable receipt、generation或新的操作registry。G0-W-C/P必须验证父在各边界退出与helper延迟调度；若所支持故障会让helper先死、pg_ctl仍活并释放锁，则该机制未通过，不能用瞬时status放行reset。
+新start先取得两锁，再ready/接纳本次操作；真实pg_ctl→shell→postgres启动链只继承PG锁，原kernel锁保持CLOEXEC。常驻PG持独立锁时，正常kernel仍可取得原锁。PG锁busy且status3必须保留inflight/unknown，拒新start及删除；已运行实例的复用/停止仍须当前准确data/socket/readiness事实，不以busy证明实例正确。stop/status等有限子命令继承原kernel锁，initdb及其有限后代继承两锁，防止helper死亡后旧有限命令晚执行。helper不因结果pipe坏掉放弃仍执行的child。
+
+reset先取得原kernel锁并核对准确实例，必要时执行有限stop；随后必须实际取得PG生命周期EX、重新核实当前已停，并持两锁至删除完成。普通reset仅删已验证PGDATA，不能unlink/替换PG锁文件。锁文件沿真实私有home/desktop，O_NOFOLLOW打开并检查regular/uid/0600/nlink1；继承的是同一open file description，各owner只close自己的fd，不能用LOCK_UN连带解锁后代。`--wait-owner`仅是原kernel串行屏障，后续helper仍须重新取实际需要的锁，不把旧等待/stop结果当删除授权。此协议只约束遵守同一准入路径的操作，不以锁约束任意外部手动PG命令。
+
+为排除“旧helper尚未取得锁、父已死、稍后进入锁空窗才执行”这一实际边界，有限调用沿现kernel start帧模式：helper先取锁并发本次ready，Node收到后才发送一个有限operation帧；helper取锁前不接纳/缓存操作。Node在发帧的真实不可逆点再次检查原取消/close准入，取消不能留下晚到帧；operation帧写出前的任何取消（含已ready但尚未发帧）必须结束本次stdin并等helper实际退出，不只reject一个Promise。ready前父EOF则无操作退出；operation已发时物理锁已持有，失联仍待真实子命令结算/readback才释放，不能把发帧后的取消改报未发生。整个过程仅当前私有pipe/锁生命周期，无durable receipt、generation或新的操作registry。G0-W-C/P必须验证父在各边界退出与helper延迟调度；若所支持故障使helper先死后仍可晚执行的PG副作用失去所需的最后准入锁，允许后续新start或删除进入，则该机制未通过，不能用瞬时status放行reset。
 
 完整有效回复与carrier正常结束才可采用操作结果；wsl启动失败、截断、EOF、丢回复与pg_ctl真实非零不同。可能已经生效但未收全结果时返回本次结果不明，保留PG/data，不自动重发start/reset/delete或继续初始化。重新进入由TS先等原kernel锁，再通过当前Linux事实验证；不做跨重启操作重放。
 
-**第二轮实测否定了当前候选在helper自身死亡下的充分性（§18）。** 真实pg_ctl fork子已setsid或真实postgres已exec时，杀helper后新helper可持同锁读到status3，而旧进程恢复后仍启动同一库。故本节锁/ready方案不能作为已获资格的维护准入；wait-owner/瞬时status不能放行reset。直接继承fd又使常驻PG持有kernel.lock，正常路径也阻断kernel，不能作为修复。以上目标语义保留，替代机制须另做G0验证，尚无生产WSL helper。
+**第三轮两锁候选取得真实PG机制正证（§19），尚无生产WSL helper。** 已覆盖helper死亡后的晚start拒绝、有限stop/initdb后代持锁、同一guard拒删及双锁内真实删除/重建。完整ready/operation/EOF/取消/失联协议、真实TS owner合成及全部P矩阵仍须验证；不能把机制子项通过当成整门资格。被否定的单helper CLOEXEC方案只作为§18历史反例保留，不再作为当前候选。
 
 ## 4. G0-W：WSL路线可行性闸门
 
@@ -145,7 +149,9 @@ kernel、私有PG、Protocol-v3和应用资源仍使用Linux机制与ext4。自�
 
 **跨域生命周期仍为G0-W-C未闭合项。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。Windows模型任务的取消/关闭范围与可观测机制必须在G0证据中闭合，之后才可进入B；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
 
-§18记录的无breakaway Job、专属anchor及私有socket字节转发只通过明确的机制子场景。裸WSL_INTEROP失效会回退；固定socket残留候选可阻止所测回退，但首次绑定、半请求/丢回复、正常join及socket退休仍待验。不得把这些实验直接import到生产，或将取消时TerminateJob当作正常任务成功结算。
+§18–19的无breakaway Job、专属anchor及私有socket字节转发只通过明确的机制子场景。首次绑定候选由anchor自己打开上游O_PATH fd，经标准SCM_RIGHTS转交，以SO_PEERCRED/pidfd及本次可信anchor身份核对，避免另一进程重开旧PID路径；它仍未与真实任务owner全部交错合成。裸WSL_INTEROP失效会回退，私有socket须保留到旧调用者结算，不能由Job空就提前unlink。
+
+第三轮真实terminal baseline已证实Windows后代存活时会提前PHYSICALLY_JOINED并释放槽位；仅透传正确路由不足。未来最小接缝须把每次执行的跨域scope纳入原取消/物理join，原watcher继续唯一发布完成及finalize，Linux group/reader与Windows Job/精确HANDLE均结算后才能释放原槽位。内存实验通过PIPE/PTY正常、取消、输入及同registry A/B子项；没有生产接口或完整MCP/hook集成。正常完成等待自然退出，不用TerminateJob冒充success。取消封新准入并保留路径，还须结算Linux调用者；请求已转发后只有Windows Job空不足以证明其退出。半请求/失联保持unknown，不重发。不得把实验monkeypatch、文件RPC或探针直接import到生产。
 
 Windows launcher仍用系统实际`wsl.exe`绝对位置、`shell:false`、明确已选-d/-u/--cd/--exec和三pipe，不经PowerShell求值。应用入口使用明确Linux可执行文件，不因PATH注入调用同名WindowsPython/Node；模型使用的是已选用户的实际环境，允许Windows PATH项存在。清理本次宿主启动环境的WSLENV自动传递清单，不抹除Linux会话的interop能力；credential仍沿原guard和Linux settings读取，不进launcher argv/宿主日志。Linux PTY仍由guest原manager创建。
 
@@ -256,7 +262,7 @@ NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckApp
 
 `runtime.ts`当前`child`在close后清空，`stop()`若child已无会直接return；WSL接入必须保留本次已结束attempt的退出/失败/unknown并在stop/quit检查，不能因为carrier先消失便升级为clean success并让main停PG。复用现owner的process-local字段，不建durable退出receipt；刚创建尚未start-frame的无工作child可按原可证明not-started路径收回。
 
-随后只有TS owner确认本实例可停止时才执行Linux`pg_ctl stop -w -m fast`并核验status为已停；最后退休TLS/控制资源并退出Windows壳。无法确认结算就保留实际错误/数据/清理责任，阻止本次维护或reset继续，不发第二stop/reset或把超时升级为总寿命cap。reset沿原明确用户确认→关闭kernel→等待旧锁→精确PG身份/停止→确认已停→有限helper删除专用data→clean-v0重建；不使用Windowsrm/UNC权限替代Linux验证，不触workspace/settings。
+随后只有TS owner确认本实例可停止时才执行Linux`pg_ctl stop -w -m fast`并核验status为已停；最后退休TLS/控制资源并退出Windows壳。无法确认结算就保留实际错误/数据/清理责任，阻止本次维护或reset继续，不发第二stop/reset或把超时升级为总寿命cap。reset沿原明确用户确认→关闭kernel→等待旧锁→当前helper取得原kernel锁→精确PG身份/停止→取得独立PG生命周期EX并重新确认已停→持两锁删除专用data→clean-v0重建（§3.3）；不使用Windowsrm/UNC权限替代Linux验证，不触workspace/settings。
 
 ### 9.3 失败矩阵
 
@@ -493,3 +499,13 @@ Windows接手的环境安装、双仓库落点及G0-W逐项操作见[PULSARA_WIN
 - 存储审计确认本机/tmp为tmpfs。首轮及本轮早期/tmp PG记录只保留其行为含义；本轮最终矩阵已在/home/plumwsl的ext4重跑，不改写旧日志，也不代替原生Ubuntu资格。
 
 完整G0、原生Ubuntu/GUI资格、Windows激活仍待验收。活动规范记录以上新证据和不合格候选，不恢复旧原生Windows内核方案、不自动放行Phase B。
+
+## 19. 第三轮PG替代准入与跨域组合证据（2026-10-25）
+
+受测源码671f8fd2，Windows/Linux clone一致；三位gpt-6.1-sol/high并行实验，interop保持，生产未改，B未进入。[第三轮总报告](research/2026-10-25/root/g0-w-round3/report.zh.md)给出原始证据索引和交叉审阅。
+
+- PG采用§3.3的单一两锁候选。真实start链继承独立PG EX，helper死亡后PG锁仍busy，status3不放新start/reset；正常PG运行不挡原kernel锁。EX7项主矩阵及最终3项复验支持此边界。有限stop2项/initdb2项证明其后代继续占维护锁；同guard真实拒删、准确stop后双锁内删除/保留inode及外部sentinel/socket、重建查询完成。完整TS/JSONL故障矩阵及guard内running→stop→delete分支仍待验，原只读readback未继承kernel的探针限制明确保留。
+- SCM_RIGHTS首次绑定四门有实证：pin前、pin后send前、send后bind前取消和live正控。请求前、部分转发、全转发后的组合取消三门通过；Windows Job空但Linux调用者未退的原反例保留，后续必须合并Linux PGID取消/join。半/全请求失联仍unknown，物理回收不证明操作没发生。
+- 真实terminal baseline复现Windows尾部仍活时提前完成/释放槽位。内存候选14项通过，覆盖PIPE/PTY正常/取消/输入、原8槽及同registry同owner A/B；原测试47项通过。候选等待自然结束，正常路径未用TerminateJob。它不是生产接口，首次绑定/封准入竞态尚未与此owner全部合成，MCP/hooks/环境probe/启动故障/GUI宿主全链等仍待验。
+
+新增PG锁仅承担无法由原kernel锁同时承担的独立OS物理寿命，不增加durable事件/registry/重放/第二startedHere。探针和文件RPC不得作为生产依赖。以上仅关闭所列研究子项，完整G0-C/P及其他门、原生Ubuntu资格与Windows激活仍未获验收。

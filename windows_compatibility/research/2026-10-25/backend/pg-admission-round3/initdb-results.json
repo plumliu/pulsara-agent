@@ -1,0 +1,873 @@
+{
+  "cases": [
+    {
+      "stage": "initdb-exec",
+      "home": "/home/plumwsl/.g0p3-2gh25va8",
+      "atGate": {
+        "home": "/home/plumwsl/.g0p3-2gh25va8",
+        "gate": "initdb-exec 911 910\n",
+        "postmaster_pid": null,
+        "pg_log": null,
+        "data_stat": {
+          "uid": null,
+          "mode": null,
+          "device": null,
+          "inode": null
+        },
+        "processes": [
+          {
+            "pid": 911,
+            "exists": true,
+            "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+            "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-2gh25va8/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+            "status": "Name:\tinitdb\nUmask:\t0022\nState:\tT (stopped)\nTgid:\t911\nNgid:\t0\nPid:\t911\nPPid:\t910\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t911\nNSpid:\t911\nNSpgid:\t910\nNSsid:\t910\nKthread:\t0\nVmPeak:\t    4376 kB\nVmSize:\t    4352 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    2480 kB\nVmRSS:\t    2480 kB\nRssAnon:\t     148 kB\nRssFile:\t    2332 kB\nRssShmem:\t       0 kB\nVmData:\t     128 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      44 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+            "fds": {
+              "0": "pipe:[98668]",
+              "1": "pipe:[102700]",
+              "2": "pipe:[102701]",
+              "3": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+              "4": "/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock"
+            },
+            "stat": "911 (initdb) T 910 910 910 34816 910 4194304 92 0 0 0 0 0 0 0 20 0 1 0 46304 4456448 599 18446744073709551615 97541848662016 97541848746977 140731495733872 0 0 0 0 0 0 1 0 0 17 15 0 0 0 0 0 97541848812496 97541848823420 97542748569600 140731495736353 140731495736561 140731495736561 140731495739307 19\n"
+          }
+        ]
+      },
+      "afterDeathKernel": {
+        "acquired": false,
+        "kernel_lock": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+        "stat": {
+          "inode": 145682,
+          "device": 2096
+        }
+      },
+      "afterDeathLifetime": {
+        "acquired": false,
+        "inode": 145683,
+        "device": 2096
+      },
+      "afterDeathState": {
+        "home": "/home/plumwsl/.g0p3-2gh25va8",
+        "gate": "initdb-exec 911 910\n",
+        "postmaster_pid": null,
+        "pg_log": null,
+        "data_stat": {
+          "uid": null,
+          "mode": null,
+          "device": null,
+          "inode": null
+        },
+        "processes": [
+          {
+            "pid": 911,
+            "exists": true,
+            "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+            "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-2gh25va8/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+            "status": "Name:\tinitdb\nUmask:\t0022\nState:\tT (stopped)\nTgid:\t911\nNgid:\t0\nPid:\t911\nPPid:\t909\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t911\nNSpid:\t911\nNSpgid:\t910\nNSsid:\t910\nKthread:\t0\nVmPeak:\t    4376 kB\nVmSize:\t    4352 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    2480 kB\nVmRSS:\t    2480 kB\nRssAnon:\t     148 kB\nRssFile:\t    2332 kB\nRssShmem:\t       0 kB\nVmData:\t     128 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      44 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t2/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000001\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+            "fds": {
+              "0": "pipe:[98668]",
+              "1": "pipe:[102700]",
+              "2": "pipe:[102701]",
+              "3": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+              "4": "/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock"
+            },
+            "stat": "911 (initdb) T 909 910 910 0 -1 4194304 92 0 0 0 0 0 0 0 20 0 1 0 46304 4456448 599 18446744073709551615 97541848662016 97541848746977 140731495733872 0 0 0 0 0 0 1 0 0 17 15 0 0 0 0 0 97541848812496 97541848823420 97542748569600 140731495736353 140731495736561 140731495736561 140731495739307 19\n"
+          }
+        ]
+      },
+      "afterSettleKernel": {
+        "acquired": true,
+        "kernel_lock": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+        "stat": {
+          "inode": 145682,
+          "device": 2096
+        }
+      },
+      "cleanup": {
+        "home": "/home/plumwsl/.g0p3-2gh25va8",
+        "matches": [],
+        "homeRemoved": true
+      }
+    },
+    {
+      "stage": "initdb-bootstrap",
+      "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+      "atGate": {
+        "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+        "gate": "initdb-bootstrap 950 949\n",
+        "postmaster_pid": null,
+        "pg_log": null,
+        "data_stat": {
+          "uid": 1000,
+          "mode": "0o700",
+          "device": 2096,
+          "inode": 145685
+        },
+        "processes": [
+          {
+            "pid": 940,
+            "exists": true,
+            "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+            "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-1a3u5fq0/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+            "status": "Name:\tinitdb\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t940\nNgid:\t0\nPid:\t940\nPPid:\t939\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t940\nNSpid:\t940\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t    5724 kB\nVmSize:\t    5688 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    4600 kB\nVmRSS:\t    4600 kB\nRssAnon:\t    1436 kB\nRssFile:\t    3164 kB\nRssShmem:\t       0 kB\nVmData:\t    1464 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000004007\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t9\nnonvoluntary_ctxt_switches:\t1\n",
+            "fds": {
+              "0": "pipe:[105579]",
+              "1": "pipe:[104687]",
+              "2": "pipe:[104688]",
+              "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+              "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock",
+              "6": "pipe:[96990]"
+            },
+            "stat": "940 (initdb) S 939 939 939 34816 939 4194304 430 4840 0 0 0 1 0 1 20 0 1 0 46395 5824512 1127 18446744073709551615 100171318542336 100171318627297 140736390653376 0 0 0 0 1073745920 16391 1 0 0 17 4 0 0 0 0 0 100171318692816 100171318703740 100171352436736 140736390657052 140736390657260 140736390657260 140736390660011 0\n"
+          },
+          {
+            "pid": 950,
+            "exists": true,
+            "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres",
+            "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres --boot -F -c log_checkpoints=false -X 16777216 ",
+            "status": "Name:\tpostgres\nUmask:\t0077\nState:\tT (stopped)\nTgid:\t950\nNgid:\t0\nPid:\t950\nPPid:\t949\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t950\nNSpid:\t950\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t   13864 kB\nVmSize:\t   13840 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    3424 kB\nVmRSS:\t    3424 kB\nRssAnon:\t     344 kB\nRssFile:\t    3080 kB\nRssShmem:\t       0 kB\nVmData:\t     412 kB\nVmStk:\t     132 kB\nVmExe:\t    5684 kB\nVmLib:\t    2472 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+            "fds": {
+              "0": "pipe:[96990]",
+              "1": "pipe:[104687]",
+              "2": "pipe:[104688]",
+              "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+              "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock"
+            },
+            "stat": "950 (postgres) T 949 939 939 34816 939 4194304 149 0 0 0 0 0 0 0 20 0 1 0 46399 14172160 818 18446744073709551615 97582097158144 97582102976193 140720834977776 0 0 0 0 1073745920 0 1 0 0 17 12 0 0 0 0 0 97582106079216 97582106324120 97582149922816 140720834978745 140720834978871 140720834978871 140720834981801 19\n"
+          }
+        ]
+      },
+      "afterDeathKernel": {
+        "acquired": false,
+        "kernel_lock": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+        "stat": {
+          "inode": 145682,
+          "device": 2096
+        }
+      },
+      "afterDeathLifetime": {
+        "acquired": false,
+        "inode": 145683,
+        "device": 2096
+      },
+      "afterDeathState": {
+        "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+        "gate": "initdb-bootstrap 950 949\n",
+        "postmaster_pid": null,
+        "pg_log": null,
+        "data_stat": {
+          "uid": 1000,
+          "mode": "0o700",
+          "device": 2096,
+          "inode": 145685
+        },
+        "processes": [
+          {
+            "pid": 940,
+            "exists": true,
+            "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+            "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-1a3u5fq0/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+            "status": "Name:\tinitdb\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t940\nNgid:\t0\nPid:\t940\nPPid:\t938\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t940\nNSpid:\t940\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t    5724 kB\nVmSize:\t    5688 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    4600 kB\nVmRSS:\t    4600 kB\nRssAnon:\t    1436 kB\nRssFile:\t    3164 kB\nRssShmem:\t       0 kB\nVmData:\t    1464 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t3/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000004007\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t10\nnonvoluntary_ctxt_switches:\t1\n",
+            "fds": {
+              "0": "pipe:[105579]",
+              "1": "pipe:[104687]",
+              "2": "pipe:[104688]",
+              "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+              "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock",
+              "6": "pipe:[96990]"
+            },
+            "stat": "940 (initdb) S 938 939 939 0 -1 4194304 430 4840 0 0 0 1 0 1 20 0 1 0 46395 5824512 1127 18446744073709551615 100171318542336 100171318627297 140736390653376 0 0 0 0 1073745920 16391 1 0 0 17 4 0 0 0 0 0 100171318692816 100171318703740 100171352436736 140736390657052 140736390657260 140736390657260 140736390660011 0\n"
+          },
+          {
+            "pid": 950,
+            "exists": true,
+            "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres",
+            "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres --boot -F -c log_checkpoints=false -X 16777216 ",
+            "status": "Name:\tpostgres\nUmask:\t0077\nState:\tT (stopped)\nTgid:\t950\nNgid:\t0\nPid:\t950\nPPid:\t938\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t950\nNSpid:\t950\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t   13864 kB\nVmSize:\t   13840 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    3424 kB\nVmRSS:\t    3424 kB\nRssAnon:\t     344 kB\nRssFile:\t    3080 kB\nRssShmem:\t       0 kB\nVmData:\t     412 kB\nVmStk:\t     132 kB\nVmExe:\t    5684 kB\nVmLib:\t    2472 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t3/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000001\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+            "fds": {
+              "0": "pipe:[96990]",
+              "1": "pipe:[104687]",
+              "2": "pipe:[104688]",
+              "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+              "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock"
+            },
+            "stat": "950 (postgres) T 938 939 939 0 -1 4194304 149 0 0 0 0 0 0 0 20 0 1 0 46399 14172160 818 18446744073709551615 97582097158144 97582102976193 140720834977776 0 0 0 0 1073745920 0 1 0 0 17 12 0 0 0 0 0 97582106079216 97582106324120 97582149922816 140720834978745 140720834978871 140720834978871 140720834981801 19\n"
+          }
+        ]
+      },
+      "afterSettleKernel": {
+        "acquired": true,
+        "kernel_lock": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+        "stat": {
+          "inode": 145682,
+          "device": 2096
+        }
+      },
+      "cleanup": {
+        "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+        "matches": [],
+        "homeRemoved": true
+      }
+    }
+  ],
+  "failures": [],
+  "records": [
+    {
+      "kind": "control",
+      "time_ns": 1792858699447875200,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "setup-empty"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-2gh25va8\", \"uid\": 1000}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "initdb-ready",
+      "time_ns": 1792858699544149500,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/finite.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/home/plumwsl/.g0p3-2gh25va8",
+        "initdb-exec"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 910,
+        "fd": 3
+      }
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858699637649700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "observe",
+        "/home/plumwsl/.g0p3-2gh25va8"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-2gh25va8\", \"gate\": \"initdb-exec 911 910\\n\", \"postmaster_pid\": null, \"pg_log\": null, \"data_stat\": {\"uid\": null, \"mode\": null, \"device\": null, \"inode\": null}, \"processes\": [{\"pid\": 911, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-2gh25va8/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C \", \"status\": \"Name:\\tinitdb\\nUmask:\\t0022\\nState:\\tT (stopped)\\nTgid:\\t911\\nNgid:\\t0\\nPid:\\t911\\nPPid:\\t910\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t911\\nNSpid:\\t911\\nNSpgid:\\t910\\nNSsid:\\t910\\nKthread:\\t0\\nVmPeak:\\t    4376 kB\\nVmSize:\\t    4352 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    2480 kB\\nVmRSS:\\t    2480 kB\\nRssAnon:\\t     148 kB\\nRssFile:\\t    2332 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     128 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t      84 kB\\nVmLib:\\t    2616 kB\\nVmPTE:\\t      44 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000000000000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[98668]\", \"1\": \"pipe:[102700]\", \"2\": \"pipe:[102701]\", \"3\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock\"}, \"stat\": \"911 (initdb) T 910 910 910 34816 910 4194304 92 0 0 0 0 0 0 0 20 0 1 0 46304 4456448 599 18446744073709551615 97541848662016 97541848746977 140731495733872 0 0 0 0 0 0 1 0 0 17 15 0 0 0 0 0 97541848812496 97541848823420 97542748569600 140731495736353 140731495736561 140731495736561 140731495739307 19\\n\"}]}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858699718333600,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "signal",
+        "/home/plumwsl/.g0p3-2gh25va8",
+        "910",
+        "SIGKILL"
+      ],
+      "exit": 0,
+      "stdout": "{\"signal\": 9, \"process\": {\"pid\": 910, \"exists\": true, \"exe\": \"/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/bin/python3.12\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python /home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/finite.py /home/plumwsl/workspaces/pulsara_agent /home/plumwsl/.g0p3-2gh25va8 initdb-exec \", \"status\": \"Name:\\tpython\\nUmask:\\t0022\\nState:\\tS (sleeping)\\nTgid:\\t910\\nNgid:\\t0\\nPid:\\t910\\nPPid:\\t909\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t910\\nNSpid:\\t910\\nNSpgid:\\t910\\nNSsid:\\t910\\nKthread:\\t0\\nVmPeak:\\t   44416 kB\\nVmSize:\\t   44220 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t   22324 kB\\nVmRSS:\\t   22324 kB\\nRssAnon:\\t   13132 kB\\nRssFile:\\t    9192 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t   14280 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t   21876 kB\\nVmLib:\\t       0 kB\\nVmPTE:\\t     124 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000001001000\\nSigCgt:\\t0000000000000002\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t5\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[98668]\", \"1\": \"pipe:[98669]\", \"2\": \"pipe:[98670]\", \"3\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock\", \"5\": \"pipe:[102700]\", \"7\": \"/dev/ptmx\", \"8\": \"pipe:[102701]\"}, \"stat\": \"910 (python) S 909 910 910 34816 910 4194560 3722 0 0 0 5 0 0 0 20 0 1 0 46297 45281280 5550 18446744073709551615 4329472 32388328 140735301099936 0 0 0 0 16781312 2 1 0 0 17 2 0 0 0 0 0 23068672 32388328 1096736768 140735301100799 140735301101025 140735301101025 140735301103552 0\\n\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858699805808200,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "lock",
+        "/home/plumwsl/.g0p3-2gh25va8"
+      ],
+      "exit": 0,
+      "stdout": "{\"acquired\": false, \"kernel_lock\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock\", \"stat\": {\"inode\": 145682, \"device\": 2096}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858699893182900,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "lifetime",
+        "/home/plumwsl/.g0p3-2gh25va8"
+      ],
+      "exit": 0,
+      "stdout": "{\"acquired\": false, \"inode\": 145683, \"device\": 2096}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858699979143100,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "state",
+        "/home/plumwsl/.g0p3-2gh25va8"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-2gh25va8\", \"gate\": \"initdb-exec 911 910\\n\", \"postmaster_pid\": null, \"pg_log\": null, \"data_stat\": {\"uid\": null, \"mode\": null, \"device\": null, \"inode\": null}, \"processes\": [{\"pid\": 911, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-2gh25va8/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C \", \"status\": \"Name:\\tinitdb\\nUmask:\\t0022\\nState:\\tT (stopped)\\nTgid:\\t911\\nNgid:\\t0\\nPid:\\t911\\nPPid:\\t909\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t911\\nNSpid:\\t911\\nNSpgid:\\t910\\nNSsid:\\t910\\nKthread:\\t0\\nVmPeak:\\t    4376 kB\\nVmSize:\\t    4352 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    2480 kB\\nVmRSS:\\t    2480 kB\\nRssAnon:\\t     148 kB\\nRssFile:\\t    2332 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     128 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t      84 kB\\nVmLib:\\t    2616 kB\\nVmPTE:\\t      44 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t2/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000001\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000000000000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[98668]\", \"1\": \"pipe:[102700]\", \"2\": \"pipe:[102701]\", \"3\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock\"}, \"stat\": \"911 (initdb) T 909 910 910 0 -1 4194304 92 0 0 0 0 0 0 0 20 0 1 0 46304 4456448 599 18446744073709551615 97541848662016 97541848746977 140731495733872 0 0 0 0 0 0 1 0 0 17 15 0 0 0 0 0 97541848812496 97541848823420 97542748569600 140731495736353 140731495736561 140731495736561 140731495739307 19\\n\"}]}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700064826300,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "resume",
+        "/home/plumwsl/.g0p3-2gh25va8"
+      ],
+      "exit": 0,
+      "stdout": "{\"resumed\": 911, \"before\": {\"pid\": 911, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-2gh25va8/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C \", \"status\": \"Name:\\tinitdb\\nUmask:\\t0022\\nState:\\tT (stopped)\\nTgid:\\t911\\nNgid:\\t0\\nPid:\\t911\\nPPid:\\t909\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t911\\nNSpid:\\t911\\nNSpgid:\\t910\\nNSsid:\\t910\\nKthread:\\t0\\nVmPeak:\\t    4376 kB\\nVmSize:\\t    4352 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    2480 kB\\nVmRSS:\\t    2480 kB\\nRssAnon:\\t     148 kB\\nRssFile:\\t    2332 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     128 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t      84 kB\\nVmLib:\\t    2616 kB\\nVmPTE:\\t      44 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t2/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000001\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000000000000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[98668]\", \"1\": \"pipe:[102700]\", \"2\": \"pipe:[102701]\", \"3\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock\"}, \"stat\": \"911 (initdb) T 909 910 910 0 -1 4194304 92 0 0 0 0 0 0 0 20 0 1 0 46304 4456448 599 18446744073709551615 97541848662016 97541848746977 140731495733872 0 0 0 0 0 0 1 0 0 17 15 0 0 0 0 0 97541848812496 97541848823420 97542748569600 140731495736353 140731495736561 140731495736561 140731495739307 19\\n\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "initdb-finished",
+      "time_ns": 1792858700064826300,
+      "exit": 9,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700143345300,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "lock",
+        "/home/plumwsl/.g0p3-2gh25va8"
+      ],
+      "exit": 0,
+      "stdout": "{\"acquired\": true, \"kernel_lock\": \"/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock\", \"stat\": {\"inode\": 145682, \"device\": 2096}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700274030200,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "cleanup-partial",
+        "/home/plumwsl/.g0p3-2gh25va8"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-2gh25va8\", \"matches\": [], \"homeRemoved\": true}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "case",
+      "time_ns": 1792858700274030200,
+      "case": {
+        "stage": "initdb-exec",
+        "home": "/home/plumwsl/.g0p3-2gh25va8",
+        "atGate": {
+          "home": "/home/plumwsl/.g0p3-2gh25va8",
+          "gate": "initdb-exec 911 910\n",
+          "postmaster_pid": null,
+          "pg_log": null,
+          "data_stat": {
+            "uid": null,
+            "mode": null,
+            "device": null,
+            "inode": null
+          },
+          "processes": [
+            {
+              "pid": 911,
+              "exists": true,
+              "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+              "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-2gh25va8/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+              "status": "Name:\tinitdb\nUmask:\t0022\nState:\tT (stopped)\nTgid:\t911\nNgid:\t0\nPid:\t911\nPPid:\t910\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t911\nNSpid:\t911\nNSpgid:\t910\nNSsid:\t910\nKthread:\t0\nVmPeak:\t    4376 kB\nVmSize:\t    4352 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    2480 kB\nVmRSS:\t    2480 kB\nRssAnon:\t     148 kB\nRssFile:\t    2332 kB\nRssShmem:\t       0 kB\nVmData:\t     128 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      44 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+              "fds": {
+                "0": "pipe:[98668]",
+                "1": "pipe:[102700]",
+                "2": "pipe:[102701]",
+                "3": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+                "4": "/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock"
+              },
+              "stat": "911 (initdb) T 910 910 910 34816 910 4194304 92 0 0 0 0 0 0 0 20 0 1 0 46304 4456448 599 18446744073709551615 97541848662016 97541848746977 140731495733872 0 0 0 0 0 0 1 0 0 17 15 0 0 0 0 0 97541848812496 97541848823420 97542748569600 140731495736353 140731495736561 140731495736561 140731495739307 19\n"
+            }
+          ]
+        },
+        "afterDeathKernel": {
+          "acquired": false,
+          "kernel_lock": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+          "stat": {
+            "inode": 145682,
+            "device": 2096
+          }
+        },
+        "afterDeathLifetime": {
+          "acquired": false,
+          "inode": 145683,
+          "device": 2096
+        },
+        "afterDeathState": {
+          "home": "/home/plumwsl/.g0p3-2gh25va8",
+          "gate": "initdb-exec 911 910\n",
+          "postmaster_pid": null,
+          "pg_log": null,
+          "data_stat": {
+            "uid": null,
+            "mode": null,
+            "device": null,
+            "inode": null
+          },
+          "processes": [
+            {
+              "pid": 911,
+              "exists": true,
+              "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+              "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-2gh25va8/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+              "status": "Name:\tinitdb\nUmask:\t0022\nState:\tT (stopped)\nTgid:\t911\nNgid:\t0\nPid:\t911\nPPid:\t909\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t911\nNSpid:\t911\nNSpgid:\t910\nNSsid:\t910\nKthread:\t0\nVmPeak:\t    4376 kB\nVmSize:\t    4352 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    2480 kB\nVmRSS:\t    2480 kB\nRssAnon:\t     148 kB\nRssFile:\t    2332 kB\nRssShmem:\t       0 kB\nVmData:\t     128 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      44 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t2/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000001\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+              "fds": {
+                "0": "pipe:[98668]",
+                "1": "pipe:[102700]",
+                "2": "pipe:[102701]",
+                "3": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+                "4": "/home/plumwsl/.g0p3-2gh25va8/desktop/pg-lifetime.lock"
+              },
+              "stat": "911 (initdb) T 909 910 910 0 -1 4194304 92 0 0 0 0 0 0 0 20 0 1 0 46304 4456448 599 18446744073709551615 97541848662016 97541848746977 140731495733872 0 0 0 0 0 0 1 0 0 17 15 0 0 0 0 0 97541848812496 97541848823420 97542748569600 140731495736353 140731495736561 140731495736561 140731495739307 19\n"
+            }
+          ]
+        },
+        "afterSettleKernel": {
+          "acquired": true,
+          "kernel_lock": "/home/plumwsl/.g0p3-2gh25va8/desktop/kernel.lock",
+          "stat": {
+            "inode": 145682,
+            "device": 2096
+          }
+        },
+        "cleanup": {
+          "home": "/home/plumwsl/.g0p3-2gh25va8",
+          "matches": [],
+          "homeRemoved": true
+        }
+      }
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700360973200,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "setup-empty"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-1a3u5fq0\", \"uid\": 1000}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "initdb-ready",
+      "time_ns": 1792858700454148700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/finite.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/home/plumwsl/.g0p3-1a3u5fq0",
+        "initdb-bootstrap"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 939,
+        "fd": 3
+      }
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700548874400,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "observe",
+        "/home/plumwsl/.g0p3-1a3u5fq0"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-1a3u5fq0\", \"gate\": \"initdb-bootstrap 950 949\\n\", \"postmaster_pid\": null, \"pg_log\": null, \"data_stat\": {\"uid\": 1000, \"mode\": \"0o700\", \"device\": 2096, \"inode\": 145685}, \"processes\": [{\"pid\": 940, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-1a3u5fq0/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C \", \"status\": \"Name:\\tinitdb\\nUmask:\\t0077\\nState:\\tS (sleeping)\\nTgid:\\t940\\nNgid:\\t0\\nPid:\\t940\\nPPid:\\t939\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t940\\nNSpid:\\t940\\nNSpgid:\\t939\\nNSsid:\\t939\\nKthread:\\t0\\nVmPeak:\\t    5724 kB\\nVmSize:\\t    5688 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    4600 kB\\nVmRSS:\\t    4600 kB\\nRssAnon:\\t    1436 kB\\nRssFile:\\t    3164 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t    1464 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t      84 kB\\nVmLib:\\t    2616 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000040001000\\nSigCgt:\\t0000000000004007\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t9\\nnonvoluntary_ctxt_switches:\\t1\\n\", \"fds\": {\"0\": \"pipe:[105579]\", \"1\": \"pipe:[104687]\", \"2\": \"pipe:[104688]\", \"3\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock\", \"6\": \"pipe:[96990]\"}, \"stat\": \"940 (initdb) S 939 939 939 34816 939 4194304 430 4840 0 0 0 1 0 1 20 0 1 0 46395 5824512 1127 18446744073709551615 100171318542336 100171318627297 140736390653376 0 0 0 0 1073745920 16391 1 0 0 17 4 0 0 0 0 0 100171318692816 100171318703740 100171352436736 140736390657052 140736390657260 140736390657260 140736390660011 0\\n\"}, {\"pid\": 950, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres --boot -F -c log_checkpoints=false -X 16777216 \", \"status\": \"Name:\\tpostgres\\nUmask:\\t0077\\nState:\\tT (stopped)\\nTgid:\\t950\\nNgid:\\t0\\nPid:\\t950\\nPPid:\\t949\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t950\\nNSpid:\\t950\\nNSpgid:\\t939\\nNSsid:\\t939\\nKthread:\\t0\\nVmPeak:\\t   13864 kB\\nVmSize:\\t   13840 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    3424 kB\\nVmRSS:\\t    3424 kB\\nRssAnon:\\t     344 kB\\nRssFile:\\t    3080 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     412 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t    5684 kB\\nVmLib:\\t    2472 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000040001000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[96990]\", \"1\": \"pipe:[104687]\", \"2\": \"pipe:[104688]\", \"3\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock\"}, \"stat\": \"950 (postgres) T 949 939 939 34816 939 4194304 149 0 0 0 0 0 0 0 20 0 1 0 46399 14172160 818 18446744073709551615 97582097158144 97582102976193 140720834977776 0 0 0 0 1073745920 0 1 0 0 17 12 0 0 0 0 0 97582106079216 97582106324120 97582149922816 140720834978745 140720834978871 140720834978871 140720834981801 19\\n\"}]}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700632438300,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "signal",
+        "/home/plumwsl/.g0p3-1a3u5fq0",
+        "939",
+        "SIGKILL"
+      ],
+      "exit": 0,
+      "stdout": "{\"signal\": 9, \"process\": {\"pid\": 939, \"exists\": true, \"exe\": \"/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/bin/python3.12\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python /home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/finite.py /home/plumwsl/workspaces/pulsara_agent /home/plumwsl/.g0p3-1a3u5fq0 initdb-bootstrap \", \"status\": \"Name:\\tpython\\nUmask:\\t0022\\nState:\\tS (sleeping)\\nTgid:\\t939\\nNgid:\\t0\\nPid:\\t939\\nPPid:\\t938\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t939\\nNSpid:\\t939\\nNSpgid:\\t939\\nNSsid:\\t939\\nKthread:\\t0\\nVmPeak:\\t   44416 kB\\nVmSize:\\t   44220 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t   22232 kB\\nVmRSS:\\t   22232 kB\\nRssAnon:\\t   13136 kB\\nRssFile:\\t    9096 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t   14280 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t   21876 kB\\nVmLib:\\t       0 kB\\nVmPTE:\\t     112 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t1/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000001001000\\nSigCgt:\\t0000000000000002\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t16\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[105579]\", \"1\": \"pipe:[105580]\", \"2\": \"pipe:[105581]\", \"3\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock\", \"5\": \"pipe:[104687]\", \"7\": \"/dev/ptmx\", \"8\": \"pipe:[104688]\"}, \"stat\": \"939 (python) S 938 939 939 34816 939 4194560 3722 0 0 0 4 1 0 0 20 0 1 0 46389 45281280 5554 18446744073709551615 4329472 32388328 140733131644656 0 0 0 0 16781312 2 1 0 0 17 10 0 0 0 0 0 23068672 32388328 600592384 140733131650298 140733131650529 140733131650529 140733131653056 0\\n\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700715679700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "lock",
+        "/home/plumwsl/.g0p3-1a3u5fq0"
+      ],
+      "exit": 0,
+      "stdout": "{\"acquired\": false, \"kernel_lock\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"stat\": {\"inode\": 145682, \"device\": 2096}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700801581000,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "lifetime",
+        "/home/plumwsl/.g0p3-1a3u5fq0"
+      ],
+      "exit": 0,
+      "stdout": "{\"acquired\": false, \"inode\": 145683, \"device\": 2096}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700887822700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "state",
+        "/home/plumwsl/.g0p3-1a3u5fq0"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-1a3u5fq0\", \"gate\": \"initdb-bootstrap 950 949\\n\", \"postmaster_pid\": null, \"pg_log\": null, \"data_stat\": {\"uid\": 1000, \"mode\": \"0o700\", \"device\": 2096, \"inode\": 145685}, \"processes\": [{\"pid\": 940, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-1a3u5fq0/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C \", \"status\": \"Name:\\tinitdb\\nUmask:\\t0077\\nState:\\tS (sleeping)\\nTgid:\\t940\\nNgid:\\t0\\nPid:\\t940\\nPPid:\\t938\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t940\\nNSpid:\\t940\\nNSpgid:\\t939\\nNSsid:\\t939\\nKthread:\\t0\\nVmPeak:\\t    5724 kB\\nVmSize:\\t    5688 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    4600 kB\\nVmRSS:\\t    4600 kB\\nRssAnon:\\t    1436 kB\\nRssFile:\\t    3164 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t    1464 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t      84 kB\\nVmLib:\\t    2616 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t3/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000000\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000040001000\\nSigCgt:\\t0000000000004007\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t10\\nnonvoluntary_ctxt_switches:\\t1\\n\", \"fds\": {\"0\": \"pipe:[105579]\", \"1\": \"pipe:[104687]\", \"2\": \"pipe:[104688]\", \"3\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock\", \"6\": \"pipe:[96990]\"}, \"stat\": \"940 (initdb) S 938 939 939 0 -1 4194304 430 4840 0 0 0 1 0 1 20 0 1 0 46395 5824512 1127 18446744073709551615 100171318542336 100171318627297 140736390653376 0 0 0 0 1073745920 16391 1 0 0 17 4 0 0 0 0 0 100171318692816 100171318703740 100171352436736 140736390657052 140736390657260 140736390657260 140736390660011 0\\n\"}, {\"pid\": 950, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres --boot -F -c log_checkpoints=false -X 16777216 \", \"status\": \"Name:\\tpostgres\\nUmask:\\t0077\\nState:\\tT (stopped)\\nTgid:\\t950\\nNgid:\\t0\\nPid:\\t950\\nPPid:\\t938\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t950\\nNSpid:\\t950\\nNSpgid:\\t939\\nNSsid:\\t939\\nKthread:\\t0\\nVmPeak:\\t   13864 kB\\nVmSize:\\t   13840 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    3424 kB\\nVmRSS:\\t    3424 kB\\nRssAnon:\\t     344 kB\\nRssFile:\\t    3080 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     412 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t    5684 kB\\nVmLib:\\t    2472 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t3/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000001\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000040001000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[96990]\", \"1\": \"pipe:[104687]\", \"2\": \"pipe:[104688]\", \"3\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock\"}, \"stat\": \"950 (postgres) T 938 939 939 0 -1 4194304 149 0 0 0 0 0 0 0 20 0 1 0 46399 14172160 818 18446744073709551615 97582097158144 97582102976193 140720834977776 0 0 0 0 1073745920 0 1 0 0 17 12 0 0 0 0 0 97582106079216 97582106324120 97582149922816 140720834978745 140720834978871 140720834978871 140720834981801 19\\n\"}]}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858700971027700,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "resume",
+        "/home/plumwsl/.g0p3-1a3u5fq0"
+      ],
+      "exit": 0,
+      "stdout": "{\"resumed\": 950, \"before\": {\"pid\": 950, \"exists\": true, \"exe\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres\", \"cmdline\": \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres --boot -F -c log_checkpoints=false -X 16777216 \", \"status\": \"Name:\\tpostgres\\nUmask:\\t0077\\nState:\\tT (stopped)\\nTgid:\\t950\\nNgid:\\t0\\nPid:\\t950\\nPPid:\\t938\\nTracerPid:\\t0\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\nFDSize:\\t64\\nGroups:\\t27 1000 \\nNStgid:\\t950\\nNSpid:\\t950\\nNSpgid:\\t939\\nNSsid:\\t939\\nKthread:\\t0\\nVmPeak:\\t   13864 kB\\nVmSize:\\t   13840 kB\\nVmLck:\\t       0 kB\\nVmPin:\\t       0 kB\\nVmHWM:\\t    3424 kB\\nVmRSS:\\t    3424 kB\\nRssAnon:\\t     344 kB\\nRssFile:\\t    3080 kB\\nRssShmem:\\t       0 kB\\nVmData:\\t     412 kB\\nVmStk:\\t     132 kB\\nVmExe:\\t    5684 kB\\nVmLib:\\t    2472 kB\\nVmPTE:\\t      48 kB\\nVmSwap:\\t       0 kB\\nHugetlbPages:\\t       0 kB\\nCoreDumping:\\t0\\nTHP_enabled:\\t1\\nuntag_mask:\\t0xffffffffffffffff\\nThreads:\\t1\\nSigQ:\\t3/62475\\nSigPnd:\\t0000000000000000\\nShdPnd:\\t0000000000000001\\nSigBlk:\\t0000000000000000\\nSigIgn:\\t0000000040001000\\nSigCgt:\\t0000000000000000\\nCapInh:\\t0000000000000000\\nCapPrm:\\t0000000000000000\\nCapEff:\\t0000000000000000\\nCapBnd:\\t000001ffffffffff\\nCapAmb:\\t0000000000000000\\nNoNewPrivs:\\t0\\nSeccomp:\\t0\\nSeccomp_filters:\\t0\\nSpeculation_Store_Bypass:\\tthread vulnerable\\nSpeculationIndirectBranch:\\tconditional enabled\\nCpus_allowed:\\tffff\\nCpus_allowed_list:\\t0-15\\nMems_allowed:\\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\\nMems_allowed_list:\\t0\\nvoluntary_ctxt_switches:\\t1\\nnonvoluntary_ctxt_switches:\\t0\\n\", \"fds\": {\"0\": \"pipe:[96990]\", \"1\": \"pipe:[104687]\", \"2\": \"pipe:[104688]\", \"3\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"4\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock\"}, \"stat\": \"950 (postgres) T 938 939 939 0 -1 4194304 149 0 0 0 0 0 0 0 20 0 1 0 46399 14172160 818 18446744073709551615 97582097158144 97582102976193 140720834977776 0 0 0 0 1073745920 0 1 0 0 17 12 0 0 0 0 0 97582106079216 97582106324120 97582149922816 140720834978745 140720834978871 140720834978871 140720834981801 19\\n\"}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "initdb-finished",
+      "time_ns": 1792858700971027700,
+      "exit": 9,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858701057103900,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "lock",
+        "/home/plumwsl/.g0p3-1a3u5fq0"
+      ],
+      "exit": 0,
+      "stdout": "{\"acquired\": true, \"kernel_lock\": \"/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock\", \"stat\": {\"inode\": 145682, \"device\": 2096}}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "control",
+      "time_ns": 1792858701199702400,
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/pg_admission_r3/round3/control.py",
+        "cleanup-partial",
+        "/home/plumwsl/.g0p3-1a3u5fq0"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\": \"/home/plumwsl/.g0p3-1a3u5fq0\", \"matches\": [], \"homeRemoved\": true}\n",
+      "stderr": ""
+    },
+    {
+      "kind": "case",
+      "time_ns": 1792858701200217300,
+      "case": {
+        "stage": "initdb-bootstrap",
+        "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+        "atGate": {
+          "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+          "gate": "initdb-bootstrap 950 949\n",
+          "postmaster_pid": null,
+          "pg_log": null,
+          "data_stat": {
+            "uid": 1000,
+            "mode": "0o700",
+            "device": 2096,
+            "inode": 145685
+          },
+          "processes": [
+            {
+              "pid": 940,
+              "exists": true,
+              "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+              "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-1a3u5fq0/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+              "status": "Name:\tinitdb\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t940\nNgid:\t0\nPid:\t940\nPPid:\t939\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t940\nNSpid:\t940\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t    5724 kB\nVmSize:\t    5688 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    4600 kB\nVmRSS:\t    4600 kB\nRssAnon:\t    1436 kB\nRssFile:\t    3164 kB\nRssShmem:\t       0 kB\nVmData:\t    1464 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000004007\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t9\nnonvoluntary_ctxt_switches:\t1\n",
+              "fds": {
+                "0": "pipe:[105579]",
+                "1": "pipe:[104687]",
+                "2": "pipe:[104688]",
+                "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+                "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock",
+                "6": "pipe:[96990]"
+              },
+              "stat": "940 (initdb) S 939 939 939 34816 939 4194304 430 4840 0 0 0 1 0 1 20 0 1 0 46395 5824512 1127 18446744073709551615 100171318542336 100171318627297 140736390653376 0 0 0 0 1073745920 16391 1 0 0 17 4 0 0 0 0 0 100171318692816 100171318703740 100171352436736 140736390657052 140736390657260 140736390657260 140736390660011 0\n"
+            },
+            {
+              "pid": 950,
+              "exists": true,
+              "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres",
+              "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres --boot -F -c log_checkpoints=false -X 16777216 ",
+              "status": "Name:\tpostgres\nUmask:\t0077\nState:\tT (stopped)\nTgid:\t950\nNgid:\t0\nPid:\t950\nPPid:\t949\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t950\nNSpid:\t950\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t   13864 kB\nVmSize:\t   13840 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    3424 kB\nVmRSS:\t    3424 kB\nRssAnon:\t     344 kB\nRssFile:\t    3080 kB\nRssShmem:\t       0 kB\nVmData:\t     412 kB\nVmStk:\t     132 kB\nVmExe:\t    5684 kB\nVmLib:\t    2472 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t1/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+              "fds": {
+                "0": "pipe:[96990]",
+                "1": "pipe:[104687]",
+                "2": "pipe:[104688]",
+                "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+                "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock"
+              },
+              "stat": "950 (postgres) T 949 939 939 34816 939 4194304 149 0 0 0 0 0 0 0 20 0 1 0 46399 14172160 818 18446744073709551615 97582097158144 97582102976193 140720834977776 0 0 0 0 1073745920 0 1 0 0 17 12 0 0 0 0 0 97582106079216 97582106324120 97582149922816 140720834978745 140720834978871 140720834978871 140720834981801 19\n"
+            }
+          ]
+        },
+        "afterDeathKernel": {
+          "acquired": false,
+          "kernel_lock": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+          "stat": {
+            "inode": 145682,
+            "device": 2096
+          }
+        },
+        "afterDeathLifetime": {
+          "acquired": false,
+          "inode": 145683,
+          "device": 2096
+        },
+        "afterDeathState": {
+          "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+          "gate": "initdb-bootstrap 950 949\n",
+          "postmaster_pid": null,
+          "pg_log": null,
+          "data_stat": {
+            "uid": 1000,
+            "mode": "0o700",
+            "device": 2096,
+            "inode": 145685
+          },
+          "processes": [
+            {
+              "pid": 940,
+              "exists": true,
+              "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb",
+              "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/initdb -D /home/plumwsl/.g0p3-1a3u5fq0/desktop/postgres -U pulsara_admin --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C ",
+              "status": "Name:\tinitdb\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t940\nNgid:\t0\nPid:\t940\nPPid:\t938\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t940\nNSpid:\t940\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t    5724 kB\nVmSize:\t    5688 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    4600 kB\nVmRSS:\t    4600 kB\nRssAnon:\t    1436 kB\nRssFile:\t    3164 kB\nRssShmem:\t       0 kB\nVmData:\t    1464 kB\nVmStk:\t     132 kB\nVmExe:\t      84 kB\nVmLib:\t    2616 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t3/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000004007\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t10\nnonvoluntary_ctxt_switches:\t1\n",
+              "fds": {
+                "0": "pipe:[105579]",
+                "1": "pipe:[104687]",
+                "2": "pipe:[104688]",
+                "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+                "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock",
+                "6": "pipe:[96990]"
+              },
+              "stat": "940 (initdb) S 938 939 939 0 -1 4194304 430 4840 0 0 0 1 0 1 20 0 1 0 46395 5824512 1127 18446744073709551615 100171318542336 100171318627297 140736390653376 0 0 0 0 1073745920 16391 1 0 0 17 4 0 0 0 0 0 100171318692816 100171318703740 100171352436736 140736390657052 140736390657260 140736390657260 140736390660011 0\n"
+            },
+            {
+              "pid": 950,
+              "exists": true,
+              "exe": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres",
+              "cmdline": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres --boot -F -c log_checkpoints=false -X 16777216 ",
+              "status": "Name:\tpostgres\nUmask:\t0077\nState:\tT (stopped)\nTgid:\t950\nNgid:\t0\nPid:\t950\nPPid:\t938\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t27 1000 \nNStgid:\t950\nNSpid:\t950\nNSpgid:\t939\nNSsid:\t939\nKthread:\t0\nVmPeak:\t   13864 kB\nVmSize:\t   13840 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    3424 kB\nVmRSS:\t    3424 kB\nRssAnon:\t     344 kB\nRssFile:\t    3080 kB\nRssShmem:\t       0 kB\nVmData:\t     412 kB\nVmStk:\t     132 kB\nVmExe:\t    5684 kB\nVmLib:\t    2472 kB\nVmPTE:\t      48 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t3/62475\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000001\nSigBlk:\t0000000000000000\nSigIgn:\t0000000040001000\nSigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n",
+              "fds": {
+                "0": "pipe:[96990]",
+                "1": "pipe:[104687]",
+                "2": "pipe:[104688]",
+                "3": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+                "4": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/pg-lifetime.lock"
+              },
+              "stat": "950 (postgres) T 938 939 939 0 -1 4194304 149 0 0 0 0 0 0 0 20 0 1 0 46399 14172160 818 18446744073709551615 97582097158144 97582102976193 140720834977776 0 0 0 0 1073745920 0 1 0 0 17 12 0 0 0 0 0 97582106079216 97582106324120 97582149922816 140720834978745 140720834978871 140720834978871 140720834981801 19\n"
+            }
+          ]
+        },
+        "afterSettleKernel": {
+          "acquired": true,
+          "kernel_lock": "/home/plumwsl/.g0p3-1a3u5fq0/desktop/kernel.lock",
+          "stat": {
+            "inode": 145682,
+            "device": 2096
+          }
+        },
+        "cleanup": {
+          "home": "/home/plumwsl/.g0p3-1a3u5fq0",
+          "matches": [],
+          "homeRemoved": true
+        }
+      }
+    }
+  ]
+}

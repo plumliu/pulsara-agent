@@ -318,7 +318,9 @@ G0-D还须验证未来目标接纳和用户私有payload安装的失败边界；
 
 有限操作helper仍需G0探针验证其锁/EOF/取消/未知结果是否满足spec §3.3；**生产`desktop_guest_ops.py`尚未实现**。Linux本地PG成功只覆盖P的一部分，不能跳过Windows→Linux调用及故障结算证据。
 
-第二轮已将helper自身死亡从待验补成反例：ext4下真实pg_ctl/postgres仍可在helper死后晚启动，而另一helper已能持同锁读到status3。当前CLOEXEC单helper持锁候选不可用于reset准入；直接继承锁给PG也因常驻持锁被否决。见spec §18及[第二轮报告](research/2026-10-24/root/g0-w-round2/report.zh.md)。今后实验home先用findmnt核真实ext4；本机/tmp实为tmpfs，不能拿旧/tmp结果冒称ext4资格。
+第二轮已将helper自身死亡从待验补成反例：ext4下真实pg_ctl/postgres仍可在helper死后晚启动，而另一helper已能持同锁读到status3。当时CLOEXEC单helper持锁候选不可用于reset准入；直接继承原kernel锁给PG也因常驻持锁被否决。见spec §18及[第二轮报告](research/2026-10-24/root/g0-w-round2/report.zh.md)。今后实验home先用findmnt核真实ext4；本机/tmp实为tmpfs，不能拿旧/tmp结果冒称ext4资格。
+
+第三轮当前候选见spec §3.3/19及[PG报告](research/2026-10-25/backend/pg-admission-round3/report.zh.md)：原kernel锁串行维护，独立PG生命周期EX由start链继承；有限stop/status继承原锁、initdb继承两锁，reset必须重取两锁并持至删除结束。真实晚启动busy拒绝、stop/initdb helper死亡、同guard拒删与实际删除重建有正证。完整JSONL/EOF/取消/失联、TS owner合成和guard内running→stop→delete分支仍待验，不能勾整个P。
 
 ### 7.5 G0-W-F：图形目录、路径与文件
 
@@ -383,7 +385,7 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 ## 10. 本清单交付检查
 
-第二轮进展见[取消/PG死亡报告](research/2026-10-24/root/g0-w-round2/report.zh.md)：Windows Job/每任务私有socket候选取得局部实证，裸socket回退与PG晚启动反例确认；正常join/绑定与取消竞态、PG替代维护准入仍待验证。未改生产或进入B，不能因此勾选整个G0-C/P。
+最新进展见[第三轮报告](research/2026-10-25/root/g0-w-round3/report.zh.md)：PG双锁候选取得真实机制正证；首次fd转交绑定四门、Windows Job+Linux PGID组合取消三门与真实terminal内存组合14项已验。仅Windows Job空仍可能留下Linux调用者，半/全请求失联仍unknown。首次绑定、封准入和真实owner启动失败/取消交错尚未合成，MCP/hooks、GUI/宿主全链继续待验。生产未改、B未进入，不能因此勾整个G0-C/P。第二轮原失败仍保留在[历史报告](research/2026-10-24/root/g0-w-round2/report.zh.md)。
 
 原root与三位`gpt-6.1-sol high` subagents批准的是修订前的专用发行版清单，历史记录保留在research。原示例JS语法检查及Mac纯测试5/5不证明本次共享WSL/interop方案。当前用户授权修订了活动规范和操作步骤；本机已有基础环境/interop观察，但Windows后代生命周期、正式picker/helper/TLS/OAuth等仍须实测，不沿用历史批准宣称完整G0或B通过。
 

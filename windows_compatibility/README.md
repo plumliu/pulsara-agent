@@ -7,9 +7,10 @@
 1. [当前实施 spec](PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md)：路线、所有权、G0-W、Phase A/B边界与验收矩阵；原冻结路线按用户授权修订为已有WSL接入，第16节保留Phase A历史实证。
 2. [Windows 开发准备与 G0-W 操作清单](PULSARA_WINDOWS_DEVELOPMENT_G0_CHECKLIST.zh.md)：按第3节准备Windows工具、确认已有WSL2/默认非root用户，再准备双仓库与独立实验。
 3. [Windows首轮环境/G0-W实测报告](research/2026-10-24/root/g0-w-initial/report.zh.md)：已有Ubuntu/plumwsl环境、双clone和Linux资源验证完成；记录interop普通Windows后代取消缺口，完整G0未通过，B未进入。
-4. [第二轮取消/PG异常死亡实验](research/2026-10-24/root/g0-w-round2/report.zh.md)：无breakaway Job及每任务私有socket转发取得局部实证；裸WSL_INTEROP回退与PG helper晚启动反例已确认。正常join/竞态与PG替代准入仍待验证。
+4. [第二轮取消/PG异常死亡实验](research/2026-10-24/root/g0-w-round2/report.zh.md)：无breakaway Job及每任务私有socket转发取得局部实证；裸WSL_INTEROP回退与PG helper晚启动反例已确认。
+5. [第三轮PG替代准入/启动取消竞态/真实任务集成](research/2026-10-25/root/g0-w-round3/report.zh.md)：独立PG生命周期锁、有限子命令继承原锁、真实拒删/删除重建取得正证；SCM_RIGHTS首次绑定和Windows/Linux组合取消有机制证据；真实terminal内存候选14项通过，完整组合仍待验。
 
-当前状态：Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI仍待验收；Windows子进程回收已有G0候选局部实证，尚未接入生产或通过完整C门；当前CLOEXEC PG helper机制已被异常死亡实测否定。完整G0未过，Phase B未实施，Windows支持未激活。
+当前状态：Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI仍待验收；Windows回收和PG替代维护准入已有G0候选实证，尚未接入生产或通过完整C/P门。当前PG候选已替换被否定的单helper持锁方案；Windows真实owner仍有提前完成反例，内存修正不代表生产已修复。完整G0未过，Phase B未实施，Windows支持未激活。
 
 2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，Windows后代生命周期等完整G0仍待验证。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
 

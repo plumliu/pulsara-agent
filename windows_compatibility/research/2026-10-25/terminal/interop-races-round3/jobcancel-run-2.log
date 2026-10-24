@@ -1,0 +1,17 @@
+C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\jobcancel-68226f4c-summary.json
+Traceback (most recent call last):
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\job_cancel_probe.py", line 68, in <module>
+    if __name__=="__main__": run()
+                             ^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\job_cancel_probe.py", line 34, in run
+    result=R.finish(caller)
+           ^^^^^^^^^^^^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\race_probe.py", line 79, in finish
+    out, err = caller["process"].communicate(timeout=20)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\plumlocal\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\plumlocal\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\subprocess.py", line 1630, in _communicate
+    raise TimeoutExpired(self.args, orig_timeout)
+subprocess.TimeoutExpired: Command '['C:\\WINDOWS\\System32\\wsl.exe', '-d', 'Ubuntu', '-u', 'plumwsl', '--cd', '/home/plumwsl/workspaces/pulsara_agent', '--exec', '/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python', '-u', '-c', 'import json,os,subprocess,sys,time; f=open(sys.argv[1],\'a\',buffering=1); f.write(json.dumps(dict(event=\'caller-ready\',pid=os.getpid(),starttime=open(\'/proc/self/stat\').read().split()[21],originalSocket=os.environ.get(\'WSL_INTEROP\')))+\'\\n\'); gate=sys.argv[3]; exec("while gate and not os.path.exists(gate): time.sleep(.01)"); e=os.environ.copy(); e[\'WSL_INTEROP\']=sys.argv[2]; p=subprocess.Popen(sys.argv[4:],env=e,stdin=subprocess.DEVNULL); rc=p.wait(); f.write(json.dumps(dict(event=\'caller-exit\',code=rc))+\'\\n\')', '/mnt/c/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round3/jobcancel-68226f4c-after.pe.jsonl.linux', '/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-1ai0i0no/interop', '', '/mnt/c/python_workspace/pulsara-agent/.venv/Scripts/python.exe', 'C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\race_probe.py', 'pe', 'C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\interop_races_r3\\round3\\jobcancel-68226f4c-after.pe.jsonl', 'Local\\PulsaraG0Socket-jobcancel-68226f4c-after', 'Local\\PulsaraG0Socket-jobcancel-68226f4c-after', '10']' timed out after 20 seconds

@@ -1,0 +1,2 @@
+{"event": "caller-ready", "pid": 1457, "starttime": "10160", "originalSocket": "/run/WSL/1456_interop"}
+{"event": "caller-exit", "code": 0}

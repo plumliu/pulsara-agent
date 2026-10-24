@@ -1,0 +1,3 @@
+{"event": "relay-ready", "time": 1792858570.4311996, "pid": 675, "starttime": "33383", "socket": "/home/plumwsl/.g0tasks/patched-c6de6806-cancel-pipe/interop", "directory": "/home/plumwsl/.g0tasks/patched-c6de6806-cancel-pipe", "mode": "0o700", "upstream": "/run/WSL/665_interop"}
+{"event": "relay-request-done", "time": 1792858570.692817}
+{"event": "relay-request-done", "time": 1792858571.1043077}

@@ -1,0 +1,9 @@
+C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\binding-ac871a20-summary.json
+Traceback (most recent call last):
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\fd_binding_probe.py", line 106, in <module>
+    if __name__=="__main__": run()
+                             ^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\fd_binding_probe.py", line 60, in run
+    S.wait_row(record,"fd-received")
+  File "<string>", line 48, in wait_row
+TimeoutError: (WindowsPath('C:/python_workspace/pulsara-agent/output/windows-g0/interop_races_r3/round3/binding-ac871a20-after-send.receiver.jsonl'), 'fd-received')

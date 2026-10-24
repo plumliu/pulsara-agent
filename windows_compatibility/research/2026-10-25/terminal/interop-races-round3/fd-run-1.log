@@ -1,0 +1,15 @@
+C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\binding-3a00dd9e-summary.json
+Traceback (most recent call last):
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\fd_binding_probe.py", line 106, in <module>
+    if __name__=="__main__": run()
+                             ^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\fd_binding_probe.py", line 56, in run
+    result["anchorPidfdKill"]=R.pidfd_kill(anchor["ready"])
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\race_probe.py", line 38, in pidfd_kill
+    return guest("import json,os,signal,sys; p=int(sys.argv[1]); expected=sys.argv[2]; fd=os.pidfd_open(p); actual=open('/proc/'+str(p)+'/stat').read().split()[21]; assert actual==expected; signal.pidfd_send_signal(fd,signal.SIGKILL); os.close(fd); print(json.dumps(dict(pid=p,starttime=actual,pidfdSignal=True)))", str(ready["pid"]), ready["starttime"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\python_workspace\pulsara-agent\output\windows-g0\interop_races_r3\round3\race_probe.py", line 33, in guest
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+           ^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: (1, '', 'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\nProcessLookupError: [Errno 3] No such process\n')

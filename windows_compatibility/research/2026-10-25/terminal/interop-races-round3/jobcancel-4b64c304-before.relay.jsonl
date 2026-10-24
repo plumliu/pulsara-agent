@@ -1,0 +1,3 @@
+{"event": "before-pin", "pid": 748, "upstream": "/run/WSL/744_interop", "starttime": "41661"}
+{"event": "relay-ready", "pid": 748, "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-ymtr9khf/interop", "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-ymtr9khf", "pinned": "/proc/748/fd/8", "inode": 1143, "mode": "0o700", "starttime": "41661"}
+{"event": "before-forward", "pid": 748, "bytes": 517}

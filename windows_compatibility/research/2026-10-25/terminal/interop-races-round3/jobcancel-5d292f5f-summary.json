@@ -1,0 +1,538 @@
+{
+  "label": "jobcancel-5d292f5f",
+  "combinedLinuxGroup": true,
+  "scenarios": {
+    "before": {
+      "gate": {
+        "event": "before-forward",
+        "pid": 490,
+        "bytes": 517
+      },
+      "sealed": {
+        "event": "admission-sealed",
+        "pid": 490,
+        "socketStillExists": true
+      },
+      "cancellation": {
+        "before": [
+          {
+            "pid": 37392,
+            "exists": true,
+            "creation": 134373325308378852,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 12272,
+            "exists": true,
+            "creation": 134373325308432025,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 38176,
+            "exists": true,
+            "creation": 134373325309000926,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 38472,
+            "exists": true,
+            "creation": 134373325309162530,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 26436,
+            "exists": true,
+            "creation": 134373325308610085,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 156250,
+          "TotalKernelTime": 156250,
+          "ThisPeriodTotalUserTime": 156250,
+          "ThisPeriodTotalKernelTime": 156250,
+          "TotalPageFaultCount": 12822,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "classification": "fixture-proves-no-forward-at-cancel",
+      "linuxGroupCancel": {
+        "pgid": 492,
+        "before": [
+          {
+            "pid": 492,
+            "starttime": "69463",
+            "state": "S"
+          },
+          {
+            "pid": 493,
+            "starttime": "69466",
+            "state": "S"
+          }
+        ],
+        "after": [],
+        "exactWaits": [
+          {
+            "pid": 492,
+            "starttime": "69463",
+            "state": "S",
+            "pidfdReadable": true
+          },
+          {
+            "pid": 493,
+            "starttime": "69466",
+            "state": "S",
+            "pidfdReadable": true
+          }
+        ],
+        "sigterm": true,
+        "sigkill": false
+      },
+      "caller": {
+        "code": 15,
+        "stdout": "",
+        "stderr": "",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 492,
+            "pgid": 492,
+            "sid": 492,
+            "starttime": "69463",
+            "originalSocket": "/run/WSL/491_interop"
+          }
+        ]
+      },
+      "sealedAttempt": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (498 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 497,
+            "starttime": "69484",
+            "originalSocket": "/run/WSL/496_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      }
+    },
+    "half": {
+      "gate": {
+        "event": "half-forwarded",
+        "pid": 503,
+        "total": 1
+      },
+      "sealed": {
+        "event": "admission-sealed",
+        "pid": 503,
+        "socketStillExists": true
+      },
+      "cancellation": {
+        "before": [
+          {
+            "pid": 38140,
+            "exists": true,
+            "creation": 134373325313956067,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 10508,
+            "exists": true,
+            "creation": 134373325314006259,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 33620,
+            "exists": true,
+            "creation": 134373325314471721,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 34108,
+            "exists": true,
+            "creation": 134373325314605089,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 17800,
+            "exists": true,
+            "creation": 134373325314204105,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 156250,
+          "TotalKernelTime": 312500,
+          "ThisPeriodTotalUserTime": 156250,
+          "ThisPeriodTotalKernelTime": 312500,
+          "TotalPageFaultCount": 12907,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "classification": "unknown",
+      "linuxGroupCancel": {
+        "pgid": 505,
+        "before": [
+          {
+            "pid": 505,
+            "starttime": "69516",
+            "state": "S"
+          },
+          {
+            "pid": 506,
+            "starttime": "69518",
+            "state": "S"
+          }
+        ],
+        "after": [],
+        "exactWaits": [
+          {
+            "pid": 505,
+            "starttime": "69516",
+            "state": "S",
+            "pidfdReadable": true
+          },
+          {
+            "pid": 506,
+            "starttime": "69518",
+            "state": "S",
+            "pidfdReadable": true
+          }
+        ],
+        "sigterm": true,
+        "sigkill": false
+      },
+      "caller": {
+        "code": 15,
+        "stdout": "",
+        "stderr": "",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 505,
+            "pgid": 505,
+            "sid": 505,
+            "starttime": "69516",
+            "originalSocket": "/run/WSL/504_interop"
+          }
+        ]
+      },
+      "sealedAttempt": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (511 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 510,
+            "starttime": "69536",
+            "originalSocket": "/run/WSL/509_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      }
+    },
+    "after": {
+      "gate": {
+        "event": "after-forwarded",
+        "pid": 516,
+        "total": 514
+      },
+      "sealed": {
+        "event": "admission-sealed",
+        "pid": 516,
+        "socketStillExists": true
+      },
+      "cancellation": {
+        "before": [
+          {
+            "pid": 37412,
+            "exists": true,
+            "creation": 134373325319185814,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 30904,
+            "exists": true,
+            "creation": 134373325319241359,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 35448,
+            "exists": true,
+            "creation": 134373325319707535,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 4236,
+            "exists": true,
+            "creation": 134373325319855049,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 11352,
+            "exists": true,
+            "creation": 134373325322646583,
+            "sameIdentity": true,
+            "image": "C:\\python_workspace\\pulsara-agent\\.venv\\Scripts\\python.exe"
+          },
+          {
+            "pid": 37712,
+            "exists": true,
+            "creation": 134373325322726016,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 33604,
+            "exists": true,
+            "creation": 134373325319418337,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          },
+          {
+            "pid": 8444,
+            "exists": true,
+            "creation": 134373325322890254,
+            "sameIdentity": true,
+            "image": "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 468750,
+          "TotalKernelTime": 1093750,
+          "ThisPeriodTotalUserTime": 468750,
+          "ThisPeriodTotalKernelTime": 1093750,
+          "TotalPageFaultCount": 20889,
+          "TotalProcesses": 8,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "classification": "unknown",
+      "linuxGroupCancel": {
+        "pgid": 518,
+        "before": [
+          {
+            "pid": 518,
+            "starttime": "69572",
+            "state": "S"
+          },
+          {
+            "pid": 519,
+            "starttime": "69574",
+            "state": "S"
+          }
+        ],
+        "after": [],
+        "exactWaits": [
+          {
+            "pid": 518,
+            "starttime": "69572",
+            "state": "S",
+            "pidfdReadable": true
+          },
+          {
+            "pid": 519,
+            "starttime": "69574",
+            "state": "S",
+            "pidfdReadable": true
+          }
+        ],
+        "sigterm": true,
+        "sigkill": false
+      },
+      "caller": {
+        "code": 15,
+        "stdout": "",
+        "stderr": "",
+        "pe": [
+          {
+            "event": "pe-start",
+            "time": 1792858932.3955278,
+            "pid": 8444,
+            "creation": 134373325322890254,
+            "memberships": {
+              "Local\\PulsaraG0Socket-jobcancel-5d292f5f-after": true
+            }
+          }
+        ],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 518,
+            "pgid": 518,
+            "sid": 518,
+            "starttime": "69572",
+            "originalSocket": "/run/WSL/517_interop"
+          }
+        ]
+      },
+      "exactPeWait": 0,
+      "sealedAttempt": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (528 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 527,
+            "starttime": "69611",
+            "originalSocket": "/run/WSL/526_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      }
+    }
+  },
+  "passedWindowsCancelAndSealGates": true,
+  "linuxCallerJoinedWithoutExplicitCleanup": true,
+  "cleanup": {
+    "relays": [
+      {
+        "pid": 490,
+        "starttime": "69448",
+        "pidfdSignal": true
+      },
+      {
+        "pid": 503,
+        "starttime": "69503",
+        "pidfdSignal": true
+      },
+      {
+        "pid": 516,
+        "starttime": "69555",
+        "pidfdSignal": true
+      }
+    ],
+    "jobs": [
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 156250,
+          "TotalKernelTime": 156250,
+          "ThisPeriodTotalUserTime": 156250,
+          "ThisPeriodTotalKernelTime": 156250,
+          "TotalPageFaultCount": 12822,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 156250,
+          "TotalKernelTime": 312500,
+          "ThisPeriodTotalUserTime": 156250,
+          "ThisPeriodTotalKernelTime": 312500,
+          "TotalPageFaultCount": 12907,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 468750,
+          "TotalKernelTime": 1093750,
+          "ThisPeriodTotalUserTime": 468750,
+          "ThisPeriodTotalKernelTime": 1093750,
+          "TotalPageFaultCount": 20889,
+          "TotalProcesses": 8,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      }
+    ],
+    "paths": [
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-93bi2xyl",
+        "exists": false
+      },
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-fgyko06k",
+        "exists": false
+      },
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-jaeodk51",
+        "exists": false
+      }
+    ],
+    "windows": [
+      {
+        "pid": 8444,
+        "exists": false,
+        "error": 87
+      }
+    ]
+  }
+}

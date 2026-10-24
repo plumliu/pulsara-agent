@@ -1,0 +1,305 @@
+{
+  "label": "jobcancel-68226f4c",
+  "scenarios": {
+    "before": {
+      "gate": {
+        "event": "before-forward",
+        "pid": 870,
+        "bytes": 517
+      },
+      "sealed": {
+        "event": "admission-sealed",
+        "pid": 870,
+        "socketStillExists": true
+      },
+      "cancellation": {
+        "before": [
+          {
+            "pid": 15672,
+            "exists": true,
+            "creation": 134373322804256801,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 35268,
+            "exists": true,
+            "creation": 134373322804310746,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 33184,
+            "exists": true,
+            "creation": 134373322804763692,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 24240,
+            "exists": true,
+            "creation": 134373322804896041,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 21820,
+            "exists": true,
+            "creation": 134373322804476295,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 468750,
+          "TotalKernelTime": 156250,
+          "ThisPeriodTotalUserTime": 468750,
+          "ThisPeriodTotalKernelTime": 156250,
+          "TotalPageFaultCount": 12856,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "caller": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (873 - ) ERROR: UtilAcceptVsock:273: accept4 failed 110\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 872,
+            "starttime": "44419",
+            "originalSocket": "/run/WSL/871_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      },
+      "classification": "fixture-proves-no-forward-at-cancel",
+      "sealedAttempt": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (886 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 885,
+            "starttime": "45427",
+            "originalSocket": "/run/WSL/884_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      }
+    },
+    "half": {
+      "gate": {
+        "event": "half-forwarded",
+        "pid": 891,
+        "total": 1
+      },
+      "sealed": {
+        "event": "admission-sealed",
+        "pid": 891,
+        "socketStillExists": true
+      },
+      "cancellation": {
+        "before": [
+          {
+            "pid": 34648,
+            "exists": true,
+            "creation": 134373322908303110,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\wsl.exe"
+          },
+          {
+            "pid": 33544,
+            "exists": true,
+            "creation": 134373322908356495,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 38404,
+            "exists": true,
+            "creation": 134373322908761354,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wslhost.exe"
+          },
+          {
+            "pid": 33148,
+            "exists": true,
+            "creation": 134373322908895080,
+            "sameIdentity": true,
+            "image": "C:\\Windows\\System32\\conhost.exe"
+          },
+          {
+            "pid": 36636,
+            "exists": true,
+            "creation": 134373322908520295,
+            "sameIdentity": true,
+            "image": "C:\\Program Files\\WSL\\wsl.exe"
+          }
+        ],
+        "waits": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "accounting": {
+          "TotalUserTime": 0,
+          "TotalKernelTime": 468750,
+          "ThisPeriodTotalUserTime": 0,
+          "ThisPeriodTotalKernelTime": 468750,
+          "TotalPageFaultCount": 12907,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      "caller": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (894 - ) ERROR: UtilAcceptVsock:273: accept4 failed 110\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 893,
+            "starttime": "45456",
+            "originalSocket": "/run/WSL/892_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      },
+      "classification": "unknown",
+      "sealedAttempt": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "<3>WSL (973 - ) ERROR: UtilConnectUnix:535: connect failed 111\n",
+        "pe": [],
+        "linux": [
+          {
+            "event": "caller-ready",
+            "pid": 972,
+            "starttime": "46464",
+            "originalSocket": "/run/WSL/971_interop"
+          },
+          {
+            "event": "caller-exit",
+            "code": 1
+          }
+        ]
+      }
+    }
+  },
+  "cleanup": {
+    "relays": [
+      {
+        "pid": 870,
+        "starttime": "44406",
+        "pidfdSignal": true
+      },
+      {
+        "pid": 891,
+        "starttime": "45443",
+        "pidfdSignal": true
+      },
+      {
+        "pid": 978,
+        "starttime": "46483",
+        "pidfdSignal": true
+      }
+    ],
+    "jobs": [
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 468750,
+          "TotalKernelTime": 156250,
+          "ThisPeriodTotalUserTime": 468750,
+          "ThisPeriodTotalKernelTime": 156250,
+          "TotalPageFaultCount": 12856,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 0,
+          "TotalKernelTime": 468750,
+          "ThisPeriodTotalUserTime": 0,
+          "ThisPeriodTotalKernelTime": 468750,
+          "TotalPageFaultCount": 12907,
+          "TotalProcesses": 5,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      },
+      {
+        "before": [],
+        "waits": [],
+        "accounting": {
+          "TotalUserTime": 781250,
+          "TotalKernelTime": 937500,
+          "ThisPeriodTotalUserTime": 781250,
+          "ThisPeriodTotalKernelTime": 937500,
+          "TotalPageFaultCount": 20867,
+          "TotalProcesses": 8,
+          "ActiveProcesses": 0,
+          "TotalTerminatedProcesses": 0
+        },
+        "members": []
+      }
+    ],
+    "paths": [
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-wtodp0if",
+        "exists": false
+      },
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-_uf4q6nj",
+        "exists": false
+      },
+      {
+        "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-1ai0i0no",
+        "exists": false
+      }
+    ],
+    "windows": [
+      {
+        "pid": 33572,
+        "exists": false,
+        "creation": 134373323015227360,
+        "sameIdentity": true
+      }
+    ]
+  }
+}

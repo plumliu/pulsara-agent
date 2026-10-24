@@ -1,0 +1,5 @@
+{"event": "before-pin", "pid": 978, "upstream": "/run/WSL/975_interop", "starttime": "46483"}
+{"event": "relay-ready", "pid": 978, "socket": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-1ai0i0no/interop", "directory": "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/interop_races_r3/round3/relay-1ai0i0no", "pinned": "/proc/978/fd/8", "inode": 1385, "mode": "0o700", "starttime": "46483"}
+{"event": "forwarded", "pid": 978, "bytes": 514, "total": 514}
+{"event": "after-forwarded", "pid": 978, "total": 514}
+{"event": "admission-sealed", "pid": 978, "socketStillExists": true}
