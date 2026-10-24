@@ -1,0 +1,120 @@
+Window: "中文 工程 G0-20261024 - 文件资源管理器", App: explorer.exe.
+	0 窗口 中文 工程 G0-20261024 - 文件资源管理器 Secondary Actions: Raise
+		1 窗格
+		2 窗格 中文 工程 G0-20261024
+			3 窗格
+				4 状态栏 状态栏 ID: StatusBarModuleInner
+					432 组 属性字段 ID: System.StatusBarViewItemCount
+						433 文本 0 个项目 Description: 项目总数 ID: PropertyValue
+					397 组 查看模式 ID: ViewButtonsGroup
+						398 单选按钮 (selectable) 详细信息 Description: 在窗口中显示每一项的相关信息。(Ctrl+Alt+6) ID: ViewMode_Details
+						399 单选按钮 (selectable) 大图标 Description: 使用大缩略图显示项。(Ctrl+Alt+2) ID: ViewMode_LargeIcons
+				7 窗格 控制项宿主 ID: ProperTreeHost
+					8 树 导航窗格 ID: 100
+						9 滚动条 (settable, float) 垂直滚动条 Value: 75 ID: NonClientVerticalScrollBar
+							10 按钮 上一行 ID: UpButton
+							400 按钮 向上翻页 ID: UpPageButton
+							11 缩略图 位置 ID: ScrollbarThumb
+							12 按钮 向下翻页 ID: DownPageButton
+							13 按钮 下一行 ID: DownButton
+						14 树项目 (selectable, settable, string) 桌面 Value: 桌面
+							15 树项目 (selectable, settable, string) 主文件夹 Value: 主文件夹
+							16 树项目 (selectable, settable, string) 图库 Value: 图库
+							17 树项目 (selectable, settable, string) OneDrive Value: OneDrive
+							18 树项目 (selectable, settable, string) 快速访问开始 - 桌面 (已固定) Value: 快速访问开始 - 桌面 (已固定)
+							19 树项目 (selectable, settable, string) 下载 (已固定) Value: 下载 (已固定)
+							20 树项目 (selectable, settable, string) 文档 (已固定) Value: 文档 (已固定)
+							21 树项目 (selectable, settable, string) 图片 (已固定) Value: 图片 (已固定)
+							22 树项目 (selectable, settable, string) 音乐 (已固定) Value: 音乐 (已固定)
+							23 树项目 (selectable, settable, string) 视频 (已固定) Value: 视频 (已固定)
+							24 树项目 (selectable, settable, string) _page_review (已固定) Value: _page_review (已固定)
+							25 树项目 (selectable, settable, string) my_doc Value: my_doc
+							26 树项目 (selectable, settable, string) chart-annotator Value: chart-annotator
+							27 树项目 (selectable, settable, string) 2025test Value: 2025test
+							28 树项目 (selectable, settable, string) 快速访问结束 - 112 Value: 快速访问结束 - 112
+							29 树项目 (selectable, settable, string) WPS云盘 Value: WPS云盘
+							30 树项目 (selectable, settable, string) 此电脑 Value: 此电脑
+							31 树项目 (selectable, settable, string) 网络 Value: 网络
+							32 树项目 (selectable, settable, string) Linux Value: Linux
+				434 窗格 Shell 文件夹视图 ID: listview
+					435 列表 项目视图
+						436 标头 标题
+							437 拆分按钮 名称 ID: System.ItemNameDisplay
+								438 按钮 筛选器下拉列表 ID: DropDown
+							439 拆分按钮 修改日期 ID: System.DateModified
+								440 按钮 筛选器下拉列表 ID: DropDown
+							441 拆分按钮 类型 ID: System.ItemTypeText
+								442 按钮 筛选器下拉列表 ID: DropDown
+							443 拆分按钮 大小 ID: System.Size
+								444 按钮 筛选器下拉列表 ID: DropDown
+						445 文本 此文件夹为空。 ID: EmptyTextFocusable
+				254 图像 缩略图模块 ID: PreviewThumbnailInner
+				255 文本 选择要预览的文件。 ID: RPaneCoverSheet_NoSel
+		256 窗格
+			257 窗格
+				258 选项卡 ID: TabView
+					259 列表 ID: TabListView
+						260 选项卡项目 (selectable) 中文 工程 G0-20261024
+							446 图像
+							262 文本 中文 工程 G0-20261024
+							263 按钮 关闭标签页 ID: CloseButton
+					264 按钮 添加新标签页 ID: AddButton
+				265 应用栏 ID: NavigationCommands
+					266 应用栏按钮 后退 Description: 返回到 workspaces ID: backButton
+					267 应用栏按钮 (disabled) 前进 Description: 前进 ID: forwardButton
+					268 应用栏按钮 上移到“workspaces”(Alt + 向上键) Description: 上移到“workspaces”(Alt + 向上键) ID: upButton
+					269 应用栏按钮 刷新“中文 工程 G0-20261024”(F5) Description: 刷新“中文 工程 G0-20261024”(F5) ID: refreshButton
+				270 组 ID: PART_AutoSuggestBox
+					271 编辑 (settable, string) 地址栏 ID: TextBox
+				379 拆分按钮 网络 ID: FirstCrumbStackPanel
+					380 图像
+				381 组 ID: PART_BreadcrumbBar
+					447 拆分按钮 更多
+					448 拆分按钮 网络
+						449 文本 网络
+					450 拆分按钮 wsl.localhost
+						451 文本 wsl.localhost
+					452 拆分按钮 Ubuntu
+						453 文本 Ubuntu
+					454 拆分按钮 home
+						455 文本 home
+					456 拆分按钮 plumwsl
+						457 文本 plumwsl
+					458 拆分按钮 workspaces
+						459 文本 workspaces
+					460 拆分按钮 中文 工程 G0-20261024
+						461 文本 中文 工程 G0-20261024
+				277 组 ID: FileExplorerSearchBox
+					278 编辑 (settable, string) 在 中文 工程 G0-20261024 中搜索 ID: TextBox
+						279 文本 在 中文 工程 G0-20261024 中搜索
+				280 应用栏 ID: FileExplorerCommandBar
+					281 应用栏按钮 新建
+						282 图像
+					283 应用栏按钮 (disabled) 剪切​​ Description: 将所选项目移动到剪贴板。
+						284 图像
+					285 应用栏按钮 (disabled) 复制​​ Description: 将所选项目复制到剪贴板。
+						286 图像
+					287 应用栏按钮 (disabled) 粘贴​​ Description: 将剪贴板中的内容粘贴到当前位置。
+						288 图像
+					289 应用栏按钮 (disabled) 重命名​​ Description: 重命名所选项目。
+						290 图像
+					291 应用栏按钮 (disabled) 共享
+						292 图像
+					293 应用栏按钮 (disabled) 删除​​ Description: 将所选项目移动到回收站或将其永久删除。
+						294 图像
+					295 应用栏按钮 排序 ID: SortAndGroupButton
+						296 图像
+					297 应用栏按钮 查看
+						298 图像
+					301 按钮 更多选项 ID: MoreButton
+				302 应用栏 ID: FileExplorerSecondaryCommandBar
+					303 应用栏按钮 预览 Description: 显示或隐藏预览窗格。 ID: PreviewPaneToggleButton
+						304 图像
+		305 标题栏 (settable, string) Value: 中文 工程 G0-20261024 - 文件资源管理器
+			306 菜单栏 系统 ID: MenuBar
+				307 菜单项 系统
+			308 按钮 最小化
+			309 按钮 最大化
+			310 按钮 关闭
+
+The focused UI element is 271 编辑 (settable, string) 地址栏 ID: TextBox.

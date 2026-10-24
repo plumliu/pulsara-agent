@@ -1,0 +1,5 @@
+﻿{"event":"windows-native-parent-start","childPid":0,"pid":32544,"action":"rootexit","mode":"native-dotnet","time":1792855939506}
+{"event":"windows-native-parent-spawn","childPid":32504,"pid":32544,"action":"rootexit","mode":"native-dotnet","time":1792855939679}
+{"event":"windows-child-start","pid":32504,"ppid":32544,"time":1792855939723,"node":"v22.23.3","mode":"native"}
+{"event":"windows-native-child-ready","childPid":32504,"pid":32544,"action":"rootexit","mode":"native-dotnet","time":1792855939734}
+{"event":"windows-child-finished","pid":32504,"ppid":32544,"time":1792855945734,"node":"v22.23.3","mode":"native"}

@@ -1,0 +1,16 @@
+{
+  "command": [
+    "C:\\WINDOWS\\System32\\wsl.exe",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--cd",
+    "/home/plumwsl",
+    "--exec",
+    "/bin/bash",
+    "-se"
+  ],
+  "script": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\root\\20261024-environment\\linux-verify.sh",
+  "exit_code": 0
+}

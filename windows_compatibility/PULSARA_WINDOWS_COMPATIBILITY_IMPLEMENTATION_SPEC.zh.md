@@ -466,3 +466,11 @@ Windows接手的环境安装、双仓库落点及G0-W逐项操作见[PULSARA_WIN
 
 
 2026-10-24 目录整理：两篇Windows活动文档及四方研究/审阅/验证材料统一移入`windows_compatibility/`，以[本目录索引](README.md)导航。原始过程文件保留当时命令与绝对/相对路径以供追溯，旧根目录/`output/windows-compat-20261024`路径不再是当前落点；生成应用包及pytest临时目录仅本地保留。此整理不改变冻结语义或验收状态。
+
+## 17. Windows现有Ubuntu接入的首轮G0证据（2026-10-24）
+
+用户授权在已有Ubuntu26.04.1/plumwsl中准备开发环境，并用三位gpt-6.1-sol/high并行实验，明确不进入B。受测源码da397a2b，两份独立clone一致；Windows工具/纯测5/5、Linux固定工具/完整资源构建、Node46/46、资源搬移PG/Python/Chromium、聚焦Python与缓存39、terminal/MCP94、hooks45通过。真实PG/检索及有限helper部分子项、隔离TLS/Session12项、BrowserOwner11项行为和Explorer图形目录子项有实际证据。
+
+**完整G0-W未通过，B未进入。** 普通非detached Windows后代在Linux进程组取消、Linux root及carrier结束后仍运行的反例已重复，现Linux PGID不能作为跨域结算证明；G0-W-C该项不通过。PG helper自身死亡在真实pg_ctl各阶段的结算仍未验证，其他接纳/GUI/网络/OAuth/休眠等矩阵仍待补；不以Linux源码测试或fixture代替生产集成，不用这些WSL结果替代原生Ubuntu资格。
+
+范围、精确失败输入、原始证据、测试profile清理拒绝与保留产物见[首轮报告](research/2026-10-24/root/g0-w-initial/report.zh.md)。本节为实际观察记录，不重新宣称修订前冻结批准覆盖新路线，也不授权提前实现生产WSL/安装器。

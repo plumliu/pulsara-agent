@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "<string>", line 21, in <module>
+    subprocess.run(["openssl", "x509", "-req", "-in", str(csr), "-signkey", str(key), "-out", str(cert), "-days", days], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['openssl', 'x509', '-req', '-in', '/tmp/pulsara-g0-tls-jgxjw1pj/expired.csr', '-signkey', '/tmp/pulsara-g0-tls-jgxjw1pj/expired.key', '-out', '/tmp/pulsara-g0-tls-jgxjw1pj/expired.crt', '-days', '-1']' returned non-zero exit status 1.

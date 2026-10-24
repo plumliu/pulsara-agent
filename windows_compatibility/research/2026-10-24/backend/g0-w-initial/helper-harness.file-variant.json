@@ -1,0 +1,831 @@
+{
+  "probeAssertionsPassed": false,
+  "helperDeathMechanismPassed": null,
+  "records": [
+    {
+      "scenario": "finite-call",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/.local/share/mise/installs/node/22.23.3/bin/node",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/helper-setup.cjs",
+        "/home/plumwsl/workspaces/pulsara_agent"
+      ],
+      "exit": 0,
+      "stdout": "{\"home\":\"/tmp/g0h-ak4iXn\",\"uid\":1000,\"data\":\"/tmp/g0h-ak4iXn/desktop/postgres\",\"socket\":\"/tmp/g0h-ak4iXn/desktop/socket\"}\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "scope",
+      "home": "/tmp/g0h-ak4iXn",
+      "uid": 1000,
+      "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+      "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn",
+        "--before-lock-ms",
+        "200"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 505,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn",
+        "--before-lock-ms",
+        "200"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"no-operation\", \"reason\": \"stdin-eof\"}\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 510,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "status",
+        "pid": 510
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"status\", \"pid\": 510}\n{\"type\": \"child-started\", \"pid\": 511, \"helper\": 510, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "eof-before-ready",
+      "passed": true,
+      "noOperation": true
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 515,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "busy"
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 73,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"no-operation\", \"reason\": \"stdin-eof\"}\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 520,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "status",
+        "pid": 520
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"status\", \"pid\": 520}\n{\"type\": \"child-started\", \"pid\": 521, \"helper\": 520, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "ready-eof-and-busy",
+      "passed": true,
+      "noOperation": true
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn",
+        "--after-frame-ms",
+        "500"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 525,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "start",
+        "pid": 525
+      }
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "busy"
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 73,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn",
+        "--after-frame-ms",
+        "500"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"start\", \"pid\": 525}\n{\"type\": \"child-started\", \"pid\": 528, \"helper\": 525, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"start\", \"exit\": 0, \"stdout\": \"waiting for server to start.... done\\nserver started\\n\", \"stderr\": \"\", \"status_exit\": 0, \"status_stdout\": \"pg_ctl: server is running (PID: 531)\\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \\\"-D\\\" \\\"/tmp/g0h-ak4iXn/desktop/postgres\\\" \\\"-c\\\" \\\"listen_addresses=\\\" \\\"-k\\\" \\\"/tmp/g0h-ak4iXn/desktop/socket\\\" \\\"-c\\\" \\\"unix_socket_permissions=0700\\\" \\\"-c\\\" \\\"port=5432\\\" \\\"-c\\\" \\\"shared_preload_libraries=pg_search\\\"\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 556,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "status",
+        "pid": 556
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"result\", \"operation\": \"status\", \"exit\": 0, \"stdout\": \"pg_ctl: server is running (PID: 531)\\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \\\"-D\\\" \\\"/tmp/g0h-ak4iXn/desktop/postgres\\\" \\\"-c\\\" \\\"listen_addresses=\\\" \\\"-k\\\" \\\"/tmp/g0h-ak4iXn/desktop/socket\\\" \\\"-c\\\" \\\"unix_socket_permissions=0700\\\" \\\"-c\\\" \\\"port=5432\\\" \\\"-c\\\" \\\"shared_preload_libraries=pg_search\\\"\\n\", \"stderr\": \"\", \"status_exit\": 0, \"status_stdout\": \"pg_ctl: server is running (PID: 531)\\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \\\"-D\\\" \\\"/tmp/g0h-ak4iXn/desktop/postgres\\\" \\\"-c\\\" \\\"listen_addresses=\\\" \\\"-k\\\" \\\"/tmp/g0h-ak4iXn/desktop/socket\\\" \\\"-c\\\" \\\"unix_socket_permissions=0700\\\" \\\"-c\\\" \\\"port=5432\\\" \\\"-c\\\" \\\"shared_preload_libraries=pg_search\\\"\\n\", \"status_stderr\": \"\"}\n",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"status\", \"pid\": 556}\n{\"type\": \"child-started\", \"pid\": 557, \"helper\": 556, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"status\", \"exit\": 0, \"stdout\": \"pg_ctl: server is running (PID: 531)\\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \\\"-D\\\" \\\"/tmp/g0h-ak4iXn/desktop/postgres\\\" \\\"-c\\\" \\\"listen_addresses=\\\" \\\"-k\\\" \\\"/tmp/g0h-ak4iXn/desktop/socket\\\" \\\"-c\\\" \\\"unix_socket_permissions=0700\\\" \\\"-c\\\" \\\"port=5432\\\" \\\"-c\\\" \\\"shared_preload_libraries=pg_search\\\"\\n\", \"stderr\": \"\", \"status_exit\": 0, \"status_stdout\": \"pg_ctl: server is running (PID: 531)\\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \\\"-D\\\" \\\"/tmp/g0h-ak4iXn/desktop/postgres\\\" \\\"-c\\\" \\\"listen_addresses=\\\" \\\"-k\\\" \\\"/tmp/g0h-ak4iXn/desktop/socket\\\" \\\"-c\\\" \\\"unix_socket_permissions=0700\\\" \\\"-c\\\" \\\"port=5432\\\" \\\"-c\\\" \\\"shared_preload_libraries=pg_search\\\"\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "lost-reply-start",
+      "passed": true,
+      "outcomeAtLoss": "unknown",
+      "laterStatus": {
+        "type": "result",
+        "operation": "status",
+        "exit": 0,
+        "stdout": "pg_ctl: server is running (PID: 531)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/tmp/g0h-ak4iXn/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/tmp/g0h-ak4iXn/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+        "stderr": "",
+        "status_exit": 0,
+        "status_stdout": "pg_ctl: server is running (PID: 531)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/tmp/g0h-ak4iXn/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/tmp/g0h-ak4iXn/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+        "status_stderr": ""
+      },
+      "lockRetainedUntilSettle": true,
+      "daemonDidNotInheritLock": true
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 561,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "stop",
+        "pid": 561
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"result\", \"operation\": \"stop\", \"exit\": 0, \"stdout\": \"waiting for server to shut down.... done\\nserver stopped\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"stop\", \"pid\": 561}\n{\"type\": \"child-started\", \"pid\": 562, \"helper\": 561, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"stop\", \"exit\": 0, \"stdout\": \"waiting for server to shut down.... done\\nserver stopped\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "stop",
+      "passed": true,
+      "result": {
+        "type": "result",
+        "operation": "stop",
+        "exit": 0,
+        "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+        "stderr": "",
+        "status_exit": 3,
+        "status_stdout": "pg_ctl: no server running\n",
+        "status_stderr": ""
+      }
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn",
+        "--pause-command-before-exec"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 566,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "start",
+        "pid": 566
+      }
+    },
+    {
+      "scenario": "finite-call",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "-c",
+        "import pathlib,sys; p=pathlib.Path('/proc')/sys.argv[1]; s=(p/'status').read_text(); assert 'State:\\tT' in s,s; c=(p/'cmdline').read_bytes(); assert sys.argv[2].encode() in c and b'pg_ctl' in c; print(s.splitlines()[:6])",
+        "567",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "['Name:\\tsh', 'Umask:\\t0022', 'State:\\tT (stopped)', 'Tgid:\\t567', 'Ngid:\\t0', 'Pid:\\t567']\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "finite-call",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "-c",
+        "import os,pathlib,signal,sys; c=(pathlib.Path('/proc')/sys.argv[1]/'cmdline').read_bytes(); assert b'pg-helper.py' in c and sys.argv[2].encode() in c; os.kill(int(sys.argv[1]),signal.SIGKILL); print('exact probe helper killed')",
+        "566",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "exact probe helper killed\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 574,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "status",
+        "pid": 574
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"status\", \"pid\": 574}\n{\"type\": \"child-started\", \"pid\": 575, \"helper\": 574, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "finite-call",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "-c",
+        "import os,pathlib,signal,sys; c=(pathlib.Path('/proc')/sys.argv[1]/'cmdline').read_bytes(); assert b'pg_ctl' in c and sys.argv[2].encode() in c; os.kill(int(sys.argv[1]),signal.SIGCONT); print('exact probe child resumed')",
+        "567",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "exact probe child resumed\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 582,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "status",
+        "pid": 582
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"status\", \"pid\": 582}\n{\"type\": \"child-started\", \"pid\": 583, \"helper\": 582, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "failure",
+      "error": "AssertionError()"
+    },
+    {
+      "scenario": "helper-frame",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "frame": {
+        "type": "ready",
+        "pid": 587,
+        "lock_cloexec": true,
+        "uid": 1000,
+        "data": "/tmp/g0h-ak4iXn/desktop/postgres",
+        "socket": "/tmp/g0h-ak4iXn/desktop/socket"
+      }
+    },
+    {
+      "scenario": "operation-accepted",
+      "frame": {
+        "type": "accepted",
+        "operation": "status",
+        "pid": 587
+      }
+    },
+    {
+      "scenario": "helper-finished",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-helper.py",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n",
+      "stderr": "{\"type\": \"accepted\", \"operation\": \"status\", \"pid\": 587}\n{\"type\": \"child-started\", \"pid\": 588, \"helper\": 587, \"paused_before_exec\": false}\n{\"type\": \"result\", \"operation\": \"status\", \"exit\": 3, \"stdout\": \"pg_ctl: no server running\\n\", \"stderr\": \"\", \"status_exit\": 3, \"status_stdout\": \"pg_ctl: no server running\\n\", \"status_stderr\": \"\"}\n"
+    },
+    {
+      "scenario": "finite-call",
+      "command": [
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "plumwsl",
+        "--cd",
+        "/home/plumwsl/workspaces/pulsara_agent",
+        "--exec",
+        "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3",
+        "-I",
+        "-c",
+        "import os,pathlib,shutil,sys; p=pathlib.Path(sys.argv[1]); assert str(p).startswith('/tmp/g0h-') and p.resolve(strict=True)==p and p.stat().st_uid==os.getuid(); shutil.rmtree(p); print('exact owned home removed')",
+        "/tmp/g0h-ak4iXn"
+      ],
+      "exit": 0,
+      "stdout": "exact owned home removed\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "cleanup",
+      "home": "/tmp/g0h-ak4iXn",
+      "removed": true,
+      "finalStatus": 3
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "command": [
+    "wsl",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--exec",
+    "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+    "-I",
+    "-c",
+    "\nimport json,pathlib,sys\nhomes=json.loads(sys.argv[1])\nmatches=[]\nfor item in pathlib.Path('/proc').glob('[0-9]*/cmdline'):\n    try:\n        args=item.read_bytes().split(bytes([0]))\n    except (FileNotFoundError,PermissionError):\n        continue\n    for home in homes:\n        if str(pathlib.Path(home)/'desktop/postgres').encode() in args and b'postgres' in args[0]:\n            matches.append({'pid':item.parent.name,'home':home})\nresult={'homes':[{ 'home':home,'exists':pathlib.Path(home).exists()} for home in homes],'matchingPostgres':matches}\nassert not matches and all(not item['exists'] for item in result['homes']),result\nprint(json.dumps(result))\n",
+    "[\"/tmp/g0h-3ffkFZ\", \"/tmp/g0h-73Nv1B\", \"/tmp/g0h-ak4iXn\", \"/tmp/g0p-0hagLa\", \"/tmp/g0p-ArbdKN\"]"
+  ],
+  "exit": 0,
+  "stdout": "{\"homes\": [{\"home\": \"/tmp/g0h-3ffkFZ\", \"exists\": false}, {\"home\": \"/tmp/g0h-73Nv1B\", \"exists\": false}, {\"home\": \"/tmp/g0h-ak4iXn\", \"exists\": false}, {\"home\": \"/tmp/g0p-0hagLa\", \"exists\": false}, {\"home\": \"/tmp/g0p-ArbdKN\", \"exists\": false}], \"matchingPostgres\": []}\n",
+  "stderr": ""
+}

@@ -1,0 +1,5 @@
+﻿{"event":"windows-native-parent-start","childPid":0,"pid":34580,"action":"cancel","mode":"native-dotnet","time":1792855865766}
+{"event":"windows-native-parent-spawn","childPid":38396,"pid":34580,"action":"cancel","mode":"native-dotnet","time":1792855865938}
+{"event":"windows-child-start","pid":38396,"ppid":34580,"time":1792855865985,"node":"v22.23.3","mode":"native"}
+{"event":"windows-native-child-ready","childPid":38396,"pid":34580,"action":"cancel","mode":"native-dotnet","time":1792855865996}
+{"event":"windows-child-finished","pid":38396,"ppid":34580,"time":1792855871993,"node":"v22.23.3","mode":"native"}

@@ -1,0 +1,96 @@
+{
+  "passed": true,
+  "records": [
+    {
+      "scenario": "scope",
+      "repo": "/home/plumwsl/workspaces/pulsara_agent",
+      "home": "/tmp/g0p-ArbdKN",
+      "directory": "/tmp/g0p-ArbdKN/desktop/postgres",
+      "socket": "/tmp/g0p-ArbdKN/desktop/socket",
+      "uid": 1000,
+      "bin": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin",
+      "python": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources/python/bin/python3"
+    },
+    {
+      "scenario": "real-start",
+      "initialized": true,
+      "startedHere": true,
+      "status": {
+        "code": 0,
+        "stdout": "pg_ctl: server is running (PID: 19832)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/tmp/g0p-ArbdKN/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/tmp/g0p-ArbdKN/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+        "stderr": ""
+      },
+      "database": "/tmp/g0p-ArbdKN/desktop/postgres|2026-10-24 23:31:36.216176+08"
+    },
+    {
+      "scenario": "reuse",
+      "startedHere": false
+    },
+    {
+      "scenario": "clean-v0-search-vector",
+      "stdout": "{\"scenario\": \"clean-v0-verify\", \"result\": {\"status\": \"verified\", \"universe_fingerprint\": \"sha256:b99c9fda8ab32ecd94ea930748c71e49f86f770a91d3ddb38303f5369241c204\", \"registry_prefix_fingerprint\": \"sha256:926ffd30b16f8c77d70dce4559eb6b0210bd3fb86a0326688f723cb2d40cc3a4\", \"verified_catalog_fingerprint\": \"sha256:812aaf3157354f2ce2b0b2765ae07128c31a01579cadac3cf3ae4e3d08f80f42\", \"runtime_grant_policy_fingerprint\": \"sha256:ce8ce2b013a39a32720a6de76b408a94f9bd0db305db0ca77c334234f0251120\", \"result_fingerprint\": \"sha256:82152173e53b3cb788f16fa8fe1da9f74d34dd0258db0311d5f4ddff3b996d51\"}}\n{\"scenario\": \"pg-facts\", \"facts\": [\"pulsara_admin\", \"pulsara\", \"17.9\", \"/tmp/g0p-ArbdKN/desktop/postgres\", \"/tmp/g0p-ArbdKN/desktop/socket\", \"\"], \"roles\": [[\"pulsara_admin\", true, true, true, true, true, true], [\"pulsara_runtime\", false, false, false, false, false, true]], \"extensions\": {\"vector\": \"0.8.1\", \"pg_search\": \"0.26.1\"}}\n{\"scenario\": \"bm25-snippet\", \"query\": \"数据库\", \"rows\": [[1, \"中文搜索与持久化数据库\", [[24, 33]], null, null]]}\n{\"scenario\": \"bm25-snippet\", \"query\": \"running\", \"rows\": [[2, \"desktop portability running checks\", [[20, 27]], [[20, 27]], [[20, 27]]]]}\n{\"scenario\": \"bm25-snippet\", \"query\": \"prepare_database\", \"rows\": [[3, \"src/pulsara_agent/desktop_runtime.py prepare_database\", [[37, 44], [45, 53]], [[37, 44], [45, 53]], [[37, 53]]]]}\n{\"scenario\": \"vector\", \"distance\": 0.0}\n{\"scenario\": \"queries-passed\"}\n",
+      "stderr": ""
+    },
+    {
+      "scenario": "socket-mismatch",
+      "rejected": true,
+      "runningDataPreserved": true
+    },
+    {
+      "scenario": "raw-directory-mismatch",
+      "rejected": true,
+      "runningDataPreserved": true
+    },
+    {
+      "scenario": "real-readiness-failure",
+      "error": {
+        "message": "Command failed: /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl start -w -D /tmp/g0p-ArbdKN/desktop/postgres -l /tmp/g0p-ArbdKN/desktop/postgres.log -o -c listen_addresses='' -k '/tmp/g0p-ArbdKN/desktop/socket' -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries=pg_search -t 0\npg_ctl: server did not start in time\n",
+        "code": 1,
+        "stdout": "waiting for server to start... stopped waiting\n",
+        "stderr": "pg_ctl: server did not start in time\n"
+      },
+      "startedHere": false,
+      "initialized": false,
+      "readback": {
+        "code": 0,
+        "stdout": "pg_ctl: server is running (PID: 19887)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/tmp/g0p-ArbdKN/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/tmp/g0p-ArbdKN/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+        "stderr": ""
+      }
+    },
+    {
+      "scenario": "version-refusal",
+      "preserved": true,
+      "status3BeforeEdit": true
+    },
+    {
+      "scenario": "reopen",
+      "query": "/tmp/g0p-ArbdKN/desktop/postgres|2026-10-24 23:31:37.8042+08"
+    },
+    {
+      "scenario": "precise-reset",
+      "onlyOwnedDataRemoved": true,
+      "statusAfterRemoval": 4,
+      "socketRetained": true,
+      "outsidePreserved": true
+    },
+    {
+      "scenario": "reset-rebuild",
+      "initialized": true,
+      "finalStatus": {
+        "code": 3,
+        "stdout": "pg_ctl: no server running\n",
+        "stderr": ""
+      }
+    },
+    {
+      "scenario": "cleanup",
+      "home": "/tmp/g0p-ArbdKN",
+      "finalStatus": {
+        "code": 3,
+        "stdout": "pg_ctl: no server running\n",
+        "stderr": ""
+      },
+      "removed": true
+    }
+  ]
+}

@@ -4,7 +4,7 @@
 
 2026-10-24 按用户授权修订：Ubuntu发行版本号不限，接入已有发行版及默认非root用户，保留interop、Windows PATH和自动挂载，不要求新建`Pulsara`/`pulsara`。本清单命令以已观察到的`Ubuntu`/`plumwsl`及`/home/plumwsl`为示例，其他用户须替换成实际确认目标，不能把示例当固定命名要求。依赖pins、ext4应用数据和完整G0验收仍适用；原四方审阅仅覆盖修订前清单。
 
-**本文件是 Windows 接手操作说明，不是完整Windows验收记录。** Phase A代码与Mac实证冻结范围保持，原生Ubuntu x64/arm64与GUI仍待验收，Phase B未进入。当前Windows已有Ubuntu 26.04.1/非root身份/ext4、版本准入及基础互操作观察；完整G0仍待执行。允许在自有隔离目录和`output/`写探针，不实现生产安装器、WslHostOperations、正式picker或TLS/OAuth桥，不改用户共享发行版配置。
+**本文件是 Windows 接手操作说明，不是完整Windows验收记录。** Phase A代码与Mac实证冻结范围保持，原生Ubuntu x64/arm64与GUI仍待验收，Phase B未进入。首轮环境、资源、控制/PG/TLS等子项实测见第9节与[报告](research/2026-10-24/root/g0-w-initial/report.zh.md)；普通Windows后代取消有已复现缺口，完整G0未通过。允许在自有隔离目录和`output/`写探针，不实现生产安装器、WslHostOperations、正式picker或TLS/OAuth桥，不改用户共享发行版配置。
 
 ## 1. 先看懂两边分工
 
@@ -370,11 +370,11 @@ Windows命令提示符另开窗口：`curl.exe --fail http://127.0.0.1:18765/`�
 
 ## 9. 接手第一轮完成到哪里
 
-- [ ] Windows本机Git/mise/Node/Electron版本可确认，tsc及选定纯测试有实际结果。
-- [ ] 已有目标和默认用户已明确确认，后续显式使用同一非root身份；ext4/interop/挂载有观察，其他用户工作和配置保留。
-- [ ] 两份clone同一Git提交；Linux pins/资源构建与聚焦回归有日志。
-- [ ] 至少完成7.1三pipe基础probe及7.6基本可达诊断，结果如实限定；有失败先保留具体错误。
-- [ ] G0-D/C/P/F/N逐项建立待验证清单，明确哪些需要后续临时probe，Ubuntu原生资格继续待验收。
+- [x] Windows本机Git/mise/Node/Electron可确认，tsc及选定纯测试5/5有实际结果。
+- [x] 已有Ubuntu/plumwsl已明确确认，后续显式使用同一非root身份；ext4/interop/挂载有观察，其他用户工作和配置保留。
+- [x] 两份clone受测源码同一提交da397a2b；Linux pins、完整desktop:verify（Node46/46及资源搬移）、聚焦39/terminal-MCP94/hooks45有日志。
+- [x] Windows Node→WSL三pipe及Windows Electron→WSL localhost TLS子项有实际证据；取消普通Windows后代的失败事实单列，不记作整C通过。
+- [x] G0-D/C/P/F/N缺项及已复现C缺口见[首轮报告](research/2026-10-24/root/g0-w-initial/report.zh.md)，Ubuntu原生资格仍待验收。
 
 **到这里可以停下来总结，再逐门补G0。只有A验收补齐、G0-W全部通过并按spec交叉审阅后，才申请下一轮Phase B实施。当前不能在生产main增加WSL选择器、自动provision/升级/卸载、Windows安装包或宣称Windows支持。**
 

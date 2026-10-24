@@ -1,0 +1,9 @@
+{
+  "path": "/home/plumwsl/workspaces/中文 工程 G0-20261024",
+  "canonical": "/home/plumwsl/workspaces/中文 工程 G0-20261024",
+  "uid": 1000,
+  "mode": "0o755",
+  "is_dir": true,
+  "entries": [],
+  "mount": "/ /dev/sdd ext4"
+}

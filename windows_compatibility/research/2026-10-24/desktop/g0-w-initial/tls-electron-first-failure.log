@@ -1,0 +1,6 @@
+
+Error: Observation timeout: guest first ready
+    at Timeout._onTimeout (C:\python_workspace\pulsara-agent\output\windows-g0\desktop\20261024-host\tls-electron.cjs:9:107)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+{ passed: 0, failed: 0 }

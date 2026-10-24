@@ -1,0 +1,11 @@
+const fs=require('node:fs');
+const path=require('node:path');
+const os=require('node:os');
+const {execFileSync}=require('node:child_process');
+const wsl=path.join(process.env.SystemRoot,'System32','wsl.exe');
+const raw=execFileSync(wsl,['--version']);
+const version=raw.includes(0)?raw.toString('utf16le'):raw.toString('utf8');
+const repo='/home/plumwsl/workspaces/pulsara_agent';
+const guest=JSON.parse(execFileSync(wsl,['-d','Ubuntu','-u','plumwsl','--cd',repo,'--exec',repo+'/.venv/bin/python','-c','import json,os,pathlib,platform,sys; print(json.dumps({"python":sys.version,"uid":os.getuid(),"home":str(pathlib.Path.home()),"kernel":platform.release(),"osRelease":pathlib.Path("/etc/os-release").read_text()}))'],{encoding:'utf8'}));
+const result={time:new Date().toISOString(),windows:{node:process.version,nodeExecutable:process.execPath,arch:process.arch,release:os.release(),wslVersion:version,git:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()},guest:{...guest,git:execFileSync(wsl,['-d','Ubuntu','-u','plumwsl','--cd',repo,'--exec','git','rev-parse','HEAD'],{encoding:'utf8'}).trim()}};
+fs.writeFileSync(path.join(__dirname,'environment.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));

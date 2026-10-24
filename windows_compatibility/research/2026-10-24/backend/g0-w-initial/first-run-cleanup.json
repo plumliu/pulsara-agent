@@ -1,0 +1,18 @@
+{
+  "command": [
+    "wsl",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--exec",
+    "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+    "-I",
+    "-c",
+    "\nimport pathlib,os,sys,shutil,json\np=pathlib.Path(sys.argv[1])\nassert str(p)=='/tmp/g0p-0hagLa' and p.resolve(strict=True)==p and p.stat().st_uid==os.getuid()\nmatches=[]\nfor item in pathlib.Path('/proc').glob('[0-9]*/cmdline'):\n    try:\n        args=item.read_bytes().split(bytes([0]))\n    except FileNotFoundError:\n        continue\n    if str(p/'desktop/postgres').encode() in args and b'postgres' in args[0]:\n        matches.append(str(item))\nassert not matches,matches\nassert not (p/'desktop/postgres').exists()\nshutil.rmtree(p)\nprint(json.dumps({'home':str(p),'noMatchingPostgres':True,'removed':True}))\n",
+    "/tmp/g0p-0hagLa"
+  ],
+  "exit": 0,
+  "stdout": "{\"home\": \"/tmp/g0p-0hagLa\", \"noMatchingPostgres\": true, \"removed\": true}\n",
+  "stderr": ""
+}

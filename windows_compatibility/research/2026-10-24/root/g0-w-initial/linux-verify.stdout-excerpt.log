@@ -1,0 +1,36 @@
+EXCERPT: last 35 lines of output/windows-g0/root/20261024-environment/linux-verify.stdout.log
+  type: 'test'
+  ...
+# Subtest: a log append failure remains a runtime event and does not replace shutdown ownership
+ok 45 - a log append failure remains a runtime event and does not replace shutdown ownership
+  ---
+  duration_ms: 25.877377
+  type: 'test'
+  ...
+# Subtest: desktop UI preferences survive a new owner independently of renderer ports
+ok 46 - desktop UI preferences survive a new owner independently of renderer ports
+  ---
+  duration_ms: 3.999159
+  type: 'test'
+  ...
+1..46
+# tests 46
+# suites 0
+# pass 46
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 352.630151
+CREATE EXTENSION
+CREATE EXTENSION
+pg_search=0.26.1
+vector=0.8.1
+CREATE TABLE
+INSERT 0 2
+CREATE INDEX
+search=1
+vector=0
+Python application import and relocated Chromium passed
+Relocated PostgreSQL, vector, pg_search, Python and Chromium passed
+0.1.0-alpha.6

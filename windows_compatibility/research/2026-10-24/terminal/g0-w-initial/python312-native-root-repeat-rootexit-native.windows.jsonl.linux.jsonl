@@ -1,0 +1,4 @@
+{"event": "linux-root-start", "pid": 325, "time": 1792855937.915731, "pgid": 325, "python": "3.12.15 (main, Oct 14 2026, 01:05:27) [Clang 23.1.3 ]"}
+{"event": "linux-popen", "pid": 325, "time": 1792855937.9234736, "child_pid": 427, "child_pgid": 427}
+{"event": "linux-parent-wait", "pid": 325, "time": 1792855945.7572584, "returncode": 0}
+{"event": "linux-root-exit", "pid": 325, "time": 1792855945.761958}

@@ -6,8 +6,9 @@
 
 1. [当前实施 spec](PULSARA_WINDOWS_COMPATIBILITY_IMPLEMENTATION_SPEC.zh.md)：路线、所有权、G0-W、Phase A/B边界与验收矩阵；原冻结路线按用户授权修订为已有WSL接入，第16节保留Phase A历史实证。
 2. [Windows 开发准备与 G0-W 操作清单](PULSARA_WINDOWS_DEVELOPMENT_G0_CHECKLIST.zh.md)：按第3节准备Windows工具、确认已有WSL2/默认非root用户，再准备双仓库与独立实验。
+3. [Windows首轮环境/G0-W实测报告](research/2026-10-24/root/g0-w-initial/report.zh.md)：已有Ubuntu/plumwsl环境、双clone和Linux资源验证完成；记录interop普通Windows后代取消缺口，完整G0未通过，B未进入。
 
-当前状态：Phase A 代码及 Mac 本机/应用包 GUI 实证已冻结；原生 Ubuntu x64/arm64 与 Ubuntu GUI 仍待验收；G0-W 待 Windows 实测，Phase B 未实施，Windows 支持未激活。整理目录不改变这些状态。
+当前状态：Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI仍待验收；Windows首轮G0子项已有实测，普通Windows后代取消子项未通过，完整G0未过，Phase B未实施，Windows支持未激活。
 
 2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，Windows后代生命周期等完整G0仍待验证。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
 

@@ -1,0 +1,17 @@
+{
+  "command": [
+    "wsl",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--cd",
+    "/home/plumwsl/workspaces/pulsara_agent",
+    "--exec",
+    "/home/plumwsl/.local/share/mise/installs/node/22.23.3/bin/node",
+    "/home/plumwsl/workspaces/pulsara_agent/output/windows-g0/backend/20261024-2323/pg-contract.cjs",
+    "/home/plumwsl/workspaces/pulsara_agent"
+  ],
+  "exit": 0,
+  "stdoutFile": "pg-contract.log"
+}

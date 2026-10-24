@@ -1,0 +1,667 @@
+{
+  "started": "2026-10-24T15:28:06.165Z",
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  },
+  "platform": "win32",
+  "tests": [
+    {
+      "name": "WSL localhost Chromium fetch pins complete current certificate",
+      "pass": true,
+      "detail": {
+        "status": 200,
+        "text": "valid:中文 TLS fixture"
+      }
+    },
+    {
+      "name": "exact scheme host port admission rejects neighboring origins",
+      "pass": true,
+      "detail": [
+        {
+          "label": "launch-one",
+          "url": "http://127.0.0.1:40021/api/check",
+          "allow": false,
+          "resourceType": "other"
+        },
+        {
+          "label": "launch-one",
+          "url": "https://localhost:40021/api/check",
+          "allow": false,
+          "resourceType": "other"
+        },
+        {
+          "label": "launch-one",
+          "url": "https://127.0.0.1:40022/api/check",
+          "allow": false,
+          "resourceType": "other"
+        }
+      ]
+    },
+    {
+      "name": "sandboxed renderer has no Node preload or process",
+      "pass": true,
+      "detail": {
+        "node": "undefined",
+        "bridge": "undefined",
+        "process": "undefined"
+      }
+    },
+    {
+      "name": "renderer EventSource and fresh connection preserve pinned TLS",
+      "pass": true,
+      "detail": [
+        "一",
+        "二"
+      ]
+    },
+    {
+      "name": "preview sandbox and image PDF MIME use same session",
+      "pass": true,
+      "detail": {
+        "loaded": true,
+        "accessible": false
+      }
+    },
+    {
+      "name": "download API writes exact Windows file bytes through same session",
+      "pass": true,
+      "detail": {
+        "state": "completed",
+        "bytes": 277,
+        "path": "C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\desktop\\20261024-host\\download-中文.bin"
+      }
+    },
+    {
+      "name": "Host Origin Fetch-Site are rejected with concrete server response evidence",
+      "pass": true,
+      "detail": {
+        "origin": {
+          "chromiumError": "Error: net::ERR_FAILED"
+        },
+        "site": {
+          "chromiumError": "Error: net::ERR_FAILED"
+        },
+        "host": {
+          "status": 421,
+          "text": "HOST_REJECTED"
+        }
+      }
+    },
+    {
+      "name": "same port wrong service is rejected after live connection closes",
+      "pass": true,
+      "detail": "Error: net::ERR_FAILED"
+    },
+    {
+      "name": "fresh session and actual WebContents adopt new launch only",
+      "pass": true,
+      "detail": {
+        "oldDestroyed": true,
+        "sessionsDistinct": true
+      }
+    },
+    {
+      "name": "retired session rejects concurrent reconnect attempts before network",
+      "pass": true,
+      "detail": [
+        "Error: net::ERR_BLOCKED_BY_CLIENT",
+        "Error: net::ERR_BLOCKED_BY_CLIENT",
+        "Error: net::ERR_BLOCKED_BY_CLIENT",
+        "Error: net::ERR_BLOCKED_BY_CLIENT"
+      ]
+    },
+    {
+      "name": "stale certificate cannot authenticate a new launch on same port",
+      "pass": true,
+      "detail": "Error: net::ERR_FAILED"
+    },
+    {
+      "name": "expired exact certificate is accepted only in new pinned session",
+      "pass": true,
+      "detail": {
+        "result": {
+          "status": 200,
+          "text": "expired:中文 TLS fixture"
+        },
+        "validFrom": "Jan  1 00:00:00 2020 GMT",
+        "validTo": "Jan  2 00:00:00 2020 GMT",
+        "checks": [
+          {
+            "label": "expired-exact",
+            "hostname": "127.0.0.1",
+            "same": true,
+            "allow": true,
+            "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID",
+            "errorCode": -202
+          }
+        ]
+      }
+    }
+  ],
+  "guest": [
+    {
+      "event": "ready",
+      "kind": "valid",
+      "origin": "https://127.0.0.1:40021",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIC1zCCAb+gAwIBAgIUSKcUAll4DJ/OrDFp8s3K7EXuK48wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE1MjgwNloXDTI2MTAy\nNTE1MjgwNlowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAqpgepIFVBCPYwBqnMc1rnTFQKR1HI30ULymbRe6weikD\n1UkTwDPKhVx0gfKqUs+X3dMEQuEPC2kS9elyZEuRGClKaEHTh3NzSAZ/8VwtUEg3\nXNcN67Z0MvOp+tcCYPKwOzSXyX7/cNG0WubQhQ+XdFK57a2woT6TRfmM9+b91c4Z\nXgCB7C3wqSX3mHA6iMXCbC84+EYCQkKrQdSRAtong2IQpRVfDj9g4PEZUi14Uwrj\nD7SRmgjtfyQEvnLXA150srirJkxKSgIdtotsTQ5JZxyzgRfVqxR2z0MCX4Qsc8UK\nrWAvaQAvS4cqvoTcg/Z6K1mMKlGSvWLGxeRvJq540wIDAQABoyEwHzAdBgNVHQ4E\nFgQUd18FjNT0jc8GxhuUuVNJ+bZGE/QwDQYJKoZIhvcNAQELBQADggEBAJwNzuGX\n6gCI8tXTcNpgCUA9UL+GLoj0hr5z/aNRtfaI2qmbY90FZVAvaGYUYq09pSyY2lBM\nR/FM4lAxZe8lYKpOAWT14/yTVNRrePUHbJLAx3tUxlKec9qLecDGEvxtlxCaju66\n3c9KrDsKuLi0ZDZg3Pj8NTo8to3eL9s0ahOVPEbxjRn4tRetQqoeYhXIeEQDijhn\nw3k5bdkbzg6CWbmGLgUrDymytcZJ1CeR+f8b/FSkyvPOUZyAwMHvP9Gr60F9q7yH\noLv3hkgD0h9hrQXN/VurzfOCkBw8fYNtFRJ9Mi0mvAXeDbqzFKU/N1UkpyR2aTxc\no+Y9ZLj+lO60L2s=\n-----END CERTIFICATE-----\n",
+      "pid": 7959,
+      "uid": 1000,
+      "temporary_keys_removed": true
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/api/check",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/api/check",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/sse",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "same-origin"
+      }
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/preview",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "same-origin"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/preview",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/image",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/image",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/pdf",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/pdf",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/download",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "same-origin"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/download",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/api/action",
+      "method": "POST",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": "https://evil.invalid",
+        "Sec-Fetch-Site": "cross-site"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/api/action",
+      "status": 403,
+      "body": "ORIGIN_REJECTED"
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/api/check",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": "https://evil.invalid",
+        "Sec-Fetch-Site": "cross-site"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/api/check",
+      "status": 403,
+      "body": "FETCH_SITE_REJECTED"
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/api/check",
+      "method": "GET",
+      "headers": {
+        "Host": "wrong.invalid",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/api/check",
+      "status": 421,
+      "body": "HOST_REJECTED"
+    },
+    {
+      "event": "request",
+      "kind": "valid",
+      "path": "/api/check",
+      "method": "GET",
+      "headers": {
+        "Host": "wrong.invalid",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "valid",
+      "path": "/api/check",
+      "status": 421,
+      "body": "HOST_REJECTED"
+    },
+    {
+      "event": "ready",
+      "kind": "other",
+      "origin": "https://127.0.0.1:40021",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIC1zCCAb+gAwIBAgIUVIfV7jVIIchdYCkm+4qOrjykTsUwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE1MjgwNloXDTI2MTAy\nNTE1MjgwNlowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAsd3Vkw33LwqmyYi/28FT9xpXHZV5nduDzSdpEyF7/luv\nQkyPMeKaOUsKMPs73TyLbqdOLbBV3ABAc5TSjRxvMELC+Kl2gsgCrI3WyPsxx/3J\nWRpoGZzgHwUHonR71DCmoPNNo20ERZFzWrxSH/Cw73+SzgEWWhiMtY5+eItXlwTN\nuE52tEcBAM1jw5dAXQ6sNNCKTVk6HbSMClH+pS8r7soOYU91GrMnEsB9bgj7AzsZ\nYwwh5R58/NwDVUFCDGoCjFfGGMF89YrGydvvlEGpgwjlqtx7rFAoZwvq1VUPkPwK\n9sLWNYtde3k8Q1a5pWbxxkBj8mOPadx19P+ACeFIPQIDAQABoyEwHzAdBgNVHQ4E\nFgQUi9Z/7e4hVVMutBwshd/GIvu4V8wwDQYJKoZIhvcNAQELBQADggEBAIK60Mpv\nkf2OsObH7svV35CdjUGzNEG5jCnIXBZ69J4cW6X6bcR4O2gPbTB1JEKgJwiQ9yWo\ntesEvnBiX/j3CQeyE01LSjRPxT+yoPA8UAAnhRD7J/IQoSu2r/pMM03ZsyJ/slxa\nxDnXfCWlKC5ba2oSectghFUN/FyyxZDDwt4gF5GxBnUM+2AAKYxBlvWgwZXWkVQj\nv/4nKWZO1QWUGE9RJ67Up192Mah6fRdQQEyOrGoSjF4B1J3l0jhWcRoKAx1Xns+f\nz6FfAX2PHfOOpSfxrAuc5Bs5mBtiWk5L8ufswHhbH+Cad83mfXHUOddJpg2a0seS\nqp010ACx6GJTVNQ=\n-----END CERTIFICATE-----\n",
+      "pid": 7959,
+      "uid": 1000,
+      "temporary_keys_removed": true
+    },
+    {
+      "event": "request",
+      "kind": "other",
+      "path": "/",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "other",
+      "path": "/",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "request",
+      "kind": "other",
+      "path": "/api/check",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "other",
+      "path": "/api/check",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "ready",
+      "kind": "valid",
+      "origin": "https://127.0.0.1:40021",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIC1zCCAb+gAwIBAgIUSKcUAll4DJ/OrDFp8s3K7EXuK48wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNDE1MjgwNloXDTI2MTAy\nNTE1MjgwNlowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAqpgepIFVBCPYwBqnMc1rnTFQKR1HI30ULymbRe6weikD\n1UkTwDPKhVx0gfKqUs+X3dMEQuEPC2kS9elyZEuRGClKaEHTh3NzSAZ/8VwtUEg3\nXNcN67Z0MvOp+tcCYPKwOzSXyX7/cNG0WubQhQ+XdFK57a2woT6TRfmM9+b91c4Z\nXgCB7C3wqSX3mHA6iMXCbC84+EYCQkKrQdSRAtong2IQpRVfDj9g4PEZUi14Uwrj\nD7SRmgjtfyQEvnLXA150srirJkxKSgIdtotsTQ5JZxyzgRfVqxR2z0MCX4Qsc8UK\nrWAvaQAvS4cqvoTcg/Z6K1mMKlGSvWLGxeRvJq540wIDAQABoyEwHzAdBgNVHQ4E\nFgQUd18FjNT0jc8GxhuUuVNJ+bZGE/QwDQYJKoZIhvcNAQELBQADggEBAJwNzuGX\n6gCI8tXTcNpgCUA9UL+GLoj0hr5z/aNRtfaI2qmbY90FZVAvaGYUYq09pSyY2lBM\nR/FM4lAxZe8lYKpOAWT14/yTVNRrePUHbJLAx3tUxlKec9qLecDGEvxtlxCaju66\n3c9KrDsKuLi0ZDZg3Pj8NTo8to3eL9s0ahOVPEbxjRn4tRetQqoeYhXIeEQDijhn\nw3k5bdkbzg6CWbmGLgUrDymytcZJ1CeR+f8b/FSkyvPOUZyAwMHvP9Gr60F9q7yH\noLv3hkgD0h9hrQXN/VurzfOCkBw8fYNtFRJ9Mi0mvAXeDbqzFKU/N1UkpyR2aTxc\no+Y9ZLj+lO60L2s=\n-----END CERTIFICATE-----\n",
+      "pid": 7959,
+      "uid": 1000,
+      "temporary_keys_removed": true
+    },
+    {
+      "event": "ready",
+      "kind": "expired",
+      "origin": "https://127.0.0.1:40021",
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIC1zCCAb+gAwIBAgIUW0sKOercjXaJY8DhTNZPBVHQweMwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTIwMDEwMTAwMDAwMFoXDTIwMDEw\nMjAwMDAwMFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAy1q+Uzw+zPLlFGyE7QXZTNYxaVYMO6OTvJS3bPcbV96e\njKyVCEaE5vEVjbrZzJmG/A1908qD4hoAn3Ig0hTYgt7/CiEwj2dc6meZEPhBFiOA\nPq4JcO+g52qcqo8N9JoSTyedC8UnJgrTgSmvz0z1w3blM57LW0Hfsve0VnnQYs4n\nClGXNGgkKILkWptpon1b4VR1a8vvOT18vRxReJNi1HIVp2TKAImVHp+Xjvr7o4TX\nuajuyA8YRLmH0oke+1ORrFrPiB97hJphFjGcGeoRKCKl9/pxKar75sJfugb+wW4V\nO2TFzR1UnR8uIsNcI/WByqLNOkUhNkm/0JORyval+QIDAQABoyEwHzAdBgNVHQ4E\nFgQUoSmWq0QJAhBDi9/0Bcge50U3gskwDQYJKoZIhvcNAQELBQADggEBAKSoORwK\nDDwuVDXc5R2X+ElRKFfmhye+ykHvwKH7+lNnzWJvyPuE96g33v8QbBUtAHsm88iJ\nyQsucDp7cqJr5fmCOQfMe0NN6N1R04Y6vfSL5wUdOUKWr4Rwq0zIM3LuNgAf46GV\naLlBC9Bqi5/CNZm6ST3rmC/oQ0rup+HArcoiUc4VshDgoCzPKGpZWBfFvymdEXes\n0Jq7F7BOLksPCxlJhlzRyLe99iGw+M45c+17GCWth3ZGpsV5NL98b2Mj3CJQPxjY\nm0k9DEJWA67FuiTgnt9m6HGIsMZocHz6MgqK1JSg/Ns99TUf6zHBF9tLSrO13Obc\n6UjCNzP4/jqFgh8=\n-----END CERTIFICATE-----\n",
+      "pid": 7959,
+      "uid": 1000,
+      "temporary_keys_removed": true
+    },
+    {
+      "event": "request",
+      "kind": "expired",
+      "path": "/api/check",
+      "method": "GET",
+      "headers": {
+        "Host": "127.0.0.1:40021",
+        "Origin": null,
+        "Sec-Fetch-Site": "none"
+      }
+    },
+    {
+      "event": "response",
+      "kind": "expired",
+      "path": "/api/check",
+      "status": 200,
+      "body": null
+    },
+    {
+      "event": "stopped",
+      "pid": 7959,
+      "temporary_keys_removed": true
+    }
+  ],
+  "certChecks": [
+    {
+      "label": "launch-one",
+      "hostname": "redirector.gvt1.com",
+      "same": false,
+      "allow": false,
+      "verificationResult": "net::OK",
+      "errorCode": 0
+    },
+    {
+      "label": "launch-one",
+      "hostname": "127.0.0.1",
+      "same": true,
+      "allow": true,
+      "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID",
+      "errorCode": -202
+    },
+    {
+      "label": "launch-one",
+      "hostname": "127.0.0.1",
+      "same": false,
+      "allow": false,
+      "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID",
+      "errorCode": -202
+    },
+    {
+      "label": "launch-two",
+      "hostname": "127.0.0.1",
+      "same": true,
+      "allow": true,
+      "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID",
+      "errorCode": -202
+    },
+    {
+      "label": "launch-two",
+      "hostname": "127.0.0.1",
+      "same": false,
+      "allow": false,
+      "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID",
+      "errorCode": -202
+    },
+    {
+      "label": "expired-exact",
+      "hostname": "127.0.0.1",
+      "same": true,
+      "allow": true,
+      "verificationResult": "net::ERR_CERT_AUTHORITY_INVALID",
+      "errorCode": -202
+    }
+  ],
+  "requests": [
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "http://127.0.0.1:40021/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://localhost:40021/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40022/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/",
+      "allow": true,
+      "resourceType": "mainFrame"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/sse",
+      "allow": true,
+      "resourceType": "xhr"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/preview",
+      "allow": true,
+      "resourceType": "subFrame"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/image",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/pdf",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/download",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/action",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-two",
+      "url": "https://127.0.0.1:40021/",
+      "allow": true,
+      "resourceType": "mainFrame"
+    },
+    {
+      "label": "launch-two",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-one",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": false,
+      "resourceType": "other"
+    },
+    {
+      "label": "launch-two",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": true,
+      "resourceType": "other"
+    },
+    {
+      "label": "expired-exact",
+      "url": "https://127.0.0.1:40021/api/check",
+      "allow": true,
+      "resourceType": "other"
+    }
+  ],
+  "windowsPid": 10476,
+  "limitations": [
+    "No real OAuth login, VPN/firewall variation, sleep/resume, system clock changes, or long-duration soak.",
+    "PDF/image endpoint MIME and bytes tested; full native PDF visual rendering and complete production preview contracts remain untested.",
+    "Fixture policy is not the production HTTP server or Phase B integration."
+  ],
+  "carrierPid": 33452,
+  "endpoint": "https://127.0.0.1:40021",
+  "guestPid": 7959,
+  "carrierExit": {
+    "code": 0,
+    "signal": null
+  },
+  "ended": "2026-10-24T15:28:11.371Z",
+  "summary": {
+    "passed": 12,
+    "failed": 0
+  }
+}

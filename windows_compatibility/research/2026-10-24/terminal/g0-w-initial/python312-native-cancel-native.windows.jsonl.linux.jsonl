@@ -1,0 +1,6 @@
+{"event": "linux-root-start", "pid": 14722, "time": 1792855782.4487877, "pgid": 14722, "python": "3.12.15 (main, Oct 14 2026, 01:05:27) [Clang 23.1.3 ]"}
+{"event": "linux-popen", "pid": 14722, "time": 1792855782.4558733, "child_pid": 14739, "child_pgid": 14739}
+{"event": "linux-control", "pid": 14722, "time": 1792855785.8737478, "command": "cancel"}
+{"event": "linux-killpg-sent", "pid": 14722, "time": 1792855785.8776124}
+{"event": "linux-parent-wait", "pid": 14722, "time": 1792855785.8849876, "returncode": -15}
+{"event": "linux-root-exit", "pid": 14722, "time": 1792855785.8906975}

@@ -1,0 +1,14 @@
+
+PASS WSL localhost Chromium fetch pins complete current certificate
+PASS exact scheme host port admission rejects neighboring origins
+PASS sandboxed renderer has no Node preload or process
+PASS renderer EventSource and fresh connection preserve pinned TLS
+PASS preview sandbox and image PDF MIME use same session
+PASS download API writes exact Windows file bytes through same session
+PASS Host Origin Fetch-Site are rejected with concrete server response evidence
+PASS same port wrong service is rejected after live connection closes
+PASS fresh session and actual WebContents adopt new launch only
+PASS retired session rejects concurrent reconnect attempts before network
+PASS stale certificate cannot authenticate a new launch on same port
+PASS expired exact certificate is accepted only in new pinned session
+{ passed: 12, failed: 0 }

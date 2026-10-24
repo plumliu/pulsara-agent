@@ -1,0 +1,5 @@
+{
+  "exit_code": 0,
+  "stdout": "{\"uid\": 1000, \"home\": \"/home/plumwsl\", \"tools\": {\"git\": \"/usr/bin/git\", \"curl\": \"/usr/bin/curl\", \"cc\": null, \"make\": null, \"bison\": null, \"flex\": null, \"pkg-config\": null, \"readelf\": \"/usr/bin/readelf\", \"patchelf\": null, \"xz\": \"/usr/bin/xz\", \"mise\": null, \"node\": null, \"uv\": null, \"protoc\": null, \"sudo\": \"/usr/bin/sudo\"}, \"repos\": {\"/home/plumwsl/workspaces/pulsara_agent\": false, \"/home/plumwsl/workspaces/pulsara-agent\": false}, \"sudo_cached\": false}\n",
+  "stderr": ""
+}
