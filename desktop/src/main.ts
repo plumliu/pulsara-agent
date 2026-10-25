@@ -21,6 +21,8 @@ import { createBackendSession } from './backend-session';
 import { checkInstalledWslMaintenance } from './wsl-maintenance';
 
 const windowsHost = process.platform === 'win32';
+// Avoid Windows occlusion/capture compositor artifacts while retaining accelerated WebGL and video.
+if (windowsHost) app.commandLine.appendSwitch('disable-gpu-compositing');
 const hostResourcesRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', 'resources');
 let resources = desktopResourcePaths(hostResourcesRoot);
 let host: HostOperations = posixHostOperations;
@@ -146,10 +148,15 @@ async function destroyWindow() {
   await destroyed;
 }
 
+function windowsControlsOverlay() {
+  const dark = uiPreferences.read()['pulsara-theme'] === 'dark';
+  return {height:44, color:dark ? '#202228' : '#faf8f2', symbolColor:dark ? '#dad5cb' : '#32343d'};
+}
 function createWindow(session?: Electron.Session) {
   window = new BrowserWindow({width:1440, height:920, minWidth:760, minHeight:520, backgroundColor:'#f3f0e7', title:'Pulsara',
     ...(process.platform !== 'darwin' ? {icon:desktopIcon} : {}),
-    titleBarStyle:process.platform === 'darwin' ? 'hiddenInset' : process.platform === 'win32' ? 'default' : 'hidden', trafficLightPosition:{x:16,y:16},
+    titleBarStyle:process.platform === 'darwin' ? 'hiddenInset' : 'hidden', trafficLightPosition:{x:16,y:16},
+    ...(windowsHost ? {titleBarOverlay:windowsControlsOverlay(), autoHideMenuBar:true} : {}),
     webPreferences:{preload:path.join(__dirname,'preload.js'), sandbox:true, contextIsolation:true, nodeIntegration:false,
       webviewTag:false, navigateOnDragDrop:false, ...(session ? {session} : {})}});
   browser = new BrowserOwner(window, () => origin);
@@ -356,7 +363,10 @@ else {
     handle('browser-activate', value => browser!.activate(value));
     handle('browser-layout', value => browser!.layout(value));
     handle('browser-hide', value => browser!.hide(value));
-    handle('write-ui-preference', value => uiPreferences.write(value));
+    handle('write-ui-preference', value => {
+      uiPreferences.write(value);
+      if (windowsHost && value.key === 'pulsara-theme') window!.setTitleBarOverlay(windowsControlsOverlay());
+    });
     handle('cli-status',async()=>{
       if (windowsHost) {
         try { await host.execFile('/usr/bin/test', ['-x',resources.packageCli], {env:{PULSARA_HOME:home}}); return {state:'ready', path:resources.packageCli, managedBy:'wsl'}; }

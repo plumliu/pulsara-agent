@@ -39,12 +39,16 @@ function fixture(options: {
   const stopping = deferred();
   const destroying = deferred();
   const calls: string[] = [];
+  const switches: string[] = [];
+  let readyRequested = false;
   const workbenchUrl = options.platform === 'win32' ? 'https://127.0.0.1:12345/' : 'http://127.0.0.1:12345/';
   const failures: string[] = [];
-  const handlers = new Map<string, (event: unknown) => Promise<unknown>>();
+  const handlers = new Map<string, (event: unknown, value?: unknown) => Promise<unknown>>();
   const dialogOptions: { defaultPath: string; properties: string[] }[] = [];
   const composition: {
     titleBarStyle?: string;
+    titleBarOverlay?: {height: number; color: string; symbolColor: string};
+    autoHideMenuBar?: boolean;
     python?: string;
     runtime?: { resources: DesktopResourcePaths; home: string; host: unknown };
     postgres?: { bin: string; home: string };
@@ -53,6 +57,7 @@ function fixture(options: {
   } = {};
   const host = { resolveHome(python: string) { composition.python = python; return '/tmp/pulsara-main-test'; } };
   const app = Object.assign(new EventEmitter(), {
+    commandLine: {appendSwitch(name: string) { assert.equal(readyRequested, false); switches.push(name); }},
     isPackaged: options.packagedResources !== undefined, setName() {}, setPath() {}, setAsDefaultProtocolClient() { return true; }, getPath(name: string) {
       if (name === 'home') return '/tmp/home';
       if (name === 'desktop') {
@@ -62,12 +67,16 @@ function fixture(options: {
       return '/tmp/pulsara-main-test';
     },
     requestSingleInstanceLock() { return true; }, exit(code: number) { calls.push('exit:' + code); }, quit() {}, getVersion() { return 'test-version'; },
-    whenReady() { return { then(action: () => Promise<void>) { return ready = action(); } }; },
+    whenReady() { readyRequested = true; return { then(action: () => Promise<void>) { return ready = action(); } }; },
   });
   let ready: Promise<void>;
   class Window extends EventEmitter {
     static current: Window;
-    constructor(options: {titleBarStyle?: string}) { super(); Window.current = this; composition.titleBarStyle = options.titleBarStyle; }
+    constructor(options: {titleBarStyle?: string; titleBarOverlay?: typeof composition.titleBarOverlay; autoHideMenuBar?: boolean}) {
+      super(); Window.current = this; composition.titleBarStyle = options.titleBarStyle;
+      composition.titleBarOverlay = options.titleBarOverlay; composition.autoHideMenuBar = options.autoHideMenuBar;
+    }
+    setTitleBarOverlay(options: typeof composition.titleBarOverlay) { composition.titleBarOverlay = options; }
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: workbenchUrl },
       isDestroyed() { return false; },
@@ -189,7 +198,11 @@ function fixture(options: {
         await settle(); calls.push('tls-retired');
       }};
     }},
-    './ui-preferences': { UiPreferences: class {} },
+    './ui-preferences': { UiPreferences: class {
+      values: Record<string,string> = {};
+      read() { return {...this.values}; }
+      write(input: {key:string;value:string}) { this.values[input.key] = input.value; }
+    } },
     './cli-install': {
       cliLauncherScript,
       async cliStatus(config: CliRegistration) { composition.cli = config; return { state: 'ready' }; },
@@ -203,7 +216,7 @@ function fixture(options: {
     process: { platform: options.platform ?? 'darwin', resourcesPath: options.packagedResources, env: {}, argv:options.maintenance ? ['Pulsara.exe','--pulsara-maintenance-check'] : [] },
     require(name: string) { return Object.hasOwn(modules, name) ? modules[name] : require(name); },
   });
-  return { composition, host, dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, destroying, handlers, calls, failures, ready: ready! };
+  return { composition, host, dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, destroying, handlers, calls, switches, failures, ready: ready! };
 }
 
 for (const scenario of [
@@ -216,6 +229,9 @@ for (const scenario of [
     await value.ready;
     await value.handlers.get('desktop:cli-status')!(value.trustedEvent());
     const { composition } = value;
+    assert.deepEqual(value.switches, []);
+    assert.equal(composition.titleBarOverlay, undefined);
+    assert.equal(composition.autoHideMenuBar, undefined);
     const paths = composition.runtime!.resources;
     assert.equal(paths.root, scenario.packagedResources);
     assert.equal(composition.python, paths.pythonExecutable);
@@ -232,7 +248,10 @@ for (const scenario of [
 test('Windows requires environment confirmation before creating a kernel or preparing PostgreSQL', async () => {
   const value = fixture({platform:'win32'});
   await value.ready;
-  assert.equal(value.composition.titleBarStyle, 'default');
+  assert.equal(value.composition.titleBarStyle, 'hidden');
+  assert.equal(value.composition.autoHideMenuBar, true);
+  assert.deepEqual(value.switches, ['disable-gpu-compositing']);
+  assert.equal(JSON.stringify(value.composition.titleBarOverlay), JSON.stringify({height:44,color:'#faf8f2',symbolColor:'#32343d'}));
   assert.ok(value.calls.includes('setup-cover'));
   assert.equal(value.calls.includes('child-spawned'), false);
   assert.equal(value.calls.includes('database-preparing'), false);
@@ -265,6 +284,17 @@ test('Windows revalidates its saved target and pins a fresh window before workbe
   assert.ok(value.calls.indexOf('tls-sealed') < value.calls.indexOf('tls-retired'));
   assert.ok(value.calls.indexOf('tls-retired') < value.calls.indexOf('database-stopped'));
   assert.equal(value.calls.at(-1), 'exit:0');
+});
+
+test('Windows native overlay follows the saved application theme', async () => {
+  const value = fixture({platform:'win32',wslSelected:true});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  await value.handlers.get('desktop:write-ui-preference')!(value.trustedEvent(),{key:'pulsara-theme',value:'dark'});
+  assert.equal(value.composition.titleBarOverlay?.color,'#202228');
+  assert.equal(value.composition.titleBarOverlay?.symbolColor,'#dad5cb');
+  await value.handlers.get('desktop:write-ui-preference')!(value.trustedEvent(),{key:'pulsara-theme',value:'light'});
+  assert.equal(value.composition.titleBarOverlay?.color,'#faf8f2');
 });
 
 for (const candidate of [

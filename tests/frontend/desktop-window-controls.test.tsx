@@ -8,6 +8,7 @@ it('keeps Linux window controls outside session drag regions when switching page
   const minimize = vi.fn(), maximize = vi.fn(), close = vi.fn();
   window.pulsaraDesktop = { platform: 'linux', minimize, toggleMaximize: maximize, closeWindow: close } as unknown as PulsaraDesktop;
   const view = render(<PulsaraApp adapter={new FakeAdapter()} />);
+  expect(view.container.querySelector('.desktop-shell')?.getAttribute('data-platform')).toBe('linux');
   const controls = screen.getByRole('group', { name: '窗口控制' });
   const shell = view.container.querySelector('.desktop-shell')!;
   expect(controls.parentElement).toBe(shell);
@@ -37,6 +38,7 @@ it('retains macOS native controls without rendering Linux replacements', async (
 it('uses Windows native controls on both overview and conversation pages', async () => {
   window.pulsaraDesktop = { platform: 'win32' } as PulsaraDesktop;
   const view = render(<PulsaraApp adapter={new FakeAdapter()} />);
+  expect(view.container.querySelector('.desktop-shell')?.getAttribute('data-platform')).toBe('win32');
   expect(screen.queryByRole('group', { name: '窗口控制' })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
   await screen.findByLabelText('发送给 Pulsara');

@@ -139,6 +139,12 @@
 .desktop-shell:has(.desktop-window-controls) .workspace-topbar { padding-right: 112px; }
 .desktop-shell:has(.desktop-window-controls):not(.has-inspector) .topbar { padding-right: 122px; }
 .desktop-shell.is-surface:has(.desktop-window-controls) .desktop-titlebar { padding-right: 122px; }
+/* Electron supplies the real native caption-button width, including DPI changes. */
+.desktop-shell[data-platform='win32'] { --native-controls-width: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)); }
+.desktop-shell[data-platform='win32'].is-surface .desktop-titlebar { padding-right: calc(var(--native-controls-width) + 14px); }
+.desktop-shell[data-platform='win32'].is-workbench:not(.has-inspector) .topbar { padding-right: calc(var(--native-controls-width) + 16px); }
+.desktop-shell[data-platform='win32'].is-workbench.has-inspector .workspace-topbar { padding-right: var(--native-controls-width); }
+.desktop-shell[data-platform='win32'] .workspace-topbar .workspace-toolbar > button { margin-left: auto; }
 /* Reserve a real box for native controls: padding would leave this drag region
    overlapping the sidebar button when the navigation column shrinks to 62px. */
 @media (min-width: 1151px) {

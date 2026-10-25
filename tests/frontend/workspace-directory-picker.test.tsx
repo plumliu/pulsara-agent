@@ -8,7 +8,47 @@ function api(): WorkspaceDirectoryApi {
   return {list:vi.fn(async () => page()), create:vi.fn(async (parent, name) => ({path:`${parent}/${name}`})), select:vi.fn(async path => ({path}))};
 }
 beforeEach(() => { HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) { this.open = true; }); });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+test('dragging the header stays in the viewport, releases capture and leaves action buttons clickable', async () => {
+  vi.stubGlobal('PointerEvent', class extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: PointerEventInit = {}) { super(type, init); this.pointerId = init.pointerId ?? 1; }
+  });
+  const operations = api(), finish = vi.fn();
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={finish} />);
+  await screen.findByRole('status', {name:'所选文件夹'});
+  const dialog = screen.getByRole('dialog'), header = dialog.querySelector('header')!;
+  vi.spyOn(dialog, 'getBoundingClientRect').mockImplementation(() => new DOMRect(
+    dialog.style.left ? parseFloat(dialog.style.left) : 200,
+    dialog.style.top ? parseFloat(dialog.style.top) : 150, 500, 350));
+  header.setPointerCapture = vi.fn();
+  const pointer = (type: 'pointerDown' | 'pointerMove' | 'pointerUp' | 'pointerCancel', x: number, y: number) => {
+    fireEvent[type](header, {button:0, pointerId:1, clientX:x, clientY:y});
+  };
+  pointer('pointerDown', 300, 170); pointer('pointerMove', 350, 220);
+  expect([dialog.style.left, dialog.style.top]).toEqual(['250px', '200px']);
+  pointer('pointerUp', 350, 220); pointer('pointerMove', 800, 700);
+  expect([dialog.style.left, dialog.style.top]).toEqual(['250px', '200px']);
+  pointer('pointerDown', 300, 220); pointer('pointerMove', -50, -50);
+  expect([dialog.style.left, dialog.style.top]).toEqual(['0px', '0px']);
+  pointer('pointerCancel', -50, -50); pointer('pointerMove', 1000, 1000);
+  expect([dialog.style.left, dialog.style.top]).toEqual(['0px', '0px']);
+  pointer('pointerDown', 50, 20); pointer('pointerMove', 10000, 10000);
+  expect([dialog.style.left, dialog.style.top]).toEqual([`${innerWidth - 500}px`, `${innerHeight - 350}px`]);
+  pointer('pointerUp', 10000, 10000);
+  vi.stubGlobal('innerWidth', 600); vi.stubGlobal('innerHeight', 400);
+  fireEvent(window, new Event('resize'));
+  expect([dialog.style.left, dialog.style.top]).toEqual(['100px', '50px']);
+  vi.mocked(header.setPointerCapture).mockClear();
+  const refresh = screen.getByRole('button', {name:'刷新'});
+  fireEvent.pointerDown(refresh.querySelector('svg')!, {button:0, pointerId:1});
+  expect(header.setPointerCapture).not.toHaveBeenCalled();
+  fireEvent.click(refresh);
+  await waitFor(() => expect(operations.list).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole('button', {name:'关闭目录选择'}));
+  expect(finish).toHaveBeenCalledWith(null);
+});
 
 test('the picker opens the existing home and selection is revalidated without creating a directory', async () => {
   const operations = api();

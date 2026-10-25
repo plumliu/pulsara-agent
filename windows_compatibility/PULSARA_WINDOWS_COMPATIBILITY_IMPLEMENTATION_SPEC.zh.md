@@ -323,7 +323,9 @@ TLS证明server身份，不把本机同用户进程当远程攻击沙箱；现�
 
 win32加入真实host类型，frontend同时知道host平台与Linux执行域，不能`platform!=='darwin'`就把路径当Windows或把所有非macOS当Linux控件。验证Windows窗口控制/拖动/snap/DPI、tray失败可恢复入口、Ctrl/AltGr/中文IME、文件选择/拖放、PDF/image/HTML与正常后台退出。图形用户不会因选择Linux执行域被要求开terminal窗口。
 
-2026-10-25 用户界面修订：Windows使用系统原生完整标题栏（`titleBarStyle: 'default'`），由系统提供最小化、最大化/还原、关闭与标题栏拖动；首次设置/启动遮罩和工作台不再绘制Windows窗口控制按钮，也不为它们保留页面内占位。关闭按钮仍沿原宿主close事件处理托盘隐藏/退出，不改变生命周期合同。macOS原生traffic lights和Linux现有自绘控件保持原方式。浏览器HTML预览只展示内容区，不模拟系统标题栏。
+2026-10-26 用户界面修订：Windows使用 `titleBarStyle: 'hidden'` 与Electron原生 `titleBarOverlay`，在现有44px顶行右侧提供系统最小化、最大化/还原和关闭按钮，不额外增加完整系统标题栏；菜单栏默认隐藏，保留Alt访问与原菜单快捷键。前端依据Window Controls Overlay的真实安全区域为顶行操作留位，四个工作区分类与Linux一样放在下一行；全屏、窗口缩放及DPI变化由原生布局更新。覆盖层跟随已有应用主题。首次设置/启动遮罩和工作台均不重画Windows按钮。关闭按钮仍沿原宿主close事件处理托盘隐藏/退出，不改变生命周期合同。macOS原生traffic lights和Linux现有自绘控件保持原方式。浏览器HTML预览只展示内容区，不模拟原生控件。此合同取代68afb244的完整原生标题栏方案；本地修正候选alpha.12，不合并、不发布。
+
+2026-10-26 Windows绘制修订：本机在其他窗口遮挡或启动截图工具时出现底部黑边和内容收缩观感；只读采样中外框、内容区及底层绘制窗口尺寸保持不变。用户对照确认 `--disable-gpu` 和范围更小的 `--disable-gpu-compositing` 均消除现象；本机真实Electron探针确认后者仍能使用NVIDIA WebGL及视频解码加速。因此Windows宿主在Electron ready之前通过既有 `app.commandLine.appendSwitch('disable-gpu-compositing')` 使用Chromium拥有的软件合成路径，不整体禁用硬件加速，不添加焦点/遮挡时反复改窗口尺寸或强制重绘的补丁。macOS与Linux不设置此开关；WSL内核与网络设置保持原合同。本机对照结果不替代其他显卡、显示矩阵或发布资格验收。
 
 2026-10-26 目录选择器界面修订：列表单击选中文件夹，双击或Enter进入，支持后退/前进/上一级；底部明确显示待选路径，最终确认仍由原选择API重新验证。通过“浏览…”显式选到无效目录时，以Pulsara标识、品牌字样和简短状态的浅色遮罩覆盖路径工具栏和整个目录列表区域，导航、新建及列表项均不再可点击或聚焦；标题栏刷新/关闭与底部浏览/取消仍可用。底部保留无效路径，具体原因靠右与取消/确认按钮组成一组并垂直居中，确认按钮置灰；重新定位有效目录后撤下遮罩。工程根目录、允许的Linux文件系统范围、分页、显式创建及取消的原owner保持；新建文件夹从工具栏打开编辑行。导航记录与高亮仅是本次弹窗的内存状态，不增加持久状态。
 

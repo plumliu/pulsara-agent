@@ -211,13 +211,16 @@
 .assistant-markdown h1, .assistant-markdown h2, .assistant-markdown h3 { margin: 18px 0 8px; color: var(--ink); font-family: var(--serif); line-height: 1.35; }
 .assistant-markdown h1 { font-size: var(--type-heading); }.assistant-markdown h2 { font-size: var(--type-title-large); }.assistant-markdown h3 { font-size: var(--type-title-small); }
 .assistant-markdown ul, .assistant-markdown ol { margin: 8px 0 12px; padding-left: 20px; }
+.assistant-markdown ul { list-style-type: disc; }
+.assistant-markdown ol { list-style-type: decimal; }
+.assistant-markdown .task-list-item { list-style-type: none; }
 .assistant-markdown li { margin: 3px 0; }
 .assistant-markdown code { padding: 1px 4px; border-radius: 4px; background: var(--paper-deep); font-family: var(--mono); font-size: .88em; }
 .assistant-markdown pre { max-width: 100%; margin: 9px 0 12px; overflow: auto; border-radius: 9px; background: #1c1e23; color: #ded8cc; }
 .assistant-markdown pre code { display: block; min-width: max-content; padding: 11px 12px; background: transparent; line-height: 1.65; }
 .assistant-markdown blockquote { margin: 10px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--blue); color: var(--muted); }
 .assistant-markdown a { color: var(--blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--blue) 35%, transparent); text-underline-offset: 2px; }
-.assistant-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.assistant-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin-bottom: 16px; }
 .assistant-markdown th, .assistant-markdown td { padding: 6px 8px; border: 1px solid var(--line); text-align: left; overflow-wrap: normal; }
 .assistant-markdown .katex { font-size: 1.04em; }
 .assistant-markdown .katex-display { max-width: 100%; margin: 12px 0 14px; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }

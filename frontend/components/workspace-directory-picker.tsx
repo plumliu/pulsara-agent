@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ArrowLeft, ArrowRight, ArrowUp, Check, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, House, LoaderCircle, RefreshCw, X } from 'lucide-react';
 import type { WorkspaceDirectoryCandidate } from '../../desktop/src/backend-paths';
@@ -24,6 +24,27 @@ export function WorkspaceDirectoryPicker({api, signal, finish}: {
   api: WorkspaceDirectoryApi; signal: AbortSignal; finish(path: string | null): void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const drag = useRef<{pointerId: number; x: number; y: number} | null>(null);
+  const position = (x: number, y: number) => {
+    const element = dialog.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    Object.assign(element.style, {margin: '0', inset: 'auto',
+      left: `${Math.max(0, Math.min(x, window.innerWidth - rect.width))}px`,
+      top: `${Math.max(0, Math.min(y, window.innerHeight - rect.height))}px`});
+  };
+  const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || event.isPrimary === false || drag.current
+      || (event.target as Element).closest('button')) return;
+    const rect = dialog.current!.getBoundingClientRect();
+    drag.current = {pointerId: event.pointerId, x: event.clientX - rect.left, y: event.clientY - rect.top};
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const current = drag.current;
+    if (current?.pointerId === event.pointerId) position(event.clientX - current.x, event.clientY - current.y);
+  };
   const [page, setPage] = useState<WorkspaceDirectoryPage>();
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
@@ -38,9 +59,18 @@ export function WorkspaceDirectoryPicker({api, signal, finish}: {
   };
   useEffect(() => {
     dialog.current?.showModal();
+    const resize = () => {
+      const element = dialog.current;
+      if (element?.style.left) {
+        const rect = element.getBoundingClientRect();
+        position(rect.left, rect.top);
+      }
+    };
+    window.addEventListener('resize', resize);
     void api.list(undefined, null, signal).then(value => {
       if (!signal.aborted) { setPage(value); setNavigation({paths: [value.path], index: 0}); }
     }).catch(showError).finally(() => { if (!signal.aborted) setBusy(false); });
+    return () => window.removeEventListener('resize', resize);
     // This mounted picker owns exactly one request lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -109,7 +139,9 @@ export function WorkspaceDirectoryPicker({api, signal, finish}: {
   const relative = page?.path.slice(page.root.length).split('/').filter(Boolean) ?? [];
   return <dialog ref={dialog} className="linux-directory-picker" aria-labelledby="linux-directory-title"
     onCancel={event => { event.preventDefault(); finish(null); }}>
-    <header className="linux-directory-header">
+    <header className="linux-directory-header" onPointerDown={startDrag} onPointerMove={moveDrag}
+      onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}
+      onLostPointerCapture={() => { drag.current = null; }}>
       <FolderOpen size={18} className="linux-directory-heading-icon" aria-hidden="true" />
       <h2 id="linux-directory-title">选择 Linux 工作目录</h2>
       {page && <button className="linux-directory-icon-button" aria-label="刷新" title="刷新" disabled={busy} onClick={() => void browse(page.path)}><RefreshCw size={15} aria-hidden="true" className={busy ? 'linux-directory-spinning' : undefined} /></button>}

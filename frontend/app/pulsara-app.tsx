@@ -6,6 +6,7 @@ import { randomIdentity, isCanonicalIdentity } from '../lib/identity';
 
 import { DesktopWorkspaceProvider, type WorkspaceControl } from '../components/desktop-workspace';
 import { DesktopTitlebar, DesktopWindowControls } from '../components/desktop-titlebar';
+import { desktopHost } from '../lib/desktop-host';
 import { FilePreviewProvider } from '../components/file-browser';
 import { UserAvatarProvider } from '../components/user-avatar';
 
@@ -3061,7 +3062,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     <FilePreviewProvider sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
     <PresentationProvider readTask={loadTask} onCloseTaskGroup={unloadTaskGroup} connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
-    <main className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>
+    <main data-platform={desktopHost()?.platform} className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>
       <DesktopTitlebar workbench={activeView === "workbench"} title={activeView === "workbench" ? activeSession.title : "Pulsara"} onToggleSidebar={() => setSidebarOpen(value => !value)} onToggleWorkspace={() => setInspectorOpen(value => !value)} />
       <div className="desktop-navigation"><ActivityRail activeView={activeView} onNavigate={navigate} />
 

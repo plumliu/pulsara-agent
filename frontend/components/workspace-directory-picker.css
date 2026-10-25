@@ -1,4 +1,5 @@
-.linux-directory-picker{width:min(780px,calc(100vw - 40px));max-height:calc(100dvh - 40px);padding:0;overflow:hidden;border:1px solid var(--line-strong,#d4cfc5);border-radius:14px;background:var(--paper-solid,#fdfbf6);color:var(--ink,#17191f);font-family:var(--sans,system-ui,sans-serif);box-shadow:var(--shadow-lg,0 24px 72px #1a181433)}
+.linux-directory-picker{width:min(780px,calc(100vw - 40px));max-height:calc(100dvh - 40px);margin:auto;padding:0;overflow:hidden;border:1px solid var(--line-strong,#d4cfc5);border-radius:14px;background:var(--paper-solid,#fdfbf6);color:var(--ink,#17191f);font-family:var(--sans,system-ui,sans-serif);box-shadow:var(--shadow-lg,0 24px 72px #1a181433)}
+.linux-directory-picker,.linux-directory-picker::backdrop{-webkit-app-region:no-drag}
 .linux-directory-picker[open]{display:flex;flex-direction:column}
 .linux-directory-picker::backdrop{background:#0d0e126b;backdrop-filter:blur(4px)}
 .linux-directory-picker button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:30px;padding:5px 11px;border:1px solid var(--line,#d4cfc5);border-radius:6px;background:var(--paper-raised,#faf8f2);color:var(--ink-soft,#32343d);font:500 12px/18px var(--sans,system-ui,sans-serif);cursor:pointer;transition:background .15s,border-color .15s}
@@ -6,7 +7,7 @@
 .linux-directory-picker button:disabled{opacity:.4;cursor:default}
 .linux-directory-picker button:focus-visible{outline:none;text-decoration:underline;text-underline-offset:3px}
 .linux-directory-picker input:focus-visible{outline:1px solid var(--line-strong,#d4cfc5);outline-offset:0}
-.linux-directory-header{display:flex;align-items:center;gap:9px;flex:none;padding:12px 18px;border-bottom:1px solid var(--line,#d4cfc5);background:var(--paper-raised,#faf8f2)}
+.linux-directory-header{display:flex;align-items:center;gap:9px;flex:none;padding:12px 18px;border-bottom:1px solid var(--line,#d4cfc5);background:var(--paper-raised,#faf8f2);cursor:move;user-select:none;touch-action:none}
 .linux-directory-heading-icon{flex:none;color:var(--annotation-accent,#966a32)}
 .linux-directory-picker h2{flex:1;min-width:0;margin:0;font-size:14px;font-weight:600;line-height:1.5}
 .linux-directory-picker .linux-directory-icon-button{width:28px;min-height:28px;flex:none;padding:0;border-color:transparent;background:transparent;color:var(--muted,#7d7b74)}
