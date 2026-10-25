@@ -1,0 +1,33 @@
+{
+  "config": {
+    "root": "/home/plumwsl/.bmain-tnsqp21k",
+    "home": "/home/plumwsl/.bmain-tnsqp21k/home",
+    "workspace": "/home/plumwsl/workspaces/.bmain-tnsqp21k",
+    "windowsHome": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-tnsqp21k-electron",
+    "kernelEvents": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/host-eof-exact-kernel.jsonl",
+    "hostEvents": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\host-eof-exact-host.jsonl",
+    "child": "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/terminal/interop-child.exe",
+    "bootstrap": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/kernel_bootstrap.py",
+    "guestConfig": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/host-eof-exact-config.json",
+    "installedRoot": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+    "resources": "C:/Users/plumlocal/AppData/Local/Programs/pulsara/resources",
+    "scenario": "host-eof"
+  },
+  "externalCleanupOnly": true,
+  "formalHomeOperation": "none",
+  "originalWaitOwnerCompleted": true,
+  "originalMaintenanceRejected": {
+    "error": "Error: PostgreSQL operation is still active",
+    "postgresExecution": "not-submitted"
+  },
+  "before": {
+    "stdout": "/home/plumwsl/.bmain-tnsqp21k/home/desktop/postgres|7700620382223286981\n",
+    "stderr": ""
+  },
+  "originalResetCompleted": true,
+  "cleanup": {
+    "rootRemoved": true,
+    "workspaceRemoved": true,
+    "remainingExactOwned": []
+  }
+}

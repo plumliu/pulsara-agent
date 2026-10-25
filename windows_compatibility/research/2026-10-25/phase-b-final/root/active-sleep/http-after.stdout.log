@@ -1,0 +1,1 @@
+{"origin":"https://127.0.0.1:37313","at":1792939524423,"method":"GET","path":"/healthz","fullCertificateSame":true,"authorized":true,"localPort":55675,"remotePort":37313,"httpStatus":200,"health":{"status":"ready"}}

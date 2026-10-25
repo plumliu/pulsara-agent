@@ -1,0 +1,65 @@
+{
+  "passed": true,
+  "version": "0.1.0-alpha.10",
+  "sleepIntervals": [
+    {
+      "start": {
+        "id": 506,
+        "recordId": 1715,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:03.4144693Z"
+      },
+      "end": {
+        "id": 507,
+        "recordId": 1717,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:04.4900335Z"
+      },
+      "secondsRounded": 1.076
+    },
+    {
+      "start": {
+        "id": 506,
+        "recordId": 1720,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:16.5133922Z"
+      },
+      "end": {
+        "id": 507,
+        "recordId": 1722,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:23.9429596Z"
+      },
+      "secondsRounded": 7.43
+    },
+    {
+      "start": {
+        "id": 506,
+        "recordId": 1726,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:43.0974559Z"
+      },
+      "end": {
+        "id": 507,
+        "recordId": 1740,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:44:55.2181384Z"
+      },
+      "secondsRounded": 132.121
+    }
+  ],
+  "writerGeneration": [
+    1,
+    2
+  ],
+  "snapshotComparisons": 16,
+  "windowsChildExitCode": 1,
+  "originalChildHeldHandleSignaled": true,
+  "observerSentSignal": false,
+  "sameKernelAndPgThroughSleep": true,
+  "uniqueCompletedPrompts": 2,
+  "terminalLaunches": 1,
+  "oldToolCallsExactlyPreserved": true,
+  "normalQuitAndMaintenancePassed": true,
+  "qualification": "One actual GUI PIPE/Windows echo task across sleep; not active provider, every owner, or hardware-DPI matrix."
+}

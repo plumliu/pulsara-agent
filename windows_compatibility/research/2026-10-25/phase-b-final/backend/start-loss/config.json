@@ -1,0 +1,8 @@
+{
+  "home": "/home/plumwsl/.pbfpg-qds5f0t5",
+  "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+  "repo": "/home/plumwsl/workspaces/pulsara_agent",
+  "library": "/home/plumwsl/.pbf-tools-u0msor9v/fault.so",
+  "method": "run:pg_ctl:start",
+  "native_stage": "postgres-exec"
+}

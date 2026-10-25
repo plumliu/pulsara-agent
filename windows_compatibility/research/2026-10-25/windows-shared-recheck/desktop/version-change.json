@@ -1,0 +1,15 @@
+{
+  "files": [
+    "pyproject.toml",
+    "src/pulsara_agent/__init__.py",
+    "uv.lock",
+    "desktop/package.json",
+    "desktop/package-lock.json",
+    "frontend/package.json",
+    "frontend/package-lock.json"
+  ],
+  "python": "0.1.0a10",
+  "desktop": "0.1.0-alpha.10",
+  "bothClones": true,
+  "dependencyVersionsChanged": false
+}

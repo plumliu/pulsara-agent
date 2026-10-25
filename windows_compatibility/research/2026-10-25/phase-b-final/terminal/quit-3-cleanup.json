@@ -1,0 +1,29 @@
+{
+  "config": {
+    "root": "/home/plumwsl/.bmain-8ea1dbs_",
+    "home": "/home/plumwsl/.bmain-8ea1dbs_/home",
+    "workspace": "/home/plumwsl/workspaces/.bmain-8ea1dbs_",
+    "windowsHome": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-8ea1dbs_-electron",
+    "kernelEvents": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/quit-3-kernel.jsonl",
+    "hostEvents": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\quit-3-host.jsonl",
+    "child": "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/terminal/interop-child.exe",
+    "bootstrap": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/kernel_bootstrap.py",
+    "guestConfig": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/quit-3-config.json",
+    "installedRoot": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+    "resources": "C:/Users/plumlocal/AppData/Local/Programs/pulsara/resources",
+    "scenario": "quit"
+  },
+  "externalCleanupOnly": true,
+  "formalHomeOperation": "none",
+  "originalWaitOwnerCompleted": true,
+  "before": {
+    "notRunning": 2,
+    "stderr": "psql: error: connection to server on socket \"/home/plumwsl/.bmain-8ea1dbs_/home/desktop/socket/.s.PGSQL.5432\" failed: No such file or directory\n\tIs the server running locally and accepting connections on that socket?\n"
+  },
+  "originalResetCompleted": true,
+  "cleanup": {
+    "rootRemoved": true,
+    "workspaceRemoved": true,
+    "remainingExactOwned": []
+  }
+}

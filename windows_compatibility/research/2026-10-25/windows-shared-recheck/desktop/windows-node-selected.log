@@ -1,0 +1,334 @@
+TAP version 13
+# Subtest: same-distribution UNC aliases preserve Linux case and Unicode identity
+ok 1 - same-distribution UNC aliases preserve Linux case and Unicode identity
+  ---
+  duration_ms: 1.9758
+  type: 'test'
+  ...
+# Subtest: domain mapping refuses Windows drives, other distributions and ambiguous components
+ok 2 - domain mapping refuses Windows drives, other distributions and ambiguous components
+  ---
+  duration_ms: 0.4177
+  type: 'test'
+  ...
+# Subtest: Linux-only names remain previewable but cannot become ambiguous host paths
+ok 3 - Linux-only names remain previewable but cannot become ambiguous host paths
+  ---
+  duration_ms: 1.1725
+  type: 'test'
+  ...
+# Subtest: one immutable full certificate and exact origin restrict every backend network request
+ok 4 - one immutable full certificate and exact origin restrict every backend network request
+  ---
+  duration_ms: 2.6855
+  type: 'test'
+  ...
+# Subtest: retirement seals admission and joins deferred native cancellation plus original owners
+ok 5 - retirement seals admission and joins deferred native cancellation plus original owners
+  ---
+  duration_ms: 4.7004
+  type: 'test'
+  ...
+# Subtest: an owner settlement failure stays a retirement failure after network cleanup
+ok 6 - an owner settlement failure stays a retirement failure after network cleanup
+  ---
+  duration_ms: 1.0046
+  type: 'test'
+  ...
+# Subtest: Windows readiness samples only HEAD on the original pinned session and shares one task
+ok 7 - Windows readiness samples only HEAD on the original pinned session and shares one task
+  ---
+  duration_ms: 279.0882
+  type: 'test'
+  ...
+# Subtest: readiness preserves authentication, TLS and other transport failures without retry
+ok 8 - readiness preserves authentication, TLS and other transport failures without retry
+  ---
+  duration_ms: 1.3189
+  type: 'test'
+  ...
+# Subtest: external cancellation aborts the forwarding sampling wait with its original reason
+ok 9 - external cancellation aborts the forwarding sampling wait with its original reason
+  ---
+  duration_ms: 1.679
+  type: 'test'
+  ...
+# Subtest: retirement aborts and joins a native readiness request before clearing the session
+ok 10 - retirement aborts and joins a native readiness request before clearing the session
+  ---
+  duration_ms: 0.7236
+  type: 'test'
+  ...
+# Subtest: retirement joins a cancelled sampling wait and caches the same cleanup during owner reentry
+ok 11 - retirement joins a cancelled sampling wait and caches the same cleanup during owner reentry
+  ---
+  duration_ms: 1.5242
+  type: 'test'
+  ...
+# Subtest: URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+ok 12 - URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+  ---
+  duration_ms: 1.2931
+  type: 'test'
+  ...
+# Subtest: partition network policy protects control port across aliases and all request types
+ok 13 - partition network policy protects control port across aliases and all request types
+  ---
+  duration_ms: 0.5761
+  type: 'test'
+  ...
+# Subtest: native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+ok 14 - native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+  ---
+  duration_ms: 0.8105
+  type: 'test'
+  ...
+# Subtest: WSL argv fixes the confirmed target and never interprets paths as shell source
+ok 15 - WSL argv fixes the confirmed target and never interprets paths as shell source
+  ---
+  duration_ms: 1.5743
+  type: 'test'
+  ...
+# Subtest: Windows automatic environment forwarding is removed without disabling interop
+ok 16 - Windows automatic environment forwarding is removed without disabling interop
+  ---
+  duration_ms: 0.7406
+  type: 'test'
+  ...
+# Subtest: runtime diagnostics stay in the host log directory and preserve exact bytes
+ok 17 - runtime diagnostics stay in the host log directory and preserve exact bytes
+  ---
+  duration_ms: 23.3293
+  type: 'test'
+  ...
+# Subtest: OAuth return link is an exact focus-only entry point
+ok 18 - OAuth return link is an exact focus-only entry point
+  ---
+  duration_ms: 0.7926
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL operation waits for close and preserves split UTF-8
+ok 19 - finite PostgreSQL operation waits for close and preserves split UTF-8
+  ---
+  duration_ms: 67.8381
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL result requires one complete valid reply and normal carrier close
+ok 20 - finite PostgreSQL result requires one complete valid reply and normal carrier close
+  ---
+  duration_ms: 276.7117
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL physical rejection and settled command failure remain distinct
+ok 21 - finite PostgreSQL physical rejection and settled command failure remain distinct
+  ---
+  duration_ms: 88.557
+  type: 'test'
+  ...
+# Subtest: cancellation before operation blocks late ready and joins the real helper
+ok 22 - cancellation before operation blocks late ready and joins the real helper
+  ---
+  duration_ms: 50.3924
+  type: 'test'
+  ...
+# Subtest: cancellation after the irreversible write preserves unknown and waits for close
+ok 23 - cancellation after the irreversible write preserves unknown and waits for close
+  ---
+  duration_ms: 47.2351
+  type: 'test'
+  ...
+# Subtest: maintenance uses the same finite client without a lifecycle action
+ok 24 - maintenance uses the same finite client without a lifecycle action
+  ---
+  duration_ms: 56.3546
+  type: 'test'
+  ...
+# Subtest: each finite reply stream keeps the existing four MiB boundary
+ok 25 - each finite reply stream keeps the existing four MiB boundary
+  ---
+  duration_ms: 139.6467
+  type: 'test'
+  ...
+# Subtest: WSL startup sends the fixed host identity and requires the current certificate
+ok 26 - WSL startup sends the fixed host identity and requires the current certificate
+  ---
+  duration_ms: 132.1748
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: failed-zero
+ok 27 - shutdown rejects incomplete settlement even with exit zero: failed-zero
+  ---
+  duration_ms: 61.276
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: invalid-zero
+ok 28 - shutdown rejects incomplete settlement even with exit zero: invalid-zero
+  ---
+  duration_ms: 51.9505
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+ok 29 - shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+  ---
+  duration_ms: 53.8086
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+ok 30 - shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+  ---
+  duration_ms: 67.0359
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+ok 31 - shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+  ---
+  duration_ms: 55.6286
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-failure
+ok 32 - a submitted startup cannot be treated as an unused child: pre-ready-failure
+  ---
+  duration_ms: 57.6033
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-exit
+ok 33 - a submitted startup cannot be treated as an unused child: pre-ready-exit
+  ---
+  duration_ms: 56.5528
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-oauth
+ok 34 - OAuth bridge reports the real browser-open outcome: wsl-oauth
+  ---
+  duration_ms: 66.8784
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+ok 35 - OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+  ---
+  duration_ms: 68.8189
+  type: 'test'
+  ...
+# Subtest: host uses one child, private startup frame and correlated quit inspection
+ok 36 - host uses one child, private startup frame and correlated quit inspection
+  ---
+  duration_ms: 103.945
+  type: 'test'
+  ...
+# Subtest: stop waits for the child to finish settlement and permits concurrent stop callers
+ok 37 - stop waits for the child to finish settlement and permits concurrent stop callers
+  ---
+  duration_ms: 66.0858
+  type: 'test'
+  ...
+# Subtest: malformed status closes the control pipe and explicit stop does not write after end
+ok 38 - malformed status closes the control pipe and explicit stop does not write after end
+  ---
+  duration_ms: 60.6262
+  type: 'test'
+  ...
+# Subtest: quit during asynchronous launch preparation still stops the child once spawned
+ok 39 - quit during asynchronous launch preparation still stops the child once spawned
+  ---
+  duration_ms: 73.7505
+  type: 'test'
+  ...
+# Subtest: a ready child reporting close failure rejects shutdown completion
+ok 40 - a ready child reporting close failure rejects shutdown completion
+  ---
+  duration_ms: 75.019
+  type: 'test'
+  ...
+# Subtest: stop before any launch is a no-op for concurrent callers
+ok 41 - stop before any launch is a no-op for concurrent callers
+  ---
+  duration_ms: 7.1635
+  type: 'test'
+  ...
+# Subtest: stop retains an already closed ready child nonzero result for every caller
+ok 42 - stop retains an already closed ready child nonzero result for every caller
+  ---
+  duration_ms: 65.001
+  type: 'test'
+  ...
+# Subtest: stop accepts an already closed ready child with exit zero
+ok 43 - stop accepts an already closed ready child with exit zero
+  ---
+  duration_ms: 74.7338
+  type: 'test'
+  ...
+# Subtest: a fresh launch cannot erase the failed exit awaited by an older stop
+ok 44 - a fresh launch cannot erase the failed exit awaited by an older stop
+  ---
+  duration_ms: 110.1265
+  type: 'test'
+  ...
+# Subtest: a child reaching ready while stop is joining still reports its failed exit
+ok 45 - a child reaching ready while stop is joining still reports its failed exit
+  ---
+  duration_ms: 52.735
+  type: 'test'
+  ...
+# Subtest: child starts before PostgreSQL finishes, but start and inspection frames stay gated
+ok 46 - child starts before PostgreSQL finishes, but start and inspection frames stay gated
+  ---
+  duration_ms: 52.0876
+  type: 'test'
+  ...
+# Subtest: PostgreSQL failure sends no start frame and joins the unused child before rejection
+ok 47 - PostgreSQL failure sends no start frame and joins the unused child before rejection
+  ---
+  duration_ms: 53.5424
+  type: 'test'
+  ...
+# Subtest: an early child exit is observed while PostgreSQL preparation is still settling
+ok 48 - an early child exit is observed while PostgreSQL preparation is still settling
+  ---
+  duration_ms: 49.6296
+  type: 'test'
+  ...
+# Subtest: runtime directory failure rejects before spawning or preparing PostgreSQL
+ok 49 - runtime directory failure rejects before spawning or preparing PostgreSQL
+  ---
+  duration_ms: 5.8565
+  type: 'test'
+  ...
+# Subtest: a log append failure remains a runtime event and does not replace shutdown ownership
+ok 50 - a log append failure remains a runtime event and does not replace shutdown ownership
+  ---
+  duration_ms: 56.7854
+  type: 'test'
+  ...
+# Subtest: desktop UI preferences survive a new owner independently of renderer ports
+ok 51 - desktop UI preferences survive a new owner independently of renderer ports
+  ---
+  duration_ms: 26.3414
+  type: 'test'
+  ...
+# Subtest: WSL discovery joins actual names to localized version/default observations
+ok 52 - WSL discovery joins actual names to localized version/default observations
+  ---
+  duration_ms: 2.1207
+  type: 'test'
+  ...
+# Subtest: Linux bundle paths use POSIX even on the Windows host
+ok 53 - Linux bundle paths use POSIX even on the Windows host
+  ---
+  duration_ms: 0.2932
+  type: 'test'
+  ...
+# Subtest: payload manifest carries only the fixed archive content boundary
+ok 54 - payload manifest carries only the fixed archive content boundary
+  ---
+  duration_ms: 40.9067
+  type: 'test'
+  ...
+1..54
+# tests 54
+# suites 0
+# pass 54
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1711.8683

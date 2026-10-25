@@ -1,0 +1,25 @@
+{
+  "at": "2026-10-25T22:47:08.3841183+08:00",
+  "processes": [
+    {
+      "Id": 7244,
+      "StartTime": "2026-10-25T22:35:21.255086+08:00"
+    },
+    {
+      "Id": 13952,
+      "StartTime": "2026-10-25T22:35:09.3603149+08:00"
+    },
+    {
+      "Id": 24704,
+      "StartTime": "2026-10-25T22:35:09.3587303+08:00"
+    },
+    {
+      "Id": 34108,
+      "StartTime": "2026-10-25T22:35:09.2339259+08:00"
+    }
+  ],
+  "child": [],
+  "originalKernelExists": true,
+  "pgExit": 0,
+  "pgOutput": "pg_ctl: server is running (PID: 499)\n/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/postgres/bin/postgres \"-D\" \"/home/plumwsl/.pulsara/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/home/plumwsl/.pulsara/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\""
+}

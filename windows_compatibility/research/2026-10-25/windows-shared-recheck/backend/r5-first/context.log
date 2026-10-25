@@ -1,0 +1,3 @@
+{"status": "completed", "output": "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/backend/r5-first/context/result.json", "undropped_databases": []}
+hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+hook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True

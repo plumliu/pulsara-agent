@@ -1,0 +1,14 @@
+{
+  "command": [
+    "mise",
+    "exec",
+    "node@22.23.3",
+    "--",
+    "desktop/node_modules/.bin/electron.cmd",
+    "output/phase-b-final/desktop/network-smoke.cjs"
+  ],
+  "start": "2026-10-25T14:33:37.673974+00:00",
+  "end": "2026-10-25T14:33:44.529301+00:00",
+  "seconds": 6.842999999993481,
+  "exitCode": 1
+}

@@ -1,0 +1,3 @@
+Error: owned exe exited before active original terminal
+    at until (C:\python_workspace\pulsara-agent\output\phase-b-final\terminal\main_cases.cjs:35:98)
+    at async C:\python_workspace\pulsara-agent\output\phase-b-final\terminal\main_cases.cjs:93:2

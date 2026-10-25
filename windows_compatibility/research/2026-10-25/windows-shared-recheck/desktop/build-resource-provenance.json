@@ -1,0 +1,22 @@
+{
+  "command": [
+    "wsl.exe",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--cd",
+    "/home/plumwsl/workspaces/pulsara_agent",
+    "--exec",
+    ".venv/bin/python",
+    "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/desktop/guest-provenance.py",
+    "--resources",
+    "desktop/resources",
+    "--output",
+    "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/desktop/build-resource-provenance-result.json"
+  ],
+  "start": "2026-10-25T14:10:27.601441+00:00",
+  "end": "2026-10-25T14:10:27.938998+00:00",
+  "seconds": 0.34399999999732245,
+  "exitCode": 0
+}

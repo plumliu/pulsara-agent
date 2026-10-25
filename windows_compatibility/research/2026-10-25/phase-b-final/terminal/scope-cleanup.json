@@ -1,0 +1,37 @@
+[
+  {
+    "case": "pin-before-send",
+    "root": "/home/plumwsl/.bfin-m7oocgio",
+    "removed": true,
+    "remainingExactOwned": [],
+    "externalCleanupOnly": false
+  },
+  {
+    "case": "received-before-bind",
+    "root": "/home/plumwsl/.bfin-r9wllamk",
+    "removed": true,
+    "remainingExactOwned": [],
+    "externalCleanupOnly": false
+  },
+  {
+    "case": "both-observers-lost",
+    "root": "/home/plumwsl/.bfin-eg0sszld",
+    "removed": true,
+    "remainingExactOwned": [],
+    "externalCleanupOnly": true
+  },
+  {
+    "case": "mcp-owner-lost",
+    "root": "/home/plumwsl/.bfin-feklfe9s",
+    "removed": true,
+    "remainingExactOwned": [],
+    "externalCleanupOnly": false
+  },
+  {
+    "case": "hook-owner-lost",
+    "root": "/home/plumwsl/.bfin-k0wgdzbq",
+    "removed": true,
+    "remainingExactOwned": [],
+    "externalCleanupOnly": false
+  }
+]

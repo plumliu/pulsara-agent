@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/desktop/review-static.py", line 5, in <module>
+    oldname=re.search(r'src="\./(assets/index-[^"]+\.js)"',oldhtml).group(1); newname=re.search(r'src="\./(assets/index-[^"]+\.js)"',newhtml).group(1)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'group'

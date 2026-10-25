@@ -1,0 +1,18 @@
+{
+  "command": [
+    "wsl.exe",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--cd",
+    "/home/plumwsl/workspaces/pulsara_agent",
+    "--exec",
+    ".venv/bin/python",
+    "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/desktop/review-static-all.py"
+  ],
+  "start": "2026-10-25T14:07:44.516606+00:00",
+  "end": "2026-10-25T14:07:49.392150+00:00",
+  "seconds": 4.875,
+  "exitCode": 0
+}

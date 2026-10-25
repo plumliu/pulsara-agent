@@ -1,0 +1,94 @@
+{
+  "stage": "after-wake",
+  "at": "2026-10-25T14:45:54.010028+00:00",
+  "identity": {
+    "system_identifier": "7700523439330484737",
+    "postmaster_start": "2026-10-25 22:35:19.623704+08"
+  },
+  "session": {
+    "id": "session:qha3722ihbndoc7c7jhzwxaa3e",
+    "title": "alpha.10 睡眠验收：单次启动等待进程",
+    "workspace_id": "workspace:msew4g24dsgiqlaqv3wo4s6iki",
+    "model_call_binding": {
+      "reasoning": {
+        "kind": "effort",
+        "value": "high"
+      },
+      "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+    },
+    "writer_generation": 2,
+    "writer_lease_owner_id": "host:x5qbzlzizfkibi6ymatdmcxhjq",
+    "writer_lease_expires_at": "2026-10-25 22:46:23.346173+08",
+    "lease_valid": true
+  },
+  "turns": [
+    {
+      "id": "turn:xcxradqombkstxfku6iqmbngki",
+      "status": "COMPLETED",
+      "initial_entry_id": "entry:vyixtqgwvjjrgzcqwnwjqe2fzu",
+      "final_entry_id": "entry:udiqnjzfwxqru6pqud4yh4d7cq"
+    }
+  ],
+  "entries": [
+    {
+      "id": "entry:vyixtqgwvjjrgzcqwnwjqe2fzu",
+      "turn_id": "turn:xcxradqombkstxfku6iqmbngki",
+      "entry_sequence": 1,
+      "entry_kind": "USER_MESSAGE",
+      "content": "{\"parts\":[{\"text\":\"这是 alpha.10 活动任务睡眠验收。请用 terminal 工具只启动一次以下命令，tty=false、yield_time_ms=0，让这个测试进程保持等待输入；收到 running 后报告 process_id 即结束本轮。不要发送输入、close_stdin、kill、wait、添加 monitor、重启命令或读写其他文件。\\n\\nprintf 'PULSARA_ACTIVE_SLEEP_READY\\\\n'; /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/root/active-sleep/pulsara-sleep-child.exe echo\\n\\n这个本机测试程序只等待 stdin 的 EOF，没有业务副作用。稍后我会让电脑真实睡眠，检验产品原来的取消与恢复行为。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:eqe4z5aw6scbhjuw5abg35n37i",
+      "turn_id": "turn:xcxradqombkstxfku6iqmbngki",
+      "entry_sequence": 2,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:70d06a3117269eda683412d0b94ebba8bae431c37dc5804515df2d0f18946b7b\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_NXE8yHlIDuxY8lte73TE5743\",\"tool_name\":\"terminal\"}],\"draft_identity\":\"entry:eqe4z5aw6scbhjuw5abg35n37i\"}"
+    },
+    {
+      "id": "entry:nkcrlvdgeasvrczsrkrkqftf64",
+      "turn_id": "turn:xcxradqombkstxfku6iqmbngki",
+      "entry_sequence": 3,
+      "entry_kind": "TOOL_RESULT",
+      "content": "{\"cwd\":\"/home/plumwsl/.pulsara/workspaces/quick-20261025-223613-7d3db961\",\"error\":null,\"exit_code\":-1,\"gap_before_output\":false,\"output\":\"\",\"output_cursor\":\"eyJjaGVja3N1bSI6IjRlZTQyOGM3NWRkOThlZjBiN2I1MmI3NDcwZjc3ZjQ0NTc1ZmJkNmQ1OTY0ZTc0NGIwZWU3ODljNTIyYWYyNDUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpqNmEyeTRsamdseGhpanB1eDV3Znprb3VpZSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnN6NTdxaHRpaDRiaHBjbXd4M3JnZ2VzZmVlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06dmF5NGVvNXUyYzU2cjY2aGJya3l5N3hmMmkifX0\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:sz57qhtih4bhpcmwx3rggesfee\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6IjRlZTQyOGM3NWRkOThlZjBiN2I1MmI3NDcwZjc3ZjQ0NTc1ZmJkNmQ1OTY0ZTc0NGIwZWU3ODljNTIyYWYyNDUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpqNmEyeTRsamdseGhpanB1eDV3Znprb3VpZSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnN6NTdxaHRpaDRiaHBjbXd4M3JnZ2VzZmVlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06dmF5NGVvNXUyYzU2cjY2aGJya3l5N3hmMmkifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"running\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":true}"
+    },
+    {
+      "id": "entry:udiqnjzfwxqru6pqud4yh4d7cq",
+      "turn_id": "turn:xcxradqombkstxfku6iqmbngki",
+      "entry_sequence": 4,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:1e74ba623faaeae8415fac4dcf69cdc77762df50c3731199a070f0551f5150d1\",\"kind\":\"TEXT\",\"size\":225}],\"draft_identity\":\"entry:udiqnjzfwxqru6pqud4yh4d7cq\"}"
+    }
+  ],
+  "tool_calls": [
+    {
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "tty": false,
+        "command": "printf 'PULSARA_ACTIVE_SLEEP_READY\\n'; /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/root/active-sleep/pulsara-sleep-child.exe echo",
+        "yield_time_ms": 0
+      }
+    }
+  ],
+  "queues": [
+    {
+      "command_id": "command:4iflqai2ppm6jglfvqfjlatjoi",
+      "client_submission_id": "command:4iflqai2ppm6jglfvqfjlatjoi",
+      "status": "CONSUMED",
+      "consumed_entry_id": "entry:vyixtqgwvjjrgzcqwnwjqe2fzu"
+    }
+  ],
+  "comparisons": {
+    "originalSessionsPreserved": true,
+    "originalTurnsPreserved": true,
+    "originalEntriesPreserved": true,
+    "expectedCompletedTurns": true,
+    "singleTerminalLaunch": true,
+    "uniqueConsumedPrompts": true,
+    "preciseTurnEntryConsumption": true,
+    "writerLeaseValidAtObservation": true,
+    "noToolReplayOrNewTool": true
+  },
+  "passed": true,
+  "readOnly": true
+}

@@ -1,0 +1,107 @@
+Window: "Pulsara — 本地智能工作台", App: pulsara.exe.
+	0 窗口 Pulsara — 本地智能工作台 Secondary Actions: Raise
+		781 窗格 (disabled)
+		2 区域 Pulsara — 本地智能工作台
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 区域
+								8 区域
+									21 文档 Pulsara — 本地智能工作台 Value: https://127.0.0.1:40121/ ID: RootWebArea
+										337 组
+											338 组 ID: root
+												693 主要
+													694 章节标题
+														695 按钮 切换会话侧栏
+													696 导航 主要功能
+														697 按钮 返回 Pulsara 总览
+														698 按钮 总览
+														699 按钮 会话
+														700 按钮 能力
+														701 按钮 记忆
+														702 按钮 定时任务
+														703 按钮 设置
+														704 按钮 用户设置
+															705 图形 用户头像
+													706 补充
+														707 章节标题
+															708 文本 本地智能工作台
+															709 标题 Pulsara
+															710 组 Description: 已连接本地服务
+														711 按钮 搜索会话 Ctrl K
+														712 按钮 新建会话 Ctrl N
+														713 区域 会话目录
+															714 区域 从目录中打开
+																715 按钮 从目录中打开
+																716 按钮 选择目录并创建会话 Description: 选择目录并创建会话
+																717 区域 Windows 共享修复 alpha10 验收 会话
+																	718 按钮 Windows 共享修复 alpha10 验收 Description: /home/plumwsl/workspaces/Windows 共享修复 alpha10 验收
+																	719 按钮 在 Windows 共享修复 alpha10 验收 中创建会话 Description: 在 Windows 共享修复 alpha10 验收 中创建会话
+																	720 按钮 alpha.10 安装版图形验收终端确认 当前会话
+																	721 详细信息
+																		722 开合三角标记 alpha.10 安装版图形验收终端确认 更多操作
+																723 区域 Windows 中文 验收 20261025 会话
+																	724 按钮 Windows 中文 验收 20261025 Description: /home/plumwsl/workspaces/Windows 中文 验收 20261025
+																	725 按钮 在 Windows 中文 验收 20261025 中创建会话 Description: 在 Windows 中文 验收 20261025 中创建会话
+																	726 按钮 WSL中文工作目录smoke.txt写入读取验收 已载入
+																	727 详细信息
+																		728 开合三角标记 WSL中文工作目录smoke.txt写入读取验收 更多操作
+															729 区域 快速开始
+																730 按钮 快速开始
+																731 按钮 创建快速开始会话 Description: 创建快速开始会话
+																732 按钮 alpha.9 睡眠自动恢复验收测试会话 已载入
+																733 详细信息
+																	734 开合三角标记 alpha.9 睡眠自动恢复验收测试会话 更多操作
+														735 文本 已连接本地服务
+													736 区域 会话工作台
+														737 章节标题
+															738 文本 已完成
+															739 标题 alpha.10 安装版图形验收终端确认
+															740 按钮 更多会话操作
+															741 按钮 压缩上下文
+															742 按钮 切换检查器
+														743 文章
+															744 章节标题
+																745 文本 你
+																746 图形 用户头像
+															747 文本 这是 alpha.10 安装版图形验收。请在当前工作目录执行一条终端命令 printf 'WINDOWS_ALPHA10_GUI_OK\n'，确认真实输出和退出码，然后简短报告。不要写文件、安装依赖或修改配置。
+															748 按钮 复制消息 Description: 复制消息
+															749 time
+																750 文本 22:19
+														751 章节标题
+															752 文本 Pulsara
+														753 按钮 展开处理过程
+														754 文章
+															755 组
+																756 文本 命令已执行，实际结果如下。
+																757 列表
+																	758 列表项目 工作目录：/home/plumwsl/workspaces/Windows 共享修复 alpha10 验收
+																		759 文本 /home/plumwsl/workspaces/Windows 共享修复 alpha10 验收
+																	760 列表项目 输出：WINDOWS_ALPHA10_GUI_OK
+																		761 文本 WINDOWS_ALPHA10_GUI_OK
+																	762 列表项目 退出码：0（进程状态 success，无超时、无输出截断）
+																		763 文本 0
+																764 文本 未写文件、未安装依赖、未改配置。
+															765 按钮 复制回复
+															766 按钮 从此处分叉 Description: 从此处分叉
+															767 time
+																768 文本 22:19
+														769 编辑 (settable, string) 发送给 Pulsara Value: alpha.10 中文草稿保留验收（不要发送）
+															770 文本 alpha.10 中文草稿保留验收（不要发送）
+														771 按钮 添加文件、技能或规划
+														772 按钮 完全访问
+														773 按钮 上下文占用 3%
+														774 按钮 DeepSeek V4.1 Flash 1017 Description: DeepSeek · DeepSeek V4.1 Flash 1017 · Chat
+														775 按钮 推理 high Description: 推理 high
+														776 按钮 发送
+													777 组 窗口控制
+														778 按钮 最小化
+														779 按钮 最大化或还原
+														780 按钮 关闭窗口
+											580 组
+								10 区域
+
+Document text: ```
+alpha.10 中文草稿保留验收（不要发送）
+```

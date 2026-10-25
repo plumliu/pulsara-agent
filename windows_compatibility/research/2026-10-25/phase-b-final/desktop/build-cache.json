@@ -1,0 +1,24 @@
+{
+  "command": [
+    "wsl.exe",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--cd",
+    "/home/plumwsl/workspaces/pulsara_agent",
+    "--exec",
+    "/home/plumwsl/.local/bin/mise",
+    "exec",
+    "--",
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "desktop/scripts/test_build_cache.py"
+  ],
+  "start": "2026-10-25T14:29:45.270487+00:00",
+  "end": "2026-10-25T14:29:52.413687+00:00",
+  "seconds": 7.14100000000326,
+  "exitCode": 1
+}

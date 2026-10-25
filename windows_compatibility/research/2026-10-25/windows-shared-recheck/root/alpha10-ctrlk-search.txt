@@ -1,0 +1,33 @@
+Window: "Pulsara — 本地智能工作台", App: pulsara.exe.
+	0 窗口 Pulsara — 本地智能工作台 Secondary Actions: Raise
+		1 窗格 (disabled)
+		2 区域 Pulsara — 本地智能工作台
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 区域
+								8 区域
+									21 文档 Pulsara — 本地智能工作台 Value: https://127.0.0.1:40121/ ID: RootWebArea
+										337 组
+											338 组 ID: root
+											580 组
+											677 组
+												678 对话框 搜索会话 Secondary Actions: Raise
+													679 标题
+														680 编辑 (settable, string) 搜索关键词 Description: 搜索会话…
+														681 按钮 会话搜索范围
+														682 按钮 关闭会话搜索
+													683 组 会话搜索结果
+														684 文本 最近会话
+														687 按钮 alpha.10 安装版图形验收终端确认 Windows 共享修复 alpha10 验收 4 分钟前
+															688 组 Description: /home/plumwsl/workspaces/Windows 共享修复 alpha10 验收
+														689 按钮 alpha.9 睡眠自动恢复验收测试会话 快速开始 2 小时前
+															690 组 Description: /home/plumwsl/.pulsara/workspaces/quick-20261025-192532-928e7b9e
+														691 按钮 WSL中文工作目录smoke.txt写入读取验收 Windows 中文 验收 20261025 5 小时前
+															692 组 Description: /home/plumwsl/workspaces/Windows 中文 验收 20261025
+								10 区域
+
+Document text: ```
+搜索关键词
+```

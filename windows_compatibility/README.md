@@ -17,8 +17,10 @@
 11. [Phase B正式接入与共享修正（进行中）](research/2026-10-25/root/phase-b/report.zh.md)：用户授权后的生产实现、原回归与真实适配验证，保留新发现的失败及修正；安装包、完整GUI与真实provider验收单独列状态。
 12. [Windows共享修改后的原生macOS回归](research/2026-10-25/macos-regression/root/report.zh.md)：Mac arm64源码、真实provider、最终wheel/应用包及图形工作区验证；记录本轮EPERM与post-accept head窄修、四方审阅和未覆盖项。
 13. [本轮共享修复的Windows最小重验清单](PULSARA_WINDOWS_SHARED_FIX_MINIMAL_REVALIDATION.zh.md)：同步/新payload、98项WSL定向测试、10项真实PE集成、Windows宿主与最终包context/GUI核验；不重做整个G0，不替代发布矩阵。
+14. **[0ea98e63 / alpha.10 Windows新基线](research/2026-10-25/windows-shared-recheck/root/report.zh.md)**：R0–R5最小重验全部通过；新payload/实际安装来源、98项源码定向、10项真实PE、Windows宿主/startup、8次真实context调用、升级保数据及GUI/正常Quit/冷重开均有新证据。后续Phase B故障资格继续，用户无备用Windows环境，“WSL未安装／需重启”真实验收延期，不删除日常Ubuntu。
+15. **[Phase B后半段本机验收收口](research/2026-10-25/phase-b-final/root/report.zh.md)**：alpha.10补齐正式PG五项失联、interop取消与未知边界、installed main活动Quit/宿主强退、setup/TLS/ENOSPC处理、真实活动任务睡眠与Explorer刷新。所选本机矩阵通过；B1–B4核心实现已落地，B5仍未激活。用户出差仅内屏，混合DPI往返延期；未装WSL/需重启、原生Ubuntu及完整发布集合依原矩阵单列，不能把延期算通过。
 
-当前状态：**2026-10-25本机Windows WSL2所选矩阵的G0-W机制可行性验收通过；用户已授权并开始Phase B正式实施，Windows支持尚未激活。** 原生Ubuntu x64/arm64与GUI按用户要求延期，不作为本轮Windows G0验收的前置，也未被WSL结果替代。正式setup/安装器/完整产品界面、真实provider长程及发布资格仍按B与激活矩阵验收。当前实施边界见spec第24节；下面历史阶段的“未实施”描述保留为当时状态。
+当前状态：**2026-10-25本机Windows WSL2所选矩阵的G0-W机制可行性验收通过；B1–B4核心生产接入已落地，alpha.10本轮所选本机验收已收口；Windows支持/B5尚未激活。** 原生Ubuntu x64/arm64与GUI按用户要求延期，不作为本轮Windows G0验收的前置，也未被WSL结果替代。已执行与延期的真实环境、硬件和发布资格分别见第15项及spec第27节；下面历史阶段的“未实施”描述保留为当时状态。
 
 Phase B已实际安装开发候选，并完成图形中文工作区、真实模型文件读写、Windows选择/拖放、HTML/image/PDF预览及图片下载字节比对。终端、记忆/历史和真实provider记录见各分工报告。进一步验收发现**共享ROOT准入缺陷**：候选输入的canonical head过期后，原owner反复重发同一旧候选而无法前进；这不是Windows跨域回收问题。窄修已通过6项真实PG定向回归、28项相关测试，进入用户批准的本地alpha.7安装包后，原capacity/context真实provider场景及跨压缩的真实Linux/Windows进程跟进也已严格通过。正常Quit/冷重开、alpha.6→alpha.7更新、普通卸载/重装保数据、正式安装版Notion OAuth与约80秒睡眠恢复均已实际通过；用户现场确认中文输入法、托盘恢复保留草稿及鼠标贴靠/还原正常。用户随后补充可使用笔记本内屏与HDMI外屏，混合DPI待核验；右Alt键本身不能证明有AltGr布局。受影响macOS原生回归、其他安装/故障环境及发布矩阵尚未齐全，不能把本机分项通过写成B5激活或全部平台完成。
 
@@ -28,7 +30,7 @@ G0发现的三类问题需要分别理解。“正式代码”指仓库中当前
 
 本轮Windows迁移及验收已获用户授权自主递增必要本地alpha候选版本并构建、安装，不再逐次询问版本号；Git tag和对外发布仍需另行明确授权，详见当前spec §8.3。
 
-**macOS arm64本轮已执行矩阵通过**：基线a57ce3b1加本轮共享窄修，完整前端1372项、后端244项、desktop105项、terminal原167+PG4项及修后定向68项、真实Electron browser13项分别通过（各suite有重叠，不相加宣称总数）；最终随包context8/capacity15与terminal19次真实provider调用通过。新包实际完成原生中文目录/文件引用、⌘快捷键、隐藏恢复草稿、正常Quit及冷重开保留会话/工作区。修复Darwin zombie组EPERM和ROOT accept后仅全局head前进窗口，完整失败/修后证据及四方审阅见上项报告与spec §25。真实Mac睡眠、硬件IME、Mac x64/分发资格仍待验收，Windows也须针对这次共享修复重验，不沿用旧alpha.9安装结果；Windows支持未因此激活。
+**macOS arm64本轮已执行矩阵通过**：基线a57ce3b1加本轮共享窄修，完整前端1372项、后端244项、desktop105项、terminal原167+PG4项及修后定向68项、真实Electron browser13项分别通过（各suite有重叠，不相加宣称总数）；最终随包context8/capacity15与terminal19次真实provider调用通过。新包实际完成原生中文目录/文件引用、⌘快捷键、隐藏恢复草稿、正常Quit及冷重开保留会话/工作区。修复Darwin zombie组EPERM和ROOT accept后仅全局head前进窗口，完整失败/修后证据及四方审阅见上项报告与spec §25。真实Mac睡眠、硬件IME、Mac x64/分发资格仍待验收。针对这次共享修复的Windows重验已在alpha.10完成，见第14项；没有沿用旧alpha.9安装结果，Windows支持仍未激活。
 
 已修复的睡眠阻断：alpha.8构建后，在alpha.7正常Quit准备更新时，原kernel报告`StaleHostWriter`收尾失败，宿主因此保留PG并阻止更新。原会话writer lease在睡眠期间到期，旧SessionEnd读取仍要求有效writer。原GUI重试复用同PG恢复，随后空闲总览正常Quit和维护检查通过，未reset或强杀。此前alpha.7睡眠后的进程、健康检查和界面恢复证据仍成立，但没有覆盖有效writer、新消息与后续Quit，不能据此称完整通过；原失败记录保留。alpha.8未安装，修复进入alpha.9。用户已关闭内屏，重建窗口回到外屏不冒充原窗口混合DPI拖回验证。自动恢复与友好重试呈现的授权见spec §9.3。
 

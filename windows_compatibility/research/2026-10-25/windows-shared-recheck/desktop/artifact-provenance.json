@@ -1,0 +1,74 @@
+{
+  "observedAt": "2026-10-25T14:13:23.507568+00:00",
+  "head": "0ea98e63d90043773f42bd9bb9bbb56951fca8b4",
+  "version": "0.1.0-alpha.10",
+  "packageExitCode": 0,
+  "manifest": {
+    "version": "0.1.0-alpha.10",
+    "sha256": "b8899807e99b8a44be7cc15a49516b521f155a1efdf2499b1312932058427a6c",
+    "platform": "linux-x86_64"
+  },
+  "packagedTarDigestVerified": true,
+  "threeProductionFiles": [
+    {
+      "relative": "conversation_kernel/provider_dispatch.py",
+      "tarMember": "payload/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/provider_dispatch.py",
+      "bytes": 298060,
+      "exactBytesEqualWSLExt4Source": true,
+      "windowsCheckoutEqualAfterCRLF": true
+    },
+    {
+      "relative": "hooks/executor.py",
+      "tarMember": "payload/python/lib/python3.12/site-packages/pulsara_agent/hooks/executor.py",
+      "bytes": 28885,
+      "exactBytesEqualWSLExt4Source": true,
+      "windowsCheckoutEqualAfterCRLF": true
+    },
+    {
+      "relative": "conversation_kernel/mcp/sdk_facade.py",
+      "tarMember": "payload/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "bytes": 62496,
+      "exactBytesEqualWSLExt4Source": true,
+      "windowsCheckoutEqualAfterCRLF": true
+    }
+  ],
+  "packagedStaticEqualFreshLinuxResources": true,
+  "launchManifest": {
+    "execution_domain": "wsl"
+  },
+  "helperVersionStdout": "pulsara-interop 1\n",
+  "files": [
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\Pulsara-0.1.0-alpha.10-windows-x64.exe",
+      "bytes": 536960938,
+      "mtimeUtc": "2026-10-25T14:12:43.094354+00:00"
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\Pulsara-0.1.0-alpha.10-windows-x64.exe.blockmap",
+      "bytes": 559749,
+      "mtimeUtc": "2026-10-25T14:13:04.334141+00:00"
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\pulsara.exe",
+      "bytes": 247185408,
+      "mtimeUtc": "2026-10-25T14:11:34.139235+00:00"
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\resources\\wsl-payload\\payload.tar",
+      "bytes": 1595320320,
+      "mtimeUtc": "2026-10-25T14:05:56.063373+00:00"
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\resources\\wsl-payload\\manifest.json",
+      "bytes": 144,
+      "mtimeUtc": "2026-10-25T14:05:56.069381+00:00"
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\resources\\windows-interop\\pulsara-interop.exe",
+      "bytes": 17920,
+      "mtimeUtc": "2026-10-25T14:11:22.752233+00:00"
+    }
+  ],
+  "installerNotRunByThisAgent": true,
+  "passed": true
+}

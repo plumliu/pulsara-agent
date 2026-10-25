@@ -1,0 +1,4 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const repo=process.cwd(),asar=require(path.join(repo,'desktop/node_modules/@electron/asar')),installed=path.join(process.env.LOCALAPPDATA,'Programs/pulsara/resources/app.asar');
+const files=['wsl-setup.js','host-wsl.js','backend-session.js'];const rows=files.map(name=>({file:name,exactBytesEqualInstalledAsar:asar.extractFile(installed,'dist/'+name).equals(fs.readFileSync(path.join(repo,'desktop/dist',name)))}));assert.ok(rows.every(x=>x.exactBytesEqualInstalledAsar));
+const version=JSON.parse(asar.extractFile(installed,'package.json').toString()).version;assert.equal(version,'0.1.0-alpha.10');fs.writeFileSync(path.join(__dirname,'tested-js-provenance.json'),JSON.stringify({installedAsar:installed,version,files:rows,passed:true},null,2)+'\n');

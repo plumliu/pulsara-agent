@@ -1,0 +1,10 @@
+{
+  "label": "enospc-e19bfef8-79d7-44a0-b08b-e1bcb788a727",
+  "version": "b-final-1998a1da-f257-4e77-bad8-2bb73b56ed3a",
+  "injection": "test-only LD_PRELOAD write errno ENOSPC after 4096 bytes; no actual full filesystem",
+  "cases": [],
+  "commandInjected": 0,
+  "privateRoot": "/home/plumwsl/.pbf-enospc-BcamLRkB",
+  "failure": "Error: Command failed: C:\\WINDOWS\\System32\\wsl.exe -d Ubuntu -u plumwsl --cd /home/plumwsl --exec /usr/bin/cc -shared -fPIC -o /home/plumwsl/.pbf-enospc-BcamLRkB/write-fault.so /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/desktop/enospc-write.c -ldl\n/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/desktop/enospc-write.c:22:23: error: unknown type name ‘loff_t’; did you mean ‘off_t’?\n   22 | ssize_t splice(int in,loff_t *offin,int out,loff_t *offout,size_t count,unsigned flags) {\n      |                       ^~~~~~\n      |                       off_t\n/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/desktop/enospc-write.c:22:45: error: unknown type name ‘loff_t’; did you mean ‘off_t’?\n   22 | ssize_t splice(int in,loff_t *offin,int out,loff_t *offout,size_t count,unsigned flags) {\n      |                                             ^~~~~~\n      |                                             off_t\n\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at ChildProcess.exithandler (node:child_process:417:12)\n    at ChildProcess.emit (node:events:519:28)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)",
+  "privateRootRemoved": true
+}

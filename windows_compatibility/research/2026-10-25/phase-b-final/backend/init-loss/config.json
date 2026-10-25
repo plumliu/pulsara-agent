@@ -1,0 +1,8 @@
+{
+  "home": "/home/plumwsl/.pbfpg-15n5xqql",
+  "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+  "repo": "/home/plumwsl/workspaces/pulsara_agent",
+  "library": "/home/plumwsl/.pbf-tools-a30yxliy/fault.so",
+  "method": "run:initdb",
+  "native_stage": "initdb-exec"
+}

@@ -1,0 +1,6 @@
+{
+  "windowsHead": "0ea98e63d90043773f42bd9bb9bbb56951fca8b4",
+  "windowsStatus": " M desktop/package-lock.json\n M desktop/package.json\n M frontend/package-lock.json\n M frontend/package.json\n M mise.toml\n M pyproject.toml\n M src/pulsara_agent/__init__.py\n M uv.lock\n?? windows_compatibility/research/2026-10-25/windows-shared-recheck/\n",
+  "wslHead": "0ea98e63d90043773f42bd9bb9bbb56951fca8b4",
+  "wslStatus": " M desktop/package-lock.json\n M desktop/package.json\n M frontend/package-lock.json\n M frontend/package.json\n M mise.toml\n M pyproject.toml\n M src/pulsara_agent/__init__.py\n M uv.lock\n"
+}

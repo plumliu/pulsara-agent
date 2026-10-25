@@ -1,0 +1,1529 @@
+{
+  "label": "network-baa0ad33-1051-48cd-8f2e-d3317192e31b",
+  "windowsPid": 33612,
+  "events": [
+    {
+      "event": "ready",
+      "pid": 436,
+      "starttime": "4523",
+      "home": "/home/plumwsl/.pbf-network-bmijxnii",
+      "origin": "https://127.0.0.1:35757",
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBhjCCAS2gAwIBAgIUPRchulfocUmtJ16pTUsdSuFAyBswCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwHhcNMjYxMDI1MTQz\nMzI1WhcNMjYxMDI1MTQzNDQwWjAiMSAwHgYDVQQDDBdQdWxzYXJhIHByaXZhdGUg\nZGVza3RvcDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABN7PU+yGljYrbybx8zJH\nFcA0us1xFE3YSqJkeDll6OUhTzLwCSH5C1m7QpLZ9qk/IN8GPsd6lrKjCLKmFETG\n9bijQTA/MBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAA\nMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqGSM49BAMCA0cAMEQCIHzdMTcQf4k0\n101J6CAVbBWa/qpv1tlXNyva7TlLJaBuAiAlfXCXyl5DxnxEgpHoLm5fym5fy88r\ne01lFQP8UYoyAw==\n-----END CERTIFICATE-----\n",
+      "validTo": "2026-10-25T14:34:40.211514+00:00",
+      "packagePath": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+      "privateKeysRemain": [],
+      "fixtureScope": "real HTTP/RendererBridge/import; synthetic sessions/Core and control streams"
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        }
+      ],
+      "closed": [],
+      "imports": [],
+      "stages": [],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 65536,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 131072,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 196608,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 196608,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 262144,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 327632,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 393168,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 393168,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 458752,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 524288,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [
+        {
+          "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+          "bytes": 589824,
+          "mode": "0o600",
+          "uid": 1000
+        }
+      ],
+      "stages": [
+        ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+      ],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [
+        "sse",
+        "download",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [],
+      "imports": [],
+      "stages": [],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/api/connections/owner/import-file",
+          "status": 400,
+          "method": "POST"
+        }
+      ]
+    },
+    {
+      "event": "inspect",
+      "pid": 436,
+      "active": [],
+      "opened": [
+        {
+          "token": "125777462904016",
+          "kind": "sse"
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download"
+        },
+        {
+          "token": "125777462909008",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending"
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending"
+        }
+      ],
+      "closed": [
+        {
+          "token": "125777462909008",
+          "kind": "pending",
+          "transportClosing": true
+        },
+        {
+          "token": "125777462910688",
+          "kind": "pending",
+          "transportClosing": true
+        },
+        {
+          "token": "125777462911744",
+          "kind": "pending",
+          "transportClosing": true
+        },
+        {
+          "token": "125777462907088",
+          "kind": "download",
+          "transportClosing": true
+        },
+        {
+          "token": "125777462904016",
+          "kind": "sse",
+          "transportClosing": true
+        }
+      ],
+      "imports": [],
+      "stages": [],
+      "requests": [
+        {
+          "path": "/",
+          "status": 200,
+          "method": "HEAD"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/healthz",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 200,
+          "method": "GET"
+        },
+        {
+          "path": "/api/connections/owner/import-file",
+          "status": 400,
+          "method": "POST"
+        },
+        {
+          "path": "/probe/pending",
+          "status": 500,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/pending",
+          "status": 500,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/pending",
+          "status": 500,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/download",
+          "status": 500,
+          "method": "GET"
+        },
+        {
+          "path": "/probe/sse",
+          "status": 500,
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "event": "rebound",
+      "origin": "https://127.0.0.1:35757",
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBiTCCAS+gAwIBAgIUafUt3v6rik6E2L2ycAsOsPo16/UwCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwIBcNNzAwMTAxMDAw\nMDAwWhgPOTk5OTEyMzEyMzU5NTlaMCIxIDAeBgNVBAMMF1B1bHNhcmEgcHJpdmF0\nZSBkZXNrdG9wMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPvnHiP1iOn+aav74\njmABVkWsQ/HuGpF4QQONcRBhNp6FfHZYJZgO+CPOavu7GvkfmBwPzyfJBthZVJ2s\no0sxtKNBMD8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAwGA1UdEwEB/wQC\nMAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCgYIKoZIzj0EAwIDSAAwRQIhAMBk0end\nMS0Xb5sqteNWC3h0KkZ+ABPNz9PUtRmFu4vIAiA+hrUg6If+pt2GRfaVZo9IKu4i\nkPNztcwSLphdWlcGrg==\n-----END CERTIFICATE-----\n",
+      "pid": 436
+    },
+    {
+      "event": "server-stopped",
+      "active": []
+    },
+    {
+      "event": "cleaned",
+      "home": "/home/plumwsl/.pbf-network-bmijxnii",
+      "exists": false,
+      "pid": 436
+    }
+  ],
+  "cases": [
+    {
+      "name": "natural validity crossing same PID/fullcert plus new native Session handshake",
+      "passed": true
+    },
+    {
+      "name": "production BackendSession retirement joins held SDK owners and LocalImport cleanup",
+      "passed": true
+    },
+    {
+      "name": "real same-port replacement certificate rejects unsealed old pin; new pin positive",
+      "passed": true
+    }
+  ],
+  "requests": [
+    {
+      "route": "/api/connections/owner/import-file",
+      "closed": true,
+      "errors": [],
+      "received": 0
+    },
+    {
+      "route": "/probe/pending",
+      "closed": true,
+      "errors": [],
+      "received": 0
+    },
+    {
+      "route": "/probe/pending",
+      "closed": true,
+      "errors": [],
+      "received": 0
+    },
+    {
+      "route": "/probe/pending",
+      "closed": true,
+      "errors": [],
+      "received": 0
+    }
+  ],
+  "verify": [
+    {
+      "name": "primary",
+      "code": -2,
+      "same": false,
+      "time": 1792938865362,
+      "error": "net::OK"
+    },
+    {
+      "name": "primary",
+      "code": 0,
+      "same": true,
+      "time": 1792938866280,
+      "error": "net::ERR_CERT_AUTHORITY_INVALID"
+    },
+    {
+      "name": "expired-new-session",
+      "code": 0,
+      "same": true,
+      "time": 1792938881118,
+      "error": "net::ERR_CERT_AUTHORITY_INVALID"
+    },
+    {
+      "name": "expired-new-session",
+      "code": -2,
+      "same": false,
+      "time": 1792938881212,
+      "error": "net::OK"
+    },
+    {
+      "name": "expired-new-session",
+      "code": -2,
+      "same": false,
+      "time": 1792938881711,
+      "error": "net::ERR_CERT_AUTHORITY_INVALID"
+    },
+    {
+      "name": "new-server",
+      "code": 0,
+      "same": true,
+      "time": 1792938881726,
+      "error": "net::ERR_CERT_AUTHORITY_INVALID"
+    }
+  ],
+  "guestSpawns": 1,
+  "productionModule": "C:\\python_workspace\\pulsara-agent\\desktop\\dist\\backend-session.js",
+  "carrierPid": 21776,
+  "ready": {
+    "event": "ready",
+    "pid": 436,
+    "starttime": "4523",
+    "home": "/home/plumwsl/.pbf-network-bmijxnii",
+    "origin": "https://127.0.0.1:35757",
+    "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBhjCCAS2gAwIBAgIUPRchulfocUmtJ16pTUsdSuFAyBswCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwHhcNMjYxMDI1MTQz\nMzI1WhcNMjYxMDI1MTQzNDQwWjAiMSAwHgYDVQQDDBdQdWxzYXJhIHByaXZhdGUg\nZGVza3RvcDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABN7PU+yGljYrbybx8zJH\nFcA0us1xFE3YSqJkeDll6OUhTzLwCSH5C1m7QpLZ9qk/IN8GPsd6lrKjCLKmFETG\n9bijQTA/MBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAA\nMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqGSM49BAMCA0cAMEQCIHzdMTcQf4k0\n101J6CAVbBWa/qpv1tlXNyva7TlLJaBuAiAlfXCXyl5DxnxEgpHoLm5fym5fy88r\ne01lFQP8UYoyAw==\n-----END CERTIFICATE-----\n",
+    "validTo": "2026-10-25T14:34:40.211514+00:00",
+    "packagePath": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+    "privateKeysRemain": [],
+    "fixtureScope": "real HTTP/RendererBridge/import; synthetic sessions/Core and control streams"
+  },
+  "expiry": {
+    "validTo": "Oct 25 14:34:40 2026 GMT",
+    "before": {
+      "count": 5,
+      "last": {
+        "pid": 436,
+        "count": 5
+      }
+    },
+    "timeBefore": 1792938866619,
+    "after": {
+      "count": 292,
+      "last": {
+        "pid": 436,
+        "count": 292
+      }
+    },
+    "timeAfter": 1792938881120
+  },
+  "downloadObserved": {
+    "state": "progressing",
+    "bytes": 720896
+  },
+  "beforeRetire": {
+    "event": "inspect",
+    "pid": 436,
+    "active": [
+      "sse",
+      "download",
+      "pending",
+      "pending",
+      "pending"
+    ],
+    "opened": [
+      {
+        "token": "125777462904016",
+        "kind": "sse"
+      },
+      {
+        "token": "125777462907088",
+        "kind": "download"
+      },
+      {
+        "token": "125777462909008",
+        "kind": "pending"
+      },
+      {
+        "token": "125777462910688",
+        "kind": "pending"
+      },
+      {
+        "token": "125777462911744",
+        "kind": "pending"
+      }
+    ],
+    "closed": [],
+    "imports": [
+      {
+        "path": "imports/.import-4d9fbf1c81e942c19c2d157ef0dabd7b/private-slow.bin",
+        "bytes": 589824,
+        "mode": "0o600",
+        "uid": 1000
+      }
+    ],
+    "stages": [
+      ".import-4d9fbf1c81e942c19c2d157ef0dabd7b"
+    ],
+    "requests": [
+      {
+        "path": "/",
+        "status": 200,
+        "method": "HEAD"
+      },
+      {
+        "path": "/healthz",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/sse",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/healthz",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/healthz",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/download",
+        "status": 200,
+        "method": "GET"
+      }
+    ]
+  },
+  "retireStart": 1792938881645,
+  "downloadDone": {
+    "state": "cancelled",
+    "bytes": 0
+  },
+  "afterRetire": {
+    "event": "inspect",
+    "pid": 436,
+    "active": [],
+    "opened": [
+      {
+        "token": "125777462904016",
+        "kind": "sse"
+      },
+      {
+        "token": "125777462907088",
+        "kind": "download"
+      },
+      {
+        "token": "125777462909008",
+        "kind": "pending"
+      },
+      {
+        "token": "125777462910688",
+        "kind": "pending"
+      },
+      {
+        "token": "125777462911744",
+        "kind": "pending"
+      }
+    ],
+    "closed": [
+      {
+        "token": "125777462909008",
+        "kind": "pending",
+        "transportClosing": true
+      },
+      {
+        "token": "125777462910688",
+        "kind": "pending",
+        "transportClosing": true
+      },
+      {
+        "token": "125777462911744",
+        "kind": "pending",
+        "transportClosing": true
+      },
+      {
+        "token": "125777462907088",
+        "kind": "download",
+        "transportClosing": true
+      },
+      {
+        "token": "125777462904016",
+        "kind": "sse",
+        "transportClosing": true
+      }
+    ],
+    "imports": [],
+    "stages": [],
+    "requests": [
+      {
+        "path": "/",
+        "status": 200,
+        "method": "HEAD"
+      },
+      {
+        "path": "/healthz",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/sse",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/healthz",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/healthz",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/download",
+        "status": 200,
+        "method": "GET"
+      },
+      {
+        "path": "/api/connections/owner/import-file",
+        "status": 400,
+        "method": "POST"
+      },
+      {
+        "path": "/probe/pending",
+        "status": 500,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/pending",
+        "status": 500,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/pending",
+        "status": 500,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/download",
+        "status": 500,
+        "method": "GET"
+      },
+      {
+        "path": "/probe/sse",
+        "status": 500,
+        "method": "GET"
+      }
+    ]
+  },
+  "rebound": {
+    "event": "rebound",
+    "origin": "https://127.0.0.1:35757",
+    "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBiTCCAS+gAwIBAgIUafUt3v6rik6E2L2ycAsOsPo16/UwCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwIBcNNzAwMTAxMDAw\nMDAwWhgPOTk5OTEyMzEyMzU5NTlaMCIxIDAeBgNVBAMMF1B1bHNhcmEgcHJpdmF0\nZSBkZXNrdG9wMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPvnHiP1iOn+aav74\njmABVkWsQ/HuGpF4QQONcRBhNp6FfHZYJZgO+CPOavu7GvkfmBwPzyfJBthZVJ2s\no0sxtKNBMD8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAwGA1UdEwEB/wQC\nMAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCgYIKoZIzj0EAwIDSAAwRQIhAMBk0end\nMS0Xb5sqteNWC3h0KkZ+ABPNz9PUtRmFu4vIAiA+hrUg6If+pt2GRfaVZo9IKu4i\nkPNztcwSLphdWlcGrg==\n-----END CERTIFICATE-----\n",
+    "pid": 436
+  },
+  "rebindRejection": "Error: net::ERR_FAILED",
+  "passed": true,
+  "carrier": {
+    "code": 0,
+    "signal": null
+  }
+}

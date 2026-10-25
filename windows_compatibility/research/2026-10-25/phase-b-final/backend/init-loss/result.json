@@ -1,0 +1,353 @@
+{
+  "name": "init-loss",
+  "config": {
+    "home": "/home/plumwsl/.pbfpg-15n5xqql",
+    "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+    "repo": "/home/plumwsl/workspaces/pulsara_agent",
+    "library": "/home/plumwsl/.pbf-tools-a30yxliy/fault.so",
+    "method": "run:initdb",
+    "native_stage": "initdb-exec"
+  },
+  "provenance": {
+    "app": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\resources\\app.asar",
+    "installedTsExactCurrentDist": true,
+    "node": "v22.23.3",
+    "productionOwner": true,
+    "productionClient": true,
+    "productionWslHost": true,
+    "installedHelperWithTestGates": true
+  },
+  "nativeGate": {
+    "gate": {
+      "pid": 683,
+      "uid": 1000,
+      "start_ticks": "90355",
+      "stage": "initdb-exec",
+      "parent": 665
+    },
+    "helper": {
+      "pid": 665,
+      "uid": 1000,
+      "start_ticks": "90261",
+      "method": "run:initdb",
+      "armed": true,
+      "helper": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/desktop_guest_ops.py"
+    },
+    "children": [
+      {
+        "pid": 682,
+        "uid": 1000,
+        "start_ticks": "90354",
+        "argv": [
+          "/usr/bin/findmnt",
+          "--json",
+          "--target",
+          "/home/plumwsl/.pbfpg-15n5xqql",
+          "--output",
+          "FSTYPE,FSROOT,TARGET"
+        ],
+        "inherited": []
+      },
+      {
+        "pid": 683,
+        "uid": 1000,
+        "start_ticks": "90355",
+        "argv": [
+          "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/postgres/bin/initdb",
+          "-D",
+          "/home/plumwsl/.pbfpg-15n5xqql/desktop/postgres",
+          "-U",
+          "pulsara_admin",
+          "--auth-local=trust",
+          "--auth-host=reject",
+          "--encoding=UTF8",
+          "--locale=C"
+        ],
+        "inherited": [
+          {
+            "fd": 3,
+            "inode": 264099
+          },
+          {
+            "fd": 4,
+            "inode": 264105
+          }
+        ]
+      }
+    ],
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 264099
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 264105
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-15n5xqql/desktop/postgres\" does not exist\n"
+      }
+    }
+  },
+  "inflightRefusals": {
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 264099
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 264105
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-15n5xqql/desktop/postgres\" does not exist\n"
+      }
+    },
+    "competition": {
+      "start": {
+        "code": "PG_KERNEL_BUSY",
+        "execution": "not-submitted",
+        "message": "[Errno 11] Resource temporarily unavailable",
+        "stdout": "",
+        "stderr": ""
+      },
+      "reset": {
+        "code": "PG_KERNEL_BUSY",
+        "execution": "not-submitted",
+        "message": "[Errno 11] Resource temporarily unavailable",
+        "stdout": "",
+        "stderr": ""
+      },
+      "maintenance": {
+        "code": "PG_KERNEL_BUSY",
+        "execution": "not-submitted",
+        "message": "[Errno 11] Resource temporarily unavailable",
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "untouched": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 264099
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 264105
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-15n5xqql/desktop/postgres\" does not exist\n"
+      }
+    }
+  },
+  "outcome": {
+    "error": {
+      "execution": "unknown",
+      "message": "PostgreSQL helper result is incomplete (9)",
+      "stderr": ""
+    },
+    "owner": {
+      "startedHere": false,
+      "initialized": false
+    },
+    "target": {
+      "id": "3",
+      "method": "run:initdb",
+      "armed": true,
+      "carrierPid": 2480,
+      "operationBytes": 184,
+      "closed": {
+        "code": 9,
+        "signal": null
+      }
+    },
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 264099
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 264105
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-15n5xqql/desktop/postgres\" does not exist\n"
+      }
+    }
+  },
+  "emptyLayoutMaintenance": {
+    "passed": true,
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 264099
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 264105
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-15n5xqql/desktop/postgres\" does not exist\n"
+      }
+    }
+  },
+  "cleanup": {
+    "owner": {
+      "startedHere": false,
+      "initialized": false
+    },
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 264099
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 264105
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-15n5xqql/desktop/postgres\" does not exist\n"
+      }
+    },
+    "calls": [
+      {
+        "id": "1",
+        "method": "prepareLayout",
+        "armed": false,
+        "carrierPid": 11076,
+        "operationBytes": 30,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "2",
+        "method": "readVersion",
+        "armed": false,
+        "carrierPid": 9260,
+        "operationBytes": 28,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "3",
+        "method": "run:initdb",
+        "armed": true,
+        "carrierPid": 2480,
+        "operationBytes": 184,
+        "closed": {
+          "code": 9,
+          "signal": null
+        }
+      },
+      {
+        "id": "4",
+        "method": "prepareLayout",
+        "armed": false,
+        "carrierPid": 35164,
+        "operationBytes": 0,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "5",
+        "method": "resetPathsMatch",
+        "armed": false,
+        "carrierPid": 33928,
+        "operationBytes": 0,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "6",
+        "method": "maintenanceCheck",
+        "armed": false,
+        "carrierPid": 42328,
+        "operationBytes": 0,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "7",
+        "method": "maintenanceCheck",
+        "armed": false,
+        "carrierPid": 15584,
+        "operationBytes": 33,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      }
+    ]
+  },
+  "passed": true
+}

@@ -1,0 +1,14 @@
+{
+  "root": "/home/plumwsl/.bmain-nm9sp13u",
+  "home": "/home/plumwsl/.bmain-nm9sp13u/home",
+  "workspace": "/home/plumwsl/workspaces/.bmain-nm9sp13u",
+  "windowsHome": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-nm9sp13u-electron",
+  "kernelEvents": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/host-eof-final-kernel.jsonl",
+  "hostEvents": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\host-eof-final-host.jsonl",
+  "child": "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/terminal/interop-child.exe",
+  "bootstrap": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/kernel_bootstrap.py",
+  "guestConfig": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/host-eof-final-config.json",
+  "installedRoot": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+  "resources": "C:/Users/plumlocal/AppData/Local/Programs/pulsara/resources",
+  "scenario": "host-eof"
+}

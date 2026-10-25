@@ -1,0 +1,66 @@
+{
+  "label": "network-f64c84c5-b061-469a-9a57-560825be6c7d",
+  "windowsPid": 13888,
+  "events": [
+    {
+      "event": "ready",
+      "pid": 327,
+      "starttime": "264",
+      "home": "/home/plumwsl/.pbf-network-ntwhwm4c",
+      "origin": "https://127.0.0.1:46519",
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBiDCCAS2gAwIBAgIUVKh8lf8jcuRy9IBUdNkdG/SvqRUwCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwHhcNMjYxMDI1MTQz\nMjQzWhcNMjYxMDI1MTQzMzU4WjAiMSAwHgYDVQQDDBdQdWxzYXJhIHByaXZhdGUg\nZGVza3RvcDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABNrFU8Q22mMOtaHaJmet\nw7qc6VAXr/DOhMB9GV+UlEbK8xNGsD/kcpzmoanTaIpkz7ZK6mBZ6UdqKZzNii0M\nNs+jQTA/MBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAA\nMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqGSM49BAMCA0kAMEYCIQCz06zpzhr8\nNpuUxsyLPYV0MPFK4egZptKekIDkdwPolwIhAKnnhsOHm0KW1LcTB/DacSaVvkMn\n/+QzHoaXdcXrq+WI\n-----END CERTIFICATE-----\n",
+      "validTo": "2026-10-25T14:33:58.537931+00:00",
+      "packagePath": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+      "privateKeysRemain": [],
+      "fixtureScope": "real HTTP/RendererBridge/import; synthetic sessions/Core and control streams"
+    },
+    {
+      "event": "server-stopped",
+      "active": []
+    },
+    {
+      "event": "cleaned",
+      "home": "/home/plumwsl/.pbf-network-ntwhwm4c",
+      "exists": false,
+      "pid": 327
+    }
+  ],
+  "cases": [],
+  "requests": [],
+  "verify": [
+    {
+      "name": "primary",
+      "code": -2,
+      "same": false,
+      "time": 1792938823695,
+      "error": "net::OK"
+    },
+    {
+      "name": "primary",
+      "code": 0,
+      "same": true,
+      "time": 1792938824096,
+      "error": "net::ERR_CERT_AUTHORITY_INVALID"
+    }
+  ],
+  "guestSpawns": 1,
+  "productionModule": "C:\\python_workspace\\pulsara-agent\\desktop\\dist\\backend-session.js",
+  "carrierPid": 26356,
+  "ready": {
+    "event": "ready",
+    "pid": 327,
+    "starttime": "264",
+    "home": "/home/plumwsl/.pbf-network-ntwhwm4c",
+    "origin": "https://127.0.0.1:46519",
+    "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBiDCCAS2gAwIBAgIUVKh8lf8jcuRy9IBUdNkdG/SvqRUwCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwHhcNMjYxMDI1MTQz\nMjQzWhcNMjYxMDI1MTQzMzU4WjAiMSAwHgYDVQQDDBdQdWxzYXJhIHByaXZhdGUg\nZGVza3RvcDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABNrFU8Q22mMOtaHaJmet\nw7qc6VAXr/DOhMB9GV+UlEbK8xNGsD/kcpzmoanTaIpkz7ZK6mBZ6UdqKZzNii0M\nNs+jQTA/MBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAA\nMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqGSM49BAMCA0kAMEYCIQCz06zpzhr8\nNpuUxsyLPYV0MPFK4egZptKekIDkdwPolwIhAKnnhsOHm0KW1LcTB/DacSaVvkMn\n/+QzHoaXdcXrq+WI\n-----END CERTIFICATE-----\n",
+    "validTo": "2026-10-25T14:33:58.537931+00:00",
+    "packagePath": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+    "privateKeysRemain": [],
+    "fixtureScope": "real HTTP/RendererBridge/import; synthetic sessions/Core and control streams"
+  },
+  "failure": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n404 !== 200\n\n    at fresh (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\desktop\\network-smoke.cjs:15:117)\n    at async main (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\desktop\\network-smoke.cjs:25:128)",
+  "carrier": {
+    "code": 0,
+    "signal": null
+  }
+}

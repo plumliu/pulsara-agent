@@ -1,0 +1,41 @@
+[desktop:bootstrap] $ uv sync --locked --dev --no-install-project --default-index https://pypi.org/simple
+Resolved 87 packages in 1ms
+Checked 85 packages in 5ms
+[desktop:windows-shell-dependencies] sources up-to-date, skipping
+[desktop:windows-resources] sources up-to-date, skipping
+[desktop:windows-package] $ npm --prefix desktop run package -- --win --x64 --publish never
+
+> pulsara-desktop@0.1.0-alpha.10 package
+> node scripts/linux-hooks.cjs && npm run build && electron-builder --win --x64 --publish never
+
+
+> pulsara-desktop@0.1.0-alpha.10 build
+> tsc
+
+  â€¢ electron-builder  version=26.15.3 os=10.0.26200
+  â€¢ loaded configuration  file=package.json ("build" field)
+native\windows-interop-helper\Program.cs(16,58): warning CS0649: ´ÓÎ´¶Ô×Ö¶Î¡°Frame.operation¡±¸³Öµ£¬×Ö¶Î½«Ò»Ö±±£³ÖÆäÄ¬ÈÏÖµ null
+native\windows-interop-helper\Program.cs(18,58): warning CS0649: ´ÓÎ´¶Ô×Ö¶Î¡°Frame.distribution¡±¸³Öµ£¬×Ö¶Î½«Ò»Ö±±£³ÖÆäÄ¬ÈÏÖµ null
+native\windows-interop-helper\Program.cs(19,58): warning CS0649: ´ÓÎ´¶Ô×Ö¶Î¡°Frame.user¡±¸³Öµ£¬×Ö¶Î½«Ò»Ö±±£³ÖÆäÄ¬ÈÏÖµ null
+native\windows-interop-helper\Program.cs(20,58): warning CS0649: ´ÓÎ´¶Ô×Ö¶Î¡°Frame.python¡±¸³Öµ£¬×Ö¶Î½«Ò»Ö±±£³ÖÆäÄ¬ÈÏÖµ null
+native\windows-interop-helper\Program.cs(21,58): warning CS0649: ´ÓÎ´¶Ô×Ö¶Î¡°Frame.control¡±¸³Öµ£¬×Ö¶Î½«Ò»Ö±±£³ÖÆäÄ¬ÈÏÖµ null
+Windows host helper and Linux payload verified
+  â€¢ executing @electron/rebuild  electronVersion=44.9.0 arch=x64 buildFromSource=false workspaceRoot=C:\python_workspace\pulsara-agent\desktop projectDir=./ appDir=./
+  â€¢ installing native dependencies  arch=x64
+  â€¢ completed installing native dependencies
+  â€¢ packaging       platform=win32 arch=x64 electron=44.9.0 appOutDir=release\win-unpacked
+  â€¢ downloaded      label=electron progress=100%
+  â€¢ downloaded electron zip extracted successfully  output=C:\python_workspace\pulsara-agent\desktop\release\win-unpacked
+  â€¢ searching for node modules  pm=npm searchDir=C:\python_workspace\pulsara-agent\desktop
+  â€¢ searching for node modules  pm=traversal searchDir=C:\python_workspace\pulsara-agent\desktop
+  â€¢ using manual traversal of node_modules to build dependency tree
+  â€¢ no node modules returned while searching directories  searchDirectories=[""]
+  â€¢ updating asar integrity executable resource  executablePath=release\win-unpacked\pulsara.exe
+  â€¢ signing with signtool.exe  path=release\win-unpacked\resources\windows-interop\pulsara-interop.exe
+  â€¢ signing with signtool.exe  path=release\win-unpacked\pulsara.exe
+  â€¢ building        target=nsis file=release\Pulsara-0.1.0-alpha.10-windows-x64.exe archs=x64 oneClick=false perMachine=false
+  â€¢ signing with signtool.exe  path=release\win-unpacked\resources\elevate.exe
+  â€¢ signing with signtool.exe  path=release\Pulsara-0.1.0-alpha.10-windows-x64.__uninstaller.exe
+  â€¢ signing with signtool.exe  path=release\Pulsara-0.1.0-alpha.10-windows-x64.exe
+  â€¢ building block map  blockMapFile=release\Pulsara-0.1.0-alpha.10-windows-x64.exe.blockmap
+Finished in 106.66s

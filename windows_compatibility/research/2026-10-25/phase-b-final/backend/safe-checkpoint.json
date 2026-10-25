@@ -1,0 +1,22 @@
+{
+  "safe_for_sleep": true,
+  "known_setup_only": true,
+  "target_mutator_never_submitted": true,
+  "original_ts_reset_confirmed": true,
+  "data_absent_before_home_removal": true,
+  "locks": {
+    "kernel.lock": {
+      "free": true,
+      "inode": 262466
+    },
+    "pg-lifetime.lock": {
+      "free": true,
+      "inode": 262472
+    }
+  },
+  "remaining_exact_owned_accessible": [],
+  "same_uid_command_inaccessible": [],
+  "removed_private_home": "/home/plumwsl/.pbfpg-efltozcl",
+  "removed_tools": "/home/plumwsl/.pbf-tools-jm2i9hih",
+  "qualification": "Initial deterministic-gate harness failed before the target operation. Original private PG had already stopped normally; original TS resetConfirmed removed stopped data. Known read-only helper/observer were signalled via verified pidfd; no unknown mutator was force-stopped. No claim about unrelated or inaccessible actors."
+}

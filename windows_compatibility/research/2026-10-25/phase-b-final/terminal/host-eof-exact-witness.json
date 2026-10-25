@@ -1,0 +1,9 @@
+{
+  "pid": 686,
+  "start": "143833",
+  "kernelLockBusyBefore": true,
+  "pidfdHeldBeforeFault": true,
+  "exactPidfdExited": true,
+  "kernelLockFreeAfter": true,
+  "privatePgStillLive": "/home/plumwsl/.bmain-tnsqp21k/home/desktop/postgres|7700620382223286981"
+}

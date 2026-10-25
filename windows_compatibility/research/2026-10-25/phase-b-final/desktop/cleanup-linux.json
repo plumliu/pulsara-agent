@@ -1,0 +1,73 @@
+{
+  "paths": [
+    {
+      "path": "/home/plumwsl/.local/share/pulsara/runtime/b-final-1998a1da-f257-4e77-bad8-2bb73b56ed3a",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.local/share/pulsara/runtime/b-final-3aa1fd66-c820-4c10-930d-0a8f13f0d325",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.local/share/pulsara/runtime/b-final-68719042-5dc9-417d-9603-6be7e5d28a5a",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.local/share/pulsara/runtime/b-final-ab9d4aca-7197-46d7-a6af-0f94fd1131b9",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.local/share/pulsara/runtime/b-final-e5b18c49-d449-4ec5-8fa6-414345a13b02",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pbf-enospc-11GOuGjm",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pbf-enospc-BcamLRkB",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pbf-enospc-Ni8yhdjr",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pbf-enospc-dG5uEPPA",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pbf-enospc-vfDLMXin",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pbf-network-bmijxnii",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pbf-network-ntwhwm4c",
+      "exists": false
+    }
+  ],
+  "processes": [
+    {
+      "pid": 327,
+      "start": "264",
+      "currentStart": null,
+      "sameIdentityLive": false
+    },
+    {
+      "pid": 436,
+      "start": "4523",
+      "currentStart": null,
+      "sameIdentityLive": false
+    }
+  ],
+  "installStages": [],
+  "passed": true,
+  "windowsPids": [
+    13888,
+    33612
+  ],
+  "observedAt": "2026-10-25T14:40:28.086368+00:00"
+}

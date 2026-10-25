@@ -1,0 +1,17 @@
+{
+  "command": [
+    "mise",
+    "exec",
+    "node@22.23.3",
+    "--",
+    "npm.cmd",
+    "--prefix",
+    "desktop",
+    "run",
+    "test:startup"
+  ],
+  "start": "2026-10-25T14:09:06.993370+00:00",
+  "end": "2026-10-25T14:09:19.805242+00:00",
+  "seconds": 12.812999999994645,
+  "exitCode": 0
+}

@@ -1,0 +1,244 @@
+Window: "Pulsara — 本地智能工作台", App: pulsara.exe.
+	0 窗口 (disabled) Pulsara — 本地智能工作台 Secondary Actions: Raise
+		399 对话框 Pulsara Secondary Actions: Raise
+			400 图像 MainInstructionIcon ID: MainIcon
+			401 文本 退出 Pulsara？ ID: MainInstruction
+			402 文本 退出会停止当前工作及后台调度。关闭窗口可以继续在后台运行。 ID: ContentText
+			403 按钮 继续后台运行 ID: CommandLink_100
+			404 按钮 退出 Pulsara ID: CommandLink_101
+			405 标题栏 (settable, string) Value: Pulsara
+				406 按钮 关闭
+		1 窗格 (disabled)
+		2 区域 Pulsara — 本地智能工作台
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 区域
+								8 区域
+									21 文档 Pulsara — 本地智能工作台 Value: https://127.0.0.1:37313/ ID: RootWebArea
+										105 组
+											22 组 ID: root
+												23 主要
+													24 章节标题
+														25 按钮 切换会话侧栏
+													28 导航 主要功能
+														29 按钮 返回 Pulsara 总览
+														30 按钮 总览
+														31 按钮 会话
+														32 按钮 能力
+														33 按钮 记忆
+														34 按钮 定时任务
+														35 按钮 设置
+														36 按钮 用户设置
+															37 图形 用户头像
+													106 补充
+														107 章节标题
+															108 文本 本地智能工作台
+															109 标题 Pulsara
+															110 组 Description: 已连接本地服务
+														111 按钮 搜索会话 Ctrl K
+														112 按钮 新建会话 Ctrl N
+														113 区域 会话目录
+															114 区域 从目录中打开
+																115 按钮 从目录中打开
+																116 按钮 选择目录并创建会话 Description: 选择目录并创建会话
+																117 区域 Windows 共享修复 alpha10 验收 会话
+																	118 按钮 Windows 共享修复 alpha10 验收 Description: /home/plumwsl/workspaces/Windows 共享修复 alpha10 验收
+																	119 按钮 在 Windows 共享修复 alpha10 验收 中创建会话 Description: 在 Windows 共享修复 alpha10 验收 中创建会话
+																	120 按钮 alpha.10 安装版图形验收终端确认 已载入
+																	121 详细信息
+																		122 开合三角标记 alpha.10 安装版图形验收终端确认 更多操作
+																123 区域 Windows 中文 验收 20261025 会话
+																	124 按钮 Windows 中文 验收 20261025 Description: /home/plumwsl/workspaces/Windows 中文 验收 20261025
+																	125 按钮 在 Windows 中文 验收 20261025 中创建会话 Description: 在 Windows 中文 验收 20261025 中创建会话
+																	126 按钮 WSL中文工作目录smoke.txt写入读取验收 可恢复
+																	127 详细信息
+																		128 开合三角标记 WSL中文工作目录smoke.txt写入读取验收 更多操作
+															129 区域 快速开始
+																130 按钮 快速开始
+																131 按钮 创建快速开始会话 Description: 创建快速开始会话
+																132 按钮 alpha.10 睡眠验收：单次启动等待进程 当前会话
+																133 详细信息
+																	134 开合三角标记 alpha.10 睡眠验收：单次启动等待进程 更多操作
+																135 按钮 alpha.9 睡眠自动恢复验收测试会话 可恢复
+																136 详细信息
+																	137 开合三角标记 alpha.9 睡眠自动恢复验收测试会话 更多操作
+														138 文本 已连接本地服务
+													301 区域 会话工作台
+														302 章节标题
+															303 文本 已完成
+															304 标题 alpha.10 睡眠验收：单次启动等待进程
+															305 按钮 更多会话操作
+															306 按钮 压缩上下文
+															307 按钮 切换检查器
+														308 文章
+															309 章节标题
+																310 文本 你
+																311 图形 用户头像
+															312 文本 这是 alpha.10 活动任务睡眠验收。请用 terminal 工具只启动一次以下命令，tty=false、yield_time_ms=0，让这个测试进程保持等待输入；收到 running 后报告 process_id 即结束本轮。不要发送输入、close_stdin、kill、wait、添加 monitor、重启命令或读写其他文件。 printf 'PULSARA_ACTIVE_SLEEP_READY\n'; /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/root/active-sleep/pulsara-sleep-child.exe echo 这个本机测试程序只等待 stdin 的 EOF，没有业务副作用。稍后我会让电脑真实睡眠，检验产品原来的取消与恢复行为。
+															313 按钮 复制消息 Description: 复制消息
+															314 time
+																315 文本 22:37
+														316 章节标题
+															317 文本 Pulsara
+														318 按钮 展开处理过程
+														319 文章
+															320 组
+																321 文本 已启动一次，status = running。
+																322 文本 process_id:
+																323 文本 process:sz57qhtih4bhpcmwx3rggesfee
+																324 文本 本轮到此结束，未发送输入、未 close_stdin、未 kill/wait、未添加 monitor、未重启，也未读写其他文件。
+															325 按钮 复制回复
+															326 按钮 从此处分叉 Description: 从此处分叉
+															327 time
+																328 文本 22:37
+														371 文章
+															372 章节标题
+																373 文本 你
+																374 图形 用户头像
+															375 文本 睡眠唤醒后的新消息：请只回复“活动任务睡眠后连接正常”，不要调用工具或重新启动之前的命令。
+															376 按钮 复制消息 Description: 复制消息
+															379 time
+																380 文本 22:46
+														390 文章
+															391 章节标题
+																392 文本 Pulsara
+															393 组
+																394 文本 活动任务睡眠后连接正常
+															395 按钮 复制回复
+															396 按钮 从此处分叉 Description: 从此处分叉
+															397 time
+																398 文本 22:46
+														366 编辑 (settable, string) 发送给 Pulsara Value: 
+															367 文本 
+														330 按钮 添加文件、技能或规划
+														331 按钮 完全访问
+														332 按钮 上下文占用 3%
+														333 按钮 DeepSeek V4.1 Flash 1017 Description: DeepSeek · DeepSeek V4.1 Flash 1017 · Chat
+														334 按钮 推理 high Description: 推理 high
+														335 按钮 (disabled) 发送
+													336 补充 会话标签工作区
+														337 缩略图 调整工作区宽度 Value: 50
+														338 章节标题
+															339 按钮 收起工作区 Description: 收起工作区
+														340 导航 工作区入口
+															341 按钮 项目能力 Description: 项目能力
+															342 按钮 任务 Description: 任务
+															343 按钮 后台进程 Description: 后台进程
+															344 按钮 新建网页 Description: 新建网页
+														345 选项卡 打开的内容
+															346 选项卡项目 (selectable) 后台进程 Description: 后台进程
+															347 按钮 关闭 后台进程 Description: 关闭视图
+														348 按钮 (disabled) 向左滚动标签页 Description: 向左滚动
+														349 按钮 (disabled) 向右滚动标签页 Description: 向右滚动
+														350 选项卡面板
+															351 文本 当前没有已交付的后台命令
+													89 组 窗口控制
+														90 按钮 最小化
+														91 按钮 最大化或还原
+														92 按钮 关闭窗口
+											185 组
+								10 区域
+		399 对话框 Pulsara Secondary Actions: Raise
+			400 图像 MainInstructionIcon ID: MainIcon
+			401 文本 退出 Pulsara？ ID: MainInstruction
+			402 文本 退出会停止当前工作及后台调度。关闭窗口可以继续在后台运行。 ID: ContentText
+			403 按钮 继续后台运行 ID: CommandLink_100
+			404 按钮 退出 Pulsara ID: CommandLink_101
+			405 标题栏 (settable, string) Value: Pulsara
+				406 按钮 关闭
+
+Document text: ```
+切换会话侧栏
+返回 Pulsara 总览
+总览
+会话
+能力
+记忆
+定时任务
+设置
+￼
+用户设置
+本地智能工作台
+Pulsara
+￼
+搜索会话
+Ctrl K
+新建会话
+Ctrl N
+从目录中打开
+选择目录并创建会话
+Windows 共享修复 alpha10 验收Windows 共享修复 a…
+在 Windows 共享修复 alpha10 验收 中创建会话
+alpha.10 安装版图形验收终端确认alpha.10 安装版图形验收…
+已载入
+alpha.10 安装版图形验收终端确认 更多操作
+Windows 中文 验收 20261025Windows 中文 验收 …
+在 Windows 中文 验收 20261025 中创建会话
+WSL中文工作目录smoke.txt写入读取验收WSL中文工作目录smoke.t…
+可恢复
+WSL中文工作目录smoke.txt写入读取验收 更多操作
+快速开始
+创建快速开始会话
+alpha.10 睡眠验收：单次启动等待进程alpha.10 睡眠验收：单次…
+当前会话
+alpha.10 睡眠验收：单次启动等待进程 更多操作
+alpha.9 睡眠自动恢复验收测试会话alpha.9 睡眠自动恢复验收…
+可恢复
+alpha.9 睡眠自动恢复验收测试会话 更多操作
+已连接本地服务
+已完成
+alpha.10 睡眠验收：单次启动等待进程
+更多会话操作
+压缩上下文
+切换检查器
+你
+￼
+这是 alpha.10 活动任务睡眠验收。请用 terminal 工具只启动一次以下命令，tty=false、yield_time_ms=0，让这个测试进程保持等待输入；收到 running 后报告 process_id 即结束本轮。不要发送输入、close_stdin、kill、wait、添加 monitor、重启命令或读写其他文件。
+
+printf 'PULSARA_ACTIVE_SLEEP_READY\n'; /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/root/active-sleep/pulsara-sleep-child.exe echo
+
+这个本机测试程序只等待 stdin 的 EOF，没有业务副作用。稍后我会让电脑真实睡眠，检验产品原来的取消与恢复行为。
+复制消息
+22:37
+Pulsara
+处理过程
+已启动一次，status = running。
+process_id: process:sz57qhtih4bhpcmwx3rggesfee
+本轮到此结束，未发送输入、未 close_stdin、未 kill/wait、未添加 monitor、未重启，也未读写其他文件。
+复制回复
+从此处分叉
+22:37
+你
+￼
+睡眠唤醒后的新消息：请只回复“活动任务睡眠后连接正常”，不要调用工具或重新启动之前的命令。
+复制消息
+22:46
+Pulsara
+活动任务睡眠后连接正常
+复制回复
+从此处分叉
+22:46
+添加文件、技能或规划
+完全访问
+上下文占用 3%
+DeepSeek V4.1 Flash 1017
+推理 high
+发送
+调整工作区宽度
+收起工作区
+能力
+任务
+后台进程
+新建网页
+后台进程
+关闭 后台进程
+向左滚动标签页
+向右滚动标签页
+当前没有已交付的后台命令
+最小化
+最大化或还原
+关闭窗口
+￼
+```

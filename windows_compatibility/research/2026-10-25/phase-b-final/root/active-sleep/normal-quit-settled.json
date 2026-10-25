@@ -1,0 +1,9 @@
+{
+  "at": "2026-10-25T22:47:50.6994212+08:00",
+  "processes": [],
+  "child": [],
+  "originalKernelExists": false,
+  "pgExit": 3,
+  "pgOutput": "pg_ctl: no server running",
+  "confirmation": "User explicitly confirmed clicking Exit; automation native modal binding failed"
+}

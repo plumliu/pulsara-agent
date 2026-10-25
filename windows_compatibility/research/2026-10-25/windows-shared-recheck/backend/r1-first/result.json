@@ -1,0 +1,36 @@
+{
+  "root": "/home/plumwsl/.wsr-ax19kear",
+  "data": "/home/plumwsl/.wsr-ax19kear/data",
+  "socket": "/home/plumwsl/.wsr-ax19kear/s",
+  "formal_cluster_used": false,
+  "identity": [
+    "7700606352142954921",
+    "/home/plumwsl/.wsr-ax19kear/data",
+    "/home/plumwsl/.wsr-ax19kear/s",
+    "",
+    null,
+    170009
+  ],
+  "pytest_argv": [
+    "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-vv",
+    "--junitxml",
+    "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/backend/r1-first/r1.xml",
+    "/home/plumwsl/workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py",
+    "/home/plumwsl/workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py",
+    "/home/plumwsl/workspaces/pulsara_agent/tests/test_round5_long_horizon_postgres.py::test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn"
+  ],
+  "pytest_exit": 0,
+  "counts": {
+    "tests": 27,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "passed": true,
+  "remaining_test_databases": [],
+  "final_pg_status": 3,
+  "private_home_removed": true
+}

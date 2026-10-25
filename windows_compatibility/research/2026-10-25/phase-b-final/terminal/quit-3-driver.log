@@ -1,0 +1,3 @@
+Error: test observation deadline: active original terminal
+    at until (C:\python_workspace\pulsara-agent\output\phase-b-final\terminal\main_cases.cjs:35:175)
+    at async C:\python_workspace\pulsara-agent\output\phase-b-final\terminal\main_cases.cjs:93:2

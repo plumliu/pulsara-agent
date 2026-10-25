@@ -1,0 +1,38 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.15, pytest-9.0.3, pluggy-1.6.0 -- /home/plumwsl/workspaces/pulsara_agent/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/plumwsl/workspaces/pulsara_agent
+configfile: pyproject.toml
+plugins: anyio-4.14.0, xdist-3.8.0
+collecting ... collected 27 items
+
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[None] PASSED [  3%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[equal-head-payload] PASSED [  7%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[backward-head] PASSED [ 11%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[binding] PASSED [ 14%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[identity] PASSED [ 18%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[payload] PASSED [ 22%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[closure] PASSED [ 25%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[late-outcome] PASSED [ 29%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[permission] PASSED [ 33%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[context] PASSED [ 37%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[replay] PASSED [ 40%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_head_only_retirement_failure_propagates_without_repeating_cleanup[handle] PASSED [ 44%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_head_only_retirement_failure_propagates_without_repeating_cleanup[borrow] PASSED [ 48%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_head_only_retirement_failure_propagates_without_repeating_cleanup[hook] PASSED [ 51%]
+../workspaces/pulsara_agent/tests/test_root_prospective_head_reprepare.py::test_head_only_retirement_failure_propagates_without_repeating_cleanup[planning] PASSED [ 55%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_compaction_release_authorities_reject_another_adoption_candidate PASSED [ 59%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_runtime_observation_codec_is_canonical_and_inert PASSED [ 62%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_prefix_fingerprint_changes_on_any_old_message_rewrite PASSED [ 66%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_scope_and_frontier_are_closed PASSED [ 70%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_frontier_entry_cut_does_not_limit_lowered_blocks_or_tool_closures PASSED [ 74%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_compatibility_reset_contract_is_physically_absent PASSED [ 77%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_started_settlement_outlives_cancelled_waiter PASSED [ 81%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_continuity_owner_has_no_durable_or_task_authority PASSED [ 85%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_only_base_system_owns_system_channel PASSED [ 88%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_activation_uses_only_typed_dispatch_anchor PASSED [ 92%]
+../workspaces/pulsara_agent/tests/test_round3_1_provider_input_prefix_continuity.py::test_round3_1_forbidden_durable_provider_input_graph_is_absent PASSED [ 96%]
+../workspaces/pulsara_agent/tests/test_round5_long_horizon_postgres.py::test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn PASSED [100%]
+
+- generated xml file: /mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/backend/r1-first/r1.xml -
+============================== 27 passed in 2.89s ==============================

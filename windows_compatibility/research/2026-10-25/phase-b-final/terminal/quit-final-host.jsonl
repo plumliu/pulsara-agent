@@ -1,0 +1,12 @@
+{"timeNs":"1792940035267000000","kind":"owned-exe-spawn","pid":7712,"executable":"C:/Users/plumlocal/AppData/Local/Programs/pulsara/Pulsara.exe","windowsHome":"C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-rmw6pu5m-electron"}
+{"timeNs":"1792940035418000000","kind":"before-main-userdata-isolated","path":"C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-rmw6pu5m-electron","version":"0.1.0-alpha.10"}
+{"timeNs":"1792940035419000000","kind":"installed-main-bytes-equal","same":true}
+{"timeNs":"1792940035419000000","kind":"inspector-injection-result","result":{"type":"string","value":"injected-before-single-instance-lock"}}
+{"timeNs":"1792940036284000000","kind":"private-prepare-only","target":{"distro":"Ubuntu","user":"plumwsl","uid":1000,"home":"/home/plumwsl"},"home":"/home/plumwsl/.bmain-rmw6pu5m/home","version":"0.1.0-alpha.10"}
+{"timeNs":"1792940036429000000","kind":"actual-carrier-spawn","pid":13508,"home":"/home/plumwsl/.bmain-rmw6pu5m/home"}
+{"timeNs":"1792940048354000000","kind":"active-task-observed"}
+{"timeNs":"1792940048359000000","kind":"invoke-original-app-quit"}
+{"timeNs":"1792940120745000000","kind":"actual-carrier-close","code":0,"signal":null}
+{"timeNs":"1792940120746000000","kind":"original-pg-stop-enter","directory":"/home/plumwsl/.bmain-rmw6pu5m/home/desktop/postgres"}
+{"timeNs":"1792940122450000000","kind":"original-pg-stop-returned"}
+{"timeNs":"1792940122590000000","kind":"owned-exe-close","code":0,"signal":null}

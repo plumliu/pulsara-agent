@@ -1,0 +1,111 @@
+diff --git a/desktop/package-lock.json b/desktop/package-lock.json
+index f6321f83..5ca11843 100644
+--- a/desktop/package-lock.json
++++ b/desktop/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "pulsara-desktop",
+-  "version": "0.1.0-alpha.9",
++  "version": "0.1.0-alpha.10",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "pulsara-desktop",
+-      "version": "0.1.0-alpha.9",
++      "version": "0.1.0-alpha.10",
+       "devDependencies": {
+         "@types/node": "22.19.19",
+         "electron": "44.9.0",
+diff --git a/desktop/package.json b/desktop/package.json
+index 3e43148e..699ed584 100644
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -2,7 +2,7 @@
+   "name": "pulsara-desktop",
+   "productName": "Pulsara",
+   "desktopName": "pulsara-desktop.desktop",
+-  "version": "0.1.0-alpha.9",
++  "version": "0.1.0-alpha.10",
+   "description": "Pulsara local agent workbench",
+   "author": "Pulsara",
+   "private": true,
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 3eb06a82..5c2ae6b5 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "pulsara-desktop-workbench",
+-  "version": "0.1.0-alpha.9",
++  "version": "0.1.0-alpha.10",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "pulsara-desktop-workbench",
+-      "version": "0.1.0-alpha.9",
++      "version": "0.1.0-alpha.10",
+       "dependencies": {
+         "@floating-ui/dom": "1.8.0",
+         "@speed-highlight/core": "1.2.24",
+diff --git a/frontend/package.json b/frontend/package.json
+index 0634d1ea..eec6df94 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "pulsara-desktop-workbench",
+-  "version": "0.1.0-alpha.9",
++  "version": "0.1.0-alpha.10",
+   "private": true,
+   "engines": {
+     "node": ">=22.13.0"
+diff --git a/mise.toml b/mise.toml
+index 71d9a48c..3b61fcbb 100644
+--- a/mise.toml
++++ b/mise.toml
+@@ -95,7 +95,7 @@ run = ".venv/bin/python desktop/scripts/prepare_wsl_payload.py"
+ depends = ["desktop:bootstrap", "desktop:windows-shell-dependencies"]
+ sources = ["desktop/scripts/prepare_windows_resources.py", "desktop/native/windows-interop-helper/Program.cs", "desktop/resources/wsl-payload/payload.tar", "desktop/resources/wsl-payload/manifest.json", "desktop/package.json"]
+ outputs = ["desktop/resources/windows-interop/pulsara-interop.exe"]
+-run = ".venv/Scripts/python.exe desktop/scripts/prepare_windows_resources.py"
++run = '.venv\Scripts\python.exe desktop\scripts\prepare_windows_resources.py'
+ 
+ [tasks."desktop:windows-shell-dependencies"]
+ depends = ["desktop:bootstrap"]
+diff --git a/pyproject.toml b/pyproject.toml
+index db1ae83c..5036d20f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,6 @@
+ [project]
+ name = "pulsara-agent"
+-version = "0.1.0a9"
++version = "0.1.0a10"
+ description = "Pulsara canonical conversation-kernel agent runtime."
+ readme = "README.md"
+ requires-python = ">=3.12"
+diff --git a/src/pulsara_agent/__init__.py b/src/pulsara_agent/__init__.py
+index 06678a24..316d2f2c 100644
+--- a/src/pulsara_agent/__init__.py
++++ b/src/pulsara_agent/__init__.py
+@@ -2,4 +2,4 @@
+ 
+ __all__ = ["__version__"]
+ 
+-__version__ = "0.1.0a9"
++__version__ = "0.1.0a10"
+diff --git a/uv.lock b/uv.lock
+index 6385b2bb..42221df9 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1340,7 +1340,7 @@ wheels = [
+ 
+ [[package]]
+ name = "pulsara-agent"
+-version = "0.1.0a9"
++version = "0.1.0a10"
+ source = { editable = "." }
+ dependencies = [
+     { name = "aiohttp" },

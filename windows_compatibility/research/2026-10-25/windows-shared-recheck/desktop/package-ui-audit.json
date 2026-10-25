@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "version": "0.1.0-alpha.10",
+  "actualUnpackedAsar": true,
+  "assetsEqualSource": [
+    "startup.html",
+    "startup.js",
+    "startup.css"
+  ],
+  "friendlyFailureAndCollapsedDetails": true,
+  "originalRetryAndLogsHandlers": true,
+  "installerRun": false
+}

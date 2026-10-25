@@ -1,0 +1,7 @@
+{
+  "observedAt": "2026-10-25T22:24:54.8008431+08:00",
+  "processes": [],
+  "pgExit": 3,
+  "pgOutput": "pg_ctl: no server running",
+  "quitMethod": "Ctrl+Q; no visible confirmation; no process kill"
+}

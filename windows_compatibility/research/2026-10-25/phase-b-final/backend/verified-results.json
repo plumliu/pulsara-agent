@@ -1,0 +1,43 @@
+{
+  "passed": true,
+  "case_count": 5,
+  "checks": {
+    "pre-cancel": {
+      "passed": true,
+      "original_call_and_explicit_followups_exact": true,
+      "all_carriers_closed": true,
+      "clean_data_and_locks": true
+    },
+    "start-loss": {
+      "passed": true,
+      "original_call_and_explicit_followups_exact": true,
+      "all_carriers_closed": true,
+      "clean_data_and_locks": true
+    },
+    "stop-loss": {
+      "passed": true,
+      "original_call_and_explicit_followups_exact": true,
+      "all_carriers_closed": true,
+      "clean_data_and_locks": true
+    },
+    "init-loss": {
+      "passed": true,
+      "original_call_and_explicit_followups_exact": true,
+      "all_carriers_closed": true,
+      "clean_data_and_locks": true
+    },
+    "readiness": {
+      "passed": true,
+      "original_call_and_explicit_followups_exact": true,
+      "all_carriers_closed": true,
+      "clean_data_and_locks": true
+    }
+  },
+  "original_fixture_failures_preserved": 2,
+  "production_changed": false,
+  "cleanup_access_qualification": "Known actor identity checks and accessible same-UID command/environment checks; no claim about unrelated inaccessible processes.",
+  "same_uid_proc_inaccessible": [
+    369,
+    371
+  ]
+}

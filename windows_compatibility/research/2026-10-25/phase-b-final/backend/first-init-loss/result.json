@@ -1,0 +1,224 @@
+{
+  "name": "init-loss",
+  "config": {
+    "home": "/home/plumwsl/.pbfpg-vnbj7i7h",
+    "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+    "repo": "/home/plumwsl/workspaces/pulsara_agent",
+    "library": "/home/plumwsl/.pbf-tools-lkdf5x4g/fault.so",
+    "method": "run:initdb",
+    "native_stage": "initdb-exec"
+  },
+  "provenance": {
+    "app": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\resources\\app.asar",
+    "installedTsExactCurrentDist": true,
+    "node": "v22.23.3",
+    "productionOwner": true,
+    "productionClient": true,
+    "productionWslHost": true,
+    "installedHelperWithTestGates": true
+  },
+  "nativeGate": {
+    "gate": {
+      "pid": 1017,
+      "uid": 1000,
+      "start_ticks": "85619",
+      "stage": "initdb-exec",
+      "parent": 1015
+    },
+    "helper": {
+      "pid": 1015,
+      "uid": 1000,
+      "start_ticks": "85525",
+      "method": "run:initdb",
+      "armed": true,
+      "helper": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/desktop_guest_ops.py"
+    },
+    "children": [
+      {
+        "pid": 1016,
+        "uid": 1000,
+        "start_ticks": "85618",
+        "argv": [
+          "/usr/bin/findmnt",
+          "--json",
+          "--target",
+          "/home/plumwsl/.pbfpg-vnbj7i7h",
+          "--output",
+          "FSTYPE,FSROOT,TARGET"
+        ],
+        "inherited": []
+      },
+      {
+        "pid": 1017,
+        "uid": 1000,
+        "start_ticks": "85619",
+        "argv": [
+          "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/postgres/bin/initdb",
+          "-D",
+          "/home/plumwsl/.pbfpg-vnbj7i7h/desktop/postgres",
+          "-U",
+          "pulsara_admin",
+          "--auth-local=trust",
+          "--auth-host=reject",
+          "--encoding=UTF8",
+          "--locale=C"
+        ],
+        "inherited": [
+          {
+            "fd": 3,
+            "inode": 262487
+          },
+          {
+            "fd": 4,
+            "inode": 262493
+          }
+        ]
+      }
+    ],
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262487
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262493
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-vnbj7i7h/desktop/postgres\" does not exist\n"
+      }
+    }
+  },
+  "inflightRefusals": {
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262487
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262493
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-vnbj7i7h/desktop/postgres\" does not exist\n"
+      }
+    },
+    "competition": {
+      "start": {
+        "code": "PG_KERNEL_BUSY",
+        "execution": "not-submitted",
+        "message": "[Errno 11] Resource temporarily unavailable",
+        "stdout": "",
+        "stderr": ""
+      },
+      "reset": {
+        "code": "PG_KERNEL_BUSY",
+        "execution": "not-submitted",
+        "message": "[Errno 11] Resource temporarily unavailable",
+        "stdout": "",
+        "stderr": ""
+      },
+      "maintenance": {
+        "code": "PG_KERNEL_BUSY",
+        "execution": "not-submitted",
+        "message": "[Errno 11] Resource temporarily unavailable",
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "untouched": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262487
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262493
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-vnbj7i7h/desktop/postgres\" does not exist\n"
+      }
+    }
+  },
+  "outcome": {
+    "error": {
+      "execution": "unknown",
+      "message": "PostgreSQL helper result is incomplete (9)",
+      "stderr": ""
+    },
+    "owner": {
+      "startedHere": false,
+      "initialized": false
+    },
+    "target": {
+      "id": "3",
+      "method": "run:initdb",
+      "armed": true,
+      "carrierPid": 27040,
+      "operationBytes": 184,
+      "closed": {
+        "code": 9,
+        "signal": null
+      }
+    },
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 262487
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 262493
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-vnbj7i7h/desktop/postgres\" does not exist\n"
+      }
+    }
+  },
+  "failure": {
+    "message": "[Errno 2] No such file or directory: '/home/plumwsl/.pbfpg-vnbj7i7h/desktop/postgres'",
+    "stack": "Error: [Errno 2] No such file or directory: '/home/plumwsl/.pbfpg-vnbj7i7h/desktop/postgres'\n    at ChildProcess.<anonymous> (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\backend\\installed-ts\\postgres-wsl.js:142:53)\n    at Object.onceWrapper (node:events:634:26)\n    at ChildProcess.emit (node:events:531:35)\n    at maybeClose (node:internal/child_process:1101:16)\n    at ChildProcess._handle.onexit (node:internal/child_process:304:5)",
+    "execution": "not-submitted",
+    "code": "ENOENT"
+  }
+}

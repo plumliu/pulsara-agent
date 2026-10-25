@@ -1,0 +1,14 @@
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/child-build-initial-failure.log
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r2-result.json
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r2.log
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r2.xml
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r3-pe-preflight-initial-failure.json
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r3-pe-provenance.json
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r3-result.json
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r3.log
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/r3.xml
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/readonly-review.zh.md
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/report.zh.md
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/results.json
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/run_r2.py
+windows_compatibility/research/2026-10-25/windows-shared-recheck/terminal/run_r3.py

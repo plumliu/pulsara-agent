@@ -1,0 +1,10 @@
+{
+  "command": [
+    "C:\\Users\\plumlocal\\AppData\\Roaming\\uv\\python\\cpython-3.12.15-windows-x86_64-none\\python.exe",
+    "output/windows-shared-recheck/desktop/artifact-provenance.py"
+  ],
+  "start": "2026-10-25T14:13:19.869209+00:00",
+  "end": "2026-10-25T14:13:23.552732+00:00",
+  "seconds": 3.687999999994645,
+  "exitCode": 0
+}

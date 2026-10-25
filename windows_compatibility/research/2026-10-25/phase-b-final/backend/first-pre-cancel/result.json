@@ -1,0 +1,32 @@
+{
+  "name": "pre-cancel",
+  "config": {
+    "home": "/home/plumwsl/.pbfpg-efltozcl",
+    "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+    "repo": "/home/plumwsl/workspaces/pulsara_agent",
+    "library": "/home/plumwsl/.pbf-tools-jm2i9hih/fault.so",
+    "method": "run:pg_ctl:start",
+    "before_ready": true
+  },
+  "provenance": {
+    "app": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\resources\\app.asar",
+    "installedTsExactCurrentDist": true,
+    "node": "v22.23.3",
+    "productionOwner": true,
+    "productionClient": true,
+    "productionWslHost": true,
+    "installedHelperWithTestGates": true
+  },
+  "initialQuery": {
+    "identity": [
+      "7700614689267711617",
+      "/home/plumwsl/.pbfpg-efltozcl/desktop/postgres",
+      "/home/plumwsl/.pbfpg-efltozcl/desktop/socket",
+      ""
+    ]
+  },
+  "failure": {
+    "message": "Command failed: C:\\WINDOWS\\System32\\wsl.exe -d Ubuntu -u plumwsl --cd /home/plumwsl --exec /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3 -I /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/control.py /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/pre-cancel/config.json wait-gate-ready",
+    "stack": "Error: Command failed: C:\\WINDOWS\\System32\\wsl.exe -d Ubuntu -u plumwsl --cd /home/plumwsl --exec /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3 -I /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/control.py /mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/pre-cancel/config.json wait-gate-ready\n    at genericNodeError (node:internal/errors:983:15)\n    at wrappedFn (node:internal/errors:537:14)\n    at checkExecSyncError (node:child_process:916:11)\n    at execFileSync (node:child_process:952:15)\n    at linux (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\backend\\owner.cjs:32:10)\n    at control (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\backend\\owner.cjs:49:49)\n    at runCase (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\backend\\owner.cjs:87:20)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async main (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\backend\\owner.cjs:205:5)"
+  }
+}

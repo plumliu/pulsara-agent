@@ -1,0 +1,32 @@
+{
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3",
+  "product": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent",
+  "version": "0.1.0a10",
+  "complete_source_bytes_equal": [
+    "conversation_kernel/provider_dispatch.py",
+    "hooks/executor.py",
+    "conversation_kernel/mcp/sdk_facade.py"
+  ],
+  "installed_helper": "/mnt/c/Users/plumlocal/AppData/Local/Programs/pulsara/resources/windows-interop/pulsara-interop.exe",
+  "runner_domains": [
+    {
+      "home": "/home/plumwsl/.pa-isd0ie9q",
+      "uid": 1000,
+      "platform": "linux",
+      "interop_configured": true
+    },
+    {
+      "home": "/home/plumwsl/.pa-isd0ie9q",
+      "uid": 1000,
+      "platform": "linux",
+      "interop_configured": true
+    }
+  ],
+  "actual_interop_configuration": {
+    "helper": "/mnt/c/Users/plumlocal/AppData/Local/Programs/pulsara/resources/windows-interop/pulsara-interop.exe",
+    "distribution": "Ubuntu",
+    "user": "plumwsl",
+    "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3",
+    "uid": 1000
+  }
+}

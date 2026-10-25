@@ -1,0 +1,134 @@
+{
+  "label": "setup-d2493f94-b4e1-4f5f-b96e-4865dcdb921c",
+  "cases": [
+    {
+      "name": "missing existing distro",
+      "rejected": true,
+      "error": "Error: 请选择已存在的 WSL2 Ubuntu；不会新建或替换发行版。",
+      "code": null
+    },
+    {
+      "name": "unknown Linux user",
+      "rejected": true,
+      "error": "Error: Command failed: C:\\WINDOWS\\System32\\wsl.exe -d Ubuntu --cd / --exec /usr/bin/id -u -- pulsara-absent-b983edbf-5670-40e2-a061-7b41f5412260\nid: 'pulsara-absent-b983edbf-5670-40e2-a061-7b41f5412260': no such user\n",
+      "code": 1
+    },
+    {
+      "name": "root user",
+      "rejected": true,
+      "error": "Error: 应用必须由所选非 root 用户运行。",
+      "code": null
+    },
+    {
+      "name": "corrupt selection never overwrites itself",
+      "passed": true
+    },
+    {
+      "name": "explicit target persists/reopens only private selection",
+      "passed": true
+    },
+    {
+      "name": "real installed alpha10 original prepare revalidates",
+      "passed": true
+    },
+    {
+      "name": "same version different digest",
+      "rejected": true,
+      "error": "Error: Command failed: C:\\WINDOWS\\System32\\wsl.exe -d Ubuntu -u plumwsl --cd /home/plumwsl --exec /bin/sh -eu -c test ! -L \"$1\"; test \"$(cat \"$1/.pulsara-payload.sha256\")\" = \"$2\" pulsara-resource-identity /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10 0000000000000000000000000000000000000000000000000000000000000000\n",
+      "code": 1
+    },
+    {
+      "name": "partial input cancellation joins finite installer",
+      "rejected": true,
+      "error": "Error: cancel after observed actual setup bytes",
+      "code": null
+    }
+  ],
+  "installedVersion": "0.1.0-alpha.10",
+  "productionModule": "C:\\python_workspace\\pulsara-agent\\desktop\\dist\\wsl-setup.js",
+  "discovered": [
+    {
+      "name": "Ubuntu",
+      "version": 2,
+      "default": true
+    }
+  ],
+  "target": {
+    "distro": "Ubuntu",
+    "user": "plumwsl",
+    "uid": 1000,
+    "home": "/home/plumwsl"
+  },
+  "before": {
+    "stages": [],
+    "markers": {
+      "0.1.0-alpha.9": "987a6947525351bca339f429a384a4d630632083158c9b8d94c06666e10c57e6\n",
+      "0.1.0-alpha.6": "be6afac1663c37c7101f6bdeae68d5fd6863a7da828ba9b50a2dd988730d73b9\n",
+      "0.1.0-alpha.10": "b8899807e99b8a44be7cc15a49516b521f155a1efdf2499b1312932058427a6c\n",
+      "0.1.0-alpha.7": "9d433825e7ec99d65138d4937c454d16ef52ddc4a5755fe34e707749ab44255a\n"
+    },
+    "settings": {
+      "inode": 145427,
+      "uid": 1000,
+      "mode": "0o600",
+      "size": 440,
+      "mtimeNs": 1792923525820928500
+    },
+    "pgData": {
+      "inode": 171484,
+      "uid": 1000,
+      "mode": "0o700",
+      "size": 4096,
+      "mtimeNs": 1792938371291467300
+    }
+  },
+  "existing": {
+    "target": {
+      "distro": "Ubuntu",
+      "user": "plumwsl",
+      "uid": 1000,
+      "home": "/home/plumwsl"
+    },
+    "home": "/home/plumwsl/.pulsara",
+    "resources": {
+      "root": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+      "pythonExecutable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3",
+      "playwrightBrowsers": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/playwright",
+      "postgresBin": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/postgres/bin",
+      "packageCli": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/bin/pulsara"
+    },
+    "hostHelperPath": "/mnt/c/python_workspace/pulsara-agent/desktop/resources/windows-interop/pulsara-interop.exe"
+  },
+  "partialObserved": [
+    {
+      "name": ".install-bsyZtjQM",
+      "bytes": 30056448
+    }
+  ],
+  "after": {
+    "stages": [],
+    "markers": {
+      "0.1.0-alpha.9": "987a6947525351bca339f429a384a4d630632083158c9b8d94c06666e10c57e6\n",
+      "0.1.0-alpha.6": "be6afac1663c37c7101f6bdeae68d5fd6863a7da828ba9b50a2dd988730d73b9\n",
+      "0.1.0-alpha.10": "b8899807e99b8a44be7cc15a49516b521f155a1efdf2499b1312932058427a6c\n",
+      "0.1.0-alpha.7": "9d433825e7ec99d65138d4937c454d16ef52ddc4a5755fe34e707749ab44255a\n"
+    },
+    "settings": {
+      "inode": 145427,
+      "uid": 1000,
+      "mode": "0o600",
+      "size": 440,
+      "mtimeNs": 1792923525820928500
+    },
+    "pgData": {
+      "inode": 171484,
+      "uid": 1000,
+      "mode": "0o700",
+      "size": 4096,
+      "mtimeNs": 1792938371291467300
+    }
+  },
+  "installLockFree": true,
+  "passed": true,
+  "localInputsRemoved": true
+}

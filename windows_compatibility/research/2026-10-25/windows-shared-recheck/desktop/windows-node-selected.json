@@ -1,0 +1,23 @@
+{
+  "command": [
+    "mise",
+    "exec",
+    "node@22.23.3",
+    "--",
+    "node",
+    "--test",
+    "desktop/dist/backend-paths.test.js",
+    "desktop/dist/backend-session.test.js",
+    "desktop/dist/host-wsl.test.js",
+    "desktop/dist/wsl-setup.test.js",
+    "desktop/dist/postgres-wsl.test.js",
+    "desktop/dist/runtime.test.js",
+    "desktop/dist/browser-policy.test.js",
+    "desktop/dist/oauth-return.test.js",
+    "desktop/dist/ui-preferences.test.js"
+  ],
+  "start": "2026-10-25T14:09:04.809422+00:00",
+  "end": "2026-10-25T14:09:06.633763+00:00",
+  "seconds": 1.8279999999940628,
+  "exitCode": 0
+}

@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-25T23:07:45.8076579+08:00",
+  "windowsHead": "0ea98e63d90043773f42bd9bb9bbb56951fca8b4",
+  "wslHead": "0ea98e63d90043773f42bd9bb9bbb56951fca8b4",
+  "candidate": "0.1.0-alpha.10",
+  "appProcesses": [],
+  "pgExit": 3,
+  "pgOutput": "pg_ctl: no server running",
+  "interop": "enabled\ninterpreter /init\nflags: P\noffset 0\nmagic 4d5a",
+  "tun": [
+    {
+      "Name": "tun0",
+      "Status": "Up",
+      "ifIndex": 30
+    }
+  ],
+  "newCommitCreated": false,
+  "mergedMain": false,
+  "published": false
+}

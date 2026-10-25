@@ -1,0 +1,60 @@
+{
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3",
+  "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "files": [
+    {
+      "relative": "windows_interop/anchor.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/windows_interop/anchor.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/windows_interop/anchor.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "windows_interop/relay.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/windows_interop/relay.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/windows_interop/relay.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "windows_interop/scope.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/windows_interop/scope.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/windows_interop/scope.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "terminal_process/manager.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/terminal_process/manager.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/terminal_process/manager.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "conversation_kernel/host.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/conversation_kernel/host.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "conversation_kernel/mcp/sdk_facade.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "conversation_kernel/mcp/supervisor.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/conversation_kernel/mcp/supervisor.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/mcp/supervisor.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "hooks/executor.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/hooks/executor.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/hooks/executor.py",
+      "bytesEqual": true
+    },
+    {
+      "relative": "desktop_app/application.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/desktop_app/application.py",
+      "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/desktop_app/application.py",
+      "bytesEqual": true
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "command": [
+    "mise",
+    "exec",
+    "node@22.23.3",
+    "--",
+    "node",
+    "output/phase-b-final/desktop/enospc-open-smoke.cjs"
+  ],
+  "start": "2026-10-25T14:38:58.006308+00:00",
+  "end": "2026-10-25T14:38:59.748565+00:00",
+  "seconds": 1.7340000000112923,
+  "exitCode": 1
+}

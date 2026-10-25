@@ -1,0 +1,9 @@
+{"timeNs":"1792939715158000000","kind":"owned-exe-spawn","pid":31196,"executable":"C:/Users/plumlocal/AppData/Local/Programs/pulsara/Pulsara.exe","windowsHome":"C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-49m0wpv2-electron"}
+{"timeNs":"1792939715338000000","kind":"before-main-userdata-isolated","path":"C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-49m0wpv2-electron","version":"0.1.0-alpha.10"}
+{"timeNs":"1792939715339000000","kind":"installed-main-bytes-equal","same":true}
+{"timeNs":"1792939715340000000","kind":"inspector-injection-result","result":{"type":"string","value":"injected-before-single-instance-lock"}}
+{"timeNs":"1792939716074000000","kind":"private-prepare-only","target":{"distro":"Ubuntu","user":"plumwsl","uid":1000,"home":"/home/plumwsl"},"home":"/home/plumwsl/.bmain-49m0wpv2/home","version":"0.1.0-alpha.10"}
+{"timeNs":"1792939716204000000","kind":"actual-carrier-spawn","pid":2328,"home":"/home/plumwsl/.bmain-49m0wpv2/home"}
+{"timeNs":"1792939727655000000","kind":"actual-carrier-close","code":1,"signal":null}
+{"timeNs":"1792939795860000000","kind":"owned-exe-close","code":9,"signal":null}
+{"timeNs":"1792939795875000000","kind":"harness-failed","error":"Error: owned exe exited before active original terminal","stack":"Error: owned exe exited before active original terminal\n    at until (C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\main_cases.cjs:35:98)\n    at async C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\main_cases.cjs:93:2"}

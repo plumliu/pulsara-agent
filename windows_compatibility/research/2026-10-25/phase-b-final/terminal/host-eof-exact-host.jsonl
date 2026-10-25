@@ -1,0 +1,12 @@
+{"timeNs":"1792940394650000000","kind":"owned-exe-spawn","pid":35304,"executable":"C:/Users/plumlocal/AppData/Local/Programs/pulsara/Pulsara.exe","windowsHome":"C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-tnsqp21k-electron"}
+{"timeNs":"1792940394748000000","kind":"before-main-userdata-isolated","path":"C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-tnsqp21k-electron","version":"0.1.0-alpha.10"}
+{"timeNs":"1792940394749000000","kind":"installed-main-bytes-equal","same":true}
+{"timeNs":"1792940394749000000","kind":"inspector-injection-result","result":{"type":"string","value":"injected-before-single-instance-lock"}}
+{"timeNs":"1792940395423000000","kind":"private-prepare-only","target":{"distro":"Ubuntu","user":"plumwsl","uid":1000,"home":"/home/plumwsl"},"home":"/home/plumwsl/.bmain-tnsqp21k/home","version":"0.1.0-alpha.10"}
+{"timeNs":"1792940395544000000","kind":"actual-carrier-spawn","pid":13028,"home":"/home/plumwsl/.bmain-tnsqp21k/home"}
+{"timeNs":"1792940406737000000","kind":"active-task-observed"}
+{"timeNs":"1792940406859000000","kind":"windows-scope-handles-held","facts":{"held":[{"pid":24312,"creation":"134374140065969504"},{"pid":33944,"creation":"134374140067935806"},{"pid":15320,"creation":"134374140068057028"}],"jobHandleClosedBeforeFault":true}}
+{"timeNs":"1792940407019000000","kind":"exact-owned-main-terminate","pid":35304}
+{"timeNs":"1792940407071000000","kind":"owned-exe-close","code":null,"signal":"SIGKILL"}
+{"timeNs":"1792940407664000000","kind":"exact-kernel-witness-returned","code":0}
+{"timeNs":"1792940407664000000","kind":"exact-windows-witness-returned","code":0,"facts":{"waits":[0,0,0],"signalSent":false}}

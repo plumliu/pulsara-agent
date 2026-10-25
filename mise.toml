@@ -95,7 +95,7 @@ run = ".venv/bin/python desktop/scripts/prepare_wsl_payload.py"
 depends = ["desktop:bootstrap", "desktop:windows-shell-dependencies"]
 sources = ["desktop/scripts/prepare_windows_resources.py", "desktop/native/windows-interop-helper/Program.cs", "desktop/resources/wsl-payload/payload.tar", "desktop/resources/wsl-payload/manifest.json", "desktop/package.json"]
 outputs = ["desktop/resources/windows-interop/pulsara-interop.exe"]
-run = ".venv/Scripts/python.exe desktop/scripts/prepare_windows_resources.py"
+run = '.venv\Scripts\python.exe desktop\scripts\prepare_windows_resources.py'
 
 [tasks."desktop:windows-shell-dependencies"]
 depends = ["desktop:bootstrap"]

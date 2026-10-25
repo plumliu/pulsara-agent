@@ -1,0 +1,26 @@
+{
+  "known_readonly_setup_only": true,
+  "target_gate_never_reached": true,
+  "actions": [
+    {
+      "pid": 3893,
+      "start_ticks": "26296",
+      "signal": 9,
+      "expected": [
+        "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/bootstrap.py",
+        "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/pre-cancel/config.json",
+        "prepareLayout"
+      ]
+    },
+    {
+      "pid": 3890,
+      "start_ticks": "26295",
+      "signal": 15,
+      "expected": [
+        "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/control.py",
+        "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/backend/pre-cancel/config.json",
+        "wait-gate-ready"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "target": {
+    "distro": "Ubuntu",
+    "user": "plumwsl"
+  },
+  "path": "/home/plumwsl/workspaces/Explorer 中文 alpha10 fb3136ea",
+  "canonical": "/home/plumwsl/workspaces/Explorer 中文 alpha10 fb3136ea",
+  "inode": 265523,
+  "device": 2096,
+  "uid": 1000,
+  "mode": "0o755",
+  "filesystem": "ext4",
+  "empty": true,
+  "pgStatus": 3,
+  "pgOutput": "pg_ctl: no server running",
+  "kernelLockFree": true,
+  "diagnosticsSocketExists": false,
+  "settingsMetadata": {
+    "inode": 145427,
+    "size": 440,
+    "mtimeNs": 1792923525820928476,
+    "uid": 1000,
+    "mode": "0o600"
+  },
+  "directoryPreserved": true,
+  "onlyTargetSelectedNoSessionCreated": true,
+  "noModelCall": true,
+  "passed": true
+}

@@ -1,0 +1,337 @@
+{
+  "name": "pre-cancel",
+  "config": {
+    "home": "/home/plumwsl/.pbfpg-ow_7mc0f",
+    "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+    "repo": "/home/plumwsl/workspaces/pulsara_agent",
+    "library": "/home/plumwsl/.pbf-tools-ywa00bm0/fault.so",
+    "method": "run:pg_ctl:start",
+    "before_ready": true
+  },
+  "provenance": {
+    "app": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\resources\\app.asar",
+    "installedTsExactCurrentDist": true,
+    "node": "v22.23.3",
+    "productionOwner": true,
+    "productionClient": true,
+    "productionWslHost": true,
+    "installedHelperWithTestGates": true
+  },
+  "initialQuery": {
+    "identity": [
+      "7700617239864430185",
+      "/home/plumwsl/.pbfpg-ow_7mc0f/desktop/postgres",
+      "/home/plumwsl/.pbfpg-ow_7mc0f/desktop/socket",
+      ""
+    ]
+  },
+  "admissionGate": {
+    "gate": {
+      "pid": 11993,
+      "uid": 1000,
+      "start_ticks": "72255"
+    },
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262459
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262466
+        }
+      },
+      "data_exists": true,
+      "version": "17",
+      "outside": "outside-sentinel",
+      "sentinel": "data-sentinel",
+      "status": {
+        "exit": 3,
+        "stdout": "pg_ctl: no server running\n",
+        "stderr": ""
+      }
+    }
+  },
+  "foreignOwner": {
+    "startedHere": true,
+    "initialized": false
+  },
+  "outcome": {
+    "error": {
+      "execution": "not-submitted",
+      "message": "PostgreSQL operation was cancelled; its physical result must settle",
+      "stderr": ""
+    },
+    "owner": {
+      "startedHere": false,
+      "initialized": false
+    },
+    "target": {
+      "id": "12",
+      "method": "run:pg_ctl:start",
+      "armed": true,
+      "carrierPid": 8364,
+      "operationBytes": 0,
+      "closed": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 262459
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": true,
+          "inode": 262466
+        }
+      },
+      "data_exists": true,
+      "version": "17",
+      "outside": "outside-sentinel",
+      "sentinel": "data-sentinel",
+      "status": {
+        "exit": 0,
+        "stdout": "pg_ctl: server is running (PID: 12032)\n/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/postgres/bin/postgres \"-D\" \"/home/plumwsl/.pbfpg-ow_7mc0f/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/home/plumwsl/.pbfpg-ow_7mc0f/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+        "stderr": ""
+      }
+    }
+  },
+  "cleanup": {
+    "owner": {
+      "startedHere": false,
+      "initialized": false
+    },
+    "facts": {
+      "locks": {
+        "kernel.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 262459
+        },
+        "pg-lifetime.lock": {
+          "exists": true,
+          "busy": false,
+          "inode": 262466
+        }
+      },
+      "data_exists": false,
+      "version": null,
+      "outside": "outside-sentinel",
+      "sentinel": null,
+      "status": {
+        "exit": 4,
+        "stdout": "",
+        "stderr": "pg_ctl: directory \"/home/plumwsl/.pbfpg-ow_7mc0f/desktop/postgres\" does not exist\n"
+      }
+    },
+    "calls": [
+      {
+        "id": "1",
+        "method": "prepareLayout",
+        "armed": false,
+        "carrierPid": 2228,
+        "operationBytes": 30,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "2",
+        "method": "readVersion",
+        "armed": false,
+        "carrierPid": 36168,
+        "operationBytes": 28,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "3",
+        "method": "run:initdb",
+        "armed": false,
+        "carrierPid": 37908,
+        "operationBytes": 184,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "4",
+        "method": "run:pg_ctl:status",
+        "armed": false,
+        "carrierPid": 11764,
+        "operationBytes": 106,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "5",
+        "method": "socketMode",
+        "armed": false,
+        "carrierPid": 41116,
+        "operationBytes": 27,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "6",
+        "method": "run:pg_ctl:start",
+        "armed": false,
+        "carrierPid": 29960,
+        "operationBytes": 330,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "7",
+        "method": "run:pg_ctl:stop",
+        "armed": false,
+        "carrierPid": 24992,
+        "operationBytes": 119,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "8",
+        "method": "prepareLayout",
+        "armed": false,
+        "carrierPid": 21468,
+        "operationBytes": 30,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "9",
+        "method": "readVersion",
+        "armed": false,
+        "carrierPid": 5040,
+        "operationBytes": 28,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "10",
+        "method": "run:pg_ctl:status",
+        "armed": false,
+        "carrierPid": 28684,
+        "operationBytes": 106,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "11",
+        "method": "socketMode",
+        "armed": false,
+        "carrierPid": 28476,
+        "operationBytes": 27,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "12",
+        "method": "run:pg_ctl:start",
+        "armed": true,
+        "carrierPid": 8364,
+        "operationBytes": 0,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "13",
+        "method": "run:pg_ctl:stop",
+        "armed": false,
+        "carrierPid": 36748,
+        "operationBytes": 119,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "14",
+        "method": "resetPathsMatch",
+        "armed": false,
+        "carrierPid": 24492,
+        "operationBytes": 32,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "15",
+        "method": "dataDirectoryInfo",
+        "armed": false,
+        "carrierPid": 37304,
+        "operationBytes": 34,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "16",
+        "method": "readVersion",
+        "armed": false,
+        "carrierPid": 22092,
+        "operationBytes": 28,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "17",
+        "method": "run:pg_ctl:status",
+        "armed": false,
+        "carrierPid": 3524,
+        "operationBytes": 106,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "id": "18",
+        "method": "removeDataDirectory",
+        "armed": false,
+        "carrierPid": 37676,
+        "operationBytes": 36,
+        "closed": {
+          "code": 0,
+          "signal": null
+        }
+      }
+    ]
+  },
+  "passed": true
+}

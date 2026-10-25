@@ -1,0 +1,11 @@
+{
+  "command": [
+    ".venv/Scripts/python.exe",
+    "desktop/scripts/release_artifacts.py",
+    "check"
+  ],
+  "start": "2026-10-25T14:02:16.593915+00:00",
+  "end": "2026-10-25T14:02:16.865586+00:00",
+  "seconds": 0.26600000000325963,
+  "exitCode": 0
+}

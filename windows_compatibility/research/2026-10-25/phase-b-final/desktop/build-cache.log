@@ -1,0 +1,40 @@
+EEE....                                                                  [100%]
+==================================== ERRORS ====================================
+_ ERROR at setup of test_warm_build_and_application_edits_reuse_only_dependency_resources _
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-0/test_warm_build_and_applicatio0')
+
+    @pytest.fixture
+    def graph(tmp_path):
+>       assert MISE, "Install mise before running the desktop build integration tests"
+E       AssertionError: Install mise before running the desktop build integration tests
+E       assert None
+
+desktop/scripts/test_build_cache.py:29: AssertionError
+_ ERROR at setup of test_dependency_and_toolchain_changes_invalidate_their_real_graph_boundaries _
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-0/test_dependency_and_toolchain_0')
+
+    @pytest.fixture
+    def graph(tmp_path):
+>       assert MISE, "Install mise before running the desktop build integration tests"
+E       AssertionError: Install mise before running the desktop build integration tests
+E       assert None
+
+desktop/scripts/test_build_cache.py:29: AssertionError
+_ ERROR at setup of test_missing_outputs_and_failed_builds_cannot_be_treated_as_cache_hits _
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-0/test_missing_outputs_and_faile0')
+
+    @pytest.fixture
+    def graph(tmp_path):
+>       assert MISE, "Install mise before running the desktop build integration tests"
+E       AssertionError: Install mise before running the desktop build integration tests
+E       assert None
+
+desktop/scripts/test_build_cache.py:29: AssertionError
+=========================== short test summary info ============================
+ERROR desktop/scripts/test_build_cache.py::test_warm_build_and_application_edits_reuse_only_dependency_resources
+ERROR desktop/scripts/test_build_cache.py::test_dependency_and_toolchain_changes_invalidate_their_real_graph_boundaries
+ERROR desktop/scripts/test_build_cache.py::test_missing_outputs_and_failed_builds_cannot_be_treated_as_cache_hits
+4 passed, 3 errors in 2.36s

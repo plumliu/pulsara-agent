@@ -1,0 +1,803 @@
+{
+  "stage": "after",
+  "observed_at": "2026-10-25T14:16:00.875294+00:00",
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3",
+  "product": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "version": "0.1.0a10",
+  "settings_exists": true,
+  "settings_stat": {
+    "inode": 145427,
+    "size": 440,
+    "mtime_ns": 1792923525820928476,
+    "uid": 1000,
+    "gid": 1000,
+    "mode": 384
+  },
+  "model_connections": [
+    {
+      "id": "connection:oeeiipbn63ytbexaxw74nv5tgy",
+      "route_id": "deepseek",
+      "wire_api": "openai_chat_completions",
+      "model_id": "deepseek-flash",
+      "base_url": "https://api.deepseek.com",
+      "credential_present": true
+    }
+  ],
+  "identity": {
+    "system_identifier": "7700523439330484737",
+    "data": "/home/plumwsl/.pulsara/desktop/postgres",
+    "socket": "/home/plumwsl/.pulsara/desktop/socket",
+    "listen_addresses": "",
+    "postmaster_start": "2026-10-25 22:14:55.809468+08"
+  },
+  "sessions": [
+    {
+      "id": "session:36omh67maz3ezaef3amghzb6ka",
+      "title": "alpha.9 睡眠自动恢复验收测试会话",
+      "workspace_id": "workspace:zlmsxoedty2ev4f2r5m7mrsjxm",
+      "memory_domain_id": "u_local",
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "lifecycle": "OPEN"
+    },
+    {
+      "id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "title": "WSL中文工作目录smoke.txt写入读取验收",
+      "workspace_id": "workspace:wiosodqkjdu7hp4r2d3vgho6lm",
+      "memory_domain_id": "u_local",
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "lifecycle": "OPEN"
+    }
+  ],
+  "turns": [
+    {
+      "id": "turn:3gayxsfhbqg2pcsiwzicm3ud4i",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:exfix4e5kkom6mfc2i5m555eay",
+      "final_entry_id": "entry:hsvqx6x4dj3lkiuxmc7uqiwtaa"
+    },
+    {
+      "id": "turn:ayj2dbwvk6jtfchjr7nl3dorwu",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:wq2f4flfn75ehhp6f3rgbdunoi",
+      "final_entry_id": "entry:wq6cyjpohruovd5d5b4hoxqire"
+    },
+    {
+      "id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:yvln7qusryfu5rrcvc6zvfkrsm",
+      "final_entry_id": "entry:chzxwu7f2kcrvn3xkk4tw4k7sm"
+    },
+    {
+      "id": "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:mst4nqhkyau443rh2pheezhypu",
+      "final_entry_id": "entry:4scnuqh4gret2okmk6ogrguznq"
+    },
+    {
+      "id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:bqi6edyvxhht2jlbcnuoxjl5hi",
+      "final_entry_id": "entry:mpl5cpni43c7lbmg4ytlx4xobu"
+    }
+  ],
+  "entries": [
+    {
+      "id": "entry:wq2f4flfn75ehhp6f3rgbdunoi",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "turn_id": "turn:ayj2dbwvk6jtfchjr7nl3dorwu",
+      "entry_sequence": 1,
+      "entry_kind": "USER_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"这是 alpha.9 睡眠自动恢复验收的独立测试会话。请只回复“睡眠前连接正常”，不要调用任何工具，不要读写文件。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:wq6cyjpohruovd5d5b4hoxqire",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "turn_id": "turn:ayj2dbwvk6jtfchjr7nl3dorwu",
+      "entry_sequence": 2,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:c4fb309e98194ed5bc103e4e4a6ca5c44e70a474386ec999730ef72ceb82ac93\",\"kind\":\"TEXT\",\"size\":21}],\"draft_identity\":\"entry:wq6cyjpohruovd5d5b4hoxqire\"}"
+    },
+    {
+      "id": "entry:exfix4e5kkom6mfc2i5m555eay",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "turn_id": "turn:3gayxsfhbqg2pcsiwzicm3ud4i",
+      "entry_sequence": 3,
+      "entry_kind": "USER_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"这是睡醒后的第二条验收消息。请只回复“自动恢复后模型调用正常”，不要调用工具，不要读写文件。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:hsvqx6x4dj3lkiuxmc7uqiwtaa",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "turn_id": "turn:3gayxsfhbqg2pcsiwzicm3ud4i",
+      "entry_sequence": 4,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:529b90084768a1f1dbda7101933b43fe8ff5a4880ed8f24aa1035f7752941797\",\"kind\":\"TEXT\",\"size\":33}],\"draft_identity\":\"entry:hsvqx6x4dj3lkiuxmc7uqiwtaa\"}"
+    },
+    {
+      "id": "entry:bqi6edyvxhht2jlbcnuoxjl5hi",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 1,
+      "entry_kind": "USER_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"本次是安装版的中文工作目录与真实模型验收。请仅在当前工作目录里创建 smoke.txt，写入一行“Windows WSL 中文验收通过”，然后读取该文件确认内容。请使用实际工具完成，并汇报文件的绝对路径和读回内容；不要修改其他目录或系统设置。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:iepff2nnhtkwxvbpoes457tjxm",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 2,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:c15cd13054764c09612c00cbc94e4bc0eb67ca41bc6ef6afa611acb1bf31efe2\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_4NpGhegkuDK54BrWsXWH5095\",\"tool_name\":\"read_file\"},{\"arguments_digest\":\"sha256:39cfd9d5653aa07ea92237cb7fe5d6cd048091de3a51acb827c4162d4ebf5b55\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_01_LuNaPEzJeVic0nrdEkoX6480\",\"tool_name\":\"terminal\"}],\"draft_identity\":\"entry:iepff2nnhtkwxvbpoes457tjxm\"}"
+    },
+    {
+      "id": "entry:b2yyfjdlbbbij35q3a2wfvmhim",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 3,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\n  \"error\": \"FILE_NOT_FOUND\",\n  \"message\": \"The requested file does not exist.\",\n  \"path\": \"AGENTS.md\",\n  \"_hint\": \"Check the path. Use write_file only when creating a new file.\"\n}"
+    },
+    {
+      "id": "entry:jxnu7cpzy5tctb7owmzkge3nnq",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 4,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"cwd\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\",\"error\":null,\"exit_code\":0,\"gap_before_output\":false,\"output\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\\ntotal 8\\ndrwxr-xr-x 2 plumwsl plumwsl 4096 Oct 25 16:54 .\\ndrwxr-xr-x 7 plumwsl plumwsl 4096 Oct 25 16:55 ..\\n\",\"output_cursor\":\"eyJjaGVja3N1bSI6IjkxNTY0ZjM0NzQxNWQ5NTQ5ZjU2MjdjNjAyMjA2NDcwZDViNTIyODgxMTEyMmRjNWIyMzQ3YjBiNjI1YzkzY2IiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmpvZ3dvcGZvN2RvZ3BpZm9zaHFiYjN4bm1tIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxNjMsInN0cmVhbV9pZCI6InN0cmVhbTpxeWI3eWJpcGZpazZxdW5obDQzcWNueWNudSJ9fQ\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:jogwopfo7dogpifoshqbb3xnmm\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6IjYyZTRlMWNlZWQ4ZGVhNTZlOGExY2Y4NDU0ZmNkMzQ5MTU4MDI4YjkwYTcwOWQwMzhiYmY5NzY4YTRlNWY1MTQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmpvZ3dvcGZvN2RvZ3BpZm9zaHFiYjN4bm1tIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06cXliN3liaXBmaWs2cXVuaGw0M3FjbnljbnUifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"success\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":false}"
+    },
+    {
+      "id": "entry:s6bwod64suyhvhclv7znwmrlzq",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 5,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:0762021503dacbd8115a1d5af461112f76bc86cbc63ba4ce78dbfa97496da2e8\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_5ifNcp7LlVXRDIrkzFjd6141\",\"tool_name\":\"write_file\"}],\"draft_identity\":\"entry:s6bwod64suyhvhclv7znwmrlzq\"}"
+    },
+    {
+      "id": "entry:cdbpcjnrq4wxlxjd42sktrwfmi",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 6,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\n  \"status\": \"ok\",\n  \"path\": \"smoke.txt\",\n  \"content_revision\": \"revision:4svp7m34ilhf23mcw3dssog64ggeagewkzc5zf7swb52cdbst4mq\",\n  \"bytes_written\": 31,\n  \"files_modified\": [\n    \"smoke.txt\"\n  ]\n}"
+    },
+    {
+      "id": "entry:2z4jzlnbsmouzivu54xivqpbky",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 7,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:7404a0d4d3202d1e39f78ef895bfa0a50dae536171a91656fde68f394720895c\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_WmAxJXA5ZaTs06tEwUZD6639\",\"tool_name\":\"read_file\"},{\"arguments_digest\":\"sha256:efffc336b9b7624c630319e2a6a30adc1b22f3e7832a985546c2282e02ccafb2\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_01_aSICGhHIIzJ8ust8qE3y0690\",\"tool_name\":\"terminal\"}],\"draft_identity\":\"entry:2z4jzlnbsmouzivu54xivqpbky\"}"
+    },
+    {
+      "id": "entry:eaips3s4x6h2fpkkdwvtjjhj6q",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 8,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\n  \"status\": \"ok\",\n  \"path\": \"smoke.txt\",\n  \"content_revision\": \"revision:4svp7m34ilhf23mcw3dssog64ggeagewkzc5zf7swb52cdbst4mq\",\n  \"access_scope\": \"workspace\",\n  \"workspace_relative\": true,\n  \"offset\": 1,\n  \"limit\": 2000,\n  \"total_lines\": 1,\n  \"file_size\": 31,\n  \"truncated\": false,\n  \"content\": \"1|Windows WSL 中文验收通过\"\n}"
+    },
+    {
+      "id": "entry:ovggbtmwclswzqugkluic2nzri",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 9,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"cwd\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\",\"error\":null,\"exit_code\":0,\"gap_before_output\":false,\"output\":\"total 12\\ndrwxr-xr-x 2 plumwsl plumwsl 4096 2026-10-25 16:59:51.031260725 +0800 .\\ndrwxr-xr-x 7 plumwsl plumwsl 4096 2026-10-25 16:55:52.285353752 +0800 ..\\n-rw------- 1 plumwsl plumwsl   31 2026-10-25 16:59:51.026878959 +0800 smoke.txt\\n--- bytes ---\\n31 smoke.txt\\n0000000   W   i   n   d   o   w   s       W   S   L     344 270 255 346\\n0000020 226 207 351 252 214 346 224 266 351 200 232 350 277 207  \\\\n\\n0000037\\n--- sha256 ---\\ne4aaffb37c42ce5d6d82b6c72938dee18c4018965645dc97f2b07ba10c329f19  smoke.txt\\n\",\"output_cursor\":\"eyJjaGVja3N1bSI6IjU0OWI0MWNiZjM0ZjkxN2ZhNzBjNDQ2OGE2NGZkM2Y0N2Y5MmU2ZmQxODAyZjU4YTFiZjgwYmU3NWQ2YTIxYzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOjNlbXhvZnI0d3VqaHkzN3p0ZGN3d3p2bHFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo1MDAsInN0cmVhbV9pZCI6InN0cmVhbTplYXNoNWZidnFlaGR0b2w0d2VicWN1aGFtbSJ9fQ\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:3emxofr4wujhy37ztdcwwzvlqa\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6IjJmYzczZDhmNDgwZGE4NGYxNDhmNjFlYTc4YWFlYmM1ZjdlMzM5ZTI2YTZjZjFlZDQ1YjRjZDY4ZjFjODQxZDYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOjNlbXhvZnI0d3VqaHkzN3p0ZGN3d3p2bHFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06ZWFzaDVmYnZxZWhkdG9sNHdlYnFjdWhhbW0ifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"success\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":false}"
+    },
+    {
+      "id": "entry:mpl5cpni43c7lbmg4ytlx4xobu",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "entry_sequence": 10,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:44dbc24ecada051b1a7869a0b960c6ada72766ceabbedaf9abae6ecba69f79e8\",\"kind\":\"TEXT\",\"size\":841}],\"draft_identity\":\"entry:mpl5cpni43c7lbmg4ytlx4xobu\"}"
+    },
+    {
+      "id": "entry:yvln7qusryfu5rrcvc6zvfkrsm",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 11,
+      "entry_kind": "USER_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"【本地文件（只读副本，285 bytes）：\\\"/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\\\"】继续验收：这个附件是本次生成的纯测试文件，请只读检查大小并汇报。然后仅在当前工作目录新建 preview.html、preview.png、preview.pdf：HTML 显示“Windows WSL 预览通过”，无外部资源，并在页面显示 typeof require 和 typeof window.pulsaraDesktop 的实际值；PNG 用简单的彩色图案；PDF 写一页英文 Windows WSL PDF OK。可用现有工具生成，不安装依赖，不改配置。完成后请给出三个文件的可点击 Markdown 链接，并嵌入 PNG 供界面预览。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:jpkeuchbfjucarmzubud4ulnjm",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 12,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:320c8d0eadb6b7b1283982e6a5aa2c4af8853bd685072fb17496bb963fb70616\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_JKwkRXEdVsysiHekmoMz8807\",\"tool_name\":\"terminal\"},{\"arguments_digest\":\"sha256:14bc9c212f48e35f6b9e4c44450ef8eeb3ce356ae3237002039db09560f7d9e7\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_01_1plx0dgkVtINPEWhnkKE9154\",\"tool_name\":\"terminal\"}],\"draft_identity\":\"entry:jpkeuchbfjucarmzubud4ulnjm\"}"
+    },
+    {
+      "id": "entry:psgoijotqe7ogapioi7lfeuade",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 13,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"cwd\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\",\"error\":null,\"exit_code\":0,\"gap_before_output\":false,\"output\":\"-r-------- 1 plumwsl plumwsl 285 Oct 25 17:07 /home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\\n--- stat ---\\n  File: /home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\\n  size: 285       \\tBlocks: 8          IO Block: 4096   regular file\\nDevice: 8,48\\tInode: 198094      Links: 1\\nAccess: (0400/-r--------)  Uid: ( 1000/ plumwsl)   Gid: ( 1000/ plumwsl)\\nAccess: 2026-10-25 17:07:59.321164240 +0800\\nModify: 2026-10-25 17:07:39.577169720 +0800\\nChange: 2026-10-25 17:07:39.577169720 +0800\\n Birth: 2026-10-25 17:07:39.553169728 +0800\\n--- file ---\\n/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin: data\\n--- sha256 ---\\n6fc07515514dd31174a809e7b88d2ebcb1c186bf8d3321ffe3b273fdb623e86e  /home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\\n\",\"output_cursor\":\"eyJjaGVja3N1bSI6ImIxNmIyZGYzM2Y3ZTJhN2Q3MThiMzM2YjVjNjY5ODBlYzRjMjU0NjU0YjNiZmIxODBiYmIxOGJjODI1NjEyOWUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnU0amJ1c3l2ZzdhN2Rqb3VuYWJpaGZnNGtlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo4ODEsInN0cmVhbV9pZCI6InN0cmVhbTppamFmZWdua2Z0bXI0a2M2bnQ2Y3h5YXAyeSJ9fQ\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:u4jbusyvg7a7djounabihfg4ke\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6ImI5M2VjYjRiZGM5NGE3YTU0MTRlOGNmMjNhM2ZiZDBkMTUyMjhjZTM0NTY3MTIzOGFkZjc2OGUzMjQ2ZTlmMmYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnU0amJ1c3l2ZzdhN2Rqb3VuYWJpaGZnNGtlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06aWphZmVnbmtmdG1yNGtjNm50NmN4eWFwMnkifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"success\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":false}"
+    },
+    {
+      "id": "entry:gjufzs2leg35mg36lecqhroiwu",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 14,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"cwd\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\",\"error\":null,\"exit_code\":0,\"gap_before_output\":false,\"output\":\"Python 3.14.4\\nzlib ok\\nModuleNotFoundError: No module named 'PIL'\\n--- pip list (partial) ---\\nno pdf/img libs found\\n\",\"output_cursor\":\"eyJjaGVja3N1bSI6IjlmMTEzOGU0Yjk5MjQ0MmZiZjFjMmIwYzY4NDhlNDU3NDk1NjQ2ZjQ1YWQ0ZjhhNjFhZTRmNGExYzFhYmZjNmUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmdmN2pjb3d5eWhxcHhodXNjcWh2YXc0MzVlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxMTQsInN0cmVhbV9pZCI6InN0cmVhbTphM3lnNnN5cTZ1ZXVwcnd2dWxvdjR1cnlhNCJ9fQ\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:gf7jcowyyhqpxhuscqhvaw435e\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6IjJjM2JhZDg0NjhhYzhiYTRhZGViNjc4ZDZjZjFlNGJmZmVmMTIyNzc4OTFiZmI2NzdhNjM2NGVkMDI1YzdjNTYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmdmN2pjb3d5eWhxcHhodXNjcWh2YXc0MzVlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06YTN5ZzZzeXE2dWV1cHJ3dnVsb3Y0dXJ5YTQifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"success\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":false}"
+    },
+    {
+      "id": "entry:eej3tn7ffflkp2nynq6dbaoaba",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 15,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:762171d015596b224bd54316126bc5e8001ea62d14f910cbf538f53129033101\",\"kind\":\"TEXT\",\"size\":193},{\"arguments_digest\":\"sha256:b8efc61e8544b04bdbfc875f2ecb776b81ee3870d8cd0f4b852873f4705b31e9\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_XxQUWt87iZOuFkKpr73S4362\",\"tool_name\":\"write_file\"}],\"draft_identity\":\"entry:eej3tn7ffflkp2nynq6dbaoaba\"}"
+    },
+    {
+      "id": "entry:whbmvwdqowxygzgicx2fz5wuwe",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 16,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\n  \"status\": \"ok\",\n  \"path\": \"preview.html\",\n  \"content_revision\": \"revision:cbscbmrqhsmf3kip3s2d7hysdkv2t323sm376wc5k76zfhpxbpfa\",\n  \"bytes_written\": 3018,\n  \"files_modified\": [\n    \"preview.html\"\n  ]\n}"
+    },
+    {
+      "id": "entry:lukbwoobnmckkxckl3iocj4ddy",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 17,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:3264c9b9686e232b6edadb433a8225e77205c6200c93befbd84b7ccb6e91bff8\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_f2sWohYJty5eQB3OzFN52448\",\"tool_name\":\"terminal\"}],\"draft_identity\":\"entry:lukbwoobnmckkxckl3iocj4ddy\"}"
+    },
+    {
+      "id": "entry:5rqk3yfjbmh5nxtrfocbem5prm",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 18,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"cwd\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\",\"error\":null,\"exit_code\":0,\"gap_before_output\":false,\"output\":\"preview.png 17701 bytes\\npreview.pdf 592 bytes\\n--- files ---\\n-rw------- 1 plumwsl plumwsl  3018 17:08:56 preview.html\\n-rw-r--r-- 1 plumwsl plumwsl   592 17:09:02 preview.pdf\\n-rw-r--r-- 1 plumwsl plumwsl 17701 17:09:02 preview.png\\npreview.png: PNG image data, 480 x 320, 8-bit/color RGB, non-interlaced\\npreview.pdf: PDF document, version 1.4, 1 page(s)\\n\",\"output_cursor\":\"eyJjaGVja3N1bSI6IjMwYzAyYjU2YzMxODkwZjRmMDkzNDcyMzE0NzYwMDYwYmNjNmJkYzhhN2E1ZTM5OWFjODk1NzNlYmNkN2MxNmQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOm9xbjdkcGJ5amdtczRmeXdkeWFxZXZ4Zm9lIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjozNTEsInN0cmVhbV9pZCI6InN0cmVhbTpiem9sanE2ZDczem9waWhyenV3ZnFxNGwybSJ9fQ\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:oqn7dpbyjgms4fywdyaqevxfoe\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6IjU0ZTliZGQxYTIzMDAzNTgwM2ZhNWYyOGJlMzVjYjFlMTlmMTM0MzM2YzkxZDk3ZmJkZmM0MGQxMWYzODkxYWEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOm9xbjdkcGJ5amdtczRmeXdkeWFxZXZ4Zm9lIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06YnpvbGpxNmQ3M3pvcGlocnp1d2ZxcTRsMm0ifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"success\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":false}"
+    },
+    {
+      "id": "entry:w4qniamdrbzawg2dsvmfgbimai",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 19,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:a54e522f9ed53947a1f11e18cc76b5720e49a968107705c82365136e25ede393\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_btjwCuwLYHIC10GbxUlQ4154\",\"tool_name\":\"terminal\"},{\"arguments_digest\":\"sha256:8cecdfb78e6cc884eaa50bccb9c512bdafe8a782aad5004d0ab88f59093099aa\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_01_MKRzjyaRkB502y9Whzzr0992\",\"tool_name\":\"view_image\"}],\"draft_identity\":\"entry:w4qniamdrbzawg2dsvmfgbimai\"}"
+    },
+    {
+      "id": "entry:z7a3vx5sxmq235okipybvdtesi",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 20,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"cwd\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\",\"error\":null,\"exit_code\":0,\"gap_before_output\":false,\"output\":\"=== PNG 结构校验 ===\\n  chunk IHDR len=13 crc_ok=True\\n  chunk IDAT len=17644 crc_ok=True\\n  chunk IEND len=0 crc_ok=True\\n  宽高=480x320 位深=8 颜色类型=2(2=RGB) 解压后=461120 期望=461120 匹配=True\\n  采样像素: 左上=(250, 250, 250) 中心=(54, 148, 218) 右下=(250, 250, 250)\\n\\n=== PDF 结构校验 ===\\n  header: %PDF-1.4\\n | EOF结尾: True\\n  startxref: 412 -> 指向: xref\\n  xref 条目数: 5\\n    obj 1 offset=15 命中=True 头部=1 0 obj\\n    obj 2 offset=60 命中=True 头部=2 0 obj\\n    obj 3 offset=112 命中=True 头部=3 0 obj\\n    obj 4 offset=227 命中=True 头部=4 0 obj\\n    obj 5 offset=315 命中=True 头部=5 0 obj\\n  全部偏移正确: True\\n  页数(/Count): 1\\n  content stream 长度自检: True | 内容: BT | /F1 28 Tf | 72 700 Td | (Windows WSL PDF OK) Tj | ET | \\n  提取文字: Windows WSL PDF OK\\n  页面尺寸: 0 0 595 842\\n\",\"output_cursor\":\"eyJjaGVja3N1bSI6IjVmOTllMGNlYmQxMjBkYjBlZTUzZTVmYzdiYzliMWY2ZWMyODM3NmRjMGNiYzk0NjI4M2RmMGYzZDFjYWZhZDAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnZoNG4zc2xhbnRhZW9vaXFmMmlpZ2Z5djdxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo4NzAsInN0cmVhbV9pZCI6InN0cmVhbTppbTdnaGNpeDJlZnoyNnRybDIza3d1NmppNCJ9fQ\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:vh4n3slantaeooiqf2iigfyv7q\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6ImU0MmMyN2Q4YTY4ZWUwYjNmNTQyMzhjMTljZWEwNDVkNDQzYTZjNmRlZmZlM2E3Y2MxNDM5MmM4YTU1NzQzMjMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOnZoNG4zc2xhbnRhZW9vaXFmMmlpZ2Z5djdxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06aW03Z2hjaXgyZWZ6MjZ0cmwyM2t3dTZqaTQifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"success\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":false}"
+    },
+    {
+      "id": "entry:oqwchhsfdwfw4vboo624hhfueq",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 21,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"Image loaded.\",\"type\":\"text\"},{\"digest\":\"sha256:80f7d474958667ab73fe7f35fa256e9e72a8191b3fd15ed0c52f34052128aa8b\",\"encoded_bytes\":17701,\"height\":320,\"image_ref\":\"image:zpnzkkq7xx6d5m2aleez2m7xjm\",\"media_type\":\"image/png\",\"type\":\"image\",\"width\":480}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:gkcr3lsbzb2zfyti6iwdfx47ee",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 22,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:c05a1b8d0c6b8c0313f48c4404c3b51050e8a9f523b0bc049de4f566f6d00a2c\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_YB2exrNiBKGxhpqEQO9W6799\",\"tool_name\":\"view_image\"}],\"draft_identity\":\"entry:gkcr3lsbzb2zfyti6iwdfx47ee\"}"
+    },
+    {
+      "id": "entry:6jbj6kd4pw6em6wgatx7meim3i",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 23,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"Current HTML still screenshot; 1200×800 viewport, light theme, visible, reduced motion; capture may crop to content-root bounds. Playback unverified. Publication rereads the file.\",\"type\":\"text\"},{\"digest\":\"sha256:0d7e83f31ca0255781f428350a6ff4095ae8da31623626f3e1735047521a587e\",\"encoded_bytes\":25556,\"height\":214,\"image_ref\":\"image:gnr2yrpmzccqbpn7adb3sobtt4\",\"media_type\":\"image/png\",\"type\":\"image\",\"width\":560}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:jue66ywcs3wcb6atlcliud3v2a",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 24,
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"arguments_digest\":\"sha256:8fddab0795717ee079cb2aed74d430763b495d50c5c186ff7f979560066106af\",\"kind\":\"TOOL_CALL\",\"tool_call_id\":\"call_00_n2DkcRfsCvbGuAr1H3o84904\",\"tool_name\":\"terminal\"}],\"draft_identity\":\"entry:jue66ywcs3wcb6atlcliud3v2a\"}"
+    },
+    {
+      "id": "entry:xnpv36szrxmiyly2xt6jdub3fi",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 25,
+      "entry_kind": "TOOL_RESULT",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"cwd\":\"/home/plumwsl/workspaces/Windows 中文 验收 20261025\",\"error\":null,\"exit_code\":0,\"gap_before_output\":false,\"output\":\"--- 目录内容 ---\\ntotal 32\\n-rw------- 1 plumwsl plumwsl  3018 17:08:56 preview.html\\n-rw-r--r-- 1 plumwsl plumwsl   592 17:09:02 preview.pdf\\n-rw-r--r-- 1 plumwsl plumwsl 17701 17:09:02 preview.png\\n-rw------- 1 plumwsl plumwsl    31 16:59:51 smoke.txt\\n--- HTML 外部资源检查 ---\\n未发现 http(s)/CDN/外部 src/@import/url() 引用\\n--- sha256 ---\\n106420b2303c985da90fdcb43f9f121aaba9ef5b9337ff585d57fd929df70bca  preview.html\\n80f7d474958667ab73fe7f35fa256e9e72a8191b3fd15ed0c52f34052128aa8b  preview.png\\n5d35ff63b36961bae92f2cb8cda9bda4127d8875b40a45c64361e372aa6ba005  preview.pdf\\n\",\"output_cursor\":\"eyJjaGVja3N1bSI6IjI3ZDI5MmIyN2RlOTVhOWZhOGI4NTRkNzVkNDY0MTlkYjQ5ZjI4MzczOWI1ODc1OGRmYjg1NDgzZjAwZmQwYTgiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmxxamlzcGd5YXBrZzUyYWthYnF5cXl1bzJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo1ODksInN0cmVhbV9pZCI6InN0cmVhbTpxdW1qNGVhcWdqaXJ5d3pzNGU1MnFzc2FteSJ9fQ\",\"output_disposition\":\"CURRENT_SNAPSHOT\",\"process_id\":\"process:lqjispgyapkg52akabqyqyuo2e\",\"reason\":null,\"retained_from_cursor\":\"eyJjaGVja3N1bSI6IjA0MzU4ZDNmZDVjNDg4ZmI0YTY3ZjRlMTY5N2IxNDRkN2U4YjM3NTlkMzlmNmJlZTU3MmJlNDM0NTM0ZTkyMDAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmxxamlzcGd5YXBrZzUyYWthYnF5cXl1bzJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06cXVtajRlYXFnamlyeXd6czRlNTJxc3NhbXkifX0\",\"source_coverage\":\"COMPLETE\",\"status\":\"success\",\"terminal_process_action\":\"start\",\"timed_out\":false,\"truncated\":false,\"truncated_by_response_bound\":false,\"yielded_to_background\":false}"
+    },
+    {
+      "id": "entry:chzxwu7f2kcrvn3xkk4tw4k7sm",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "entry_sequence": 26,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:ad40bee7681f2e22ac15f54cf59ff839e177033560fc361cc50dd0ede43aa930\",\"kind\":\"TEXT\",\"size\":2220}],\"draft_identity\":\"entry:chzxwu7f2kcrvn3xkk4tw4k7sm\"}"
+    },
+    {
+      "id": "entry:mst4nqhkyau443rh2pheezhypu",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+      "entry_sequence": 27,
+      "entry_kind": "USER_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"刚才三个链接的路径含空格，Markdown 没有解析成可点击链接。请仅重发这三个链接，目标路径用尖括号包住，例如 [HTML](</home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.html>)。不要重新创建文件，不需调用工具。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:4scnuqh4gret2okmk6ogrguznq",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "turn_id": "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+      "entry_sequence": 28,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "conversation_scope_kind": "ROOT",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:31e71a022c72acec4c14fac1f58126492772603afa37b94bda7959cbd1aad3fd\",\"kind\":\"TEXT\",\"size\":258}],\"draft_identity\":\"entry:4scnuqh4gret2okmk6ogrguznq\"}"
+    }
+  ],
+  "blocks": [
+    {
+      "id": "block:tfcrjg3fyw3ycekzdxfbguitse",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "assistant_entry_id": "entry:hsvqx6x4dj3lkiuxmc7uqiwtaa",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "tool_arguments": null,
+      "content_codec": "utf-8",
+      "content": "自动恢复后模型调用正常"
+    },
+    {
+      "id": "block:uve2nfxtslawglfbebz7klsvau",
+      "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+      "assistant_entry_id": "entry:wq6cyjpohruovd5d5b4hoxqire",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "tool_arguments": null,
+      "content_codec": "utf-8",
+      "content": "睡眠前连接正常"
+    },
+    {
+      "id": "block:io62l34sprfapeawceq2gbtvvy",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:2z4jzlnbsmouzivu54xivqpbky",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "read_file",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/smoke.txt"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:5pzoaayevkfdagevl5ufhtgida",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:2z4jzlnbsmouzivu54xivqpbky",
+      "block_ordinal": 1,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "ls -la --time-style=full-iso; echo '--- bytes ---'; wc -c smoke.txt; od -c smoke.txt | head -5; echo '--- sha256 ---'; sha256sum smoke.txt",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:ij5rnu76hqh4r6567q2o37b6ve",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:4scnuqh4gret2okmk6ogrguznq",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "tool_arguments": null,
+      "content_codec": "utf-8",
+      "content": "[preview.html](</home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.html>)\n\n[preview.png](</home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.png>)\n\n[preview.pdf](</home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.pdf>)"
+    },
+    {
+      "id": "block:6wykrzorfvrqiho5zfvuehdxca",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:chzxwu7f2kcrvn3xkk4tw4k7sm",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "tool_arguments": null,
+      "content_codec": "utf-8",
+      "content": "三个预览文件均已创建并通过校验。\n\n**附件只读检查（未修改，只读取 stat/sha256）**\n- 路径：`/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin`\n- 大小 **285 字节**（权限 `0400`，`file` 识别为 `data`，无固定格式签名）\n- sha256：`6fc07515514dd31174a809e7b88d2ebcb1c186bf8d3321ffe3b273fdb623e86e`\n\n**新建文件（仅当前工作目录，无依赖安装、无配置改动）**\n\n| 文件 | 大小 | 说明 |\n|---|---|---|\n| preview.html | 3018 B | 单文件，内联 CSS/JS，零外部资源 |\n| preview.png | 17701 B | 480×320 RGB 彩色图案 |\n| preview.pdf | 592 B | 1 页 A4，英文 “Windows WSL PDF OK” |\n\n**可点击链接**\n- [preview.html](/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.html)\n- [preview.png](/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.png)\n- [preview.pdf](/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.pdf)\n\n**校验结果**\n- HTML：标题渲染为「Windows WSL 预览通过」；页面实时求值显示 `typeof require` = **undefined**、`typeof window.pulsaraDesktop` = **undefined**；grep 未发现 `http(s)://`、`src=`、`@import`、`url()` 等外部引用。\n- PNG：IHDR/IDAT/IEND 三段 CRC 全部正确，解压后 461120 字节 = 320×(1+480×3)，颜色类型 2（真彩 RGB），与预期完全一致；已用看图确认图案正常显示。\n- PDF：`file` 识别为 PDF 1.4 单页；startxref 指向 `xref`，5 个对象偏移逐条命中 `N 0 obj`，`/Count 1`，content stream 长度自检一致，提取文字为 `Windows WSL PDF OK`，MediaBox `0 0 595 842`。\n\n一点如实说明：上述 `typeof` 值是在我截图所用的隔离浏览器环境中实测的（页面显示运行环境为 about，来自 `location.protocol`）。若在桌面右侧预览标签里打开，`window.pulsaraDesktop` 可能因注入而存在——页面每次加载都实时求值，不做任何写死或兜底替换，所以看到的仍是当时环境的真实值。\n\n```pulsara-visualization\npreview.png\n```\n\n目录内现共 4 个文件：`smoke.txt`、`preview.html`、`preview.png`、`preview.pdf`，未触碰其他目录或系统设置。"
+    },
+    {
+      "id": "block:gaxk4746k4yz6366tvrftbnlmq",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:eej3tn7ffflkp2nynq6dbaoaba",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "tool_arguments": null,
+      "content_codec": "utf-8",
+      "content": "附件只读检查完成（285 字节，未修改）。环境中没有 PIL、pdftotext 等库，因此我用 Python 标准库（zlib/struct）直接生成 PNG 与 PDF，不安装任何依赖。"
+    },
+    {
+      "id": "block:3tulyvtifmeivkcjnh26bwfagu",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:eej3tn7ffflkp2nynq6dbaoaba",
+      "block_ordinal": 1,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "write_file",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.html",
+        "content": "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Windows WSL 预览通过</title>\n<style>\n  :root { color-scheme: light dark; }\n  * { box-sizing: border-box; }\n  html, body { margin: 0; padding: 0; background: transparent; }\n  body {\n    font-family: -apple-system, \"Segoe UI\", \"Microsoft YaHei\", \"PingFang SC\", sans-serif;\n    color: var(--pulsara-foreground, #17191f);\n    padding: 24px;\n    line-height: 1.5;\n  }\n  .card {\n    max-width: 560px;\n    padding: 22px 24px 20px;\n    border: 1px solid rgba(120, 130, 150, .35);\n    border-radius: 14px;\n    background: rgba(255, 255, 255, .72);\n    box-shadow: 0 6px 24px rgba(20, 30, 50, .10);\n  }\n  @media (prefers-color-scheme: dark) {\n    .card { background: rgba(28, 32, 40, .72); box-shadow: 0 6px 24px rgba(0, 0, 0, .45); }\n  }\n  h1 {\n    margin: 0 0 4px;\n    font-size: 22px;\n    letter-spacing: .3px;\n  }\n  .sub { margin: 0 0 18px; font-size: 12.5px; opacity: .7; }\n  dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 0; font-size: 14px; }\n  dt { opacity: .72; }\n  dd { margin: 0; font-family: ui-monospace, \"Cascadia Mono\", Consolas, monospace; }\n  code {\n    padding: 2px 7px;\n    border-radius: 6px;\n    background: rgba(125, 140, 165, .16);\n    font-family: ui-monospace, \"Cascadia Mono\", Consolas, monospace;\n  }\n  .value-undefined { color: #b3261e; }\n  .value-present { color: #0d7a46; }\n  .note { margin-top: 16px; font-size: 12px; opacity: .62; }\n</style>\n</head>\n<body>\n  <main class=\"card\" id=\"root\">\n    <h1>Windows WSL 预览通过</h1>\n    <p class=\"sub\">smoke check · 单文件 HTML · 无外部资源（无 CDN、无图片、无网络请求）</p>\n    <dl>\n      <dt>typeof require</dt>\n      <dd><code id=\"v-require\">（脚本未执行）</code></dd>\n      <dt>typeof window.pulsaraDesktop</dt>\n      <dd><code id=\"v-desktop\">（脚本未执行）</code></dd>\n    </dl>\n    <p class=\"note\" id=\"v-env\">正在检测运行环境…</p>\n  </main>\n\n  <script>\n    (function () {\n      function show(id, type) {\n        var el = document.getElementById(id);\n        el.textContent = type;\n        el.className = \"value-\" + (type === \"undefined\" ? \"undefined\" : \"present\");\n        el.title = \"实际求值结果：\" + type;\n      }\n\n      // 实际求值，不做任何伪造或兜底替换\n      var tRequire = typeof require;\n      var tDesktop = \"unknown\";\n      try {\n        tDesktop = typeof window.pulsaraDesktop;\n      } catch (err) {\n        tDesktop = \"throws:\" + err.name;\n      }\n\n      show(\"v-require\", tRequire);\n      show(\"v-desktop\", tDesktop);\n\n      var env = document.getElementById(\"v-env\");\n      var proto = (location.protocol || \"\").replace(\":\", \"\") || \"unknown\";\n      env.textContent = \"运行环境：\" + (proto === \"file\" ? \"本地文件 (file://)\" : proto)\n        + \" · JS 已执行 · 本页未发起任何网络请求\";\n      env.title = location.href;\n    })();\n  </script>\n</body>\n</html>\n"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:7z35bzlp3k37cazs6vksowys4q",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:gkcr3lsbzb2zfyti6iwdfx47ee",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "view_image",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.html"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:4jmev2kleii4hxobq3mwoafv4m",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:iepff2nnhtkwxvbpoes457tjxm",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "read_file",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/AGENTS.md"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:4c26zp4m6ufapsncqlqdmkc4lm",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:iepff2nnhtkwxvbpoes457tjxm",
+      "block_ordinal": 1,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "pwd; ls -la",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:gik5zirkbjzjnyi762vgkmuooa",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:jpkeuchbfjucarmzubud4ulnjm",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "ls -l \"/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\"; echo '--- stat ---'; stat \"/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\"; echo '--- file ---'; file \"/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\"; echo '--- sha256 ---'; sha256sum \"/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin\"",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:62ml6orhzzi57zowbddhizhhoe",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:jpkeuchbfjucarmzubud4ulnjm",
+      "block_ordinal": 1,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "python3 -V; python3 -c \"import zlib,struct;print('zlib ok')\"; python3 -c \"import PIL;print('PIL',PIL.__version__)\" 2>&1 | tail -1; which pdftotext qpdf gs chromium google-chrome 2>/dev/null; echo '--- pip list (partial) ---'; python3 -m pip list 2>/dev/null | grep -iE 'pillow|reportlab|pypdf|fpdf' || echo 'no pdf/img libs found'",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:lz4w6rme3huhdfq4op3mhtmw6i",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:jue66ywcs3wcb6atlcliud3v2a",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "echo '--- 目录内容 ---'; ls -l --time-style=+%H:%M:%S; echo '--- HTML 外部资源检查 ---'; grep -nEi 'https?:|//[a-z0-9.-]+\\.(com|net|org)|src=|@import|url\\(' preview.html || echo '未发现 http(s)/CDN/外部 src/@import/url() 引用'; echo '--- sha256 ---'; sha256sum preview.html preview.png preview.pdf",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:ryzalpjfvpu7dm6ucmq57ygb64",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:lukbwoobnmckkxckl3iocj4ddy",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "python3 - <<'PY'\nimport zlib, struct, math, colorsys\n\n# ---------- preview.png : 简单彩色图案，纯标准库 RGB ----------\nW, H = 480, 320\nPALETTE = [(233, 69, 96), (242, 140, 40), (247, 201, 72), (46, 176, 126),\n           (56, 152, 224), (108, 99, 255), (178, 90, 214), (236, 96, 176)]\n\ndef px(x, y):\n    band = min(len(PALETTE) - 1, x * len(PALETTE) // W)\n    r, g, b = PALETTE[band]\n    # 纵向明暗渐变\n    k = 0.80 + 0.35 * (1.0 - y / (H - 1))\n    # 斜向高光带\n    d = abs((x * 0.55 + y) - 190)\n    if d < 34:\n        k += 0.30 * (1 - d / 34) ** 2\n    # 中央若干同心白环\n    cx, cy = W / 2, H / 2\n    rr = math.hypot(x - cx, y - cy)\n    if 92 < rr < 100 or 60 < rr < 65:\n        k += 0.45\n    r, g, b = (min(255, int(c * k)) for c in (r, g, b))\n    # 4px 白色外框\n    if x < 4 or y < 4 or x >= W - 4 or y >= H - 4:\n        r = g = b = 250\n    return bytes((r, g, b))\n\nraw = bytearray()\nfor y in range(H):\n    raw.append(0)                      # filter type 0\n    for x in range(W):\n        raw.extend(px(x, y))\n\ndef chunk(tag, data):\n    return (struct.pack(\">I\", len(data)) + tag + data\n            + struct.pack(\">I\", zlib.crc32(tag + data) & 0xFFFFFFFF))\n\npng = (b\"\\x89PNG\\r\\n\\x1a\\n\"\n       + chunk(b\"IHDR\", struct.pack(\">IIBBBBB\", W, H, 8, 2, 0, 0, 0))\n       + chunk(b\"IDAT\", zlib.compress(bytes(raw), 9))\n       + chunk(b\"IEND\", b\"\"))\nopen(\"preview.png\", \"wb\").write(png)\nprint(\"preview.png\", len(png), \"bytes\")\n\n# ---------- preview.pdf : 一页英文 ----------\nTEXT = \"Windows WSL PDF OK\"\nstream = (\"BT\\n/F1 28 Tf\\n72 700 Td\\n(%s) Tj\\nET\\n\" % TEXT).encode(\"ascii\")\nobjs = [\n    b\"<</Type/Catalog/Pages 2 0 R>>\",\n    b\"<</Type/Pages/Kids [3 0 R]/Count 1>>\",\n    b\"<</Type/Page/Parent 2 0 R/MediaBox [0 0 595 842]\"\n    b\"/Resources <</Font <</F1 4 0 R>>>>/Contents 5 0 R>>\",\n    b\"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\",\n    b\"<</Length %d>>\\nstream\\n\" % len(stream) + stream + b\"endstream\",\n]\nout = bytearray(b\"%PDF-1.4\\n%\\xe2\\xe3\\xcf\\xd3\\n\")\noffsets = []\nfor i, body in enumerate(objs, start=1):\n    offsets.append(len(out))\n    out += b\"%d 0 obj\\n\" % i + body + b\"\\nendobj\\n\"\nxref_at = len(out)\nout += b\"xref\\n0 %d\\n\" % (len(objs) + 1)\nout += b\"0000000000 65535 f \\n\"\nfor off in offsets:\n    out += b\"%010d 00000 n \\n\" % off\nout += b\"trailer\\n<</Size %d/Root 1 0 R>>\\nstartxref\\n%d\\n%%%%EOF\\n\" % (len(objs) + 1, xref_at)\nopen(\"preview.pdf\", \"wb\").write(bytes(out))\nprint(\"preview.pdf\", len(out), \"bytes\")\nPY\necho '--- files ---'; ls -l --time-style=+%H:%M:%S preview.html preview.png preview.pdf; file preview.png preview.pdf",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:5vwb3ku547n6eiactzssz6ukqa",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:mpl5cpni43c7lbmg4ytlx4xobu",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "tool_arguments": null,
+      "content_codec": "utf-8",
+      "content": "验收通过。\n\n**文件绝对路径**\n```\n/home/plumwsl/workspaces/Windows 中文 验收 20261025/smoke.txt\n```\n\n**读回内容**（read_file 工具，1 行）\n```\nWindows WSL 中文验收通过\n```\n\n**实测校验**\n- 大小 31 字节，末尾单个换行（`od -c` 显示 `\\n` 结尾，无 CR，即 LF 换行）\n- 中文按 UTF-8 三字节编码，例：`344 270 255` = U+4E2D「中」，`351 252 214` = U+9A8C「验」\n- sha256：`e4aaffb37c42ce5d6d82b6c72938dee18c4018965645dc97f2b07ba10c329f19`\n- 工作目录创建前后对比：目录原为空，现在仅有 `smoke.txt` 一个文件，未触碰其他目录，也未改任何系统设置\n\n一点说明：文件权限为 `-rw-------`（600），是写入工具采用的保守默认值。如果后续验收要求其他用户或 Windows 侧可读，告诉我目标权限即可调整。"
+    },
+    {
+      "id": "block:gupm3ypii5a3s5ia2ooqw2jv2q",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:s6bwod64suyhvhclv7znwmrlzq",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "write_file",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/smoke.txt",
+        "content": "Windows WSL 中文验收通过\n"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:s3loovbpmen3itsvnjftgqense",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:w4qniamdrbzawg2dsvmfgbimai",
+      "block_ordinal": 0,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "python3 - <<'PY'\nimport re, zlib, struct\n\nprint(\"=== PNG 结构校验 ===\")\nd = open(\"preview.png\",\"rb\").read()\nassert d[:8] == b\"\\x89PNG\\r\\n\\x1a\\n\"\npos, idat, hdr = 8, b\"\", None\nwhile pos < len(d):\n    ln, tag = struct.unpack(\">I4s\", d[pos:pos+8]); body = d[pos+8:pos+8+ln]\n    crc = struct.unpack(\">I\", d[pos+8+ln:pos+12+ln])[0]\n    ok = (zlib.crc32(tag+body) & 0xFFFFFFFF) == crc\n    print(f\"  chunk {tag.decode()} len={ln} crc_ok={ok}\")\n    if tag == b\"IHDR\": hdr = struct.unpack(\">IIBBBBB\", body)\n    if tag == b\"IDAT\": idat += body\n    pos += 12 + ln\nw,h,bd,ct = hdr[0],hdr[1],hdr[2],hdr[3]\nraw = zlib.decompress(idat)\nprint(f\"  宽高={w}x{h} 位深={bd} 颜色类型={ct}(2=RGB) 解压后={len(raw)} 期望={h*(1+w*3)} 匹配={len(raw)==h*(1+w*3)}\")\nprint(f\"  采样像素: 左上={tuple(raw[1:4])} 中心={tuple(raw[(h//2)*(1+w*3)+1+(w//2)*3: (h//2)*(1+w*3)+4+(w//2)*3])} 右下={tuple(raw[-3:])}\")\n\nprint(\"\\n=== PDF 结构校验 ===\")\np = open(\"preview.pdf\",\"rb\").read()\nprint(\"  header:\", p[:9].decode(\"latin1\"), \"| EOF结尾:\", p.rstrip().endswith(b\"%%EOF\"))\nm = re.search(rb\"startxref\\s+(\\d+)\", p); sx = int(m.group(1))\nprint(\"  startxref:\", sx, \"-> 指向:\", p[sx:sx+4].decode(\"latin1\"))\nxr = p[sx:].split(b\"\\n\")\nents = re.findall(rb\"(\\d{10}) 00000 n\", p[sx:])\nprint(\"  xref 条目数:\", len(ents))\nallok = True\nfor i, off in enumerate(ents, start=1):\n    o = int(off); head = p[o:o+12].split(b\"\\n\")[0]\n    good = head.startswith(b\"%d 0 obj\" % i); allok &= good\n    print(f\"    obj {i} offset={o} 命中={good} 头部={head.decode('latin1')}\")\nprint(\"  全部偏移正确:\", allok)\nprint(\"  页数(/Count):\", re.search(rb\"/Count (\\d+)\", p).group(1).decode())\ncs = re.search(rb\"/Length (\\d+)>>\\nstream\\n\", p)\nln = int(cs.group(1)); st = p[cs.end():cs.end()+ln]\nprint(\"  content stream 长度自检:\", len(st) == ln, \"| 内容:\", st.decode(\"latin1\").replace(\"\\n\",\" | \"))\nprint(\"  提取文字:\", re.search(rb\"\\((.*?)\\) Tj\", st).group(1).decode())\nprint(\"  页面尺寸:\", re.search(rb\"/MediaBox \\[(.*?)\\]\", p).group(1).decode())\nPY",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "content_codec": null,
+      "content": null
+    },
+    {
+      "id": "block:dbngsy2mri2vhwqnueckehtcga",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "assistant_entry_id": "entry:w4qniamdrbzawg2dsvmfgbimai",
+      "block_ordinal": 1,
+      "block_kind": "TOOL_CALL",
+      "tool_name": "view_image",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.png"
+      },
+      "content_codec": null,
+      "content": null
+    }
+  ],
+  "workspaces": [
+    {
+      "memory_domain_id": "u_local",
+      "id": "workspace:wiosodqkjdu7hp4r2d3vgho6lm",
+      "workspace_kind": "project",
+      "workspace_root": "/home/plumwsl/workspaces/Windows 中文 验收 20261025",
+      "workspace_label": "Windows 中文 验收 20261025"
+    },
+    {
+      "memory_domain_id": "u_local",
+      "id": "workspace:zlmsxoedty2ev4f2r5m7mrsjxm",
+      "workspace_kind": "transient",
+      "workspace_root": "/home/plumwsl/.pulsara/workspaces/quick-20261025-192532-928e7b9e",
+      "workspace_label": "快速开始 · 10月25日 19:25"
+    }
+  ],
+  "data_inode": 171484,
+  "workspace_files": [
+    {
+      "workspace_id": "workspace:wiosodqkjdu7hp4r2d3vgho6lm",
+      "root": "/home/plumwsl/workspaces/Windows 中文 验收 20261025",
+      "files": [
+        {
+          "relative": "preview.html",
+          "mode": 384,
+          "kind": "file",
+          "size": 3018,
+          "content_base64": "PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9InpoLUNOIj4KPGhlYWQ+CjxtZXRhIGNoYXJzZXQ9InV0Zi04Ij4KPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xIj4KPHRpdGxlPldpbmRvd3MgV1NMIOmihOiniOmAmui/hzwvdGl0bGU+CjxzdHlsZT4KICA6cm9vdCB7IGNvbG9yLXNjaGVtZTogbGlnaHQgZGFyazsgfQogICogeyBib3gtc2l6aW5nOiBib3JkZXItYm94OyB9CiAgaHRtbCwgYm9keSB7IG1hcmdpbjogMDsgcGFkZGluZzogMDsgYmFja2dyb3VuZDogdHJhbnNwYXJlbnQ7IH0KICBib2R5IHsKICAgIGZvbnQtZmFtaWx5OiAtYXBwbGUtc3lzdGVtLCAiU2Vnb2UgVUkiLCAiTWljcm9zb2Z0IFlhSGVpIiwgIlBpbmdGYW5nIFNDIiwgc2Fucy1zZXJpZjsKICAgIGNvbG9yOiB2YXIoLS1wdWxzYXJhLWZvcmVncm91bmQsICMxNzE5MWYpOwogICAgcGFkZGluZzogMjRweDsKICAgIGxpbmUtaGVpZ2h0OiAxLjU7CiAgfQogIC5jYXJkIHsKICAgIG1heC13aWR0aDogNTYwcHg7CiAgICBwYWRkaW5nOiAyMnB4IDI0cHggMjBweDsKICAgIGJvcmRlcjogMXB4IHNvbGlkIHJnYmEoMTIwLCAxMzAsIDE1MCwgLjM1KTsKICAgIGJvcmRlci1yYWRpdXM6IDE0cHg7CiAgICBiYWNrZ3JvdW5kOiByZ2JhKDI1NSwgMjU1LCAyNTUsIC43Mik7CiAgICBib3gtc2hhZG93OiAwIDZweCAyNHB4IHJnYmEoMjAsIDMwLCA1MCwgLjEwKTsKICB9CiAgQG1lZGlhIChwcmVmZXJzLWNvbG9yLXNjaGVtZTogZGFyaykgewogICAgLmNhcmQgeyBiYWNrZ3JvdW5kOiByZ2JhKDI4LCAzMiwgNDAsIC43Mik7IGJveC1zaGFkb3c6IDAgNnB4IDI0cHggcmdiYSgwLCAwLCAwLCAuNDUpOyB9CiAgfQogIGgxIHsKICAgIG1hcmdpbjogMCAwIDRweDsKICAgIGZvbnQtc2l6ZTogMjJweDsKICAgIGxldHRlci1zcGFjaW5nOiAuM3B4OwogIH0KICAuc3ViIHsgbWFyZ2luOiAwIDAgMThweDsgZm9udC1zaXplOiAxMi41cHg7IG9wYWNpdHk6IC43OyB9CiAgZGwgeyBkaXNwbGF5OiBncmlkOyBncmlkLXRlbXBsYXRlLWNvbHVtbnM6IG1heC1jb250ZW50IDFmcjsgZ2FwOiA4cHggMTZweDsgbWFyZ2luOiAwOyBmb250LXNpemU6IDE0cHg7IH0KICBkdCB7IG9wYWNpdHk6IC43MjsgfQogIGRkIHsgbWFyZ2luOiAwOyBmb250LWZhbWlseTogdWktbW9ub3NwYWNlLCAiQ2FzY2FkaWEgTW9ubyIsIENvbnNvbGFzLCBtb25vc3BhY2U7IH0KICBjb2RlIHsKICAgIHBhZGRpbmc6IDJweCA3cHg7CiAgICBib3JkZXItcmFkaXVzOiA2cHg7CiAgICBiYWNrZ3JvdW5kOiByZ2JhKDEyNSwgMTQwLCAxNjUsIC4xNik7CiAgICBmb250LWZhbWlseTogdWktbW9ub3NwYWNlLCAiQ2FzY2FkaWEgTW9ubyIsIENvbnNvbGFzLCBtb25vc3BhY2U7CiAgfQogIC52YWx1ZS11bmRlZmluZWQgeyBjb2xvcjogI2IzMjYxZTsgfQogIC52YWx1ZS1wcmVzZW50IHsgY29sb3I6ICMwZDdhNDY7IH0KICAubm90ZSB7IG1hcmdpbi10b3A6IDE2cHg7IGZvbnQtc2l6ZTogMTJweDsgb3BhY2l0eTogLjYyOyB9Cjwvc3R5bGU+CjwvaGVhZD4KPGJvZHk+CiAgPG1haW4gY2xhc3M9ImNhcmQiIGlkPSJyb290Ij4KICAgIDxoMT5XaW5kb3dzIFdTTCDpooTop4jpgJrov4c8L2gxPgogICAgPHAgY2xhc3M9InN1YiI+c21va2UgY2hlY2sgwrcg5Y2V5paH5Lu2IEhUTUwgwrcg5peg5aSW6YOo6LWE5rqQ77yI5pegIENETuOAgeaXoOWbvueJh+OAgeaXoOe9kee7nOivt+axgu+8iTwvcD4KICAgIDxkbD4KICAgICAgPGR0PnR5cGVvZiByZXF1aXJlPC9kdD4KICAgICAgPGRkPjxjb2RlIGlkPSJ2LXJlcXVpcmUiPu+8iOiEmuacrOacquaJp+ihjO+8iTwvY29kZT48L2RkPgogICAgICA8ZHQ+dHlwZW9mIHdpbmRvdy5wdWxzYXJhRGVza3RvcDwvZHQ+CiAgICAgIDxkZD48Y29kZSBpZD0idi1kZXNrdG9wIj7vvIjohJrmnKzmnKrmiafooYzvvIk8L2NvZGU+PC9kZD4KICAgIDwvZGw+CiAgICA8cCBjbGFzcz0ibm90ZSIgaWQ9InYtZW52Ij7mraPlnKjmo4DmtYvov5DooYznjq/looPigKY8L3A+CiAgPC9tYWluPgoKICA8c2NyaXB0PgogICAgKGZ1bmN0aW9uICgpIHsKICAgICAgZnVuY3Rpb24gc2hvdyhpZCwgdHlwZSkgewogICAgICAgIHZhciBlbCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKGlkKTsKICAgICAgICBlbC50ZXh0Q29udGVudCA9IHR5cGU7CiAgICAgICAgZWwuY2xhc3NOYW1lID0gInZhbHVlLSIgKyAodHlwZSA9PT0gInVuZGVmaW5lZCIgPyAidW5kZWZpbmVkIiA6ICJwcmVzZW50Iik7CiAgICAgICAgZWwudGl0bGUgPSAi5a6e6ZmF5rGC5YC857uT5p6c77yaIiArIHR5cGU7CiAgICAgIH0KCiAgICAgIC8vIOWunumZheaxguWAvO+8jOS4jeWBmuS7u+S9leS8qumAoOaIluWFnOW6leabv+aNogogICAgICB2YXIgdFJlcXVpcmUgPSB0eXBlb2YgcmVxdWlyZTsKICAgICAgdmFyIHREZXNrdG9wID0gInVua25vd24iOwogICAgICB0cnkgewogICAgICAgIHREZXNrdG9wID0gdHlwZW9mIHdpbmRvdy5wdWxzYXJhRGVza3RvcDsKICAgICAgfSBjYXRjaCAoZXJyKSB7CiAgICAgICAgdERlc2t0b3AgPSAidGhyb3dzOiIgKyBlcnIubmFtZTsKICAgICAgfQoKICAgICAgc2hvdygidi1yZXF1aXJlIiwgdFJlcXVpcmUpOwogICAgICBzaG93KCJ2LWRlc2t0b3AiLCB0RGVza3RvcCk7CgogICAgICB2YXIgZW52ID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoInYtZW52Iik7CiAgICAgIHZhciBwcm90byA9IChsb2NhdGlvbi5wcm90b2NvbCB8fCAiIikucmVwbGFjZSgiOiIsICIiKSB8fCAidW5rbm93biI7CiAgICAgIGVudi50ZXh0Q29udGVudCA9ICLov5DooYznjq/looPvvJoiICsgKHByb3RvID09PSAiZmlsZSIgPyAi5pys5Zyw5paH5Lu2IChmaWxlOi8vKSIgOiBwcm90bykKICAgICAgICArICIgwrcgSlMg5bey5omn6KGMIMK3IOacrOmhteacquWPkei1t+S7u+S9lee9kee7nOivt+axgiI7CiAgICAgIGVudi50aXRsZSA9IGxvY2F0aW9uLmhyZWY7CiAgICB9KSgpOwogIDwvc2NyaXB0Pgo8L2JvZHk+CjwvaHRtbD4K"
+        },
+        {
+          "relative": "preview.pdf",
+          "mode": 420,
+          "kind": "file",
+          "size": 592,
+          "content_base64": "JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHMgWzMgMCBSXS9Db3VudCAxPj4KZW5kb2JqCjMgMCBvYmoKPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveCBbMCAwIDU5NSA4NDJdL1Jlc291cmNlcyA8PC9Gb250IDw8L0YxIDQgMCBSPj4+Pi9Db250ZW50cyA1IDAgUj4+CmVuZG9iago0IDAgb2JqCjw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYS9FbmNvZGluZy9XaW5BbnNpRW5jb2Rpbmc+PgplbmRvYmoKNSAwIG9iago8PC9MZW5ndGggNTA+PgpzdHJlYW0KQlQKL0YxIDI4IFRmCjcyIDcwMCBUZAooV2luZG93cyBXU0wgUERGIE9LKSBUagpFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSAwMDAwMCBuIAowMDAwMDAwMDYwIDAwMDAwIG4gCjAwMDAwMDAxMTIgMDAwMDAgbiAKMDAwMDAwMDIyNyAwMDAwMCBuIAowMDAwMDAwMzE1IDAwMDAwIG4gCnRyYWlsZXIKPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKNDEyCiUlRU9GCg=="
+        },
+        {
+          "relative": "preview.png",
+          "mode": 420,
+          "kind": "file",
+          "size": 17701,
+          "content_base64": "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"
+        },
+        {
+          "relative": "smoke.txt",
+          "mode": 384,
+          "kind": "file",
+          "size": 31,
+          "content_base64": "V2luZG93cyBXU0wg5Lit5paH6aqM5pS26YCa6L+HCg=="
+        }
+      ]
+    },
+    {
+      "workspace_id": "workspace:zlmsxoedty2ev4f2r5m7mrsjxm",
+      "root": "/home/plumwsl/.pulsara/workspaces/quick-20261025-192532-928e7b9e",
+      "files": []
+    }
+  ],
+  "deep": {
+    "status": "verified",
+    "universe_fingerprint": "sha256:b99c9fda8ab32ecd94ea930748c71e49f86f770a91d3ddb38303f5369241c204",
+    "registry_prefix_fingerprint": "sha256:926ffd30b16f8c77d70dce4559eb6b0210bd3fb86a0326688f723cb2d40cc3a4",
+    "verified_catalog_fingerprint": "sha256:812aaf3157354f2ce2b0b2765ae07128c31a01579cadac3cf3ae4e3d08f80f42",
+    "runtime_grant_policy_fingerprint": "sha256:ce8ce2b013a39a32720a6de76b408a94f9bd0db305db0ca77c334234f0251120",
+    "result_fingerprint": "sha256:0d5bb6b4fca861465d228506bb4503d2a5e83b3468e29a67b536eccc90dcfbeb"
+  },
+  "installed_source_equal": {
+    "conversation_kernel/provider_dispatch.py": true,
+    "hooks/executor.py": true,
+    "conversation_kernel/mcp/sdk_facade.py": true
+  },
+  "preserved": {
+    "settings_exists": true,
+    "settings_stat": true,
+    "model_connections": true,
+    "sessions": true,
+    "turns": true,
+    "entries": true,
+    "blocks": true,
+    "workspaces": true,
+    "workspace_files": true,
+    "data_inode": true
+  },
+  "same_pg": {
+    "system_identifier": true,
+    "data": true,
+    "socket": true,
+    "listen_addresses": true
+  },
+  "new_pg_start": true
+}

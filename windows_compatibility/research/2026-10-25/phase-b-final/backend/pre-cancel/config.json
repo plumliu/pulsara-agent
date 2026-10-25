@@ -1,0 +1,8 @@
+{
+  "home": "/home/plumwsl/.pbfpg-ow_7mc0f",
+  "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+  "repo": "/home/plumwsl/workspaces/pulsara_agent",
+  "library": "/home/plumwsl/.pbf-tools-ywa00bm0/fault.so",
+  "method": "run:pg_ctl:start",
+  "before_ready": true
+}

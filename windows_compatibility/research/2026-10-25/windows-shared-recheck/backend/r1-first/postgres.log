@@ -1,0 +1,16 @@
+2026-10-25 22:05:34.340 +08 [433] LOG:  registered custom resource manager "pg_search" with ID 137
+2026-10-25 22:05:34.426 +08 [433] LOG:  starting PostgreSQL 17.9 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, 64-bit
+2026-10-25 22:05:34.430 +08 [433] LOG:  listening on Unix socket "/home/plumwsl/.wsr-ax19kear/s/.s.PGSQL.5432"
+2026-10-25 22:05:34.438 +08 [451] LOG:  database system was shut down at 2026-10-25 22:05:33 +08
+2026-10-25 22:05:34.444 +08 [433] LOG:  database system is ready to accept connections
+2026-10-25 22:05:36.982 +08 [460] WARNING:  key_field is deprecated as of 0.26.0 and is a no-op; it no longer needs to be provided
+2026-10-25 22:05:37.016 +08 [460] WARNING:  key_field is deprecated as of 0.26.0 and is a no-op; it no longer needs to be provided
+2026-10-25 22:05:37.801 +08 [449] LOG:  checkpoint starting: immediate force wait
+2026-10-25 22:05:37.840 +08 [449] LOG:  checkpoint complete: wrote 15 buffers (0.1%); 1 WAL file(s) added, 0 removed, 0 recycled; write=0.005 s, sync=0.009 s, total=0.039 s; sync files=12, longest=0.002 s, average=0.001 s; distance=8014 kB, estimate=8014 kB; lsn=0/1C4E278, redo lsn=0/1C4E220
+2026-10-25 22:05:38.408 +08 [433] LOG:  received fast shutdown request
+2026-10-25 22:05:38.413 +08 [433] LOG:  aborting any active transactions
+2026-10-25 22:05:38.413 +08 [433] LOG:  background worker "logical replication launcher" (PID 454) exited with exit code 1
+2026-10-25 22:05:38.414 +08 [449] LOG:  shutting down
+2026-10-25 22:05:38.416 +08 [449] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 22:05:38.428 +08 [449] LOG:  checkpoint complete: wrote 2 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.003 s, total=0.014 s; sync files=2, longest=0.002 s, average=0.002 s; distance=0 kB, estimate=7212 kB; lsn=0/1C4E390, redo lsn=0/1C4E390
+2026-10-25 22:05:38.434 +08 [433] LOG:  database system is shut down

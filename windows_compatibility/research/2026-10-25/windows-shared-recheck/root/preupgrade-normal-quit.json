@@ -1,0 +1,8 @@
+{
+  "observedAt": "2026-10-25T22:03:19.7179977+08:00",
+  "appCount": 0,
+  "pgStatus": 3,
+  "pgOutput": "pg_ctl: no server running",
+  "exitMethod": "Computer Use Ctrl+Q from idle overview",
+  "externalKillUsed": false
+}

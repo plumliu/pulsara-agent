@@ -1,0 +1,16 @@
+{
+  "source": "gui-completed.json",
+  "session_id": "session:uctdxsxom55pycdl5l3dvg5owu",
+  "completed_roots": 1,
+  "unique_queue_prompt": true,
+  "terminal_calls": 1,
+  "additional_read_only_find_files": 1,
+  "terminal_exit": 0,
+  "terminal_output": "WINDOWS_ALPHA10_GUI_OK\nEXIT_CODE=0\n",
+  "prior_preserved": {
+    "sessions": true,
+    "turns": true,
+    "entries": true
+  },
+  "qualification": "Actual simple terminal roundtrip passed; model also searched AGENTS.md and printed the exit status. This is not an exactly-one-total-tool or literal-printf-only result. Initial observer assertion failure is retained; no message rerun or production change."
+}

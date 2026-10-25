@@ -1,0 +1,14 @@
+{
+  "root": "/home/plumwsl/.bmain-6uasrfsi",
+  "home": "/home/plumwsl/.bmain-6uasrfsi/home",
+  "workspace": "/home/plumwsl/.bmain-6uasrfsi/workspace",
+  "windowsHome": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\.bmain-6uasrfsi-electron",
+  "kernelEvents": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/quit-kernel.jsonl",
+  "hostEvents": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\terminal\\quit-host.jsonl",
+  "child": "/mnt/c/python_workspace/pulsara-agent/output/windows-shared-recheck/terminal/interop-child.exe",
+  "bootstrap": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/kernel_bootstrap.py",
+  "guestConfig": "/mnt/c/python_workspace/pulsara-agent/output/phase-b-final/terminal/quit-config.json",
+  "installedRoot": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+  "resources": "C:/Users/plumlocal/AppData/Local/Programs/pulsara/resources",
+  "scenario": "quit"
+}

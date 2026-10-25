@@ -1,0 +1,12 @@
+{
+  "baseline": "HEAD 0ea98e63",
+  "built": "WSL desktop:verify then desktop:wsl-payload",
+  "oldMapFiles": 87,
+  "newMapFiles": 87,
+  "oldUniqueSourceNames": 1336,
+  "newUniqueSourceNames": 1336,
+  "contentChangesAfterCRLFNormalization": [],
+  "sameSourceContentAfterCRLF": true,
+  "payloadAlreadyWritten": true,
+  "windowsTrackedStaticUntouched": true
+}

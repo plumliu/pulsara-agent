@@ -1,0 +1,37 @@
+{
+  "provider_calls": 8,
+  "epochs": 2,
+  "exact_wire_prefix_comparisons": 6,
+  "marker_observations": [
+    {
+      "sequence": 2,
+      "markers_present": {
+        "ROOT_CONTEXT_MARKER_ONE_7C1A": true,
+        "ROOT_CONTEXT_MARKER_TWO_9B4E": true,
+        "MIDFLIGHT_GUIDANCE_MARKER_2D6F": false
+      }
+    },
+    {
+      "sequence": 6,
+      "markers_present": {
+        "ROOT_CONTEXT_MARKER_ONE_7C1A": true,
+        "ROOT_CONTEXT_MARKER_TWO_9B4E": true,
+        "MIDFLIGHT_GUIDANCE_MARKER_2D6F": true
+      }
+    }
+  ],
+  "two_pending": true,
+  "mailbox_entries": 1,
+  "actual_saved_credential_matches": 0,
+  "credential_checked_files": 24,
+  "private_paths_absent": [
+    "/home/plumwsl/.pa-isd0ie9q",
+    "/home/plumwsl/.wsr-provider-5w4_48eh"
+  ],
+  "remaining_exact_owned_accessible_processes": [],
+  "same_uid_environ_inaccessible": [
+    425,
+    427
+  ],
+  "limits": "Independent read-only record check; inaccessible process environments are not claimed empty. Random context does not independently identify the new post-accept retirement branch; R1 supplies its deterministic proof."
+}

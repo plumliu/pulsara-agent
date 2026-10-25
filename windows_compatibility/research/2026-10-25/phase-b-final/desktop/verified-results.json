@@ -1,0 +1,27 @@
+{
+  "version": "0.1.0-alpha.10",
+  "setupChecks": 8,
+  "networkCombinations": 3,
+  "enospcInjectedAllocationCase": 1,
+  "recipeFixturePassed": 7,
+  "actualNetworkHostExitCode": 0,
+  "actualGuestCarrierExitCode": 0,
+  "productionCodeChangedThisBatch": false,
+  "observedInstalledProductOwners": true,
+  "syntheticSessionCoreFixture": true,
+  "fullMainInFlightClosureClaimed": false,
+  "actualFullDiskClaimed": false,
+  "safeForSleepBeforeRootManualAction": true,
+  "allOriginalFailuresPreserved": true,
+  "publicCredentialsRead": false,
+  "B5ActivationClaimed": false,
+  "passed": true,
+  "explorerGuiRequiredCase": {
+    "passed": true,
+    "source": "explorer-results.json",
+    "modelCalls": 0,
+    "sessionCreated": false,
+    "directoryPreserved": true,
+    "normalQuit": true
+  }
+}

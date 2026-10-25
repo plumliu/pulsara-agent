@@ -1,0 +1,18 @@
+mise by @jdx – installing 2 tools
+mise ░░░░░░░░░░░░░░░░ 0/2 · 3.0s
+  protoc@34.0  installing  3.0s
+  1 queued
+mise ✓ protoc@34.0  5.2s  protoc-34.0-win64.zip
+mise ████████░░░░░░░░ 1/2 · 6.0s
+  uv@0.13.4    installing  765ms
+mise █████████████░░░ 1/2 · 9.0s
+  uv@0.13.4    verifying  3.8s
+mise ✓ uv@0.13.4    6.4s  uv-x86_64-pc-windows-msvc.zip
+mise ████████████████ 2/2 · installed 2 tools in 11.6s
+[desktop:bootstrap] $ uv sync --locked --dev --no-install-project --default-index https://pypi.org/simple
+Downloading cpython-3.12.15-windows-x86_64-none (download) (21.0MiB)
+ Downloaded cpython-3.12.15-windows-x86_64-none (download)
+Using CPython 3.12.15
+error: failed to remove directory `\\?\C:\python_workspace\pulsara-agent\.venv\Scripts`: 拒绝访问。 (os error 5)
+Finished in 9.21s
+[desktop:bootstrap] ERROR task failed

@@ -1,0 +1,11 @@
+{
+  "pid": 3052,
+  "image": "C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\root\\active-sleep\\pulsara-sleep-child.exe",
+  "creationFileTime": 134374124708072644,
+  "observedAt": "2026-10-25T14:34:30.924402+00:00",
+  "alive": false,
+  "signalSent": false,
+  "exitCode": 0,
+  "exitObservedAt": "2026-10-25T14:34:33.867795+00:00",
+  "sameHeldHandle": true
+}

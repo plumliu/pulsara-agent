@@ -1,0 +1,3 @@
+{"timeNs": 1792939726091096565, "kind": "original-application-started", "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py", "kernelPid": 461, "kernelStart": "75900", "home": "/home/plumwsl/.bmain-49m0wpv2/home", "origin": "https://127.0.0.1:38677"}
+{"timeNs": 1792939726097017095, "kind": "original-application-close-enter", "states": []}
+{"timeNs": 1792939727146687671, "kind": "original-application-close-returned", "states": []}

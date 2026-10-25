@@ -1,0 +1,153 @@
+Window: "workspaces - 文件资源管理器", App: explorer.exe.
+	0 窗口 workspaces - 文件资源管理器 Secondary Actions: Raise
+		1 窗格
+		2 窗格 workspaces
+			3 窗格
+				4 状态栏 状态栏 ID: StatusBarModuleInner
+					442 组 属性字段 ID: System.StatusBarViewItemCount
+						443 文本 7 个项目 Description: 项目总数 ID: PropertyValue
+					444 组 属性字段 ID: System.StatusBarSelectedItemCount
+						445 文本 选中 1 个项目 Description: 所选项目数量和大小 ID: PropertyValue
+					369 组 查看模式 ID: ViewButtonsGroup
+						370 单选按钮 (selectable) 详细信息 Description: 在窗口中显示每一项的相关信息。(Ctrl+Alt+6) ID: ViewMode_Details
+						371 单选按钮 (selectable) 大图标 Description: 使用大缩略图显示项。(Ctrl+Alt+2) ID: ViewMode_LargeIcons
+				7 窗格 控制项宿主 ID: ProperTreeHost
+					8 树 导航窗格 ID: 100
+						9 滚动条 (settable, float) 垂直滚动条 Value: 0 ID: NonClientVerticalScrollBar
+							10 按钮 上一行 ID: UpButton
+							11 缩略图 位置 ID: ScrollbarThumb
+							12 按钮 向下翻页 ID: DownPageButton
+							13 按钮 下一行 ID: DownButton
+						14 树项目 (selectable, settable, string) 桌面 Value: 桌面
+							15 树项目 (selectable, settable, string) 主文件夹 Value: 主文件夹
+							16 树项目 (selectable, settable, string) 图库 Value: 图库
+							17 树项目 (selectable, settable, string) OneDrive Value: OneDrive
+							18 树项目 (selectable, settable, string) 快速访问开始 - 桌面 (已固定) Value: 快速访问开始 - 桌面 (已固定)
+							19 树项目 (selectable, settable, string) 下载 (已固定) Value: 下载 (已固定)
+							20 树项目 (selectable, settable, string) 文档 (已固定) Value: 文档 (已固定)
+							21 树项目 (selectable, settable, string) 图片 (已固定) Value: 图片 (已固定)
+							22 树项目 (selectable, settable, string) 音乐 (已固定) Value: 音乐 (已固定)
+							23 树项目 (selectable, settable, string) 视频 (已固定) Value: 视频 (已固定)
+							24 树项目 (selectable, settable, string) _page_review (已固定) Value: _page_review (已固定)
+							25 树项目 (selectable, settable, string) my_doc Value: my_doc
+							26 树项目 (selectable, settable, string) 2025test Value: 2025test
+							27 树项目 (selectable, settable, string) 112 Value: 112
+							28 树项目 (selectable, settable, string) 快速访问结束 - round5 Value: 快速访问结束 - round5
+							29 树项目 (selectable, settable, string) WPS云盘 Value: WPS云盘
+							30 树项目 (selectable, settable, string) 此电脑 Value: 此电脑
+							31 树项目 (selectable, settable, string) 网络 Value: 网络
+							32 树项目 (selectable, settable, string) Linux Value: Linux
+				372 窗格 Shell 文件夹视图 ID: listview
+					373 列表 项目视图
+						374 标头 标题
+							375 拆分按钮 名称 ID: System.ItemNameDisplay
+								376 按钮 筛选器下拉列表 ID: DropDown
+							377 拆分按钮 修改日期 ID: System.DateModified
+								378 按钮 筛选器下拉列表 ID: DropDown
+							379 拆分按钮 类型 ID: System.ItemTypeText
+								380 按钮 筛选器下拉列表 ID: DropDown
+							381 拆分按钮 大小 ID: System.Size
+								382 按钮 筛选器下拉列表 ID: DropDown
+						383 列表项目 (selectable, settable, string) .bmain-nm9sp13u Value: .bmain-nm9sp13u ID: 0
+							384 编辑 (settable, string) 名称 Value: .bmain-nm9sp13u ID: System.ItemNameDisplay
+							385 编辑 修改日期 Value: ‎25/‎10/‎2026 ‏‎下午 10:55 ID: System.DateModified
+							386 编辑 类型 Value: 文件夹 ID: System.ItemTypeText
+							387 编辑 大小 ID: System.Size
+						388 列表项目 (selectable, settable, string) .bmain-tnsqp21k Value: .bmain-tnsqp21k ID: 1
+							389 编辑 (settable, string) 名称 Value: .bmain-tnsqp21k ID: System.ItemNameDisplay
+							390 编辑 修改日期 Value: ‎25/‎10/‎2026 ‏‎下午 10:59 ID: System.DateModified
+							391 编辑 类型 Value: 文件夹 ID: System.ItemTypeText
+							392 编辑 大小 ID: System.Size
+						393 列表项目 (selectable, settable, string) pulsara_agent Value: pulsara_agent ID: 2
+							394 编辑 (settable, string) 名称 Value: pulsara_agent ID: System.ItemNameDisplay
+							395 编辑 修改日期 Value: ‎25/‎10/‎2026 ‏‎下午 9:55 ID: System.DateModified
+							396 编辑 类型 Value: 文件夹 ID: System.ItemTypeText
+							397 编辑 大小 ID: System.Size
+						398 列表项目 (selectable, settable, string) Windows 共享修复 alpha10 验收 Value: Windows 共享修复 alpha10 验收 ID: 3
+							399 编辑 (settable, string) 名称 Value: Windows 共享修复 alpha10 验收 ID: System.ItemNameDisplay
+							400 编辑 修改日期 Value: ‎25/‎10/‎2026 ‏‎下午 10:18 ID: System.DateModified
+							401 编辑 类型 Value: 文件夹 ID: System.ItemTypeText
+							402 编辑 大小 ID: System.Size
+						403 列表项目 (selectable, settable, string) Windows 中文 验收 20261025 Value: Windows 中文 验收 20261025 ID: 4
+							404 编辑 (settable, string) 名称 Value: Windows 中文 验收 20261025 ID: System.ItemNameDisplay
+							405 编辑 修改日期 Value: ‎25/‎10/‎2026 ‏‎下午 5:09 ID: System.DateModified
+							406 编辑 类型 Value: 文件夹 ID: System.ItemTypeText
+							407 编辑 大小 ID: System.Size
+						408 列表项目 (selectable, settable, string) 中文 工程 G0-20261024 Value: 中文 工程 G0-20261024 ID: 5
+							409 编辑 (settable, string) 名称 Value: 中文 工程 G0-20261024 ID: System.ItemNameDisplay
+							410 编辑 修改日期 Value: ‎24/‎10/‎2026 ‏‎下午 11:30 ID: System.DateModified
+							411 编辑 类型 Value: 文件夹 ID: System.ItemTypeText
+							412 编辑 大小 ID: System.Size
+						437 列表项目 (selectable, settable, string) Explorer 中文 alpha10 fb3136ea Value: Explorer 中文 alpha10 fb3136ea ID: 6
+							446 编辑 (settable, string) 名称 Value: Explorer 中文 alpha10 fb3136ea ID: System.ItemNameDisplay
+							447 编辑 修改日期 Value: ‎25/‎10/‎2026 ‏‎下午 11:01 ID: System.DateModified
+							448 编辑 类型 Value: 文件夹 ID: System.ItemTypeText
+							449 编辑 大小 ID: System.Size
+				234 图像 缩略图模块 ID: PreviewThumbnailInner
+				235 文本 没有预览。 ID: RPaneCoverSheet_NoSel
+		236 窗格
+			237 窗格
+				238 选项卡 ID: TabView
+					239 列表 ID: TabListView
+						240 选项卡项目 (selectable) workspaces
+							430 图像
+							242 文本 workspaces
+							243 按钮 关闭标签页 ID: CloseButton
+					244 按钮 添加新标签页 ID: AddButton
+				245 应用栏 ID: NavigationCommands
+					246 应用栏按钮 后退 Description: 返回到 主文件夹 ID: backButton
+					247 应用栏按钮 (disabled) 前进 Description: 前进 ID: forwardButton
+					248 应用栏按钮 上移到“plumwsl”(Alt + 向上键) Description: 上移到“plumwsl”(Alt + 向上键) ID: upButton
+					249 应用栏按钮 刷新“workspaces”(F5) Description: 刷新“workspaces”(F5) ID: refreshButton
+				250 组 ID: PART_AutoSuggestBox
+					251 编辑 (settable, string) 地址栏 ID: TextBox
+				414 拆分按钮 网络 ID: FirstCrumbStackPanel
+					415 图像
+				416 组 ID: PART_BreadcrumbBar
+					417 拆分按钮 更多
+					418 拆分按钮 网络
+						419 文本 网络
+					420 拆分按钮 wsl.localhost
+						421 文本 wsl.localhost
+					422 拆分按钮 Ubuntu
+						423 文本 Ubuntu
+					424 拆分按钮 home
+						425 文本 home
+					426 拆分按钮 plumwsl
+						427 文本 plumwsl
+					428 拆分按钮 workspaces
+						429 文本 workspaces
+				257 组 ID: FileExplorerSearchBox
+					258 编辑 (settable, string) 在 workspaces 中搜索 ID: TextBox
+						259 文本 在 workspaces 中搜索
+				260 应用栏 ID: FileExplorerCommandBar
+					261 应用栏按钮 新建
+						262 图像
+					263 应用栏按钮 剪切​​ Description: 将所选项目移动到剪贴板。
+						264 图像
+					265 应用栏按钮 复制​​ Description: 将所选项目复制到剪贴板。
+						266 图像
+					267 应用栏按钮 (disabled) 粘贴​​ Description: 将剪贴板中的内容粘贴到当前位置。
+						268 图像
+					269 应用栏按钮 重命名​​ Description: 重命名所选项目。
+						270 图像
+					271 应用栏按钮 (disabled) 共享
+						272 图像
+					273 应用栏按钮 删除​​ Description: 将所选项目移动到回收站或将其永久删除。
+						274 图像
+					275 应用栏按钮 排序 ID: SortAndGroupButton
+						276 图像
+					277 应用栏按钮 查看
+						278 图像
+					281 按钮 更多选项 ID: MoreButton
+				282 应用栏 ID: FileExplorerSecondaryCommandBar
+					283 应用栏按钮 预览 Description: 显示或隐藏预览窗格。 ID: PreviewPaneToggleButton
+						284 图像
+		285 标题栏 (settable, string) Value: workspaces - 文件资源管理器
+			286 菜单栏 系统 ID: MenuBar
+				432 菜单项 系统
+			288 按钮 最小化
+			289 按钮 最大化
+			290 按钮 关闭
+
+The focused UI element is 251 编辑 (settable, string) 地址栏 ID: TextBox.

@@ -1,0 +1,30 @@
+{
+  "case": "mcp-owner-lost",
+  "root": "/home/plumwsl/.bfin-feklfe9s",
+  "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3",
+  "scope": {
+    "ready": {
+      "anchorPid": 6844,
+      "creation": "134374124750981379",
+      "job": "Local\\PulsaraInterop-3e7e1ffaf6ba49e3841aeb009a3bb6e0",
+      "monitorCreation": "134374124751762813",
+      "monitorPid": 35716,
+      "pid": 31064,
+      "type": "ready"
+    },
+    "joined": true,
+    "failure": "Windows interop owner failed; the task result is unknown",
+    "helperExit": 9,
+    "directory": null,
+    "workerAlive": false,
+    "tasks": 0,
+    "writers": 0
+  },
+  "callOutcome": "[MCPError(-32000, 'Connection closed', None)]",
+  "closeError": "Windows interop owner failed; the task result is unknown",
+  "sameCloseError": true,
+  "failedSlotRetained": true,
+  "status": "passed",
+  "remainingScopePaths": []
+}

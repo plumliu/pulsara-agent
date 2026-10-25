@@ -1,0 +1,18 @@
+{
+  "recordedFromEarlierToolOutput": true,
+  "cleanupFirst": {
+    "command": "uv-managed system Python cleanup-audit.py; first source used Path.read_text() without explicit encoding",
+    "exception": "UnicodeDecodeError: 'gbk' codec can't decode byte 0x99 in position 724: illegal multibyte sequence",
+    "linuxAuditResultWritten": false,
+    "subsequentNullWindowsPidJsonInvalid": "cleanup-first-windows.json is retained but never used as evidence",
+    "fixedBy": "explicit UTF-8 and checking Linux audit exit0 before Windows PID checks"
+  },
+  "namespaceFeasibility": {
+    "command": ["wsl.exe", "-d", "Ubuntu", "-u", "plumwsl", "--cd", "/home/plumwsl", "--exec", "unshare", "-Urmp", "--mount-proc", "/usr/bin/id", "-u"],
+    "exitCode": 1,
+    "stderr": "unshare: mount /proc failed: Operation not permitted\n",
+    "privilegeEscalationAttempted": false,
+    "sharedMountConfigurationChanged": false,
+    "claim": "not a limited-filesystem success; final ENOSPC was explicit open allocation errno injection"
+  }
+}

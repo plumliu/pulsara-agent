@@ -1,0 +1,6 @@
+{
+  "observerPid": 27968,
+  "startedAt": "2026-10-25T22:37:43.3657382+08:00",
+  "childPid": 14916,
+  "purpose": "read-only held HANDLE; never terminate child"
+}

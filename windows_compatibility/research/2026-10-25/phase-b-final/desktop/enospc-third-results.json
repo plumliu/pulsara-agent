@@ -1,0 +1,34 @@
+{
+  "label": "enospc-22fc60f9-fe08-47f3-ae52-ea8e1ac313ed",
+  "version": "b-final-3aa1fd66-c820-4c10-930d-0a8f13f0d325",
+  "injection": "test-only LD_PRELOAD write errno ENOSPC after 4096 bytes; no actual full filesystem",
+  "cases": [],
+  "commandInjected": 1,
+  "privateRoot": "/home/plumwsl/.pbf-enospc-vfDLMXin",
+  "before": {
+    "stages": [],
+    "versionExists": false,
+    "marker": "b8899807e99b8a44be7cc15a49516b521f155a1efdf2499b1312932058427a6c\n",
+    "settings": [
+      145427,
+      440,
+      1792923525820928500,
+      1000,
+      33152
+    ],
+    "pgData": [
+      171484,
+      4096,
+      1792938919384818000,
+      1000,
+      16832
+    ]
+  },
+  "error": {
+    "message": "Error: Command failed: C:\\WINDOWS\\System32\\wsl.exe -d Ubuntu -u plumwsl --cd /home/plumwsl --exec /usr/bin/env LD_PRELOAD=/home/plumwsl/.pbf-enospc-vfDLMXin/write-fault.so /bin/sh -c set -eu\numask 077\nbase=\"$1/.local/share/pulsara/runtime\"\nparent=\"$base\"\nwhile ! test -e \"$parent\" && ! test -L \"$parent\"; do parent=\"${parent%/*}\"; done\ntest -d \"$parent\"; test -O \"$parent\"\ntest \"$(realpath -e -- \"$parent\")\" = \"$parent\"\nmkdir -p -- \"$base\"\ntest ! -L \"$base\"; test -O \"$base\"\ntest \"$(realpath -e -- \"$base\")\" = \"$base\"\ntest \"$(/usr/bin/findmnt -n -o FSTYPE -T \"$base\")\" = ext4\nchmod 700 -- \"$base\"\nexec 9>\"$base/.install.lock\"\n# A previous finite installer may outlive its Windows host. Never queue a late publish.\nflock -n 9 || { echo 'Another resource installation is still running.' >&2; exit 1; }\nstage=$(mktemp -d \"$base/.install-XXXXXXXX\")\ntrap 'case \"$stage\" in \"$base\"/.install-*) rm -rf -- \"$stage\";; esac' EXIT\ncat > \"$stage/payload.tar\"\nprintf '%s  %s\\n' \"$3\" \"$stage/payload.tar\" | sha256sum -c - >/dev/null\ndestination=\"$base/$2\"\nif test -e \"$destination\"; then\n  test -d \"$destination\"; test ! -L \"$destination\"; test -O \"$destination\"\n  test \"$(cat \"$destination/.pulsara-payload.sha256\")\" = \"$3\" || { echo 'This application version contains different resources; close the application and select an explicit update.' >&2; exit 1; }\nelse\n  mkdir \"$stage/unpack\"\n  tar -xf \"$stage/payload.tar\" -C \"$stage/unpack\" --no-same-owner --no-same-permissions\n  test -x \"$stage/unpack/payload/python/bin/python3\"\n  test -x \"$stage/unpack/payload/postgres/bin/pg_ctl\"\n  \"$stage/unpack/payload/python/bin/python3\" -I -c \"$4\" \"$stage/unpack/payload\" >/dev/null\n  printf '%s\\n' \"$3\" > \"$stage/unpack/payload/.pulsara-payload.sha256\"\n  chmod 700 \"$stage/unpack/payload\"\n  mv -T -- \"$stage/unpack/payload\" \"$destination\"\nfi\n\"$destination/python/bin/python3\" -I -c \"$4\" \"$destination\"\n pulsara-install /home/plumwsl b-final-3aa1fd66-c820-4c10-930d-0a8f13f0d325 0000000000000000000000000000000000000000000000000000000000000000 import json,os,stat,subprocess,sys\nfrom pathlib import Path\nroot=Path(sys.argv[1])\nassert root.resolve()==root and root.stat().st_uid==os.getuid()!=0\nimport pulsara_agent\nassert Path(pulsara_agent.__file__).resolve().is_relative_to(root)\nfor name in ('python/bin/python3','postgres/bin/postgres','postgres/bin/pg_ctl','postgres/bin/initdb','postgres/bin/pg_config','bin/pulsara'):\n p=root/name\n assert p.is_file() and os.access(p,os.X_OK) and p.resolve().is_relative_to(root), name\nassert (root/'playwright').is_dir()\nfrom pulsara_agent.capability.pulsara_home import require_pulsara_home\nhome=require_pulsara_home()\nparent=home\nwhile not parent.exists():parent=parent.parent\nassert subprocess.check_output(['/usr/bin/findmnt','-n','-o','FSTYPE','-T',str(parent)],text=True).strip()=='ext4'\nassert home.resolve()==home and home!=Path('/')\nhome.mkdir(mode=0o700,parents=True,exist_ok=True)\nassert home.stat().st_uid==os.getuid() and stat.S_IMODE(home.stat().st_mode)&0o077==0\nprint(json.dumps({'root':str(root),'home':str(home),'uid':os.getuid()}))\n\nsha256sum: WARNING: 1 computed checksum did NOT match\n",
+    "code": 1,
+    "stderr": "sha256sum: WARNING: 1 computed checksum did NOT match\n"
+  },
+  "failure": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert.ok(error.stderr.includes('PBF_ENOSPC injected after actual prefix write'))\n\n    at C:\\python_workspace\\pulsara-agent\\output\\phase-b-final\\desktop\\enospc-smoke.cjs:19:109\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)",
+  "privateRootRemoved": true
+}

@@ -405,7 +405,7 @@ A不因薄宿主抽取强制重跑未触及的全部terminal/filesystem/provider
 
 本轮继续参考当前生产、AGENTS与用户指定本地仓库；上一轮源码版本为deepseek-harness `687f282e8625`、codex `89461ea68338`、ZCode `3c5b22764937`、grok-build `2bdd1d6a6369`、opencode `37e3912d8ea5`。它们的Windows Job/ConPTY/PowerShell实现仅保留为已放弃原生路线的研究背景，不成为WSL生产依赖。ZCode/opencode的NSIS安装资源/更新退出、grok文件锁生命周期观察仍可作review反例，不复制其强杀/fallback/新manifest或恢复机制。
 
-主要实际修改导航为`desktop/src/{main,runtime,postgres,preload,cli-install,browser-owner,browser-policy}.ts`、`frontend/lib/{desktop-host,runtime-adapter,prompt-draft,file-drop,file-preview}.ts`、`desktop_runtime.py`、`desktop_app/{http_server,application,file_import,file_preview,file_preview_http,path_completion}.py`、`workspace_identity.py`及现构建/安装/release owners。其中A的Node资源/宿主/PG接缝已按第16节落地；其余B模块仍为计划，未创建Windows/WSL生产实现。
+主要修改导航为`desktop/src/{main,runtime,postgres,preload,cli-install,browser-owner,browser-policy}.ts`、`frontend/lib/{desktop-host,runtime-adapter,prompt-draft,file-drop,file-preview}.ts`、`desktop_runtime.py`、`desktop_app/{http_server,application,file_import,file_preview,file_preview_http,path_completion}.py`、`workspace_identity.py`及现构建/安装/release owners。此导航最初写于B实施前；A的Node资源/宿主/PG接缝见第16节，后续Windows/WSL正式实现及候选验收以第24节起的记录和当前源码为准，不能继续将这些已实现模块称为仅有计划。
 
 官方依据在相应章节近旁链接；文档证明平台能力/依赖扩展点，不证明Pulsara集成已通过。下载/布局/API须检查实际锁定版本实现，禁止拿别的agent产品已发Windows包推断本产品PG、物理join、文件授权或prefix已成立。
 
@@ -617,3 +617,24 @@ PDF正证需要Electron内置固定extension及其自身frame发起的chrome://r
 - 测试使用私有PULSARA_HOME、独立PG及UUID DB；saved production settings只读并仅内存注入真实provider。未更新日用/Applications应用。所有测试进程/库/home已结算，原用户CLI恢复相同inode/bytes/mode，原生产main/kernel/PG仍运行。构建生成static散列文件只还原本轮噪声，不提交数百无前端产品变化的生成差异。
 
 本轮只关闭已执行Mac arm64矩阵。真实Mac睡眠/硬件IME、Mac x64及签名分发矩阵仍待验收；原生Ubuntu延期不变。本轮共享窄修后的Windows候选须在Windows重验受影响用例，不继承旧alpha.9安装通过事实；不自动tag、发布或激活B5。root与三位gpt-6.1-sol/high已完成最终交叉审阅，均APPROVE；所选Mac arm64矩阵和本轮窄修合同冻结，见[四方记录](research/2026-10-25/macos-regression/root/freeze-review.zh.md)。
+
+## 26. 共享修复后的 Windows alpha.10 最小重验（2026-10-25）
+
+Windows/WSL 两份仓库同步 `0ea98e63d90043773f42bd9bb9bbb56951fca8b4`，复用三位 gpt-6.1-sol/high，按最小重验清单 R0–R5 全部通过。新基线及各原始证据见[汇总](research/2026-10-25/windows-shared-recheck/root/report.zh.md)。新候选为本地 alpha.10；七个原版本文件同步，另修复 mise Windows 配方的相对 exe 路径，不改变三条共享修复产品逻辑。
+
+新 payload、真实 Windows PE、安装目录 Python -I 与三条文件完整 bytes 已核验；源码 R1 27 项/R2 71 项、真实 PE R3 10 项、Windows R4 54 项加 10 项 main 及 startup 通过。最终随包 context 8 次真实调用与原场景/prefix 断言通过；新 post-accept 窗口由 R1 确定性实证，不能由随机 context 成功推断命中。
+
+alpha.9 正常更新保留原模型、两个会话/5 turns/32 entries、工作区文件与 PG 身份；alpha.10 实际 GUI 中文目录/新会话/终端往返、Ctrl+N/K、隐藏恢复中文草稿、正常 Quit、冷重开保留会话及最终 Quit 通过。没有人工强停正式 PG；冷重开后草稿按原内存合同清空。interop、automount、Hiddify TUN 保持。
+
+此基线只关闭本轮共享差分最小回归。后续完整 Phase B 故障资格继续按原矩阵执行，不激活 B5。用户没有备用 Windows/VM，明确不为测试删除当前 Ubuntu，因此真实“WSL 未安装／需重启”暂时延期；mock/有限注入不替代真实资格。不得为了补验终止、注销或重建用户共享 Ubuntu。原生 Ubuntu 延期、其他硬件及签名分发边界不变。
+
+## 27. Phase B 后半段本机验收收口（2026-10-25）
+
+在第26节新Windows基线上，继续复用三位gpt-6.1-sol/high补齐原矩阵具体缺证，结果见[后半段报告](research/2026-10-25/phase-b-final/root/report.zh.md)。所选本机验收通过，本批没有新增产品逻辑修改，不额外递增版本或重跑不受影响的整套G0。
+
+- 原installed TS owner/client/helper的5项真实PG失联：未提交不追认归属、start结果丢失的PG lifetime锁、stop尾部kernel锁、initdb双FD、已结算readiness非零读回；原错误分类/无自动重放/保数据及精确清理均有证据。
+- 5项原scope边界补齐pin/send/bind取消、双观察者丢失unjoined、MCP/hook失联；隔离installed main正常活动Quit先物理join再kernel/carrier0、PGstop、exe0。宿主强退则原EOF/aclose保unknown、runtime非零，故障前精确HANDLE/pidfd证实任务与kernel退出，PG保留/维护拒入；此为§9.3负向门通过，不冒称clean或自动恢复旧任务。
+- 生产setup8项、真实BackendSession/HTTP/import组合3项及有限ENOSPC分配点注入通过；原cache fixture7项通过。只证明对应生产owner错误保数据与结算，不称真实整盘填满，也不新增同一main run全部流量同时在途的额外验收门。
+- 正式GUI启动一条真实PIPE/Windows等待输入任务，用户实际睡眠最后132.121秒；同main/kernel/PG、writer1→2、原精确HANDLE退出、草稿保留。新消息唯一消费且不重放工具，用户确认正常Quit后PG停/维护0。Explorer真实新建中文目录后，产品picker刷新/选择同Linuxcanonical目录亦通过。
+
+B1–B4核心实现及本轮选定本机证据据此收口；完整B5/Windows支持声明仍不激活。用户无备用Windows/VM，未装WSL/需重启真实环境延期；用户出差仅内屏，完整混合DPI往返延期；原生Ubuntu继续延期，其他跨平台/完整发布制品资格按§13独立列示。interop、automount、Hiddify TUN及日常Ubuntu保持；没有合并main、tag或对外发布。

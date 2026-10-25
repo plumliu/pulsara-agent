@@ -1,0 +1,259 @@
+{
+  "stage": "after",
+  "utc": "2026-10-25T14:45:30.154354+00:00",
+  "target": {
+    "port": 37313,
+    "sessionId": "session:qha3722ihbndoc7c7jhzwxaa3e",
+    "mainPid": 34108,
+    "kernelPid": 472,
+    "kernelStart": null,
+    "pgPid": null,
+    "pgStart": null
+  },
+  "linux": {
+    "readOnly": true,
+    "utc": "2026-10-25T14:45:23.147204+00:00",
+    "version": "0.1.0a10",
+    "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+    "bootId": "9a8c9c6d-267e-4c5e-969e-a05bb47feb82",
+    "kernel": {
+      "pid": 472,
+      "starttime": "9469",
+      "pidNamespace": "pid:[4026532222]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3.12"
+    },
+    "postgres": {
+      "pid": 499,
+      "starttime": "10106",
+      "pidNamespace": "pid:[4026532222]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/postgres/bin/postgres"
+    },
+    "pidfdsOpenedAndClosedForObservation": true,
+    "pgFacts": {
+      "systemid": "7700523439330484737",
+      "data": "/home/plumwsl/.pulsara/desktop/postgres",
+      "socket": "/home/plumwsl/.pulsara/desktop/socket",
+      "listen": "",
+      "inetAddress": null,
+      "postmasterStarted": "2026-10-25 22:35:19.623704+08",
+      "dataInode": 171484
+    },
+    "locks": [
+      {
+        "path": "/home/plumwsl/.pulsara/desktop/kernel.lock",
+        "inode": 145305,
+        "device": 2096,
+        "uid": 1000,
+        "mode": "0o600",
+        "busy": true
+      },
+      {
+        "path": "/home/plumwsl/.pulsara/desktop/pg-lifetime.lock",
+        "inode": 171582,
+        "device": 2096,
+        "uid": 1000,
+        "mode": "0o600",
+        "busy": true
+      }
+    ],
+    "diagnosticsSocketInode": 42755,
+    "http": {
+      "origin": "https://127.0.0.1:37313",
+      "listenInode": "1833",
+      "ownedByKernel": true,
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBiTCCAS+gAwIBAgIUZnX5mUROderS7PswdRtwHhfYqIowCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwIBcNNzAwMTAxMDAw\nMDAwWhgPOTk5OTEyMzEyMzU5NTlaMCIxIDAeBgNVBAMMF1B1bHNhcmEgcHJpdmF0\nZSBkZXNrdG9wMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEAk2/UNIAb1x1XW6\nQudvO0mH3otFbU9JkghM78j6axKZ8RyrJWl2Llb6a8NdcEE1JIpeROcDXUK7WZNB\nfXa0MaNBMD8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAwGA1UdEwEB/wQC\nMAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCgYIKoZIzj0EAwIDSAAwRQIhANl9yvYS\nnhrTJ4tWoESLgFC2OuvskDC8SR93n1m+Td86AiA+2Pk+mx0vMRNsjyM0KahaneKG\nRyl/ZS5dgKrrjK2HBA==\n-----END CERTIFICATE-----\n"
+    },
+    "session": [
+      "session:qha3722ihbndoc7c7jhzwxaa3e",
+      "alpha.10 睡眠验收：单次启动等待进程",
+      "workspace:msew4g24dsgiqlaqv3wo4s6iki",
+      4
+    ],
+    "turns": [
+      [
+        "turn:xcxradqombkstxfku6iqmbngki",
+        "COMPLETED"
+      ]
+    ],
+    "writer": {
+      "generation": 2,
+      "owner": "host:x5qbzlzizfkibi6ymatdmcxhjq",
+      "leaseExpires": "2026-10-25 22:45:43.292388+08",
+      "leaseValid": true,
+      "databaseObservedAt": "2026-10-25 22:45:23.141471+08"
+    },
+    "settingsRead": false,
+    "kernelSpawned": false,
+    "pgLifecycleCommands": false
+  },
+  "windows": {
+    "loopback": [
+      {
+        "OwningProcess": 13952,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 63396,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 37313,
+        "State": 5
+      },
+      {
+        "OwningProcess": 13952,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 61819,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 37313,
+        "State": 5
+      },
+      {
+        "OwningProcess": 13952,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 60474,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 37313,
+        "State": 5
+      },
+      {
+        "OwningProcess": 13952,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 51083,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 37313,
+        "State": 5
+      }
+    ],
+    "eventBookmark": 1747,
+    "powerEvents": [
+      {
+        "id": 507,
+        "recordId": 1740,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:44:55.2181384Z"
+      },
+      {
+        "id": 506,
+        "recordId": 1726,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:43.0974559Z"
+      },
+      {
+        "id": 507,
+        "recordId": 1722,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:23.9429596Z"
+      },
+      {
+        "id": 506,
+        "recordId": 1720,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:16.5133922Z"
+      },
+      {
+        "id": 507,
+        "recordId": 1717,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:04.4900335Z"
+      },
+      {
+        "id": 506,
+        "recordId": 1715,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "utc": "2026-10-25T14:42:03.4144693Z"
+      }
+    ],
+    "main": {
+      "pid": 34108,
+      "creationFileTime": 134374125092339259,
+      "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+      "alive": true,
+      "parent": 36536,
+      "auxiliary": false,
+      "maintenance": false
+    },
+    "processes": [
+      {
+        "pid": 34108,
+        "creationFileTime": 134374125092339259,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 36536,
+        "auxiliary": false,
+        "maintenance": false
+      },
+      {
+        "pid": 24704,
+        "creationFileTime": 134374125093587303,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 34108,
+        "auxiliary": true,
+        "maintenance": false
+      },
+      {
+        "pid": 13952,
+        "creationFileTime": 134374125093603149,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 34108,
+        "auxiliary": true,
+        "maintenance": false
+      },
+      {
+        "pid": 7244,
+        "creationFileTime": 134374125212550860,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 34108,
+        "auxiliary": true,
+        "maintenance": false
+      }
+    ]
+  },
+  "http": {
+    "origin": "https://127.0.0.1:37313",
+    "at": 1792939524423,
+    "method": "GET",
+    "path": "/healthz",
+    "fullCertificateSame": true,
+    "authorized": true,
+    "localPort": 55675,
+    "remotePort": 37313,
+    "httpStatus": 200,
+    "health": {
+      "status": "ready"
+    }
+  },
+  "httpExit": 0,
+  "tun": [
+    {
+      "Name": "tun0",
+      "InterfaceDescription": "sing-tun Tunnel",
+      "ifIndex": 30,
+      "Status": "Up"
+    }
+  ],
+  "readOnly": true,
+  "settingsRead": false,
+  "sleepInvoked": false,
+  "businessOperationReplayed": false,
+  "comparisons": {
+    "sameWindowsMain": true,
+    "sameKernel": true,
+    "samePostgres": true,
+    "sameBoot": true,
+    "sameBusyLockInodes": true,
+    "sameControlSocket": true,
+    "sameHttpListenerAndCertificate": true,
+    "sameSessionAndWorkspace": true,
+    "savedTurnsRemain": true,
+    "writerGenerationNondecreasing": true,
+    "currentWriterLeaseValid": true,
+    "sameGenerationRetainsOwner": true,
+    "advancedGenerationChangesOwner": true,
+    "originalCertificateAndHealthValid": true,
+    "tunStillUp": true,
+    "sleepEventsRecorded": true
+  },
+  "writerObservation": "generation advanced",
+  "beforeLeaseExpiredByAfterObservation": true,
+  "allComparisonsPassed": true
+}

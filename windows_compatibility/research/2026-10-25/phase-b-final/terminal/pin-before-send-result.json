@@ -1,0 +1,31 @@
+{
+  "case": "pin-before-send",
+  "root": "/home/plumwsl/.bfin-m7oocgio",
+  "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/bin/python3",
+  "anchorPin": {
+    "pid": 420,
+    "starttime": "3535",
+    "descriptor": 3
+  },
+  "scope": {
+    "ready": {
+      "anchorPid": 17480,
+      "creation": "134374124535181475",
+      "job": "Local\\PulsaraInterop-cfdb7710583942ad8a6338aab5014211",
+      "monitorCreation": "134374124536098233",
+      "monitorPid": 38488,
+      "pid": 17012,
+      "type": "ready"
+    },
+    "joined": true,
+    "failure": null,
+    "helperExit": 0,
+    "directory": null,
+    "workerAlive": false,
+    "tasks": 0,
+    "writers": 0
+  },
+  "status": "passed",
+  "remainingScopePaths": []
+}

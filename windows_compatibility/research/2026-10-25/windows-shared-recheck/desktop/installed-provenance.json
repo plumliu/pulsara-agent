@@ -1,0 +1,39 @@
+{
+  "observedAt": "2026-10-25T14:15:46.345778+00:00",
+  "head": "0ea98e63d90043773f42bd9bb9bbb56951fca8b4",
+  "resourceRoot": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+  "version": {
+    "path": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+    "runtime": "0.1.0a10",
+    "metadata": "0.1.0a10"
+  },
+  "threeProductionFiles": [
+    {
+      "relative": "conversation_kernel/provider_dispatch.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/conversation_kernel/provider_dispatch.py",
+      "bundled": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/provider_dispatch.py",
+      "sourceBytes": 298060,
+      "bundledBytes": 298060,
+      "exactBytesEqual": true
+    },
+    {
+      "relative": "hooks/executor.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/hooks/executor.py",
+      "bundled": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/hooks/executor.py",
+      "sourceBytes": 28885,
+      "bundledBytes": 28885,
+      "exactBytesEqual": true
+    },
+    {
+      "relative": "conversation_kernel/mcp/sdk_facade.py",
+      "source": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "bundled": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+      "sourceBytes": 62496,
+      "bundledBytes": 62496,
+      "exactBytesEqual": true
+    }
+  ],
+  "sourceByteChecksUseWSLExt4Clone": true,
+  "noSourceFingerprints": true,
+  "passed": true
+}

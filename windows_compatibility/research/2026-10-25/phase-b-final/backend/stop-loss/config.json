@@ -1,0 +1,8 @@
+{
+  "home": "/home/plumwsl/.pbfpg-yqtzabww",
+  "installed": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.10",
+  "repo": "/home/plumwsl/workspaces/pulsara_agent",
+  "library": "/home/plumwsl/.pbf-tools-omwlpda6/fault.so",
+  "method": "run:pg_ctl:stop",
+  "native_stage": "pgctl-stop-tail"
+}

@@ -1,0 +1,18 @@
+[desktop:bootstrap] $ uv sync --locked --dev --no-install-project --default-index https://pypi.org/simple
+Resolved 87 packages in 1ms
+Checked 85 packages in 8ms
+[desktop:windows-shell-dependencies] $ npm --prefix desktop ci --no-audit --no-fund
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.
+npm warn deprecated rimraf@2.6.3: Rimraf versions prior to v4 are no longer supported
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm warn deprecated boolean@3.2.0: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
+
+added 287 packages in 11s
+[desktop:windows-resources] $ .venv\Scripts\python.exe desktop\scripts\prepare_windows_resources.py
+desktop\native\windows-interop-helper\Program.cs(16,58): warning CS0649: 从未对字段“Frame.operation”赋值，字段将一直保持其默认值 null
+desktop\native\windows-interop-helper\Program.cs(18,58): warning CS0649: 从未对字段“Frame.distribution”赋值，字段将一直保持其默认值 null
+desktop\native\windows-interop-helper\Program.cs(19,58): warning CS0649: 从未对字段“Frame.user”赋值，字段将一直保持其默认值 null
+desktop\native\windows-interop-helper\Program.cs(20,58): warning CS0649: 从未对字段“Frame.python”赋值，字段将一直保持其默认值 null
+desktop\native\windows-interop-helper\Program.cs(21,58): warning CS0649: 从未对字段“Frame.control”赋值，字段将一直保持其默认值 null
+Windows host helper and Linux payload verified
+Finished in 14.05s

@@ -1,0 +1,8 @@
+{
+  "mainPid": 19552,
+  "exactMainWait": 0,
+  "mainExit": 0,
+  "driverPid": 37268,
+  "driverOnlyTerminated": true,
+  "reason": "failed observation driver kept inspector connected after actual app.exit"
+}

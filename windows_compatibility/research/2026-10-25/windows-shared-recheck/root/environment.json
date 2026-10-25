@@ -1,0 +1,13 @@
+{
+  "observedAt": "2026-10-25T22:10:18.0103073+08:00",
+  "tun": [
+    {
+      "Name": "tun0",
+      "InterfaceDescription": "sing-tun Tunnel",
+      "Status": "Up",
+      "ifIndex": 30
+    }
+  ],
+  "interop": "enabled\ninterpreter /init\nflags: P\noffset 0\nmagic 4d5a",
+  "distroUser": "uid=1000(plumwsl) gid=1000(plumwsl) groups=1000(plumwsl),27(sudo)"
+}

@@ -1,0 +1,333 @@
+{
+  "snapshots": {
+    "pre-cancel": {
+      "home": "/home/plumwsl/.pbfpg-ow_7mc0f",
+      "data_absent": true,
+      "locks": {
+        "kernel.lock": {
+          "inode": 262459,
+          "busy": false
+        },
+        "pg-lifetime.lock": {
+          "inode": 262466,
+          "busy": false
+        }
+      },
+      "outside": "outside-sentinel",
+      "retained_records": [
+        "children-1.jsonl",
+        "children-10.jsonl",
+        "children-11.jsonl",
+        "children-12.jsonl",
+        "children-13.jsonl",
+        "children-14.jsonl",
+        "children-15.jsonl",
+        "children-16.jsonl",
+        "children-17.jsonl",
+        "children-18.jsonl",
+        "children-2.jsonl",
+        "children-3.jsonl",
+        "children-4.jsonl",
+        "children-5.jsonl",
+        "children-6.jsonl",
+        "children-7.jsonl",
+        "children-8.jsonl",
+        "children-9.jsonl",
+        "gate-ready",
+        "helper-1.json",
+        "helper-10.json",
+        "helper-11.json",
+        "helper-12.json",
+        "helper-13.json",
+        "helper-14.json",
+        "helper-15.json",
+        "helper-16.json",
+        "helper-17.json",
+        "helper-18.json",
+        "helper-2.json",
+        "helper-3.json",
+        "helper-4.json",
+        "helper-5.json",
+        "helper-6.json",
+        "helper-7.json",
+        "helper-8.json",
+        "helper-9.json",
+        "postgres.log"
+      ]
+    },
+    "start-loss": {
+      "home": "/home/plumwsl/.pbfpg-qds5f0t5",
+      "data_absent": true,
+      "locks": {
+        "kernel.lock": {
+          "inode": 262481,
+          "busy": false
+        },
+        "pg-lifetime.lock": {
+          "inode": 262528,
+          "busy": false
+        }
+      },
+      "outside": "outside-sentinel",
+      "retained_records": [
+        "children-1.jsonl",
+        "children-10.jsonl",
+        "children-11.jsonl",
+        "children-12.jsonl",
+        "children-13.jsonl",
+        "children-14.jsonl",
+        "children-15.jsonl",
+        "children-16.jsonl",
+        "children-17.jsonl",
+        "children-18.jsonl",
+        "children-19.jsonl",
+        "children-2.jsonl",
+        "children-20.jsonl",
+        "children-21.jsonl",
+        "children-22.jsonl",
+        "children-23.jsonl",
+        "children-24.jsonl",
+        "children-25.jsonl",
+        "children-26.jsonl",
+        "children-27.jsonl",
+        "children-28.jsonl",
+        "children-29.jsonl",
+        "children-3.jsonl",
+        "children-4.jsonl",
+        "children-5.jsonl",
+        "children-6.jsonl",
+        "children-7.jsonl",
+        "children-8.jsonl",
+        "children-9.jsonl",
+        "gate-native",
+        "helper-1.json",
+        "helper-10.json",
+        "helper-11.json",
+        "helper-12.json",
+        "helper-13.json",
+        "helper-14.json",
+        "helper-15.json",
+        "helper-16.json",
+        "helper-17.json",
+        "helper-18.json",
+        "helper-19.json",
+        "helper-2.json",
+        "helper-20.json",
+        "helper-21.json",
+        "helper-22.json",
+        "helper-23.json",
+        "helper-24.json",
+        "helper-25.json",
+        "helper-26.json",
+        "helper-27.json",
+        "helper-28.json",
+        "helper-29.json",
+        "helper-3.json",
+        "helper-4.json",
+        "helper-5.json",
+        "helper-6.json",
+        "helper-7.json",
+        "helper-8.json",
+        "helper-9.json",
+        "postgres.log"
+      ]
+    },
+    "stop-loss": {
+      "home": "/home/plumwsl/.pbfpg-yqtzabww",
+      "data_absent": true,
+      "locks": {
+        "kernel.lock": {
+          "inode": 262536,
+          "busy": false
+        },
+        "pg-lifetime.lock": {
+          "inode": 262547,
+          "busy": false
+        }
+      },
+      "outside": "outside-sentinel",
+      "retained_records": [
+        "children-1.jsonl",
+        "children-10.jsonl",
+        "children-11.jsonl",
+        "children-12.jsonl",
+        "children-13.jsonl",
+        "children-14.jsonl",
+        "children-15.jsonl",
+        "children-2.jsonl",
+        "children-3.jsonl",
+        "children-4.jsonl",
+        "children-5.jsonl",
+        "children-6.jsonl",
+        "children-7.jsonl",
+        "children-8.jsonl",
+        "children-9.jsonl",
+        "gate-native",
+        "helper-1.json",
+        "helper-10.json",
+        "helper-11.json",
+        "helper-12.json",
+        "helper-13.json",
+        "helper-14.json",
+        "helper-15.json",
+        "helper-2.json",
+        "helper-3.json",
+        "helper-4.json",
+        "helper-5.json",
+        "helper-6.json",
+        "helper-7.json",
+        "helper-8.json",
+        "helper-9.json",
+        "postgres.log"
+      ]
+    },
+    "init-loss": {
+      "home": "/home/plumwsl/.pbfpg-15n5xqql",
+      "data_absent": true,
+      "locks": {
+        "kernel.lock": {
+          "inode": 264099,
+          "busy": false
+        },
+        "pg-lifetime.lock": {
+          "inode": 264105,
+          "busy": false
+        }
+      },
+      "outside": "outside-sentinel",
+      "retained_records": [
+        "children-1.jsonl",
+        "children-2.jsonl",
+        "children-3.jsonl",
+        "children-4.jsonl",
+        "children-5.jsonl",
+        "children-6.jsonl",
+        "children-7.jsonl",
+        "gate-native",
+        "helper-1.json",
+        "helper-2.json",
+        "helper-3.json",
+        "helper-4.json",
+        "helper-5.json",
+        "helper-6.json",
+        "helper-7.json"
+      ]
+    },
+    "readiness": {
+      "home": "/home/plumwsl/.pbfpg-iqq7yph7",
+      "data_absent": true,
+      "locks": {
+        "kernel.lock": {
+          "inode": 264120,
+          "busy": false
+        },
+        "pg-lifetime.lock": {
+          "inode": 264126,
+          "busy": false
+        }
+      },
+      "outside": "outside-sentinel",
+      "retained_records": [
+        "children-1.jsonl",
+        "children-10.jsonl",
+        "children-11.jsonl",
+        "children-12.jsonl",
+        "children-13.jsonl",
+        "children-14.jsonl",
+        "children-15.jsonl",
+        "children-16.jsonl",
+        "children-17.jsonl",
+        "children-18.jsonl",
+        "children-19.jsonl",
+        "children-2.jsonl",
+        "children-20.jsonl",
+        "children-3.jsonl",
+        "children-4.jsonl",
+        "children-5.jsonl",
+        "children-6.jsonl",
+        "children-7.jsonl",
+        "children-8.jsonl",
+        "children-9.jsonl",
+        "gate-failed-result",
+        "gate-native",
+        "helper-1.json",
+        "helper-10.json",
+        "helper-11.json",
+        "helper-12.json",
+        "helper-13.json",
+        "helper-14.json",
+        "helper-15.json",
+        "helper-16.json",
+        "helper-17.json",
+        "helper-18.json",
+        "helper-19.json",
+        "helper-2.json",
+        "helper-20.json",
+        "helper-3.json",
+        "helper-4.json",
+        "helper-5.json",
+        "helper-6.json",
+        "helper-7.json",
+        "helper-8.json",
+        "helper-9.json",
+        "postgres.log"
+      ]
+    },
+    "first-init-loss": {
+      "home": "/home/plumwsl/.pbfpg-vnbj7i7h",
+      "data_absent": true,
+      "locks": {
+        "kernel.lock": {
+          "inode": 262487,
+          "busy": false
+        },
+        "pg-lifetime.lock": {
+          "inode": 262493,
+          "busy": false
+        }
+      },
+      "outside": "outside-sentinel",
+      "retained_records": [
+        "children-1.jsonl",
+        "children-2.jsonl",
+        "children-3.jsonl",
+        "children-4.jsonl",
+        "children-5.jsonl",
+        "children-6.jsonl",
+        "children-7.jsonl",
+        "children-8.jsonl",
+        "gate-native",
+        "helper-1.json",
+        "helper-2.json",
+        "helper-3.json",
+        "helper-4.json",
+        "helper-5.json",
+        "helper-6.json",
+        "helper-7.json",
+        "helper-8.json"
+      ]
+    }
+  },
+  "known_actor_same_identity_alive": [],
+  "remaining_accessible_exact_owned": [],
+  "same_uid_proc_inaccessible": [
+    369,
+    371
+  ],
+  "removed": [
+    "/home/plumwsl/.pbfpg-ow_7mc0f",
+    "/home/plumwsl/.pbfpg-qds5f0t5",
+    "/home/plumwsl/.pbfpg-yqtzabww",
+    "/home/plumwsl/.pbfpg-15n5xqql",
+    "/home/plumwsl/.pbfpg-iqq7yph7",
+    "/home/plumwsl/.pbfpg-vnbj7i7h",
+    "/home/plumwsl/.pbf-tools-a30yxliy",
+    "/home/plumwsl/.pbf-tools-lkdf5x4g",
+    "/home/plumwsl/.pbf-tools-omwlpda6",
+    "/home/plumwsl/.pbf-tools-st2d8tdl",
+    "/home/plumwsl/.pbf-tools-u0msor9v",
+    "/home/plumwsl/.pbf-tools-ywa00bm0"
+  ],
+  "all_removed": true,
+  "qualification": "Known actor identity checks and accessible same-UID command/environment checks; no claim about unrelated inaccessible processes."
+}

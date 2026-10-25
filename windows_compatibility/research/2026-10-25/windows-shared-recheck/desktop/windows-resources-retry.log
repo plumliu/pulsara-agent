@@ -1,0 +1,5 @@
+[desktop:bootstrap] $ uv sync --locked --dev --no-install-project --default-index https://pypi.org/simple
+Using CPython 3.12.15
+error: failed to remove directory `\\?\C:\python_workspace\pulsara-agent\.venv\Scripts`: 拒绝访问。 (os error 5)
+Finished in 523.6ms
+[desktop:bootstrap] ERROR task failed

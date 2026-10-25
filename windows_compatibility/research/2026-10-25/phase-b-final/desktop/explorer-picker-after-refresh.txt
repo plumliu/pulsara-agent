@@ -1,0 +1,41 @@
+Window: "Pulsara — 本地智能工作台", App: pulsara.exe.
+	0 窗口 Pulsara — 本地智能工作台 Secondary Actions: Raise
+		1 窗格 (disabled)
+		2 区域 Pulsara — 本地智能工作台
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 区域
+								8 区域
+									20 文档 Pulsara — 本地智能工作台 Value: https://127.0.0.1:41131/ ID: RootWebArea
+										110 对话框 选择 Linux 工作目录 Secondary Actions: Raise
+											111 标题 选择 Linux 工作目录 ID: linux-directory-title
+											112 文本 工程保存在 WSL 的 Linux 文件系统。Windows 工程可先通过资源管理器复制到这里。
+											113 导航 目录位置
+												114 按钮 工程根目录
+											115 文本 /home/plumwsl/workspaces
+											116 按钮 (disabled) 上一级
+											117 按钮 刷新
+											118 列表 子目录
+												137 列表项目 Explorer 中文 alpha10 fb3136ea
+													138 按钮 Explorer 中文 alpha10 fb3136ea
+												123 列表项目 Windows 中文 验收 20261025
+													124 按钮 Windows 中文 验收 20261025
+												125 列表项目 Windows 共享修复 alpha10 验收
+													126 按钮 Windows 共享修复 alpha10 验收
+												127 列表项目 pulsara_agent
+													128 按钮 pulsara_agent
+												129 列表项目 中文 工程 G0-20261024
+													130 按钮 中文 工程 G0-20261024
+											131 文本 新文件夹名称
+											132 编辑 (settable, string) 新文件夹名称
+											133 按钮 (disabled) 新建文件夹
+											134 页脚
+												135 按钮 取消
+												136 按钮 选择此目录
+								9 区域
+
+Document text: ```
+￼
+```
