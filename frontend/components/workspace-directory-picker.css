@@ -1,0 +1,92 @@
+.linux-directory-picker{width:min(780px,calc(100vw - 40px));max-height:calc(100dvh - 40px);margin:auto;padding:0;overflow:hidden;border:1px solid var(--line-strong,#d4cfc5);border-radius:14px;background:var(--paper-solid,#fdfbf6);color:var(--ink,#17191f);font-family:var(--sans,system-ui,sans-serif);box-shadow:var(--shadow-lg,0 24px 72px #1a181433)}
+.linux-directory-picker,.linux-directory-picker::backdrop{-webkit-app-region:no-drag}
+.linux-directory-picker[open]{display:flex;flex-direction:column}
+.linux-directory-picker::backdrop{background:#0d0e126b;backdrop-filter:blur(4px)}
+.linux-directory-picker button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:30px;padding:5px 11px;border:1px solid var(--line,#d4cfc5);border-radius:6px;background:var(--paper-raised,#faf8f2);color:var(--ink-soft,#32343d);font:500 12px/18px var(--sans,system-ui,sans-serif);cursor:pointer;transition:background .15s,border-color .15s}
+.linux-directory-picker button:hover:not(:disabled){background:var(--paper-deep,#e9e5db);border-color:var(--line-strong,#d4cfc5)}
+.linux-directory-picker button:disabled{opacity:.4;cursor:default}
+.linux-directory-picker button:focus-visible{outline:none;text-decoration:underline;text-underline-offset:3px}
+.linux-directory-picker input:focus-visible{outline:1px solid var(--line-strong,#d4cfc5);outline-offset:0}
+.linux-directory-header{display:flex;align-items:center;gap:9px;flex:none;padding:12px 18px;border-bottom:1px solid var(--line,#d4cfc5);background:var(--paper-raised,#faf8f2);cursor:move;user-select:none;touch-action:none}
+.linux-directory-heading-icon{flex:none;color:var(--annotation-accent,#966a32)}
+.linux-directory-picker h2{flex:1;min-width:0;margin:0;font-size:14px;font-weight:600;line-height:1.5}
+.linux-directory-picker .linux-directory-icon-button{width:28px;min-height:28px;flex:none;padding:0;border-color:transparent;background:transparent;color:var(--muted,#7d7b74)}
+.linux-directory-picker .linux-directory-icon-button:focus-visible{background:var(--paper-deep,#e9e5db);color:var(--ink,#17191f)}
+.linux-directory-toolbar{display:flex;align-items:center;gap:10px;flex:none;padding:10px 14px;border-bottom:1px solid var(--line,#d4cfc5)}
+.linux-directory-actions{display:flex;align-items:center;gap:1px;flex:none}
+.linux-directory-location{display:flex;align-items:center;flex:1;min-width:0;padding:2px 5px;border:1px solid var(--line,#d4cfc5);border-radius:6px;background:var(--paper-raised,#faf8f2)}
+.linux-directory-location nav{display:flex;align-items:center;flex:1;min-width:0;gap:2px;overflow-x:auto;scrollbar-width:thin}
+.linux-directory-location nav button{min-height:26px;max-width:220px;flex:none;padding:3px 6px;border:0;border-radius:4px;background:transparent;font-size:12px}
+.linux-directory-location nav button span,.linux-directory-crumb button{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.linux-directory-location nav button svg{flex:none;color:var(--annotation-accent,#966a32)}
+.linux-directory-crumb{display:flex;align-items:center;min-width:0;flex:none;gap:1px;color:var(--faint,#a29f96)}
+.linux-directory-body{min-height:0;overflow:auto;overscroll-behavior:contain}
+.linux-directory-picker :is(.linux-directory-location nav,.linux-directory-body,.linux-directory-file-scroll){--directory-scroll-thumb:transparent;scrollbar-width:auto}
+.linux-directory-picker :is(.linux-directory-location nav,.linux-directory-body,.linux-directory-file-scroll):is(:hover,:has(:focus-visible)){--directory-scroll-thumb:color-mix(in srgb,var(--ink,#17191f) 24%,transparent)}
+.linux-directory-picker :is(.linux-directory-location nav,.linux-directory-body,.linux-directory-file-scroll)::-webkit-scrollbar{width:10px;height:10px}
+.linux-directory-picker :is(.linux-directory-location nav,.linux-directory-body,.linux-directory-file-scroll)::-webkit-scrollbar-track{background:transparent}
+.linux-directory-picker :is(.linux-directory-location nav,.linux-directory-body,.linux-directory-file-scroll)::-webkit-scrollbar-thumb{border:4px solid transparent;border-radius:999px;background:var(--directory-scroll-thumb);background-clip:padding-box}
+.linux-directory-picker :is(.linux-directory-location nav,.linux-directory-body,.linux-directory-file-scroll)::-webkit-scrollbar-button{display:none;width:0;height:0}
+.linux-directory-blocked{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:365px;padding:28px 24px;background:var(--paper,#f3f0e7);text-align:center}
+.linux-directory-blocked .brand-mark{display:block;width:64px;height:64px;object-fit:contain}
+.linux-directory-blocked strong{margin:8px 0 12px;color:#3c3933;font:700 32px "Pulsara Brand",serif}
+.linux-directory-blocked p{margin:0;color:var(--muted,#7d7b74);font-size:14px;line-height:1.7}
+.linux-directory-browser{display:grid;grid-template-columns:150px minmax(0,1fr);min-height:310px}
+.linux-directory-places{min-width:0;padding:0 9px 18px;border-right:1px solid var(--line,#d4cfc5);background:var(--paper-raised,#faf8f2)}
+.linux-directory-places-title{display:block;height:30px;margin:0 0 4px;padding:0 9px;border-bottom:1px solid var(--line,#d4cfc5);color:var(--muted,#7d7b74);font-size:11px;line-height:29px}
+.linux-directory-places button{justify-content:flex-start;gap:6px;width:100%;min-height:27px;padding:3px 9px;border-color:transparent;border-radius:5px;background:transparent;text-align:left}
+.linux-directory-places button svg{flex:none;color:var(--annotation-accent,#966a32)}
+.linux-directory-places button span{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.linux-directory-places button.is-current{border-color:transparent;background:var(--paper-deep,#e9e5db);color:var(--ink,#17191f)}
+.linux-directory-places button+button{margin-top:3px;padding-left:18px}
+.linux-directory-files{display:flex;flex-direction:column;min-width:0;min-height:0;padding-bottom:12px}
+.linux-directory-toolbar .linux-directory-new-folder{flex:none;padding:5px 7px;border-color:transparent;background:transparent;white-space:nowrap;font-size:11px}
+.linux-directory-list-heading{display:grid;grid-template-columns:minmax(0,1fr) 92px;gap:10px;flex:none;height:30px;margin:0 14px;border-bottom:1px solid var(--line,#d4cfc5);color:var(--muted,#7d7b74);font-size:11px;line-height:29px}
+.linux-directory-list-heading span+span{padding-left:10px;border-left:1px solid var(--line,#d4cfc5)}
+.linux-directory-file-scroll{min-height:220px;max-height:36vh;overflow:auto;padding:4px 9px 0;scrollbar-width:thin}
+.linux-directory-files ul{list-style:none;margin:0;padding:0}
+.linux-directory-files li button{display:grid;grid-template-columns:minmax(0,1fr) 92px;gap:10px;width:100%;min-height:28px;padding:3px 4px;border-color:transparent;border-radius:4px;background:transparent;font-size:12px;text-align:left}
+.linux-directory-filename{display:flex;align-items:center;gap:6px;min-width:0}
+.linux-directory-filename>svg{width:16px;height:16px;flex:none;color:color-mix(in srgb,var(--annotation-accent,#966a32) 35%,var(--muted,#7d7b74));opacity:.72;fill:none}
+.linux-directory-filename>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.linux-directory-filetype{padding-left:10px;color:var(--muted,#7d7b74);font-size:11px}
+.linux-directory-files li button:hover:not(:disabled){border-color:transparent;background:var(--paper-raised,#faf8f2)}
+.linux-directory-files li button.is-selected{border-color:color-mix(in srgb,var(--amber,#d79a42) 38%,var(--line,#d4cfc5));background:color-mix(in srgb,var(--amber,#d79a42) 12%,var(--paper-solid,#fdfbf6));color:var(--ink,#17191f)}
+.linux-directory-files li button.is-selected:hover:not(:disabled){border-color:color-mix(in srgb,var(--amber,#d79a42) 45%,var(--line,#d4cfc5));background:color-mix(in srgb,var(--amber,#d79a42) 16%,var(--paper-solid,#fdfbf6))}
+.linux-directory-list-empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;min-height:190px;color:var(--faint,#a29f96);font-size:12px}
+.linux-directory-picker .linux-directory-more{display:flex;width:100%;margin-top:8px;border:0;color:var(--muted,#7d7b74);font-size:11px}
+.linux-directory-create{display:flex;align-items:center;gap:6px;margin:2px 0 6px;padding:4px 6px;border-radius:5px;background:var(--paper-raised,#faf8f2)}
+.linux-directory-create>svg{flex:none;color:var(--annotation-accent,#966a32)}
+.linux-directory-create label{display:flex;align-items:center;flex:1;min-width:0}
+.linux-directory-create input{width:100%;min-width:0;height:28px;padding:0 7px;border:1px solid var(--line-strong,#d4cfc5);border-radius:4px;background:var(--paper-solid,#fdfbf6);color:var(--ink,#17191f);font:12px var(--sans,system-ui,sans-serif)}
+.linux-directory-create input::placeholder{color:var(--faint,#a29f96)}
+.linux-directory-create>button{flex:none;min-height:28px;padding:3px 8px}
+.linux-directory-picker .linux-directory-create-confirm,.linux-directory-picker .linux-directory-create-cancel{width:28px;height:28px;padding:0;border-radius:5px}
+.linux-directory-picker .linux-directory-create-confirm{border-color:color-mix(in srgb,var(--blue,#536fd3) 35%,var(--line,#d4cfc5));background:color-mix(in srgb,var(--blue,#536fd3) 6%,var(--paper-solid,#fdfbf6));color:var(--blue,#536fd3)}
+.linux-directory-picker .linux-directory-create-confirm:hover:not(:disabled){border-color:var(--blue,#536fd3);background:var(--blue-soft,#e4e9fa)}
+.linux-directory-picker .linux-directory-create-cancel{border-color:color-mix(in srgb,var(--red,#b65f56) 35%,var(--line,#d4cfc5));background:color-mix(in srgb,var(--red,#b65f56) 6%,var(--paper-solid,#fdfbf6));color:var(--red,#b65f56)}
+.linux-directory-picker .linux-directory-create-cancel:hover:not(:disabled){border-color:var(--red,#b65f56);background:var(--red-soft,#f2dfdc)}
+.linux-directory-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.linux-directory-alert{display:flex;align-items:flex-start;gap:8px;margin:10px 14px 0;padding:8px 10px;border:1px solid color-mix(in srgb,var(--red,#b65f56) 20%,transparent);border-radius:6px;background:color-mix(in srgb,var(--red,#b65f56) 7%,var(--paper-solid,#fdfbf6));color:var(--red,#b65f56);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.linux-directory-alert svg{flex:none;margin-top:2px}
+.linux-directory-state{display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:310px;padding:28px 24px;text-align:center}
+.linux-directory-state-icon{display:grid;place-items:center;width:60px;height:60px;margin-bottom:18px;border:1px solid color-mix(in srgb,var(--amber,#d79a42) 18%,transparent);border-radius:16px;background:color-mix(in srgb,var(--amber,#d79a42) 9%,var(--paper-raised,#faf8f2));color:var(--annotation-accent,#966a32)}
+.linux-directory-state-icon.is-error{border-color:color-mix(in srgb,var(--red,#b65f56) 15%,transparent);background:color-mix(in srgb,var(--red,#b65f56) 7%,var(--paper-raised,#faf8f2));color:var(--red,#b65f56)}
+.linux-directory-state h3{margin:0;font-size:16px;font-weight:550;line-height:1.6}
+.linux-directory-state p{max-width:100%;margin:8px 0 0;color:var(--muted,#7d7b74);font-size:12px;line-height:1.7;overflow-wrap:anywhere}
+.linux-directory-state>button{margin-top:20px}
+.linux-directory-picker .linux-directory-primary{border-color:#805821;background:#855d2c;color:#fffaf0;box-shadow:0 2px 4px #966a3212}
+.linux-directory-picker .linux-directory-primary:hover:not(:disabled){border-color:#704b20;background:#755026}
+.linux-directory-picker footer{display:flex;flex-direction:column;align-items:stretch;gap:7px;flex:none;padding:8px 18px 10px;border-top:1px solid var(--line,#d4cfc5);background:var(--paper-raised,#faf8f2)}
+.linux-directory-selection{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--ink-soft,#32343d)}
+.linux-directory-selection>span{flex:none}
+.linux-directory-selection output{display:block;flex:1;min-width:0;padding:0 2px;color:var(--muted,#7d7b74);font:11px/20px var(--mono,monospace);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:none;cursor:default}
+.linux-directory-footer-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.linux-directory-native-browse{margin-right:auto;flex:none}
+.linux-directory-selection-error{min-width:0;color:var(--red,#b65f56);font-size:11px;line-height:1.5;text-align:right;overflow-wrap:anywhere}
+.linux-directory-confirm-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;min-width:0;margin-left:auto}
+.linux-directory-confirm-actions>button{flex:none}
+.linux-directory-spinning{animation:linux-directory-spin 1s linear infinite}
+@keyframes linux-directory-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.linux-directory-spinning{animation:none}.linux-directory-picker button{transition:none}}
+@media(max-width:560px){.linux-directory-picker{width:calc(100vw - 20px);max-height:calc(100dvh - 20px)}.linux-directory-header{padding:10px 12px}.linux-directory-toolbar{gap:4px;padding:8px}.linux-directory-actions{gap:0}.linux-directory-browser{grid-template-columns:minmax(0,1fr)}.linux-directory-places{display:none}.linux-directory-list-heading{margin-inline:12px}.linux-directory-picker footer{padding:8px 12px 10px}.linux-directory-selection{gap:9px}.linux-directory-state{min-height:250px}.linux-directory-file-scroll{min-height:190px}.linux-directory-filetype,.linux-directory-list-heading span+span{display:none}.linux-directory-list-heading,.linux-directory-files li button{grid-template-columns:minmax(0,1fr)}}

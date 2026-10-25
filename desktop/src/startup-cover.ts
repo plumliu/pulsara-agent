@@ -11,6 +11,8 @@ type Cover = {
 /** Keep the original startup document above the workbench across navigation. */
 export class StartupCover {
   private current?: Cover;
+  private retiring: Promise<void> = Promise.resolve();
+  private requested?: object;
 
   constructor(private host: BrowserWindow, private file: string, private preload: string) {
     host.on('resize', () => this.resize());
@@ -18,7 +20,7 @@ export class StartupCover {
     const finishHidden = () => { if (this.current?.finishing) this.dispose(); };
     host.on('hide', finishHidden);
     host.on('minimize', finishHidden);
-    host.once('closed', () => this.dispose());
+    host.once('closed', () => this.retire());
   }
 
   private resize() {
@@ -27,7 +29,11 @@ export class StartupCover {
   }
 
   async show(error = '', phase = error ? 'failed' : 'starting') {
-    this.dispose();
+    const request = {};
+    this.requested = request;
+    await this.dispose();
+    // A newer status or host retirement may arrive while old contents close.
+    if (this.requested !== request || this.host.isDestroyed()) return;
     const view = new WebContentsView({ webPreferences: {
       preload: this.preload, sandbox: true, contextIsolation: true,
       nodeIntegration: false, webviewTag: false, navigateOnDragDrop: false,
@@ -56,7 +62,7 @@ export class StartupCover {
     if (!cover) return;
     if (cover.finishing) return cover.finishing;
     if (cover.contents.isDestroyed() || !this.host.isVisible() || this.host.isMinimized()) {
-      this.dispose();
+      await this.dispose();
       return;
     }
     const retired = new Promise<void>(resolve => { cover.endFade = resolve; });
@@ -81,19 +87,27 @@ export class StartupCover {
         if (this.current === cover && !cover.contents.isDestroyed()) throw error;
       } finally {
         // An error/reset screen may have replaced the cover while it was fading.
-        if (this.current === cover) this.dispose();
+        if (this.current === cover) await this.dispose();
+        else await this.retiring;
       }
     })();
     return cover.finishing;
   }
 
-  private dispose() {
+  async retire(): Promise<void> { this.requested = undefined; await this.dispose(); }
+
+  private dispose(): Promise<void> {
     const cover = this.current;
     this.current = undefined;
-    if (!cover) return;
+    if (!cover) return this.retiring;
     cover.endFade?.();
     if (!this.host.isDestroyed()) this.host.contentView.removeChildView(cover.view);
     // Electron clears view.webContents when its native WebContents is destroyed.
-    if (!cover.contents.isDestroyed()) cover.contents.close();
+    if (!cover.contents.isDestroyed()) {
+      const destroyed = new Promise<void>(resolve => cover.contents.once('destroyed', () => resolve()));
+      this.retiring = Promise.all([this.retiring, destroyed]).then(() => {});
+      cover.contents.close();
+    }
+    return this.retiring;
   }
 }

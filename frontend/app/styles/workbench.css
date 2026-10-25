@@ -45,6 +45,9 @@
 .runtime-banner--offline, .runtime-banner--failed { border-color: color-mix(in srgb, var(--red) 24%, var(--line)); color: var(--red); }
 .runtime-banner > button { flex: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); color: var(--ink-soft); font-size: var(--type-caption); }
 .runtime-banner > button:hover { border-color: var(--line-strong); background: var(--paper-deep); }
+.runtime-error-details { flex-basis: 100%; color: var(--muted); }
+.runtime-error-details summary { cursor: pointer; }
+.runtime-error-details pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; user-select: text; }
 .observer-badge { display: inline-flex; align-items: center; gap: 5px; min-height: 27px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--blue-soft) 62%, transparent); color: var(--blue); font-size: var(--type-label); font-weight: 650; white-space: nowrap; }
 .popover-anchor { position: relative; }
 .menu-popover { position: absolute; z-index: 60; top: calc(100% + 7px); right: 0; min-width: 260px; padding: 7px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--paper-solid); box-shadow: var(--shadow-lg); animation: pop-in .14s ease-out; }
@@ -208,13 +211,16 @@
 .assistant-markdown h1, .assistant-markdown h2, .assistant-markdown h3 { margin: 18px 0 8px; color: var(--ink); font-family: var(--serif); line-height: 1.35; }
 .assistant-markdown h1 { font-size: var(--type-heading); }.assistant-markdown h2 { font-size: var(--type-title-large); }.assistant-markdown h3 { font-size: var(--type-title-small); }
 .assistant-markdown ul, .assistant-markdown ol { margin: 8px 0 12px; padding-left: 20px; }
+.assistant-markdown ul { list-style-type: disc; }
+.assistant-markdown ol { list-style-type: decimal; }
+.assistant-markdown .task-list-item { list-style-type: none; }
 .assistant-markdown li { margin: 3px 0; }
 .assistant-markdown code { padding: 1px 4px; border-radius: 4px; background: var(--paper-deep); font-family: var(--mono); font-size: .88em; }
 .assistant-markdown pre { max-width: 100%; margin: 9px 0 12px; overflow: auto; border-radius: 9px; background: #1c1e23; color: #ded8cc; }
 .assistant-markdown pre code { display: block; min-width: max-content; padding: 11px 12px; background: transparent; line-height: 1.65; }
 .assistant-markdown blockquote { margin: 10px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--blue); color: var(--muted); }
 .assistant-markdown a { color: var(--blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--blue) 35%, transparent); text-underline-offset: 2px; }
-.assistant-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.assistant-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin-bottom: 16px; }
 .assistant-markdown th, .assistant-markdown td { padding: 6px 8px; border: 1px solid var(--line); text-align: left; overflow-wrap: normal; }
 .assistant-markdown .katex { font-size: 1.04em; }
 .assistant-markdown .katex-display { max-width: 100%; margin: 12px 0 14px; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
@@ -569,7 +575,7 @@
 .prompt-composer .tiptap { min-height: 24px; max-height: 250px; overflow-x: hidden; overflow-y: auto; border: 0; outline: 0; color: var(--ink); font-size: var(--type-control); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .prompt-composer .tiptap p { min-height: 24px; margin: 0; }
 .prompt-composer__placeholder { grid-area: 1 / 1; min-width: 0; color: var(--faint); font-size: var(--type-control); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; }
-.prompt-composer__accept-hint { display: inline-block; visibility: hidden; margin-left: 7px; padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--paper-darker) 45%, transparent); color: var(--faint); font-family: ui-rounded, "SF Pro Rounded", var(--sans); font-size: 11px; font-weight: 500; line-height: 17px; letter-spacing: .02em; vertical-align: 1px; white-space: nowrap; }
+.prompt-composer__accept-hint { display: inline-block; visibility: hidden; margin-left: 7px; padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--paper-darker) 45%, transparent); color: var(--faint); font-family: var(--sans); font-size: 11px; font-weight: 500; line-height: 17px; letter-spacing: .02em; vertical-align: 1px; white-space: nowrap; }
 .prompt-composer:has(.composer-prosemirror:focus) .prompt-composer__accept-hint { visibility: visible; }
 .composer-actions { position: relative; display: flex; align-items: center; justify-content: space-between; gap: clamp(4px, 2cqw, 12px); padding: 4px clamp(7px, 1.5cqw, 9px) 8px; }
 .composer-actions > div { display: flex; align-items: center; gap: 3px; }
@@ -695,7 +701,7 @@
 .welcome-typewriter { display: inline-grid; max-width: min(86vw, 760px); text-align: left; white-space: nowrap; }
 .welcome-typewriter__sizer, .welcome-typewriter__line { grid-area: 1 / 1; }
 .welcome-typewriter__sizer { visibility: hidden; }
-.welcome-typewriter__sizer > span, .welcome-typewriter__cursor { display: inline-block; margin-left: .04em; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-weight: 500; }
+.welcome-typewriter__sizer > span, .welcome-typewriter__cursor { display: inline-block; margin-left: .04em; font-family: var(--mono); font-weight: 500; }
 .welcome-typewriter__line { display: flex; align-items: baseline; }
 .welcome-typewriter__cursor { flex: none; align-self: baseline; }
 .welcome-typewriter__cursor.is-hidden { visibility: hidden; }
@@ -969,3 +975,9 @@
 .history-current-interaction { flex: none; max-height: 40vh; overflow-y: auto; padding: 10px 24px; border-top: 1px solid var(--line); background: var(--paper-solid); }
 .history-current-interaction > p { margin: 0 0 8px; font: 12px/1.5 var(--sans); color: var(--muted); }
 .history-current-interaction .interaction-card { max-width: 850px; margin: 0 auto; }
+
+/* Code and process text keeps literal operator glyphs; math owns its shaping. */
+:is(code, pre, .terminal-output, .background-process__command, .process-command-tooltip, .process-detail__identity strong, .background-process__toggle strong, .file-reference__path, .readonly-dock__path, .readonly-dock__path-tooltip, .workspace-path-field input, .hook-source-path, .capability-detail-path, .hook-rule-command, .hook-config-editor, .project-capability-row__transport, .interaction-mcp-editor textarea, .linux-directory-selection output):not(.katex *) {
+  font-variant-ligatures: none;
+  font-feature-settings: 'liga' 0, 'calt' 0;
+}

@@ -15,6 +15,9 @@ from threading import Condition, Event, RLock, Thread, Timer, current_thread
 from time import monotonic, sleep
 from typing import Callable, IO
 
+from pulsara_agent.windows_interop import create_scope
+from pulsara_agent.windows_interop.scope import WindowsInteropScope
+
 from pulsara_agent.terminal_process.environment import TerminalEnvironmentOwner
 from pulsara_agent.terminal_process.models import (
     TerminalCwdScope,
@@ -85,6 +88,8 @@ class _TerminalForegroundDecisionAttempt:
     process_id: str | None = None
     adoption_allowed: bool = True
     timer: Timer | None = None
+    interop_scope: WindowsInteropScope | None = None
+    launch_failed: bool = False
 
 
 @dataclass(slots=True)
@@ -102,6 +107,7 @@ class _ProcessState:
     watcher: Thread | None
     master_fd: int | None
     started_at: float
+    interop_scope: WindowsInteropScope | None = None
     deadline_timer: Timer | None = None
     termination_intent: TerminalStatus | None = None
     final_status: TerminalStatus | None = None
@@ -150,9 +156,7 @@ class ProcessRegistry:
         self._completion_subscriber = completion_subscriber
         self._states: dict[str, _ProcessState] = {}
         self._launching_by_owner: dict[str, int] = {}
-        self._decision_attempts: dict[
-            str, _TerminalForegroundDecisionAttempt
-        ] = {}
+        self._decision_attempts: dict[str, _TerminalForegroundDecisionAttempt] = {}
         self._released_owners: set[str] = set()
         self._closed = False
         self._lock = RLock()
@@ -191,6 +195,13 @@ class ProcessRegistry:
             if (
                 sum(_occupies_live_capacity(state) for state in self._states.values())
                 + sum(self._launching_by_owner.values())
+                + sum(
+                    attempt.interop_scope is not None
+                    and not attempt.interop_scope.physically_joined.is_set()
+                    and attempt.process_id not in self._states
+                    and attempt.launch_failed
+                    for attempt in self._decision_attempts.values()
+                )
                 >= self.max_live_processes
             ):
                 raise ProcessLimitError(
@@ -207,7 +218,9 @@ class ProcessRegistry:
                     )
             if decision_handle.attempt_id in self._decision_attempts:
                 self._release_launch_locked(owner_host_session_id)
-                raise ProcessDecisionIdentityConflict("IDENTITY_CONFLICT: terminal foreground decision attempt already exists")
+                raise ProcessDecisionIdentityConflict(
+                    "IDENTITY_CONFLICT: terminal foreground decision attempt already exists"
+                )
             decision = _TerminalForegroundDecisionAttempt(
                 handle=decision_handle,
                 state=TerminalForegroundDecisionState.PREPARING,
@@ -225,14 +238,19 @@ class ProcessRegistry:
                 decision.state = TerminalForegroundDecisionState.ABORT_REQUESTED
                 decision.adoption_allowed = False
             else:
-                timer = Timer(
-                    remaining,
-                    self._abort_foreground_decision,
-                    args=(decision_handle.attempt_id,),
-                )
-                timer.daemon = False
-                decision.timer = timer
-                timer.start()
+                try:
+                    timer = Timer(
+                        remaining,
+                        self._abort_foreground_decision,
+                        args=(decision_handle.attempt_id,),
+                    )
+                    timer.daemon = False
+                    decision.timer = timer
+                    timer.start()
+                except BaseException:
+                    self._release_launch_locked(owner_host_session_id)
+                    self._settle_foreground_decision_locked(decision_handle.attempt_id)
+                    raise
         launch_reserved = True
         try:
             if remaining <= 0:
@@ -253,17 +271,21 @@ class ProcessRegistry:
                     )
                 ),
             )
-        except BaseException:
+        except BaseException as error:
+            scope = decision.interop_scope
+            unjoined = scope is not None and not scope.physically_joined.is_set()
             with self._launch_condition:
+                decision.launch_failed = True
                 self._release_launch_locked(owner_host_session_id)
-                self._settle_foreground_decision_locked(
-                    decision_handle.attempt_id
-                )
+                if not unjoined:
+                    self._settle_foreground_decision_locked(decision_handle.attempt_id)
+            if unjoined:
+                raise ProcessPhysicalJoinError(
+                    "terminal interop launch has an unknown physical boundary"
+                ) from error
             raise
         live_subscription = (
-            None
-            if output_subscriber is None
-            else random_id("subscription")
+            None if output_subscriber is None else random_id("subscription")
         )
         closed_during_launch = False
         decision_aborted = False
@@ -307,9 +329,7 @@ class ProcessRegistry:
                 return state, False
             if yield_time_ms > 0:
                 state.physical_completion.wait(yield_time_ms / 1000)
-            if self._foreground_decision_abort_requested(
-                decision_handle.attempt_id
-            ):
+            if self._foreground_decision_abort_requested(decision_handle.attempt_id):
                 with state.lock:
                     if state.yield_decision is None:
                         state.yield_decision = True
@@ -357,14 +377,10 @@ class ProcessRegistry:
                 # not a successful launch publication.
                 with self._launch_condition:
                     self._states[state.process_id] = state
-                    attempt = self._decision_attempts.get(
-                        decision_handle.attempt_id
-                    )
+                    attempt = self._decision_attempts.get(decision_handle.attempt_id)
                     if attempt is not None:
                         attempt.process_id = state.process_id
-                        attempt.state = (
-                            TerminalForegroundDecisionState.ABORT_REQUESTED
-                        )
+                        attempt.state = TerminalForegroundDecisionState.ABORT_REQUESTED
                         attempt.adoption_allowed = False
                 raise ProcessPhysicalJoinError(
                     "failed terminal launch did not physically join"
@@ -372,9 +388,7 @@ class ProcessRegistry:
             with self._launch_condition:
                 if self._states.get(state.process_id) is state:
                     self._states.pop(state.process_id, None)
-                self._settle_foreground_decision_locked(
-                    decision_handle.attempt_id
-                )
+                self._settle_foreground_decision_locked(decision_handle.attempt_id)
             raise
         finally:
             if live_subscription is not None:
@@ -416,8 +430,11 @@ class ProcessRegistry:
                 return
             attempt.state = TerminalForegroundDecisionState.ABORT_REQUESTED
             attempt.adoption_allowed = False
+            scope = attempt.interop_scope
             if attempt.process_id is not None:
                 state = self._states.get(attempt.process_id)
+        if scope is not None:
+            scope.request_cancel()
         if state is not None:
             _accept_termination_intent(state, TerminalStatus.KILLED)
             _terminate_process_group(state)
@@ -445,8 +462,7 @@ class ProcessRegistry:
             adoption_published = bool(
                 background_adopted
                 and attempt.adoption_allowed
-                and attempt.state
-                is not TerminalForegroundDecisionState.ABORT_REQUESTED
+                and attempt.state is not TerminalForegroundDecisionState.ABORT_REQUESTED
                 and state is not None
                 and state.yield_decision is True
             )
@@ -467,6 +483,16 @@ class ProcessRegistry:
         if attempt.timer is not None:
             attempt.timer.cancel()
             attempt.timer = None
+        if (
+            attempt.interop_scope is not None
+            and not attempt.interop_scope.physically_joined.is_set()
+            and attempt.process_id not in self._states
+        ):
+            # The command caller may settle a failed decision, but cannot erase
+            # its only remaining physical owner after bootstrap loss.
+            attempt.state = TerminalForegroundDecisionState.ABORT_REQUESTED
+            attempt.adoption_allowed = False
+            return
         attempt.state = TerminalForegroundDecisionState.SETTLED
         if not attempt.adoption_allowed and attempt.process_id is not None:
             state = self._states.get(attempt.process_id)
@@ -489,77 +515,127 @@ class ProcessRegistry:
         with self._lock:
             process_id = random_id("process")
             while process_id in self._states or any(
-                attempt.process_id == process_id for attempt in self._decision_attempts.values()
+                attempt.process_id == process_id
+                for attempt in self._decision_attempts.values()
             ):
                 process_id = random_id("process")
             # Reserve in the already-held foreground decision before spawning.
             # Another pending launch must see this identity as occupied too.
             decision = self._decision_attempts[decision_attempt_id]
             decision.process_id = process_id
+            scope = create_scope()
+            decision.interop_scope = scope
+            if scope is not None and (
+                decision.state is TerminalForegroundDecisionState.ABORT_REQUESTED
+                or self._closed
+                or owner_host_session_id in self._released_owners
+            ):
+                scope.request_cancel()
         output = TerminalOutputOwner(
             owner_epoch=owner_host_session_id,
             process_id=process_id,
             retained_bytes_changed=self._retained_bytes_changed,
         )
         master_fd: int | None = None
-        if tty:
-            master_fd, slave_fd = pty.openpty()
-            try:
+        process: subprocess.Popen[bytes] | None = None
+        stdin: IO[bytes] | None = None
+        try:
+            if scope is not None:
+                scope.prepare()
+                env = scope.environment(env)
+            if tty:
+                master_fd, slave_fd = pty.openpty()
+                try:
+                    process = subprocess.Popen(
+                        shell_argv,
+                        cwd=cwd,
+                        env=env,
+                        stdin=slave_fd,
+                        stdout=slave_fd,
+                        stderr=slave_fd,
+                        start_new_session=True,
+                        close_fds=True,
+                    )
+                finally:
+                    os.close(slave_fd)
+                input_fd = os.dup(master_fd)
+                try:
+                    stdin = os.fdopen(input_fd, "wb", buffering=0)
+                except BaseException:
+                    os.close(input_fd)
+                    raise
+                reader = Thread(
+                    target=_read_fd,
+                    args=(master_fd, output),
+                    name=f"terminal-reader:{process_id}",
+                    daemon=False,
+                )
+                mode = TerminalIOMode.PTY
+            else:
                 process = subprocess.Popen(
                     shell_argv,
                     cwd=cwd,
                     env=env,
-                    stdin=slave_fd,
-                    stdout=slave_fd,
-                    stderr=slave_fd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     start_new_session=True,
                     close_fds=True,
                 )
-            finally:
-                os.close(slave_fd)
-            stdin: IO[bytes] | None = os.fdopen(os.dup(master_fd), "wb", buffering=0)
-            reader = Thread(
-                target=_read_fd,
-                args=(master_fd, output),
-                name=f"terminal-reader:{process_id}",
-                daemon=False,
-            )
-            mode = TerminalIOMode.PTY
-        else:
-            process = subprocess.Popen(
-                shell_argv,
+                assert process.stdout is not None
+                stdin = process.stdin
+                reader = Thread(
+                    target=_read_stream,
+                    args=(process.stdout, output),
+                    name=f"terminal-reader:{process_id}",
+                    daemon=False,
+                )
+                mode = TerminalIOMode.PIPE
+            return _ProcessState(
+                process_id=process_id,
+                command=command,
                 cwd=cwd,
-                env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                close_fds=True,
+                owner_host_session_id=owner_host_session_id,
+                origin=origin,
+                io_mode=mode,
+                process=process,
+                output=output,
+                stdin=stdin,
+                reader=reader,
+                watcher=None,
+                master_fd=master_fd,
+                started_at=monotonic(),
+                interop_scope=scope,
             )
-            assert process.stdout is not None
-            stdin = process.stdin
-            reader = Thread(
-                target=_read_stream,
-                args=(process.stdout, output),
-                name=f"terminal-reader:{process_id}",
-                daemon=False,
-            )
-            mode = TerminalIOMode.PIPE
-        return _ProcessState(
-            process_id=process_id,
-            command=command,
-            cwd=cwd,
-            owner_host_session_id=owner_host_session_id,
-            origin=origin,
-            io_mode=mode,
-            process=process,
-            output=output,
-            stdin=stdin,
-            reader=reader,
-            watcher=None,
-            master_fd=master_fd,
-            started_at=monotonic(),
-        )
+        except BaseException:
+            # Until a state is returned, this local frame owns every descriptor
+            # and any child already created.  Do not release its reservation
+            # while a failed fd/thread/state construction leaves an invisible child.
+            if scope is not None:
+                scope.request_cancel()
+            if process is not None:
+                _terminate_spawned_process_group(process)
+            for stream in (
+                stdin,
+                None if process is None else process.stdin,
+                None if process is None else process.stdout,
+                None if process is None else process.stderr,
+            ):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            if master_fd is not None:
+                os.close(master_fd)
+            if process is not None:
+                process.wait()
+                while _process_group_exists(process.pid):
+                    sleep(0.01)
+            if scope is not None:
+                scope.finish(cancel=True)
+                scope.retire()
+            raise
 
     def _start_physical_threads(self, state: _ProcessState) -> None:
         state.reader.start()
@@ -610,7 +686,9 @@ class ProcessRegistry:
                     decision_aborted = True
                 else:
                     if state.process_id in self._states:
-                        raise RuntimeError("IDENTITY_CONFLICT: process identity occupied after spawn")
+                        raise RuntimeError(
+                            "IDENTITY_CONFLICT: process identity occupied after spawn"
+                        )
                     current_decision.state = (
                         TerminalForegroundDecisionState.PROCESS_INSTALLED
                     )
@@ -638,7 +716,16 @@ class ProcessRegistry:
         return live_subscription, True, decision_aborted, False
 
     def _watch_process(self, state: _ProcessState) -> None:
-        code = state.process.wait()
+        while True:
+            try:
+                code = state.process.wait(timeout=0.05)
+                break
+            except subprocess.TimeoutExpired:
+                if (
+                    state.interop_scope is not None
+                    and state.interop_scope.failed.is_set()
+                ):
+                    _terminate_process_group(state)
         with state.lock:
             state.physical_state = TerminalPhysicalState.TERMINALIZING
         state.reader.join()
@@ -647,7 +734,16 @@ class ProcessRegistry:
         # stdout.  Completion, capacity release and monitor wake all wait for
         # the exact group to disappear.
         while _process_group_exists(state.process.pid):
+            if state.interop_scope is not None and state.interop_scope.failed.is_set():
+                _terminate_process_group(state)
             sleep(0.01)
+        if state.interop_scope is not None:
+            try:
+                state.interop_scope.finish()
+            except Exception:
+                # Without an exact Windows join, keep the original state and
+                # capacity occupied. Host close reports the physical failure.
+                return
         with state.lock:
             state.ended_at = monotonic()
             status, exit_code = _freeze_final_outcome_locked(state, code=code)
@@ -861,9 +957,7 @@ class ProcessRegistry:
         elif joined:
             disposition = TerminalTerminationDisposition.TERMINATION_COMPLETED
         else:
-            disposition = (
-                TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
-            )
+            disposition = TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
         return TerminalTerminationResult(
             disposition,
             _snapshot(state, max_output_chars),
@@ -920,9 +1014,7 @@ class ProcessRegistry:
                 state.refresh()
                 if _process_is_live(state):
                     frozen.append(_info(state))
-            return tuple(
-                sorted(frozen, key=lambda item: item.process_id)
-            )
+            return tuple(sorted(frozen, key=lambda item: item.process_id))
 
     def log(
         self,
@@ -1010,6 +1102,7 @@ class ProcessRegistry:
                 for state in self._states.values()
                 if state.owner_host_session_id == owner
             ]
+        self._join_uninstalled_scopes(owner, deadline=deadline)
         for state in states:
             _accept_termination_intent(state, TerminalStatus.KILLED)
             _terminate_process_group(state)
@@ -1056,6 +1149,7 @@ class ProcessRegistry:
                 for state in self._states.values()
                 if state.owner_host_session_id == owner
             ]
+        self._join_uninstalled_scopes(owner, deadline=None)
         for state in states:
             _accept_termination_intent(state, TerminalStatus.KILLED)
             _terminate_process_group(state)
@@ -1071,11 +1165,29 @@ class ProcessRegistry:
                 attempt = self._decision_attempts.get(attempt_id)
                 if (
                     attempt is not None
-                    and attempt.state
-                    is TerminalForegroundDecisionState.RESULT_READY
+                    and attempt.state is TerminalForegroundDecisionState.RESULT_READY
                 ):
                     self._settle_foreground_decision_locked(attempt_id)
         return results
+
+    def _join_uninstalled_scopes(self, owner: str, *, deadline: float | None) -> None:
+        with self._lock:
+            attempts = tuple(
+                attempt
+                for attempt in self._decision_attempts.values()
+                if attempt.handle.owner_host_session_id == owner
+                and attempt.process_id not in self._states
+                and attempt.interop_scope is not None
+            )
+        for attempt in attempts:
+            scope = attempt.interop_scope
+            assert scope is not None
+            timeout = None if deadline is None else max(0.0, deadline - monotonic())
+            if not scope.finish(cancel=True, timeout=timeout):
+                raise ProcessPhysicalJoinError("terminal launch scope did not join")
+            scope.retire()
+            with self._launch_condition:
+                self._settle_foreground_decision_locked(attempt.handle.attempt_id)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -1083,6 +1195,10 @@ class ProcessRegistry:
                 {
                     *(state.owner_host_session_id for state in self._states.values()),
                     *self._launching_by_owner,
+                    *(
+                        attempt.handle.owner_host_session_id
+                        for attempt in self._decision_attempts.values()
+                    ),
                 }
             )
             self._closed = True
@@ -1225,8 +1341,10 @@ class TerminalManager:
                 # did not acquire the occupied slot, so never settle its owner.
                 if decision_attempt_id is not None:
                     raise
-                if (decision_deadline_monotonic is not None
-                        and monotonic() >= decision_deadline_monotonic):
+                if (
+                    decision_deadline_monotonic is not None
+                    and monotonic() >= decision_deadline_monotonic
+                ):
                     raise TimeoutError("terminal decision allocation deadline expired")
                 continue
             except ProcessLimitError as exc:
@@ -1345,26 +1463,32 @@ def _read_fd(fd: int, output: TerminalOutputOwner) -> None:
 
 
 def _terminate_process_group(state: _ProcessState) -> None:
+    if state.interop_scope is not None:
+        state.interop_scope.request_cancel()
     with state.lock:
         if state.physical_state is TerminalPhysicalState.RUNNING:
             state.physical_state = TerminalPhysicalState.TERMINALIZING
+    _terminate_spawned_process_group(state.process)
+
+
+def _terminate_spawned_process_group(process: subprocess.Popen[bytes]) -> None:
     # The session leader may already have exited while a descendant remains in
     # its process group (and may still own stdout).  Always target the group;
     # checking only Popen.poll() would strand that descendant and its reader.
     try:
-        os.killpg(state.process.pid, signal.SIGTERM)
+        os.killpg(process.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
     try:
-        state.process.wait(timeout=0.5)
+        process.wait(timeout=0.5)
     except subprocess.TimeoutExpired:
         pass
     group_deadline = monotonic() + 0.5
-    while _process_group_exists(state.process.pid) and monotonic() < group_deadline:
+    while _process_group_exists(process.pid) and monotonic() < group_deadline:
         sleep(0.01)
-    if _process_group_exists(state.process.pid):
+    if _process_group_exists(process.pid):
         try:
-            os.killpg(state.process.pid, signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
 
@@ -1420,6 +1544,10 @@ def _join_physical(state: _ProcessState, *, timeout: float) -> bool:
         sleep(0.005)
     if _process_group_exists(state.process.pid):
         return False
+    if state.interop_scope is not None:
+        if not state.interop_scope.finish(timeout=max(0.0, deadline - monotonic())):
+            return False
+        state.interop_scope.retire()
     with state.lock:
         if state.physical_state is not TerminalPhysicalState.PRUNABLE:
             state.physical_state = TerminalPhysicalState.PHYSICALLY_JOINED
@@ -1458,12 +1586,17 @@ def _process_group_exists(process_group_id: int) -> bool:
 def _process_is_live(state: _ProcessState) -> bool:
     """Return whether any physical member of this exact process group lives."""
 
-    return state.process.poll() is None or _process_group_exists(state.process.pid)
+    return (
+        state.process.poll() is None
+        or _process_group_exists(state.process.pid)
+        or (
+            state.interop_scope is not None
+            and not state.interop_scope.physically_joined.is_set()
+        )
+    )
 
 
-def _accept_termination_intent(
-    state: _ProcessState, reason: TerminalStatus
-) -> bool:
+def _accept_termination_intent(state: _ProcessState, reason: TerminalStatus) -> bool:
     """Linearize one terminal intent without overwriting a frozen outcome."""
 
     if reason not in {TerminalStatus.KILLED, TerminalStatus.TIMEOUT}:
@@ -1493,9 +1626,19 @@ def _freeze_final_outcome_locked(
             state.final_exit_code = -1 if code is None else code
         else:
             state.final_status = (
-                TerminalStatus.SUCCESS if code == 0 else TerminalStatus.ERROR
+                TerminalStatus.SUCCESS
+                if code == 0
+                and not (
+                    state.interop_scope is not None and state.interop_scope.failure
+                )
+                else TerminalStatus.ERROR
             )
-            state.final_exit_code = -1 if code is None else code
+            state.final_exit_code = (
+                -1
+                if code is None
+                or (state.interop_scope is not None and state.interop_scope.failure)
+                else code
+            )
     assert state.final_exit_code is not None
     return state.final_status, state.final_exit_code
 
@@ -1576,9 +1719,13 @@ def _snapshot(
         cwd=str(state.cwd),
         timed_out=state.timed_out,
         truncated=snapshot.gap_before_output or snapshot.truncated_by_response_bound,
-        error=None
-        if status in {TerminalStatus.RUNNING, TerminalStatus.SUCCESS}
-        else status.value,
+        error=(
+            state.interop_scope.failure
+            if state.interop_scope is not None and state.interop_scope.failure
+            else None
+            if status in {TerminalStatus.RUNNING, TerminalStatus.SUCCESS}
+            else status.value
+        ),
         process_id=state.process_id,
         output_artifact_candidate=artifact_candidate,
         output_disposition=snapshot.disposition,

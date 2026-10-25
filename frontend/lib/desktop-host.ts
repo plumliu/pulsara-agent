@@ -1,4 +1,5 @@
 import type { DesktopBrowser } from '../../desktop/src/browser-contract';
+import type { WorkspaceDirectoryCandidate } from '../../desktop/src/backend-paths';
 export type { BrowserState, BrowserEvent, BrowserCommand, BrowserPresentation, BrowserLayout, BrowserHide, DesktopBrowser } from '../../desktop/src/browser-contract';
 
 export interface CliStatus {
@@ -6,13 +7,13 @@ export interface CliStatus {
   path: string;
   existingTarget?: string;
   message?: string;
-  managedBy: 'application' | 'package';
+  managedBy: 'application' | 'package' | 'wsl';
   shadowedBy?: string;
 }
 /** Narrow preload contract. Browser-based component tests deliberately have no host. */
 export interface PulsaraDesktop {
   browser: DesktopBrowser;
-  platform: 'darwin' | 'linux';
+  platform: 'darwin' | 'linux' | 'win32';
   startupSettled(): Promise<void>;
   focus(): Promise<void>;
   readUiPreferences(): Promise<Record<string, string>>;
@@ -25,6 +26,7 @@ export interface PulsaraDesktop {
   repairCli(replaceConflict: boolean): Promise<CliStatus>;
   chooseFiles(): Promise<string[]>;
   chooseDirectory(): Promise<string | null>;
+  chooseWorkspaceDirectory(): Promise<WorkspaceDirectoryCandidate | null>;
   pathForFile(file: File): string;
   openPath(input: { path: string; reveal: boolean }): Promise<void>;
   openExternal(url: string): Promise<void>;

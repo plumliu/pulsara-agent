@@ -540,6 +540,7 @@ def _bare_host_core_with_blocked_blob_gc(
     core._blob_store = object()  # noqa: SLF001
     core._access = None  # noqa: SLF001
     core._repository = None  # noqa: SLF001
+    core._history_maintenance = None  # noqa: SLF001
     core._event_loop = asyncio.get_running_loop()  # noqa: SLF001
     core._bundled_skill_binding = (  # noqa: SLF001
         BundledSkillDistributionBindingOwner()

@@ -16,7 +16,7 @@ import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import remarkCjkStrikethrough from 'remark-cjk-friendly-gfm-strikethrough/parseOnly';
 import remarkMath from 'remark-math-extended';
 import { SKIP, visitParents } from 'unist-util-visit-parents';
-import { normalizeMathWithSource, rehypeSourceMapping } from '../lib/markdown-source';
+import { normalizeMathWithSource, normalizeMarkdownWithSource, rehypeSourceMapping } from '../lib/markdown-source';
 import { markdownDiagramFormat } from '../lib/markdown-diagram';
 import { MermaidBlock } from './mermaid-block';
 import { DiagramBlock } from './diagram-block';
@@ -324,7 +324,7 @@ function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob
 const VisualizationContext = createContext<InlineVisualizationContext | undefined>(undefined);
 
 export const MarkdownBody = memo(function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false, visualization, assistantChat = false }: MarkdownProps) {
-  const normalized = useMemo(() => normalizeMathWithSource(body), [body]);
+  const normalized = useMemo(() => normalizeMarkdownWithSource(body), [body]);
   const sourceMapping = useMemo(() => () => annotationSource ? rehypeSourceMapping(normalized) : () => {}, [normalized, annotationSource]);
   const components = useMemo<Components>(() => ({
     a: ({ children, href }) => <MarkdownLink href={href} onNotify={onNotify}>{children}</MarkdownLink>,
@@ -390,7 +390,7 @@ export function MarkdownInline({ body, onNotify }: MarkdownProps) {
           a: ({ children, href }) => <MarkdownLink href={href} onNotify={onNotify}>{children}</MarkdownLink>,
         }}
       >
-        {normalizeMathMarkdown(body)}
+        {normalizeMarkdownWithSource(body).text}
       </ReactMarkdown>
     </MarkdownCopySurface>
   );

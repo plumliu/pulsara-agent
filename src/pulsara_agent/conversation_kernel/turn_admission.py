@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
+from pulsara_agent.conversation_kernel.repository_errors import PreparedRootInputHeadStale
 
 import asyncio
 from dataclasses import dataclass
@@ -133,7 +134,7 @@ class TurnAdmissionCoordinator:
                 cancellation_intent=cancellation_intent,
             )
             raise cancellation
-        except BaseException:
+        except BaseException as error:
             accepted = await self._settle_root_intent(
                 intent=intent,
                 provider_input_admission=provider_input_admission,
@@ -142,6 +143,9 @@ class TurnAdmissionCoordinator:
                 reissue_allowed=True,
                 cancellation_requested=False,
                 cancellation_intent=cancellation_intent,
+                stale_input=(
+                    error if isinstance(error, PreparedRootInputHeadStale) else None
+                ),
             )
             if accepted is None:
                 raise ConversationKernelConflict("ROOT turn admission did not settle")
@@ -166,6 +170,7 @@ class TurnAdmissionCoordinator:
         reissue_allowed: bool,
         cancellation_requested: bool,
         cancellation_intent: ActiveTurnCancellationIntent,
+        stale_input: PreparedRootInputHeadStale | None = None,
     ) -> AcceptedEntry | None:
         while True:
             try:
@@ -194,6 +199,8 @@ class TurnAdmissionCoordinator:
                 raise ConversationKernelConflict(
                     "ROOT turn admission has a conflicting winner"
                 )
+            if stale_input is not None:
+                raise stale_input
             if cancellation_requested or not reissue_allowed:
                 return None
             if self._workspace_gate is not None:
@@ -207,6 +214,10 @@ class TurnAdmissionCoordinator:
                     model_resolution_snapshot=model_resolution_snapshot,
                     deadline_monotonic=self._deadline(),
                 )
+            except PreparedRootInputHeadStale as error:
+                # Confirm the exact immutable command before retiring its input.
+                stale_input = error
+                continue
             except StaleHostWriter:
                 raise
             except BaseException:

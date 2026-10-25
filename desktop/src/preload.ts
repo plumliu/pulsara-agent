@@ -33,7 +33,14 @@ if (process.isMainFrame) contextBridge.exposeInMainWorld('pulsaraDesktop', {
   repairCli: (replaceConflict: boolean) => ipcRenderer.invoke('desktop:repair-cli', replaceConflict),
   chooseFiles: () => ipcRenderer.invoke('desktop:choose-files'),
   chooseDirectory: () => ipcRenderer.invoke('desktop:choose-directory'),
-  pathForFile: (file: File) => webUtils.getPathForFile(file),
+  chooseWorkspaceDirectory: () => ipcRenderer.invoke('desktop:choose-workspace-directory'),
+  pathForFile: (file: File) => {
+    const path = webUtils.getPathForFile(file);
+    return process.platform === 'win32' && path ? ipcRenderer.sendSync('desktop:backend-path', path) : path;
+  },
+  wslDiscover: () => ipcRenderer.invoke('desktop:wsl-discover'),
+  wslInspect: (distro: string) => ipcRenderer.invoke('desktop:wsl-inspect', distro),
+  wslSelect: (selection: {distro: string; user: string}) => ipcRenderer.invoke('desktop:wsl-select', selection),
   openPath: (value: {path: string; reveal: boolean}) => ipcRenderer.invoke('desktop:open-path', value),
   openExternal: (url: string) => ipcRenderer.invoke('desktop:open-external', url),
   retryStartup: () => ipcRenderer.invoke('desktop:retry'),

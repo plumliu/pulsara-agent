@@ -34,7 +34,7 @@ function finishStartup() {
 }
 
 if (!desktopHost()) {
-  root.innerHTML = '<main style="font:16px system-ui;padding:48px;color:#625a49;background:#faf8f1;height:100vh"><h1>Pulsara</h1><p>请从 Pulsara 桌面应用打开工作台。</p></main>';
+  root.innerHTML = '<main style="font:16px var(--sans);padding:48px;color:#625a49;background:#faf8f1;height:100vh"><h1>Pulsara</h1><p>请从 Pulsara 桌面应用打开工作台。</p></main>';
   root.inert = false;
 } else void desktopHost()!.readUiPreferences().catch(error => {
   console.warn('Could not load UI preferences', error);

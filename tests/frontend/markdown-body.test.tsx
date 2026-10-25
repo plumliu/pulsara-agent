@@ -1,10 +1,41 @@
 import { fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarkdownBody, MarkdownInline, normalizeMathMarkdown } from '../../frontend/components/markdown-body';
+import { FileLinkContext } from '../../frontend/components/file-link-context';
 
 afterEach(() => { delete window.pulsaraDesktop; });
 
 const noopNotify = () => undefined;
+
+describe('local Markdown destinations with spaces', () => {
+  it.each([MarkdownBody, MarkdownInline])('opens spaced Chinese paths through the existing file preview in %s', Component => {
+    const open = vi.fn();
+    const { container } = render(<FileLinkContext.Provider value={{ open }}><Component
+      body={'[HTML](/home/plumwsl/Windows 中文 验收/preview.html) [PDF](./我的 文件 (最终)/preview.pdf)'} onNotify={noopNotify}/></FileLinkContext.Provider>);
+    const links = container.querySelectorAll('a');
+    expect(links.length).toBe(2);
+    fireEvent.click(links[0]);
+    expect(open.mock.calls[0][0]).toBe(new URL('/home/plumwsl/Windows 中文 验收/preview.html', 'file:///').href);
+    fireEvent.click(links[1]);
+    expect(decodeURIComponent(open.mock.calls[1][0])).toBe('./我的 文件 (最终)/preview.pdf');
+  });
+
+  it('keeps code, escaped markup, math, standard titles and incomplete links unchanged', () => {
+    const literal = '[文件](/home/我的 文件.txt)';
+    const body = ['`' + literal + '`', '', '```text', literal, '```', '',
+      String.raw`\[文件](/home/我的 文件.txt)`, '', '$[文件](/home/我的 文件.txt)$', '',
+      '[标题](/home/file.txt "file title")', '[外部](https://example.com/a b)', '[未完成](/home/我的 文件.txt',
+    ].join('\n');
+    const { container } = render(<MarkdownBody streaming body={body} onNotify={noopNotify}/>);
+    expect(container.querySelector('p code')?.textContent).toBe(literal);
+    expect(container.querySelector('.code-card__line-content')?.textContent).toBe(literal);
+    expect(container.querySelector('.math-copy-target')?.getAttribute('data-math-source')).toBe(literal);
+    // GFM still autolinks the URL fragment in otherwise literal external markup.
+    expect([...container.querySelectorAll('a')].map(link => link.textContent)).toEqual(['标题', 'https://example.com/a']);
+    expect(container.textContent).toContain('[未完成](/home/我的 文件.txt');
+    expect(container.textContent).toContain('[外部](https://example.com/a b)');
+  });
+});
 
 describe('CJK emphasis and strikethrough', () => {
   it.each([MarkdownBody, MarkdownInline])('renders punctuation-adjacent CJK markup in %s', Component => {

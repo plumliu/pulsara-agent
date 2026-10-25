@@ -72,12 +72,12 @@ export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, on
         <div className="workspace-kind-grid" role="radiogroup" aria-label="工作目录来源">
           <button type="button" role="radio" aria-checked={workspaceKind === 'quick'} className={`workspace-kind-card${workspaceKind === 'quick' ? ' is-selected' : ''}`} onClick={() => setWorkspaceKind('quick')}>
             <span className="workspace-kind-icon"><FolderPlus size={18} /></span>
-            <span><strong>快速开始</strong><small>Pulsara 创建并管理一个持久目录</small></span>
+            <span><strong>快速开始</strong><small>自动创建工作目录</small></span>
             <i>{workspaceKind === 'quick' && <Check size={11} />}</i>
           </button>
           <button type="button" role="radio" aria-checked={workspaceKind === 'project'} className={`workspace-kind-card${workspaceKind === 'project' ? ' is-selected' : ''}`} onClick={() => setWorkspaceKind('project')}>
             <span className="workspace-kind-icon"><FolderOpen size={18} /></span>
-            <span><strong>指定目录</strong><small>使用一个已有的本地工作目录</small></span>
+            <span><strong>指定目录</strong><small>选择已有文件夹</small></span>
             <i>{workspaceKind === 'project' && <Check size={11} />}</i>
           </button>
         </div>

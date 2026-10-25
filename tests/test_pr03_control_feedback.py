@@ -92,6 +92,7 @@ def _content(*, session_id: str = 'session:5dyf7lfzp7z22pphjtostkgsjm') -> Proce
 
 def _feedback_host() -> tuple[KernelHostSession, _UserControlAttempt, str]:
     host = object.__new__(KernelHostSession)
+    host._writer_renewal_failure = None
     host._workspace_recreated_at = None
     host._workspace_feedback_candidate = None
     host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'

@@ -357,6 +357,8 @@ class _RuntimeReopenInFlight:
 @dataclass(frozen=True, slots=True)
 class _Quarantined:
     public_code: str
+    # Keep the physical close error available on a later user retry.
+    cause: BaseException | None = None
 
 
 @dataclass(eq=False, slots=True)
@@ -431,7 +433,7 @@ class LocalSessionController:
         return {
             "application": {
                 "name": "Pulsara",
-                "version": "0.1.0",
+                "version": "0.1.1",
                 "transport": "localhost-http+terminal-v3",
             },
             "protocol": {"major": 3, "minor": 0},
@@ -2301,13 +2303,24 @@ class LocalSessionController:
             if isinstance(current, _Quarantined):
                 raise SessionControlRejected(
                     current.public_code,
-                    "Session runtime is quarantined; restart Pulsara to continue.",
-                )
+                    ("连接恢复未完成，旧会话关闭失败。请查看日志并重新打开 Pulsara。" if current.cause is not None
+                     else "Session runtime is quarantined; restart Pulsara to continue."),
+                ) from current.cause
             if live is not None:
                 if no_live_observation is not None or current is not None:
                     raise RuntimeError("Session has another current operation")
-                return live
-            if isinstance(current, _ResumeInFlight):
+                if not getattr(live.session, "writer_unavailable", False):
+                    return live
+                # Reuse the normal resume reservation. An unavailable writer does not
+                # release its physical owners or authorize another cold open.
+                task = asyncio.create_task(
+                    self._recover_writer_owner(session_id, live, scheduled=scheduled),
+                    name=f"desktop-resume:{session_id}",
+                )
+                self._operations[session_id] = _ResumeInFlight(task, scheduled=scheduled)
+                self._by_session.pop(session_id, None)
+                self._by_host.pop(live.host_session_id, None)
+            elif isinstance(current, _ResumeInFlight):
                 if scheduled and not current.scheduled:
                     raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在打开或恢复，请稍后再试。")
                 if no_live_observation is not None:
@@ -2333,6 +2346,35 @@ class LocalSessionController:
                 )
                 self._operations[session_id] = _ResumeInFlight(task, scheduled=scheduled)
         return await asyncio.shield(task)
+
+    async def _recover_writer_owner(
+        self, session_id: str, previous: HostSessionHandle, *, scheduled: bool
+    ) -> HostSessionHandle:
+        try:
+            await self.core.close_session(previous.host_session_id)
+        except BaseException as exc:
+            async with self._lock:
+                current = self._operations.get(session_id)
+                if isinstance(current, _ResumeInFlight) and current.task is asyncio.current_task():
+                    self._operations[session_id] = _Quarantined("SESSION_RECOVERY_CLOSE_FAILED", exc)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise SessionControlRejected(
+                "SESSION_RECOVERY_CLOSE_FAILED", "连接恢复未完成，旧会话关闭失败。请查看日志并重新打开 Pulsara。"
+            ) from exc
+        async with self._lock:
+            if self._closing:
+                current = self._operations.get(session_id)
+                if isinstance(current, _ResumeInFlight) and current.task is asyncio.current_task():
+                    self._operations.pop(session_id, None)
+                raise KernelHostCoreClosing("Desktop application is draining")
+        # Stay in this same task: publication/finally compare the existing
+        # reservation's task identity. The original cold resume owns the epoch.
+        return await self._resume_owner(session_id, scheduled=scheduled)
+
+    def host_writer_unavailable(self, host_session_id: str) -> bool:
+        handle = self._by_host.get(host_session_id)
+        return handle is not None and bool(getattr(handle.session, "writer_unavailable", False))
 
     async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False, scheduled: bool = False) -> HostSessionHandle:
         task = asyncio.current_task()

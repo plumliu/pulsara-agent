@@ -19,6 +19,15 @@ function mount(body: string) {
 }
 
 describe('canonical response selection', () => {
+  it('keeps canonical offsets around local links with spaces and normalized display math', () => {
+    const body = '😀前文\n\n$$ x+y $$\n\n[我的文件](/home/plumwsl/我的 文件.txt) 后面的文字';
+    const { container, leaves } = mount(body);
+    expect(container.querySelector('[data-source-invalid]')).toBeNull();
+    const link = container.querySelector('a [data-source-text]')!.firstChild!;
+    expect(select(link, 0)?.source).toEqual({ entry_id: 'entry:a', start: body.indexOf('我的文件'), end: body.indexOf('我的文件') + 4 });
+    const last = leaves.at(-1)!.firstChild!;
+    expect(select(link, 0, last, last.textContent!.length)?.quote).toBe(body.slice(body.indexOf('我的文件')));
+  });
   it('clips leading, trailing and enclosing blank boundaries but rejects selected process text', () => {
     const body = '第一段。\n\n最后一段。';
     const { container } = render(<section className="conversation-run">

@@ -42,6 +42,12 @@ from pulsara_agent.conversation_kernel.repository import (
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
 )
+from pulsara_agent.conversation_kernel.repository_errors import PreparedRootInputHeadStale
+from pulsara_agent.conversation_kernel.cancellation import (
+    ActiveTurnCancellationIntent,
+    ForegroundCancellationCause,
+)
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
@@ -685,6 +691,7 @@ def test_round5_exact_tool_return_is_shielded_through_canonical_settlement(
 
     asyncio.run(scenario())
 
+
     assert repository.acceptance_calls == 1
     assert tool.invocations == 1
     assert tool.settlements == [ProcessLocalEffectSettlementDisposition.COMMITTED]
@@ -700,6 +707,53 @@ def test_round5_exact_tool_return_is_shielded_through_canonical_settlement(
             "SELECT status FROM pulsara_v3.turns WHERE session_id = %s",
             (session_id,),
         ).fetchone() == ("INTERRUPTED",)
+
+
+def test_root_stale_head_cancellation_during_confirmation_never_readmits(
+    stage2_migrated_postgres_database,
+) -> None:
+    class BlockedConfirmationRepository(ConversationKernelRepository):
+        calls = 0
+
+        def accept_root_turn_intent(self, *args, **kwargs):
+            self.calls += 1
+            raise PreparedRootInputHeadStale("ROOT provider input head changed")
+
+        def confirm_root_turn_intent(self, **kwargs):
+            started.set()
+            assert release.wait(5), "test did not release exact confirmation"
+            return super().confirm_root_turn_intent(**kwargs)
+
+    started, release = Event(), Event()
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = BlockedConfirmationRepository(provider)
+    session_id, _, lease = _lease(repository)
+    model = ScriptedKernelModel([])
+    runner = _runner(repository, lease, model)
+
+    async def scenario():
+        from pulsara_agent.conversation_kernel.steer import build_direct_root_turn_identity
+        command = _name("command")
+        identity = build_direct_root_turn_identity(session_id, command)
+        intent = ActiveTurnCancellationIntent(identity.turn_id, ModelInputScopeKind.ROOT, None)
+        task = asyncio.create_task(runner.run_turn(
+            frozen_test_prompt("cancel before canonical admission"),
+            command_id=command, cancellation_intent=intent,
+        ))
+        assert await asyncio.to_thread(started.wait, 5)
+        intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert repository.calls == 1
+    assert model.requests == []
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                             deadline_monotonic=monotonic() + 10) as connection:
+        assert connection.execute("SELECT id FROM pulsara_v3.turns WHERE session_id=%s", (session_id,)).fetchall() == []
+
 
 
 def test_round5_remote_identity_lost_ack_cannot_discard_exact_tool_result(
@@ -884,6 +938,151 @@ def test_round5_root_turn_admission_full_none_conflict_matrix(
             asyncio.run(runner.run_turn(frozen_test_prompt("start"), command_id=_name("command")))
         assert model.requests == []
     assert repository.calls == expected_calls if hasattr(repository, "calls") else True
+
+
+@pytest.mark.parametrize("after_unknown", (False, True))
+def test_root_stale_head_reprepares_same_intent_without_rebuilding_prefix(
+    stage2_migrated_postgres_database,
+    after_unknown: bool,
+) -> None:
+    class StaleHeadRepository(ConversationKernelRepository):
+        stale_attempts = []
+        armed = False
+        unknown_raised = False
+
+        def accept_root_turn_intent(self, *args, **kwargs):
+            if self.armed:
+                self.stale_attempts.append(kwargs["intent"])
+                if after_unknown and not self.unknown_raised:
+                    self.unknown_raised = True
+                    raise OSError("lost pre-commit acknowledgement")
+                self.armed = False
+                raise PreparedRootInputHeadStale("ROOT provider input head changed")
+            return super().accept_root_turn_intent(*args, **kwargs)
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = StaleHeadRepository(provider)
+    _, _, lease = _lease(repository)
+    model = ScriptedKernelModel([
+        _text_stream("first", block_id="first"),
+        _text_stream("second", block_id="second"),
+    ])
+    runner = _runner(repository, lease, model)
+    prepare = runner.prepare_prospective_root_input
+    preparations = []
+
+    async def tracked_prepare(*args, **kwargs):
+        if preparations:
+            assert not preparations[-1].owns_resources
+        prepared = await prepare(*args, **kwargs)
+        preparations.append(prepared)
+        return prepared
+
+    runner.prepare_prospective_root_input = tracked_prepare
+
+    async def scenario():
+        await runner.run_turn(frozen_test_prompt("first"))
+        original = model.requests[0].compiled_input
+        repository.armed = True
+        command = _name("command")
+        result = await runner.run_turn(frozen_test_prompt("second"), command_id=command)
+        assert result.final_text == "second"
+        assert len(preparations) == 3
+        assert all(item.command_id == command for item in repository.stale_attempts)
+        assert all(
+            item is repository.stale_attempts[0] for item in repository.stale_attempts
+        )
+        assert preparations[1].admission.candidate.exact_turn_id == result.turn_id
+        assert preparations[2].admission.candidate.exact_turn_id == result.turn_id
+        current = model.requests[1].compiled_input
+        assert current.system_prompt == original.system_prompt
+        assert current.tools == original.tools
+        assert current.messages[: len(original.messages)] == original.messages
+        assert all(not item.owns_resources for item in preparations)
+
+    asyncio.run(scenario())
+
+
+def test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn(
+    stage2_migrated_postgres_database,
+) -> None:
+    class ChildAfterRootRepository(ConversationKernelRepository):
+        child_admission = None
+        target_command = None
+        target_intents = []
+
+        def accept_root_turn_intent(self, *args, **kwargs):
+            accepted = super().accept_root_turn_intent(*args, **kwargs)
+            if kwargs["intent"].command_id == self.target_command:
+                self.target_intents.append(kwargs["intent"])
+                assert self.child_admission is not None
+                child, self.child_admission = self.child_admission, None
+                self.accept_subagent_turn(
+                    args[0], candidate=child,
+                    deadline_monotonic=monotonic() + 10,
+                )
+            return accepted
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ChildAfterRootRepository(provider)
+    session_id, _, lease = _lease(repository)
+    task = _prepare_subagent_task(repository, lease)
+    repository.interrupt_turn(
+        lease.guard, turn_id=task.launch.task_start.parent_turn_id,
+        reason="test fixture delegated parent finished", occurred_at=datetime.now(timezone.utc),
+        actor_id="test-fixture", deadline_monotonic=monotonic() + 10,
+    )
+    model = ScriptedKernelModel([
+        _text_stream("first", block_id="first"),
+        _text_stream("second", block_id="second"),
+    ])
+    runner = _runner(repository, lease, model)
+    preparations = []
+    activations = []
+    original_prepare = runner.prepare_prospective_root_input
+    original_activate = runner._provider_dispatch.activate_prospective_root_input
+
+    async def prepare(*args, **kwargs):
+        prepared = await original_prepare(*args, **kwargs)
+        preparations.append(prepared)
+        return prepared
+
+    async def activate(prepared, **kwargs):
+        result = await original_activate(prepared, **kwargs)
+        activations.append(result is None)
+        return result
+
+    runner.prepare_prospective_root_input = prepare
+    runner._provider_dispatch.activate_prospective_root_input = activate
+
+    async def scenario():
+        await runner.run_turn(frozen_test_prompt("first"))
+        first = model.requests[0].compiled_input
+        repository.child_admission = build_prepared_subagent_turn_admission(
+            session_id=session_id, task_id=task, turn_id=_name("turn"),
+            entry_id=_name("entry"), context_binding_revision_id=_name("binding"),
+            permission_snapshot_id=_name("permission"),
+            task_start_event_id=task.launch.task_start.event_id,
+            expected_parent_permission_snapshot=task.launch.parent_permission_snapshot,
+            content=InlineContent.from_bytes(b"answer once"),
+            occurred_at=datetime.now(timezone.utc), actor_id="subagent-manager",
+        )
+        command = repository.target_command = _name("command")
+        result = await runner.run_turn(frozen_test_prompt("second"), command_id=command)
+        assert result.final_text == "second"
+        assert len(repository.target_intents) == 1
+        assert repository.child_admission is None
+        assert len(preparations) == 2
+        assert activations == [False, True]
+        assert preparations[-1].admission.candidate.exact_turn_id == result.turn_id
+        assert all(not prepared.owns_resources for prepared in preparations)
+        assert runner._safe_point._active_handle is None
+        second = model.requests[1].compiled_input
+        assert second.system_prompt == first.system_prompt
+        assert second.tools == first.tools
+        assert second.messages[:len(first.messages)] == first.messages
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("commit_before_block", (False, True))

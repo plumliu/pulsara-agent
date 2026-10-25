@@ -83,3 +83,26 @@ run = ["npm --prefix desktop test", ".venv/bin/python desktop/scripts/smoke_reso
 [tasks."desktop:package"]
 depends = ["desktop:verify"]
 run = "npm --prefix desktop run package -- --publish never"
+
+# Guest resources are built on native Ubuntu; Windows only verifies/carries them.
+[tasks."desktop:wsl-payload"]
+depends = ["desktop:resources"]
+sources = ["desktop/scripts/prepare_wsl_payload.py", "desktop/scripts/prepare_resources.py", "desktop/scripts/pulsara-cli.sh", "desktop/package.json", "src/**", "frontend/dist/**"]
+outputs = ["desktop/build/wsl-payload/payload.tar", "desktop/build/wsl-payload/manifest.json"]
+run = ".venv/bin/python desktop/scripts/prepare_wsl_payload.py"
+
+[tasks."desktop:windows-resources"]
+depends = ["desktop:bootstrap", "desktop:windows-shell-dependencies"]
+sources = ["desktop/scripts/prepare_windows_resources.py", "desktop/native/windows-interop-helper/Program.cs", "desktop/resources/wsl-payload/payload.tar", "desktop/resources/wsl-payload/manifest.json", "desktop/package.json"]
+outputs = ["desktop/resources/windows-interop/pulsara-interop.exe"]
+run = '.venv\Scripts\python.exe desktop\scripts\prepare_windows_resources.py'
+
+[tasks."desktop:windows-shell-dependencies"]
+depends = ["desktop:bootstrap"]
+sources = ["desktop/package.json", "desktop/package-lock.json"]
+outputs = ["desktop/node_modules/.package-lock.json", "desktop/node_modules/.bin/electron-builder"]
+run = "npm --prefix desktop ci --no-audit --no-fund"
+
+[tasks."desktop:windows-package"]
+depends = ["desktop:windows-resources"]
+run = "npm --prefix desktop run package -- --win --x64 --publish never"

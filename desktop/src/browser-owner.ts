@@ -1,9 +1,9 @@
-import { session, WebContentsView, type BrowserWindow, type Session } from 'electron';
+import { session, WebContentsView, type BrowserWindow, type Session, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import type { BrowserCommand, BrowserEvent, BrowserHide, BrowserLayout, BrowserPresentation, BrowserState } from './browser-contract';
 import { allowBrowserRequest, browserBounds, browserURL, networkPort } from './browser-policy';
 
-interface Partition { sessionId: string; session: Session; port: string; retired: boolean }
+interface Partition { sessionId: string; session: Session; port: string; retired: boolean; contents: Map<WebContents, Promise<void>>; retiring?: Promise<void> }
 interface Navigation { url: string; stopped: boolean; awaitingStart: boolean; programmatic: boolean }
 interface Page {
   state: BrowserState;
@@ -29,21 +29,24 @@ export class BrowserOwner {
     private emit: (event: BrowserEvent) => void = event => {
       if (!host.webContents.isDestroyed()) host.webContents.send('desktop:browser-event', event);
     }) {
-    host.webContents.on('did-start-navigation', (_event, _url, inPlace, main) => { if (main && !inPlace) void this.retireHost(); });
+    host.webContents.on('did-start-navigation', (_event, _url, inPlace, main) => { if (main && !inPlace) void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
     host.webContents.on('did-finish-load', () => {
       try { const url = new URL(host.webContents.getURL()); this.accepting = url.origin === this.origin() && url.pathname === '/'; }
       catch { this.accepting = false; }
     });
-    host.webContents.on('render-process-gone', () => { void this.retireHost(); });
-    host.once('closed', () => { void this.retireHost(); });
+    host.webContents.on('render-process-gone', () => { void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
+    host.once('closed', () => { void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
   }
 
   private partition(sessionId: string): Partition {
     const existing = this.partitions.get(sessionId);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.retired) throw new Error('网页会话仍在关闭，请等待其结算。');
+      return existing;
+    }
     const origin = this.origin();
     if (!origin) throw new Error('工作台尚未就绪。');
-    const part: Partition = { sessionId, session: session.fromPartition(`pulsara-browser-${randomUUID()}`), port: networkPort(new URL(origin)), retired: false };
+    const part: Partition = { sessionId, session: session.fromPartition(`pulsara-browser-${randomUUID()}`), port: networkPort(new URL(origin)), retired: false, contents: new Map() };
     const ses = part.session;
     ses.setPermissionRequestHandler((_wc, _permission, done) => done(false));
     ses.setPermissionCheckHandler(() => false);
@@ -72,6 +75,11 @@ export class BrowserOwner {
       state: { instanceId: randomUUID(), sessionId: input.sessionId, tabId: input.tabId, url: '', pendingUrl: null,
         title: '', loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false } };
     this.pages.set(page.state.instanceId, page);
+    const wc = view.webContents;
+    part.contents.set(wc, new Promise(resolve => wc.once('destroyed', () => {
+      part.contents.delete(wc);
+      resolve();
+    })));
     try {
       view.setVisible(false);
       this.listen(page);
@@ -244,15 +252,23 @@ export class BrowserOwner {
     if (!wc.isDestroyed()) {
       wc.once('destroyed', () => wc.removeAllListeners());
       wc.close({ waitForBeforeUnload: false });
-    } else wc.removeAllListeners();
+    } else if (!page.partition.contents.has(wc)) wc.removeAllListeners();
   }
   async forgetSession(sessionId: string): Promise<void> {
     identity(sessionId);
     const part = this.partitions.get(sessionId);
     if (!part) return;
-    part.retired = true; this.partitions.delete(sessionId);
-    for (const page of [...this.pages.values()]) if (page.partition === part) this.close(page.state.instanceId);
-    try { await part.session.clearData(); } catch (error) { console.error('Could not clear retired browser partition', error); }
+    part.retired = true;
+    part.retiring ??= Promise.resolve().then(async () => {
+      for (const page of [...this.pages.values()]) if (page.partition === part) this.close(page.state.instanceId);
+      // Closed tabs leave the presentation map before their native destruction.
+      // Their partition retains ownership until those exact events have joined.
+      await Promise.all(part.contents.values());
+      await part.session.closeAllConnections();
+      await part.session.clearData();
+      this.partitions.delete(sessionId);
+    });
+    await part.retiring;
   }
   async clear(): Promise<void> {
     this.presentation = null;

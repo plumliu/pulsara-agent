@@ -6,7 +6,10 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.repository_errors import PlanControlSupersededBySteer
+from pulsara_agent.conversation_kernel.repository_errors import (
+    PlanControlSupersededBySteer,
+    PreparedRootInputHeadStale,
+)
 
 from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 from pulsara_agent.identity import derive_id
@@ -1359,23 +1362,37 @@ class ConversationKernelRunner:
         try:
             if hook_context_reservation is not None:
                 hook_context_reservation.commit()
-            prospective_candidate = await self._io.run(
-                self._repository.prepare_root_provider_input_candidate,
-                self._writer_lease.guard,
-                intent=candidate,
-                model_resolution_snapshot=frozen_model_resolution,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-            prospective_dispatch = await self.prepare_prospective_root_input(
-                prospective_candidate,
-                cancellation_intent=intent,
-            )
-            await self._turn_admission.accept_root_intent(
-                candidate,
-                provider_input_admission=prospective_dispatch.admission,
-                model_resolution_snapshot=frozen_model_resolution,
-                cancellation_intent=intent,
-            )
+            while True:
+                current_task = asyncio.current_task()
+                if intent.cause is not None or (
+                    current_task is not None and current_task.cancelling()
+                ):
+                    raise asyncio.CancelledError
+                prospective_candidate = await self._io.run(
+                    self._repository.prepare_root_provider_input_candidate,
+                    self._writer_lease.guard,
+                    intent=candidate,
+                    model_resolution_snapshot=frozen_model_resolution,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                prospective_dispatch = await self.prepare_prospective_root_input(
+                    prospective_candidate,
+                    cancellation_intent=intent,
+                )
+                try:
+                    await self._turn_admission.accept_root_intent(
+                        candidate,
+                        provider_input_admission=prospective_dispatch.admission,
+                        model_resolution_snapshot=frozen_model_resolution,
+                        cancellation_intent=intent,
+                    )
+                except PreparedRootInputHeadStale:
+                    # No ROOT winner/input was installed. Retire only this dry
+                    # preparation; the continuity owner preserves its epoch.
+                    prospective_dispatch.close()
+                    prospective_dispatch = None
+                    continue
+                break
         except BaseException:
             if prospective_dispatch is not None:
                 prospective_dispatch.close()

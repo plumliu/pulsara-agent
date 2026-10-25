@@ -789,6 +789,7 @@ def test_round4_protocol_old_writer_can_query_exact_resolution_winner() -> None:
 def test_round4_ack_unknown_query_preserves_typed_plan_winner() -> None:
     async def scenario() -> KernelCommandOutcome:
         host = object.__new__(KernelHostSession)
+        host._writer_renewal_failure = None
         host._command_failures = {}  # type: ignore[attr-defined]
 
         async def query(_: str) -> dict[str, object]:
@@ -852,6 +853,7 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
             guard = Guard()
 
         host = object.__new__(KernelHostSession)
+        host._writer_renewal_failure = None
         host._closing = False  # type: ignore[attr-defined]
         host._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         host._plan_exit_fence = True  # type: ignore[attr-defined]
@@ -911,6 +913,7 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
 
     async def new_host() -> KernelHostSession:
         host = object.__new__(KernelHostSession)
+        host._writer_renewal_failure = None
         host._closing = False  # type: ignore[attr-defined]
         host._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         from pulsara_agent.conversation_kernel.image_validation import HostPromptImageValidator

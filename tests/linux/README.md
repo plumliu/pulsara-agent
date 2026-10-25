@@ -1,6 +1,8 @@
 # Ubuntu backend and package validation
 
-The Python wheel build targets are macOS ARM64 and Ubuntu 24.04 x86_64/ARM64.
+The Python wheel build targets are macOS ARM64 and Ubuntu x86_64/ARM64.
+Ubuntu release numbers are not enforced for native or WSL builds. The pinned CI
+and container baselines remain test environments, not release-number gates.
 The macOS wheel tag does not establish the minimum OS version of Electron or
 other bundled desktop binaries.
 Linux wheels use `linux_x86_64` / `linux_aarch64` tags; this is not a manylinux

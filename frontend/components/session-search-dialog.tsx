@@ -170,7 +170,7 @@ export function SessionSearchDialog({ adapter, available, onClose, onOpen }: {
     <section ref={dialog} className="session-search-dialog" role="dialog" aria-modal="true" aria-label="搜索会话" onKeyDown={event => {
       event.stopPropagation();
       if (event.nativeEvent.isComposing || composing.current || event.keyCode === 229) return;
-      if (event.key === 'Escape' || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k')) {
+      if (event.key === 'Escape' || ((event.metaKey || event.ctrlKey) && !event.altKey && !event.getModifierState('AltGraph') && event.key.toLowerCase() === 'k')) {
         event.preventDefault(); if (!operation.current) onClose(); return;
       }
       if (!restore && event.target === input.current && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {

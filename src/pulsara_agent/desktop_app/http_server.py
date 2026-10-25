@@ -15,6 +15,7 @@ from pulsara_agent.terminal_protocol.canonical_v3 import (
 
 import asyncio
 from pathlib import Path
+import ssl
 from time import monotonic
 from typing import Awaitable, Callable, cast
 from pulsara_agent.identity import require_id
@@ -319,6 +320,9 @@ class LocalHttpServer:
         reset_postgres: Callable[[LocalPostgresConfig], Awaitable[dict[str, object]]],
         scheduled_tasks=None,
         model_catalog_loading: Callable[[], bool] = lambda: False,
+        host: dict[str, str] | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+        workspace_directories=None,
     ) -> None:
         self.sessions = sessions
         self.scheduled_tasks = scheduled_tasks
@@ -331,6 +335,9 @@ class LocalHttpServer:
         self.catalog = catalog
         self.model_runtime = model_runtime
         self._model_catalog_loading = model_catalog_loading
+        self._host = host
+        self._ssl_context = ssl_context
+        self._workspace_directories = workspace_directories
         self._database_state = database_state
         self._refresh_database_state = refresh_database_state
         self._reset_postgres_data = reset_postgres
@@ -355,7 +362,7 @@ class LocalHttpServer:
 
     @property
     def origin(self) -> str:
-        return f"http://{LOOPBACK_HOST}:{self.port}"
+        return f"{'https' if self._ssl_context is not None else 'http'}://{LOOPBACK_HOST}:{self.port}"
 
     async def start(self) -> None:
         if self._runner is not None:
@@ -373,6 +380,7 @@ class LocalHttpServer:
                 host=LOOPBACK_HOST,
                 port=self.requested_port,
                 shutdown_timeout=0.0,
+                ssl_context=self._ssl_context,
             )
             await site.start()
             self._site = site
@@ -573,6 +581,9 @@ class LocalHttpServer:
             self._inspect_session_capabilities,
         )
         self._app.router.add_post("/api/sessions", self._create_session)
+        self._app.router.add_get("/api/workspace-directories", self._list_workspace_directories)
+        self._app.router.add_post("/api/workspace-directories", self._create_workspace_directory)
+        self._app.router.add_post("/api/workspace-directories/select", self._select_workspace_directory)
         self._app.router.add_get("/api/sessions/archived", self._list_archived_sessions)
         self._app.router.add_get("/api/sessions/{session_id}", self._read_session)
         self._app.router.add_get("/api/sessions/{session_id}/workspace-availability", self._workspace_availability)
@@ -937,7 +948,8 @@ class LocalHttpServer:
         target = (self.static_root / relative).resolve()
         if self.static_root not in target.parents or not target.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(target)
+        headers = {"Content-Type": "font/woff2"} if target.suffix == ".woff2" else None
+        return web.FileResponse(target, headers=headers)
 
     async def _bootstrap(self, _request: web.Request) -> web.Response:
         catalog_loading = self._model_catalog_loading()
@@ -949,6 +961,8 @@ class LocalHttpServer:
             "origin": self.origin,
             "database_state": self._database_state(),
         }
+        if self._host is not None:
+            payload["host"] = {key: value for key, value in self._host.items() if key != "interopHelper"}
         return web.json_response(payload)
 
     async def _model_catalog(self, _request: web.Request) -> web.Response:
@@ -2322,6 +2336,8 @@ class LocalHttpServer:
                 status=400,
             )
         try:
+            if self._workspace_directories is not None and workspace_kind == "project":
+                await self._directory_call(self._workspace_directories.select, workspace_path)
             handle = await self.sessions.create_session(
                 workspace_kind=cast(SessionWorkspaceKind, workspace_kind),
                 workspace_path=workspace_path,
@@ -2342,6 +2358,39 @@ class LocalHttpServer:
         summaries = await self.sessions.list_sessions()
         summary = next(item for item in summaries if item["id"] == handle.session_id)
         return web.json_response({"session": summary}, status=201)
+
+    async def _directory_call(self, operation, *args):
+        from pulsara_agent.desktop_app.workspace_directories import WorkspaceDirectoryError
+        try:
+            return await asyncio.to_thread(operation, *args)
+        except WorkspaceDirectoryError as error:
+            raise HttpPublicError(error.code, str(error), status=error.status) from error
+        except OSError as error:
+            raise HttpPublicError("WORKSPACE_DIRECTORY_UNAVAILABLE", str(error), status=409) from error
+        except ValueError as error:
+            raise HttpPublicError("WORKSPACE_PATH_INVALID", str(error), status=400) from error
+
+    def _directories(self):
+        if self._workspace_directories is None:
+            raise HttpPublicError("WORKSPACE_PICKER_UNAVAILABLE", "当前执行域不提供 Linux 目录选择。", status=404)
+        return self._workspace_directories
+
+    async def _list_workspace_directories(self, request: web.Request) -> web.Response:
+        if set(request.query) - {"path", "cursor"}:
+            raise ValueError("invalid directory query")
+        return web.json_response(await self._directory_call(self._directories().list, request.query.get("path"), request.query.get("cursor")))
+
+    async def _select_workspace_directory(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"path"} or not isinstance(body["path"], str):
+            raise ValueError("invalid directory selection")
+        return web.json_response(await self._directory_call(self._directories().select, body["path"]))
+
+    async def _create_workspace_directory(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"path", "name"} or not all(isinstance(value, str) for value in body.values()):
+            raise ValueError("invalid directory creation")
+        return web.json_response(await self._directory_call(self._directories().create, body["path"], body["name"]))
 
     async def _delete_session(self, request: web.Request) -> web.Response:
         return await self._delete_session_request(request, archived_only=False)
@@ -2628,11 +2677,21 @@ class LocalHttpServer:
         takeover = body.get("takeover", False)
         if not isinstance(takeover, bool):
             raise ValueError("takeover must be boolean")
-        payload = await self.bridge.connect(
-            request.match_info["session_id"],
-            browser_instance_id=browser_instance_id,
-            takeover=takeover,
-        )
+        try:
+            payload = await self.bridge.connect(
+                request.match_info["session_id"],
+                browser_instance_id=browser_instance_id,
+                takeover=takeover,
+            )
+        except SessionControlRejected as exc:
+            message = str(exc)
+            if exc.public_code == "SESSION_RECOVERY_CLOSE_FAILED" and exc.__cause__ is not None:
+                scrub = await self.sessions._capture_capability_notice_scrub()
+                if scrub is not None:
+                    detail = scrub.scrub_text(f"{type(exc.__cause__).__name__}: {exc.__cause__}")
+                    message += f"\n{detail}"
+            raise HttpPublicError(exc.public_code, message, status=409,
+                retryable=exc.public_code != "SESSION_RECOVERY_CLOSE_FAILED") from exc
         return web.json_response(payload, status=201)
 
     async def _disconnect(self, request: web.Request) -> web.Response:

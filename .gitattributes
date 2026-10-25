@@ -1,0 +1,5 @@
+src/pulsara_agent/storage/migrations/sql/*.sql text eol=lf
+src/pulsara_agent/storage/migrations/resources/*.json text eol=lf
+*.woff2 binary
+desktop/assets/fonts/licenses/* text eol=lf
+src/pulsara_agent/desktop_app/static/assets/font-licenses/* text eol=lf

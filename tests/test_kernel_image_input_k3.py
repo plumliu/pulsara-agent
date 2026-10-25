@@ -492,6 +492,7 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
 def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
     async def scenario() -> None:
         host = object.__new__(KernelHostSession)
+        host._writer_renewal_failure = None
         host._lock = asyncio.Lock()
         host._compaction = HostCompactionRuntimeOwner()
         host._compaction_write_reservations = {}

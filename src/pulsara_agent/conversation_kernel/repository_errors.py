@@ -15,6 +15,10 @@ class PreparedCompletionSuffixStale(ConversationKernelConflict):
     """A speculative ROOT completion batch lost its exact canonical cut."""
 
 
+class PreparedRootInputHeadStale(ConversationKernelConflict):
+    """An uncommitted ROOT input lost its canonical transcript head."""
+
+
 class PlanControlSupersededBySteer(ConversationKernelConflict):
     """Accepted Steer won before this Plan batch crossed its dispatch boundary."""
 
@@ -35,4 +39,4 @@ ConversationKernelConflict.__module__ = (
 )
 
 
-__all__ = ["ConversationKernelConflict", "PreparedCompletionSuffixStale", "PlanControlSupersededBySteer", "SessionDeletionBusy", "SessionWriterConflict"]
+__all__ = ["ConversationKernelConflict", "PreparedCompletionSuffixStale", "PreparedRootInputHeadStale", "PlanControlSupersededBySteer", "SessionDeletionBusy", "SessionWriterConflict"]

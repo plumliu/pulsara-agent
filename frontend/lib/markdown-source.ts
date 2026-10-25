@@ -7,8 +7,60 @@ import { decodeString } from 'micromark-util-decode-string';
 import type { Element, Root, RootContent } from 'hast';
 import { toText } from 'hast-util-to-text';
 import { markdownDiagramFormat } from './markdown-diagram';
+import { classifyFileLink } from './file-preview';
 
 export interface NormalizedMarkdown { text: string; boundaries: number[] }
+
+function markdownEvents(text: string) {
+  return postprocess(parse({ extensions: [gfm(), cjkFriendlyExtension(), gfmStrikethroughCjkFriendly(), math({ singleDollarTextMath: true })] })
+    .document().write(preprocess()(text, undefined, true)));
+}
+
+/** CommonMark has no bare-destination space option. Probe encoded candidates
+ * with the same parser, then retain only spaces it accepts inside local links.
+ * Stored Markdown stays untouched; boundaries still refer to its original text. */
+export function normalizeMarkdownWithSource(source: string): NormalizedMarkdown {
+  const normalized = normalizeMathWithSource(source);
+  const text = normalized.text;
+  if (!/\]\([^\n]* /u.test(text)) return normalized;
+  const protectedTypes = new Set(['codeText', 'codeFenced', 'codeIndented', 'mathText', 'mathFlow', 'htmlText', 'htmlFlow', 'link', 'image', 'definition']);
+  const protectedRanges = markdownEvents(text).filter(([phase, token]) => phase === 'enter' && protectedTypes.has(token.type))
+    .map(([, token]) => [token.start.offset, token.end.offset]);
+  const protectedAt = (start: number, end: number) => protectedRanges.some(([a, b]) => start < b && end > a);
+  const candidates = new Set([...text.matchAll(/\]\((?=[^<\s])/gu)]
+    .filter(match => !protectedAt(match.index, match.index + 2)).map(match => match.index + 2));
+  if (!candidates.size) return normalized;
+
+  let probe = '';
+  const offsets = [0];
+  let inCandidateLine = false;
+  for (let i = 0; i < text.length; i++) {
+    if (candidates.has(i)) inCandidateLine = true;
+    if (text[i] === '\n' || text[i] === '\r') inCandidateLine = false;
+    const value = inCandidateLine && text[i] === ' ' ? '%20' : text[i];
+    probe += value;
+    for (let j = 1; j <= value.length; j++) offsets.push(j === value.length ? i + 1 : i);
+  }
+  const spaces = new Set<number>();
+  for (const [phase, token] of markdownEvents(probe)) {
+    if (phase !== 'enter' || token.type !== 'resourceDestinationString') continue;
+    const start = offsets[token.start.offset], end = offsets[token.end.offset];
+    const destination = text.slice(start, end);
+    // Preserve standard titles and leave ambiguous quoted destinations literal.
+    if (!candidates.has(start) || protectedAt(start, end) || /["']/u.test(destination)
+      || destination.trim() !== destination || classifyFileLink(destination) !== 'local') continue;
+    for (let i = start; i < end; i++) if (text[i] === ' ') spaces.add(i);
+  }
+  if (!spaces.size) return normalized;
+  let result = '';
+  const boundaries = [normalized.boundaries[0]];
+  for (let i = 0; i < text.length; i++) {
+    result += spaces.has(i) ? '%20' : text[i];
+    if (spaces.has(i)) boundaries.push(normalized.boundaries[i], normalized.boundaries[i]);
+    boundaries.push(normalized.boundaries[i + 1]);
+  }
+  return { text: result, boundaries };
+}
 
 /** Same presentation normalization, with explicit provenance for inserted lines. */
 export function normalizeMathWithSource(source: string): NormalizedMarkdown {
@@ -80,8 +132,7 @@ function linearUnits(value: string, start: number): SourceUnit[] {
 function sourceUnits(text: string): { units: SourceUnit[]; code: Map<number, SourceUnit[]> } {
   // Match MarkdownBody's remark extensions: CJK syntax is parsed in place,
   // never rewritten, so rendered selections retain canonical source offsets.
-  const events = postprocess(parse({ extensions: [gfm(), cjkFriendlyExtension(), gfmStrikethroughCjkFriendly(), math({ singleDollarTextMath: true })] })
-    .document().write(preprocess()(text, undefined, true)));
+  const events = markdownEvents(text);
   const units: SourceUnit[] = [];
   const stack: string[] = [];
   const code = new Map<number, SourceUnit[]>();

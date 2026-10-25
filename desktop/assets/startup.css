@@ -1,1 +1,53 @@
-:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#3c3933;background:transparent}body{background:#f3f0e7;margin:0;min-height:100vh;display:grid;place-items:center;-webkit-app-region:drag}main{text-align:center;max-width:640px;padding:48px}.mark{display:block;margin:0 auto;color:#b67a23;font-family:Georgia,serif;font-style:italic;font-size:72px}h1{font-family:Georgia,serif;font-size:32px;margin:8px}#status{line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.hint{font-size:13px;color:#8a857b}button{font:inherit;border:1px solid #d4cfc5;border-radius:8px;padding:8px 16px;background:#fffcf5;color:#49443b;cursor:pointer;margin:6px;-webkit-app-region:no-drag}button:hover{background:#e9dfcd}
+:root{--startup-sans:'Pulsara UI','Pulsara UI CJK',sans-serif;color-scheme:light;font-family:var(--startup-sans);color:#32343d;background:transparent;font-synthesis:none;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box}
+body{background:#f3f0e7;margin:0;min-height:100vh;display:grid;place-items:center;-webkit-app-region:drag}
+main{text-align:center;width:min(736px,100%);padding:48px}
+.mark{display:block;margin:0 auto;width:72px;height:72px}
+h1{font-family:'Pulsara Brand',serif;font-size:32px;margin:8px;color:#3c3933}
+#status{font-size:16px;line-height:1.7;margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:#7d7b74}
+button{font:500 14px/20px var(--startup-sans);border:1px solid transparent;border-radius:10px;padding:9px 16px;background:transparent;color:#625e55;cursor:pointer;margin:0;-webkit-app-region:no-drag;transition:background .15s,border-color .15s,box-shadow .15s,color .15s}
+button:hover:not(:disabled){background:#e9e5db;color:#3c3933}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid #9c7838;outline-offset:4px}
+[hidden]{display:none!important}
+#wsl-setup{text-align:left;border-top:1px solid #d4cfc5;margin:24px auto 0;padding-top:20px}
+.environment-card{width:100%;margin:0 auto;padding:20px 22px 22px;border:1px solid #fdfbf6;border-radius:20px;background:#faf8f2;box-shadow:0 4px 6px #3b352705,0 14px 40px #3b352708}
+.environment-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.environment-heading label{font-size:13px;font-weight:600;letter-spacing:.02em;color:#7d7b74}
+#wsl-refresh{display:grid;place-items:center;flex:none;width:30px;height:30px;padding:0;margin:-4px -4px -4px 0;border:0;border-radius:8px;background:transparent;color:#a29f96}
+#wsl-refresh:hover:not(:disabled){color:#966a32;background:#f5e6ca}
+#wsl-refresh[aria-busy="true"] svg{animation:refresh-spin 1s linear infinite}
+.environment-selection{position:relative;display:flex;align-items:center;border:1px solid #ddd8cc;border-radius:12px;background:#f3f0e8;transition:border-color .15s,box-shadow .15s}
+.environment-selection:focus-within{border-color:#d79a42;box-shadow:0 0 0 3px #d79a421a}
+.environment-icon{position:absolute;left:15px;color:#b08449;pointer-events:none}
+#wsl-distribution{appearance:none;box-sizing:border-box;width:100%;height:54px;border:0;border-radius:12px;padding:0 42px 0 49px;font:500 15px var(--startup-sans);background:transparent;color:#32343d;cursor:pointer;-webkit-app-region:no-drag}
+#wsl-distribution:disabled{cursor:default;color:#a29f96}
+#wsl-distribution option{background:#faf8f2;color:#32343d}
+.environment-chevron{position:absolute;right:16px;color:#a29f96;pointer-events:none}
+#wsl-identity{font-size:12px;line-height:1.65;color:#a45040;margin:12px 1px 0;overflow-wrap:anywhere}
+#wsl-confirm{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;height:48px;margin:20px 0 0;padding:0 20px;border:1px solid #805821;border-radius:12px;background:#855d2c;box-shadow:0 2px 4px #966a3212;color:#fffaf0;font-size:14px;font-weight:600;line-height:20px}
+#wsl-confirm span{display:block;line-height:20px}
+#wsl-confirm svg{display:block;flex:none;transform:translateY(1px)}
+#wsl-confirm:hover:not(:disabled){background:#755026;border-color:#704b20;box-shadow:0 3px 8px #966a3220}
+#wsl-confirm:disabled{opacity:1;background:#e9e5db;border-color:#e9e5db;box-shadow:none;color:#a29f96}
+.wsl-help{width:100%;margin:20px auto 0;text-align:center;font-size:12px;line-height:1.8;color:#a29f96}
+.wsl-help a{color:#8d784c;text-decoration-color:#b3a582;text-underline-offset:3px;-webkit-app-region:no-drag}
+.wsl-help a:hover{color:#66532e}
+#actions{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;margin-top:24px}
+#actions button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:6px 11px;border-color:#ddd8cc;border-radius:8px;background:#faf8f2;color:#625e55;box-shadow:0 1px 2px #3b352705;font-size:12px;line-height:18px;white-space:nowrap}
+#actions button:hover:not(:disabled){border-color:#cfc7b7;background:#eeeadf;color:#3c3933;box-shadow:0 2px 5px #3b35270a}
+#actions button svg{display:block;flex:none;width:14px;height:14px}
+#actions button span{display:block;line-height:18px}
+#window-controls{position:fixed;right:0;top:0;display:flex;z-index:1}
+#window-controls button{width:46px;height:34px;border:0;border-radius:0;margin:0;padding:0;background:transparent;font-size:17px}
+#window-controls button:hover{background:#e9dfcd}
+#window-controls #window-close:hover{background:#c42b1c;color:white}
+#error-details{text-align:left;margin:24px 0 0;padding-top:16px;border-top:1px solid #d4cfc5;color:#8a857b;font-size:12px;-webkit-app-region:no-drag}
+#error-details summary{width:max-content;max-width:100%;margin:0;cursor:pointer;line-height:20px}
+#error-details summary:hover{color:#62523e}
+#error-details summary:focus-visible{outline:2px solid #9c7838;outline-offset:4px;border-radius:3px}
+#error-details:not([hidden])+#actions{margin-top:16px}
+#error-detail-text{margin:14px 0 0;padding:14px 16px;border:1px solid #ddd8cc;border-radius:10px;background:#faf8f2;font:inherit;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;max-height:32vh;overflow:auto;user-select:text}
+@keyframes refresh-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){#wsl-refresh[aria-busy="true"] svg{animation:none}button,.environment-selection{transition:none}}
+@media(max-width:480px){main{padding:32px 20px}.environment-card{padding:18px}.wsl-help{margin-inline:0}}

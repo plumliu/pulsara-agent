@@ -2,7 +2,7 @@
 
 electron-builder owns installer naming/metadata; packaging owns PEP 440 parsing;
 GitHub owns release state, pagination and uploads. This script only checks the
-three-product contract and keeps publication an explicit human action.
+four-product contract and keeps publication an explicit human action.
 """
 from __future__ import annotations
 
@@ -54,6 +54,7 @@ def installer_names(version: str) -> tuple[str, ...]:
         f"Pulsara-{version}-macos-arm64.dmg",
         f"Pulsara-{version}-linux-amd64.deb",
         f"Pulsara-{version}-linux-arm64.deb",
+        f"Pulsara-{version}-windows-x64.exe",
     )
 
 
@@ -62,7 +63,7 @@ def assemble(root: Path, artifacts: Path, output: Path, tag: str, repository: st
     expected = installer_names(version)
     files = [path for path in artifacts.rglob("*") if path.is_file()]
     if sorted(path.name for path in files) != sorted(expected):
-        raise ValueError("Expected exactly one DMG and two deb installers for this tag")
+        raise ValueError("Expected exactly one DMG, two deb installers and one Windows installer for this tag")
     output.mkdir(parents=True, exist_ok=True)
     for path in files:
         if path.is_symlink() or path.stat().st_size == 0:
@@ -71,7 +72,7 @@ def assemble(root: Path, artifacts: Path, output: Path, tag: str, repository: st
     template = (root / "desktop/release-notes.md").read_text()
     downloads = "\n".join(
         f"- [{label}](https://github.com/{repository}/releases/download/{tag}/{name})"
-        for label, name in zip(("macOS 15+，Apple Silicon", "Ubuntu 24.04，amd64", "Ubuntu 24.04，arm64"), expected)
+        for label, name in zip(("macOS 15+，Apple Silicon", "Ubuntu，amd64", "Ubuntu，arm64", "Windows 11，x64（已有 WSL2 Ubuntu）"), expected)
     )
     (output / "release-notes.md").write_text(template.replace("{{version}}", version).replace("{{downloads}}", downloads))
     return [output / name for name in expected]

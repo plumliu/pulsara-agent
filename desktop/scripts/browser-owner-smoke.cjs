@@ -2,9 +2,10 @@
 const {app,BrowserWindow}=require('electron');
 const {BrowserOwner}=require('../dist/browser-owner');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
-const output=path.resolve(__dirname,'../../output/playwright/browser-owner-integration');fs.mkdirSync(output,{recursive:true});
+const output=process.env.PULSARA_BROWSER_SMOKE_OUTPUT || path.resolve(__dirname,'../../output/playwright/browser-owner-integration');fs.mkdirSync(output,{recursive:true});
 const profile=fs.mkdtempSync(path.join(os.tmpdir(),'pulsara-owner-test-'));
 app.setPath('userData',profile);app.setPath('sessionData',path.join(profile,'sessions'));
+app.on('window-all-closed',()=>{});
 const report={tests:[],events:[],requests:[],profile,versions:process.versions};let win,owner;const servers=[];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn){const end=Date.now()+10000;while(!fn()){if(Date.now()>end)throw new Error('condition timed out');await sleep(20)}}
@@ -25,10 +26,41 @@ async function main(){
  await test('slow navigation returns immediately and stop is scoped; genuine failure retry works',async()=>{owner.command({instanceId:a.instanceId,kind:'navigate',url:origin+'/hang'});await sleep(100);owner.command({instanceId:a.instanceId,kind:'stop'});await sleep(100);assert.equal(page(a).state.error,null);assert.equal(page(a).state.loading,false);await nav(a,'http://127.0.0.1:1/fail');assert.ok(page(a).state.error);await nav(a,origin+'/');assert.equal(page(a).state.error,null)});
  await test('permission denied; popup forwarded original owner without native child',async()=>{assert.equal(await wc.executeJavaScript('Notification.requestPermission()'),'denied');const count=BrowserWindow.getAllWindows().length;await wc.executeJavaScript(`window.open(${JSON.stringify(origin+'/popup')},'_blank')`,true);await until(()=>report.events.some(e=>e.kind==='popup'));assert.equal(BrowserWindow.getAllWindows().length,count);const e=report.events.find(e=>e.kind==='popup');assert.equal(e.sessionId,'A');assert.equal(e.instanceId,a.instanceId);return e});
  await test('control port blocked for explicit navigation fetch websocket and worker',async()=>{assert.throws(()=>owner.command({instanceId:a.instanceId,kind:'navigate',url:protectedOrigin}));const result=await wc.executeJavaScript(`(async()=>{const u=${JSON.stringify(protectedOrigin)};return {fetch:await fetch(u).then(()=>true,()=>false),ws:await new Promise(r=>{const w=new WebSocket(u.replace('http:','ws:'));w.onerror=()=>r(false);w.onopen=()=>r(true)}),worker:await new Promise(r=>{const w=new Worker('/worker.js');w.onmessage=e=>{w.terminate();r(e.data)};w.postMessage(u)})}})()`);assert.deepEqual(result,{fetch:false,ws:false,worker:'blocked'});assert.equal(report.requests.some(r=>r.protected),false);return result});
+ await test('forget joins an earlier tab close until the actual destroyed event',async()=>{
+  const state=owner.create({sessionId:'join',tabId:'close'});await nav(state,origin+'/');
+  const part=page(state).partition,native=page(state).view.webContents,physicalClose=native.close.bind(native),physicalClear=part.session.clearData.bind(part.session);
+  let requested,cleared=false,destroyed=false,finished=false;native.once('destroyed',()=>{destroyed=true});
+  native.close=options=>{requested=options};
+  part.session.clearData=async(...args)=>{assert.equal(destroyed,true);assert.equal(native.isDestroyed(),true);cleared=true;return physicalClear(...args)};
+  let first,second;
+  try{
+   owner.close(state.instanceId);assert.equal(owner.pages.has(state.instanceId),false);
+   first=owner.forgetSession('join').then(()=>{finished=true});second=owner.forgetSession('join');
+   await new Promise(resolve=>setImmediate(resolve));
+   assert.ok(requested);assert.equal(finished,false);assert.equal(cleared,false);assert.equal(native.isDestroyed(),false);
+   assert.throws(()=>owner.create({sessionId:'join',tabId:'too-early'}),/仍在关闭/);
+   native.close=physicalClose;physicalClose(requested);
+   await Promise.all([first,second]);
+   assert.equal(destroyed,true);assert.equal(cleared,true);assert.equal(part.contents.size,0);assert.equal(owner.partitions.has('join'),false);
+  }finally{native.close=physicalClose;if(!native.isDestroyed())physicalClose({waitForBeforeUnload:false});await Promise.allSettled([first,second].filter(Boolean));part.session.clearData=physicalClear}
+ });
+ await test('host retirement joins already running forget and other live partitions',async()=>{
+  const host=new BrowserWindow({show:false,webPreferences:{sandbox:true}}),resources=new BrowserOwner(host,()=>protectedOrigin,()=>{});
+  const first=resources.create({sessionId:'retire-first',tabId:'one'}),second=resources.create({sessionId:'retire-second',tabId:'two'});
+  const old=resources.pages.get(first.instanceId).view.webContents,otherPage=resources.pages.get(second.instanceId),other=otherPage.view.webContents,physicalClose=old.close.bind(old),physicalClear=otherPage.partition.session.clearData.bind(otherPage.partition.session);
+  let otherCleared;const joinedOther=new Promise(resolve=>{otherCleared=resolve});otherPage.partition.session.clearData=async(...args)=>{await physicalClear(...args);otherCleared()};
+  let requested,finished=false;old.close=options=>{requested=options};resources.close(first.instanceId);
+  const forgetting=resources.forgetSession('retire-first'),retiring=resources.retireHost().then(()=>{finished=true});
+  try{
+   await joinedOther;await new Promise(resolve=>setImmediate(resolve));assert.equal(finished,false);assert.throws(()=>resources.create({sessionId:'late',tabId:'late'}));
+   old.close=physicalClose;physicalClose(requested);await Promise.all([forgetting,retiring]);
+   assert.equal(old.isDestroyed(),true);assert.equal(other.isDestroyed(),true);assert.equal(resources.pages.size,0);assert.equal(resources.partitions.size,0);
+  }finally{old.close=physicalClose;if(!old.isDestroyed())physicalClose({waitForBeforeUnload:false});await Promise.allSettled([forgetting,retiring]);otherPage.partition.session.clearData=physicalClear;host.destroy()}
+ });
  await test('retire tabless partition rejects pending worker then new same-session partition is fresh',async()=>{await wc.executeJavaScript(`(async()=>{await navigator.serviceWorker.register('/sw.js');const reg=await navigator.serviceWorker.ready;reg.active.postMessage(${JSON.stringify(origin+'/late-worker')})})()`);const old=page(a).partition;owner.close(a.instanceId);await until(()=>wc.isDestroyed());await owner.forgetSession('A');assert.equal(old.retired,true);const fresh=owner.create({sessionId:'A',tabId:'fresh'});assert.notEqual(page(fresh).partition,old);await nav(fresh,origin+'/');assert.equal(await page(fresh).view.webContents.executeJavaScript('localStorage.value'),undefined);await sleep(400);assert.equal(report.requests.some(r=>r.url==='/late-worker'),false)});
  await test('crash destroys native resource and sends retained error state',async()=>{const s=owner.create({sessionId:'crash',tabId:'crash'});await nav(s,origin+'/');const wc=page(s).view.webContents;wc.forcefullyCrashRenderer();await until(()=>report.events.some(e=>e.kind==='state'&&e.state.instanceId===s.instanceId&&e.state.crashed));assert.equal(owner.pages.has(s.instanceId),false);assert.equal(wc.isDestroyed(),true)});
- await test('host reload retires every partition including tabless owners',async()=>{const parts=[...owner.partitions.values()];await win.loadURL('data:text/html,reloaded');await until(()=>owner.pages.size===0);assert.ok(parts.every(p=>p.retired));assert.equal(owner.partitions.size,0);assert.throws(()=>owner.create({sessionId:'late',tabId:'late'}));});
- await test('destroying host window closes its separately owned WebContents',async()=>{const other=new BrowserWindow({show:false,webPreferences:{sandbox:true}});const resources=new BrowserOwner(other,()=>protectedOrigin,()=>{});const s=resources.create({sessionId:'destroy',tabId:'destroy'});const native=resources.pages.get(s.instanceId).view.webContents;other.destroy();await until(()=>native.isDestroyed());assert.equal(resources.pages.size,0);assert.equal(resources.partitions.size,0)});
+ await test('host reload retires every partition including tabless owners',async()=>{const parts=[...owner.partitions.values()];await win.loadURL('data:text/html,reloaded');await owner.retireHost();assert.ok(parts.every(p=>p.retired));assert.equal(owner.partitions.size,0);assert.throws(()=>owner.create({sessionId:'late',tabId:'late'}));});
+ await test('destroying host window closes its separately owned WebContents',async()=>{const other=new BrowserWindow({show:false,webPreferences:{sandbox:true}});const resources=new BrowserOwner(other,()=>protectedOrigin,()=>{});const s=resources.create({sessionId:'destroy',tabId:'destroy'});const native=resources.pages.get(s.instanceId).view.webContents;other.destroy();await resources.retireHost();assert.equal(native.isDestroyed(),true);assert.equal(resources.pages.size,0);assert.equal(resources.partitions.size,0)});
 
 }
-app.whenReady().then(main).catch(e=>{report.fatal=e.stack;console.error(e)}).finally(async()=>{await owner?.clear();win?.destroy();for(const s of servers){s.closeAllConnections();s.close()}report.summary={passed:report.tests.filter(t=>t.pass).length,failed:report.tests.filter(t=>!t.pass).length};fs.writeFileSync(path.join(output,'results.json'),JSON.stringify(report,null,2));console.log(report.summary);fs.rmSync(profile,{recursive:true,force:true});app.exit(report.fatal||report.summary.failed?1:0)});
+app.whenReady().then(main).catch(e=>{report.fatal=e.stack;console.error(e)}).finally(async()=>{await owner?.retireHost();if(win&&!win.isDestroyed()){const destroyed=new Promise(resolve=>win.webContents.once('destroyed',resolve));win.destroy();await destroyed}await Promise.all(servers.map(s=>new Promise(resolve=>{s.closeAllConnections();s.close(resolve)})));report.profileCleanup='Idle profile retained after Electron exit; removing an in-use native profile is not resource join.';report.summary={passed:report.tests.filter(t=>t.pass).length,failed:report.tests.filter(t=>!t.pass).length};fs.writeFileSync(path.join(output,'results.json'),JSON.stringify(report,null,2));console.log(report.summary);app.exit(report.fatal||report.summary.failed?1:0)});

@@ -1,6 +1,7 @@
 import { Archive, ChevronRight, Ellipsis, Pencil, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
+import { desktopHost } from '../lib/desktop-host';
 import { BrandMark } from './brand-mark';
 import {
   getSessionPresence,
@@ -155,6 +156,7 @@ export function SessionSidebar({
   canCreateSession,
   onOpenSearch,
 }: SessionSidebarProps) {
+  const shortcutModifier = desktopHost()?.platform === 'darwin' ? '⌘' : 'Ctrl';
   const sidebarRef = useRef<HTMLElement>(null);
   const [scrollbarNearby, setScrollbarNearby] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
@@ -274,13 +276,13 @@ export function SessionSidebar({
         <button className="sidebar-search" onClick={onOpenSearch}>
           <Search size={14} />
           <span>搜索会话</span>
-          <kbd>⌘ K</kbd>
+          <kbd>{shortcutModifier} K</kbd>
         </button>
 
         <button className="new-session" disabled={!canCreateSession || creatingGroup !== null} onClick={onNewSession}>
           <Plus size={14} />
           <span>新建会话</span>
-          <kbd>⌘ N</kbd>
+          <kbd>{shortcutModifier} N</kbd>
         </button>
 
         <section className="session-list" aria-label="会话目录">

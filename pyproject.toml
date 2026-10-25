@@ -1,11 +1,12 @@
 [project]
 name = "pulsara-agent"
-version = "0.1.0a6"
+version = "0.1.1a1"
 description = "Pulsara canonical conversation-kernel agent runtime."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.12,<4",
+    "cryptography>=50,<51",
     "httpx>=0.28.1,<1",
     "jsonschema>=4.26,<5",
     "referencing>=0.37,<1",

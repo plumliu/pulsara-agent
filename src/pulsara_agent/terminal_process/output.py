@@ -763,7 +763,11 @@ class TerminalOutputOwner:
                 if remaining is not None and remaining <= 0:
                     break
                 self._condition.wait(remaining)
-            return self._revision
+        # Revision publication precedes the out-of-lock Host retention callback.
+        # A waiter must settle that same policy before exposing its observation.
+        if self._retained_bytes_changed is not None:
+            self._retained_bytes_changed(self)
+        return self.output_revision
 
     def _cursor(self, offset: int) -> TerminalOutputCursor:
         return TerminalOutputCursor(

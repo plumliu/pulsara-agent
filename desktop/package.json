@@ -2,7 +2,7 @@
   "name": "pulsara-desktop",
   "productName": "Pulsara",
   "desktopName": "pulsara-desktop.desktop",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.1-alpha.1",
   "description": "Pulsara local agent workbench",
   "author": "Pulsara",
   "private": true,
@@ -43,17 +43,9 @@
       "assets/**",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "resources",
-        "to": "."
-      },
-      {
-        "from": "scripts/pulsara-cli.sh",
-        "to": "bin/pulsara"
-      }
-    ],
+    "beforePack": "scripts/windows-package.cjs",
     "mac": {
+      "extraResources": [{"from":"resources","to":"."},{"from":"scripts/pulsara-cli.sh","to":"bin/pulsara"}],
       "target": [
         {
           "target": "dmg",
@@ -69,6 +61,7 @@
       "artifactName": "Pulsara-${version}-macos-${arch}.${ext}"
     },
     "linux": {
+      "extraResources": [{"from":"resources","to":"."},{"from":"scripts/pulsara-cli.sh","to":"bin/pulsara"}],
       "syncDesktopName": true,
       "target": [
         "deb"
@@ -82,6 +75,21 @@
         }
       },
       "executableName": "pulsara-desktop"
+    },
+    "win": {
+      "target": [{"target":"nsis","arch":["x64"]}],
+      "icon": "assets/pulsara.png",
+      "requestedExecutionLevel": "asInvoker",
+      "artifactName": "Pulsara-${version}-windows-x64.${ext}",
+      "extraResources": [{"from":"resources/wsl-payload","to":"wsl-payload"},{"from":"resources/windows-interop","to":"windows-interop"}]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "native/windows-installer.nsh"
     },
     "deb": {
       "afterInstall": "build/linux-after-install.sh",

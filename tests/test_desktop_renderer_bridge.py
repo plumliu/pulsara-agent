@@ -50,6 +50,9 @@ def test_pr03_background_reads_use_attached_protocol_requests() -> None:
 
 
 class _Sessions:
+    def host_writer_unavailable(self, host_session_id: str) -> bool:
+        return False
+
     async def resume_session(self, session_id: str) -> SimpleNamespace:
         return SimpleNamespace(
             session_id=session_id,
@@ -65,6 +68,7 @@ class _RuntimeConnection:
         type(self).next_id += 1
         self.connection_id = f"connection:{type(self).next_id}"
         self.session_id = session_id
+        self.host_session_id = derive_id("host", "test-fixture", f"host:{session_id}")
         self.generation = generation
         self.role = role
         self.closed = False
@@ -764,6 +768,7 @@ class _RuntimeReopenConnection:
     def __init__(self, connection_id: str, session_id: str, *, fail: bool = False):
         self.connection_id = connection_id
         self.session_id = session_id
+        self.host_session_id = derive_id("host", "test-fixture", f"host:{session_id}")
         self.fail = fail
         self.role = "controller"
         self.generation = 1
@@ -1177,3 +1182,131 @@ def test_browser_observe_accepts_exact_decimal_wire_cursor(sequence):
         assert request.after_event_sequence == int(sequence)
         assert request.maximum_events == 128
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("cancel_first_waiter", [False, True])
+def test_lost_writer_resume_joins_old_close_once_before_cold_open(tmp_path, cancel_first_waiter):
+    async def scenario():
+        old = _RuntimeReopenHost('session:gsikvbdgycchganur2wnjscrg4', 'host:fnej7unuravnczew6u2aj3yev4')
+        old.writer_unavailable = True
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def close(host_id):
+            core.closed_host_ids.append(host_id)
+            entered.set()
+            await release.wait()
+        core.close_session = close
+        first = asyncio.create_task(controller.resume_session(old.session_id))
+        await entered.wait()
+        second = asyncio.create_task(controller.resume_session(old.session_id))
+        await asyncio.sleep(0)
+        assert core.resume_count == 0
+        assert old.session_id in controller._operations
+        if cancel_first_waiter:
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        release.set()
+        resumed = await second
+        if not cancel_first_waiter:
+            assert await first is resumed
+        assert core.closed_host_ids == [old.host_session_id]
+        assert core.resume_count == 1
+        assert controller._by_session[old.session_id] is resumed
+        assert old.host_session_id not in controller._by_host
+        assert old.session_id not in controller._operations
+    asyncio.run(scenario())
+
+
+def test_lost_writer_physical_close_failure_keeps_original_quarantine(tmp_path):
+    async def scenario():
+        old = _RuntimeReopenHost('session:gsikvbdgycchganur2wnjscrg4', 'host:fnej7unuravnczew6u2aj3yev4')
+        old.writer_unavailable = True
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        failure = OSError('physical scope join failed with synthetic-secret-value')
+        async def close(host_id):
+            core.closed_host_ids.append(host_id)
+            raise failure
+        core.close_session = close
+        for _ in range(2):
+            with pytest.raises(SessionControlRejected) as caught:
+                await controller.resume_session(old.session_id)
+            assert caught.value.public_code == 'SESSION_RECOVERY_CLOSE_FAILED'
+            assert caught.value.__cause__ is failure
+            assert 'synthetic-secret-value' not in str(caught.value)
+            assert 'synthetic-secret-value' in str(caught.value.__cause__)
+        assert core.resume_count == 0
+        assert core.closed_host_ids == [old.host_session_id]
+        assert controller._operations[old.session_id].cause is failure
+    asyncio.run(scenario())
+
+
+def test_writer_recovery_does_not_cold_open_after_controller_close_started(tmp_path):
+    from pulsara_agent.conversation_kernel.host import KernelHostCoreClosing
+
+    async def scenario():
+        old = _RuntimeReopenHost('session:gsikvbdgycchganur2wnjscrg4', 'host:fnej7unuravnczew6u2aj3yev4')
+        old.writer_unavailable = True
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def close(host_id):
+            core.closed_host_ids.append(host_id)
+            entered.set()
+            await release.wait()
+        core.close_session = close
+        resuming = asyncio.create_task(controller.resume_session(old.session_id))
+        await entered.wait()
+        closing = asyncio.create_task(controller.aclose())
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(KernelHostCoreClosing):
+            await resuming
+        await closing
+        assert core.closed_host_ids == [old.host_session_id]
+        assert core.resume_count == 0
+        assert controller._by_session == controller._by_host == controller._operations == {}
+    asyncio.run(scenario())
+
+
+def test_browser_lost_writer_interrupts_observation_without_cold_open(tmp_path):
+    async def scenario():
+        old = _RuntimeReopenHost('session:gsikvbdgycchganur2wnjscrg4', 'host:fnej7unuravnczew6u2aj3yev4')
+        old.writer_unavailable = True
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        bridge = RendererBridge(sessions=controller, protocol_server=cast(object, None))
+        connection = SimpleNamespace(connection_id='browser', session_id=old.session_id,
+            host_session_id=old.host_session_id, is_open=True)
+        bridge._connections['browser'] = connection
+        with pytest.raises(ProtocolBridgeError) as caught:
+            await bridge.observe('browser', {})
+        assert caught.value.code == 'SESSION_WRITER_UNAVAILABLE'
+        assert core.closed_host_ids == [] and core.resume_count == 0
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('scrub_available', [True, False])
+def test_recovery_http_details_use_existing_credential_scrub_boundary(scrub_available):
+    from unittest.mock import AsyncMock
+    from pulsara_agent.desktop_app.http_server import HttpPublicError
+    from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+
+    async def scenario():
+        secret = 'synthetic-secret-value'
+        cause = OSError(f'physical scope join failed: {secret}')
+        rejection = SessionControlRejected('SESSION_RECOVERY_CLOSE_FAILED', '连接恢复未完成。')
+        rejection.__cause__ = cause
+        scrub = ProcessCredentialScrubSet()
+        scrub.observe(secret)
+        server = object.__new__(LocalHttpServer)
+        server._json_body = AsyncMock(return_value={'browser_instance_id': derive_id('transport', 'test-fixture', 'browser')})
+        server.bridge = SimpleNamespace(connect=AsyncMock(side_effect=rejection))
+        server.sessions = SimpleNamespace(_capture_capability_notice_scrub=AsyncMock(return_value=scrub if scrub_available else None))
+        with pytest.raises(HttpPublicError) as caught:
+            await server._connect(SimpleNamespace(match_info={'session_id':'session:gsikvbdgycchganur2wnjscrg4'}))
+        assert secret not in str(caught.value)
+        assert caught.value.retryable is False
+        assert ('physical scope join failed' in str(caught.value)) is scrub_available
+        assert caught.value.__cause__ is rejection
+        assert rejection.__cause__ is cause
+    asyncio.run(scenario())

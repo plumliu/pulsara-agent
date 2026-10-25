@@ -29,6 +29,7 @@ def _session(supervisor):
     port = object.__new__(DirectKernelToolPort)
     port._mcp_supervisor = supervisor
     session = object.__new__(KernelHostSession)
+    session._writer_renewal_failure = None
     session._closing = False
     session._tools = port
     session._capabilities = SimpleNamespace(

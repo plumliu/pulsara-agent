@@ -16,7 +16,20 @@ async function within(promise, message) {
   } finally { clearTimeout(timer); }
 }
 function coverView() { return host.contentView.children.find(child => child.webContents !== host.webContents); }
-async function fadeStarted(contents) {
+async function fadeStarted(contents, stage) {
+  // On macOS, showInactive() can leave an occluded renderer hidden. A fade is
+  // only required for a visible page; establish that premise before observing it.
+  host.show();
+  host.focus();
+  await within(contents.executeJavaScript(`new Promise(resolve => {
+    const visible = () => {
+      if (document.hidden) return;
+      document.removeEventListener('visibilitychange', visible);
+      resolve();
+    };
+    document.addEventListener('visibilitychange', visible);
+    visible();
+  })`), `${stage}: fade requires a visible renderer`);
   await contents.executeJavaScript(`(() => {
     const animate = document.body.animate.bind(document.body);
     document.body.animate = (...args) => {
@@ -51,6 +64,7 @@ app.whenReady().then(async () => {
   const view = host.contentView.children.find(child => child.webContents !== host.webContents);
   assert.ok(view);
   const contents = view.webContents;
+  assert.equal(await contents.executeJavaScript('document.getElementById("window-controls").hidden'), process.platform !== 'linux');
   await contents.executeJavaScript('window.startupIdentity = "original-startup-page"');
   for (const stage of ['loading workbench', 'reading preferences', 'connecting session']) {
     await host.loadURL(`data:text/html,<h1>${stage}</h1>`);
@@ -89,7 +103,7 @@ app.whenReady().then(async () => {
     await cover.show();
     const pendingView = coverView();
     const pendingContents = pendingView.webContents;
-    const { started } = await fadeStarted(pendingContents);
+    const { started } = await fadeStarted(pendingContents, transition);
     const ready = host.webContents.executeJavaScript(`(() => {
       document.getElementById('root').inert = true;
       return Promise.all([window.pulsaraDesktop.startupSettled(), window.pulsaraDesktop.startupSettled()]).then(() => {
@@ -112,12 +126,46 @@ app.whenReady().then(async () => {
     assert.equal(host.contentView.children.includes(pendingView), false);
     if (replacement) {
       assert.equal(coverView(), replacement, 'old fade must not remove its replacement');
-      assert.equal(await replacement.webContents.executeJavaScript('document.getElementById("status").textContent'), 'replacement error');
+      assert.equal(await replacement.webContents.executeJavaScript('document.getElementById("status").textContent'), '工作台连接未完成');
+      assert.equal(await replacement.webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), 'replacement error');
       host.hide();
       await cover.finish();
     }
     console.log(`PASS: ${transition} settles startup IPC and releases the renderer interaction gate`);
   }
+
+  // A hidden cover legitimately skips the fade but must still settle the same
+  // preload -> IPC interaction gate and physically destroy its own contents.
+  host.hide();
+  await cover.show();
+  const hiddenView = coverView();
+  const hiddenContents = hiddenView.webContents;
+  assert.equal(host.isVisible(), false);
+  await within(hiddenContents.executeJavaScript(`new Promise(resolve => {
+    const hidden = () => {
+      if (!document.hidden) return;
+      document.removeEventListener('visibilitychange', hidden);
+      resolve();
+    };
+    document.addEventListener('visibilitychange', hidden);
+    hidden();
+  })`), 'hidden: renderer never became hidden');
+  await hiddenContents.executeJavaScript(`(() => {
+    document.body.animate = () => {
+      throw new Error('A hidden startup cover must not animate');
+    };
+  })()`);
+  const hiddenReady = host.webContents.executeJavaScript(`(() => {
+    document.getElementById('root').inert = true;
+    return window.pulsaraDesktop.startupSettled().then(() => {
+      document.getElementById('root').inert = false;
+    });
+  })()`);
+  await within(hiddenReady, 'hidden: startup IPC remained blocked');
+  assert.equal(await host.webContents.executeJavaScript('document.getElementById("root").inert'), false);
+  assert.equal(hiddenContents.isDestroyed(), true);
+  assert.equal(host.contentView.children.includes(hiddenView), false);
+  console.log('PASS: hidden startup skips animation and releases the renderer interaction gate');
 
   // Electron can clear view.webContents before the cover owner disposes the view.
   await cover.show();
@@ -128,14 +176,31 @@ app.whenReady().then(async () => {
   await earlyClosed;
   assert.equal(earlyDestroyed.webContents, undefined);
   await cover.finish();
+  // Competing show/retire requests can overlap native contents destruction.
+  await Promise.all([cover.show('superseded status'), cover.show('current status')]);
+  assert.equal(host.contentView.children.filter(child => child.webContents !== host.webContents).length, 1);
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), 'current status');
+  const superseded = cover.show('must not survive retirement');
+  await cover.retire();
+  await superseded;
+  assert.equal(host.contentView.children.filter(child => child.webContents !== host.webContents).length, 0);
+  await cover.show('退出尚未完成：StaleHostWriter: host writer generation is stale');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("status").textContent'), '退出尚未完成');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), '退出尚未完成：StaleHostWriter: host writer generation is stale');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-details").open'), false);
+  await cover.show('PostgreSQL instance identity mismatch');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("status").textContent'), '工作台连接未完成');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), 'PostgreSQL instance identity mismatch');
+  assert.equal(await coverView().webContents.executeJavaScript('document.querySelector(".hint")'), null);
   await cover.show('fixture startup failure');
   const failure = host.contentView.children.find(child => child.webContents !== host.webContents);
   const failureContents = failure.webContents;
   assert.equal(await failureContents.executeJavaScript('document.getElementById("actions").hidden'), false);
-  assert.equal(await failureContents.executeJavaScript('document.getElementById("status").textContent'), 'fixture startup failure');
+  assert.equal(await failureContents.executeJavaScript('document.getElementById("status").textContent'), '工作台连接未完成');
+  assert.deepEqual(await failureContents.executeJavaScript(`({text:document.getElementById('error-detail-text').textContent,open:document.getElementById('error-details').open,hidden:document.getElementById('error-details').hidden})`), {text:'fixture startup failure',open:false,hidden:false});
   const failureDestroyed = once(failureContents, 'destroyed');
   host.showInactive();
-  const { started: closingStarted } = await fadeStarted(failureContents);
+  const { started: closingStarted } = await fadeStarted(failureContents, 'closing');
   const closing = cover.finish();
   await within(closingStarted, 'closing: fade never started');
   host.destroy();

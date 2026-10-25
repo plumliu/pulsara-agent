@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from typing import Awaitable, Callable
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.model_catalog import (
@@ -75,6 +76,9 @@ class DesktopApplication:
         catalog: ModelCatalogOwner | None = None,
         model_runtime: ModelRuntime | None = None,
         core: KernelHostCore | None = None,
+        open_browser: Callable[[str], Awaitable[None]] | None = None,
+        host: dict[str, str] | None = None,
+        tls_identity=None,
     ) -> None:
         if not 0 <= port <= 65535:
             raise ValueError("desktop HTTP port is out of bounds")
@@ -88,7 +92,16 @@ class DesktopApplication:
         self.active_skill_names = active_skill_names
         self.requested_port = port
         self.static_root = (static_root or packaged_static_root()).resolve()
-        self.core = core or KernelHostCore.production(model_runtime=self.model_runtime)
+        self.host = host
+        self.tls_identity = tls_identity
+        self.workspace_directories = None
+        if host is not None:
+            from pulsara_agent.desktop_app.workspace_directories import WorkspaceDirectories
+            self.workspace_directories = WorkspaceDirectories()
+        self.core = core or KernelHostCore.production(
+            model_runtime=self.model_runtime, open_browser=open_browser,
+            workspace_validator=(lambda path: self.workspace_directories.select(str(path))) if self.workspace_directories is not None else None,
+        )
         self.sessions = LocalSessionController(
             core=self.core,
             memory_domain_id=memory_domain_id,
@@ -172,6 +185,9 @@ class DesktopApplication:
                     refresh_database_state=self.refresh_database_state,
                     reset_postgres=self.reset_postgres,
                     model_catalog_loading=lambda: self.model_catalog_loading,
+                    host=self.host,
+                    ssl_context=self.tls_identity.context if self.tls_identity is not None else None,
+                    workspace_directories=self.workspace_directories,
                 )
                 await http.start()
                 self.http = http

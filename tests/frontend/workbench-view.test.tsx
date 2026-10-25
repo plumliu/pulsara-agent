@@ -1358,6 +1358,25 @@ describe('workbench file drop boundary', () => {
   const transfer = (files: File[] = []) => ({ types: ['Files'], files, items: [], getData: () => '', dropEffect: 'none', effectAllowed: 'all' });
   const importFile = async (_session: string, files: readonly File[]) => ({ path: `/tmp/imports/${files[0].name}`, name: files[0].name, bytes: files[0].size });
 
+  it('Windows file selection keeps the browser File input mounted and imports bytes through the original owner', async () => {
+    const chooseFiles = vi.fn();
+    window.pulsaraDesktop = {platform:'win32', chooseFiles, pathForFile:() => ''} as unknown as PulsaraDesktop;
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    render(<WorkbenchView {...props()} />);
+    fireEvent.click(screen.getByRole('button', {name:'添加文件、技能或规划'}));
+    fireEvent.click(screen.getByRole('button', {name:'添加文件'}));
+    expect(screen.queryByRole('button', {name:'添加文件'})).toBeNull();
+    const input = screen.getByLabelText('从 Windows 添加文件');
+    const file = new File(['abc'], '中文附件.bin');
+    fireEvent.change(input, {target:{files:[file]}});
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+    await waitFor(() => expect(promptDraftStore.summary('session-one').pendingFiles).toBe(0));
+    expect(chooseFiles).not.toHaveBeenCalled();
+    expect(upload.mock.calls[0][1][0]).toBe(file);
+    expect(promptDraftStore.summary('session-one').text).toContain('/tmp/imports/中文附件.bin');
+  });
+
   it.each([
     { insideEditor: false, mixed: false }, { insideEditor: true, mixed: false },
     { insideEditor: false, mixed: true }, { insideEditor: true, mixed: true },

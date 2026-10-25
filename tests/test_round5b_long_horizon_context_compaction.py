@@ -194,6 +194,7 @@ def _wire_quote(
 
 def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> None:
     host = object.__new__(KernelHostSession)
+    host._writer_renewal_failure = None
     host._scheduled_tasks = None
     host._manual_compaction_command_attempts = {}
     host._compaction = HostCompactionRuntimeOwner()
@@ -1958,6 +1959,7 @@ def test_round5b_resource_headroom_exact_boundaries() -> None:
 @pytest.mark.parametrize("force", [False, True])
 def test_round5b_empty_session_manual_compaction_never_starts_summary(force: bool) -> None:
     host = object.__new__(KernelHostSession)
+    host._writer_renewal_failure = None
     host._scheduled_tasks = None
     host._lock = asyncio.Lock()
     host._closing = False
@@ -1988,8 +1990,10 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
         policy=ResolvedCompactionPolicy(automatic_enabled=False)
     )
     host = object.__new__(KernelHostSession)
+    host._writer_renewal_failure = None
     host._scheduled_tasks = None
     host.session_id = 'session:336wrfwkamrr3up6kjtsgvgcte'
+    host._ephemeral = SimpleNamespace(invalidate=lambda: None)
     host._lock = asyncio.Lock()
     host._closing = False
     host._pending_root_successor = None

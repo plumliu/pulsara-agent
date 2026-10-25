@@ -57,6 +57,7 @@ export type {
 } from './prompt-content';
 
 export interface RuntimeBootstrap {
+  host?: {platform:'win32'; executionDomain:'wsl'; distribution:string; user:string};
   application: { name: string; version: string; transport: string };
   protocol: { major: number; minor: number };
   runtime: { status: string; origin: string; database_state: DatabaseDataPlaneState };
@@ -2231,6 +2232,20 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const host = desktopHost();
     if (!host) throw new Error('请从 Pulsara 桌面应用选择目录。');
+    if (host.platform === 'win32') {
+      const {pickLinuxWorkspaceDirectory} = await import('../components/workspace-directory-picker');
+      return pickLinuxWorkspaceDirectory({
+        chooseNative: () => host.chooseWorkspaceDirectory(),
+        list: (path, cursor, requestSignal) => {
+          const query = new URLSearchParams();
+          if (path !== undefined) query.set('path', path);
+          if (cursor !== null) query.set('cursor', cursor);
+          return apiRequest(`/api/workspace-directories?${query}`, {signal: requestSignal});
+        },
+        create: (path, name, requestSignal) => apiRequest('/api/workspace-directories', {method:'POST', body:JSON.stringify({path, name}), signal:requestSignal}),
+        select: (path, requestSignal) => apiRequest('/api/workspace-directories/select', {method:'POST', body:JSON.stringify({path}), signal:requestSignal}),
+      }, signal);
+    }
     const path = await host.chooseDirectory();
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     return path;

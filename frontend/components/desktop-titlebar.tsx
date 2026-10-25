@@ -7,7 +7,7 @@ export function DesktopTitlebar({ title, workbench = false, onToggleSidebar, onT
   </header>;
 }
 
-/** Window controls belong to the shell, outside session-scoped drag regions. */
+/** Linux controls belong to the shell; Windows and macOS use native controls. */
 export function DesktopWindowControls() {
   const host = desktopHost();
   if (host?.platform !== 'linux') return null;

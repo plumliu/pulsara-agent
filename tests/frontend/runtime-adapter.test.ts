@@ -2,6 +2,7 @@ import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { webcrypto } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import {
   createUserControlCommandRef,
   LocalHttpRuntimeAdapter,
@@ -90,16 +91,76 @@ it('bootstraps the app without assigning a working directory', async () => {
   expect(fetchMock).toHaveBeenCalledWith('/api/app/bootstrap', expect.any(Object));
 });
 
-it('requests a native directory selection and distinguishes cancellation', async () => {
+it('keeps the macOS native directory picker and distinguishes cancellation without Linux directory requests', async () => {
   const fetchMock = vi.fn();
-  const chooseDirectory = vi.fn().mockResolvedValueOnce('/tmp/项目 ').mockResolvedValueOnce(null);
-  window.pulsaraDesktop = { chooseDirectory } as unknown as PulsaraDesktop;
+  const selected = "/Users/pulsara/中文 项目's ";
+  const chooseDirectory = vi.fn().mockResolvedValueOnce(selected).mockResolvedValueOnce(null);
+  window.pulsaraDesktop = { platform: 'darwin', chooseDirectory } as unknown as PulsaraDesktop;
   stubRuntimeFetch(fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
   const controller = new AbortController();
-  expect(await adapter.pickWorkspaceDirectory(controller.signal)).toBe('/tmp/项目 ');
+  expect(await adapter.pickWorkspaceDirectory(controller.signal)).toBe(selected);
   expect(chooseDirectory).toHaveBeenCalledExactlyOnceWith();
   expect(await adapter.pickWorkspaceDirectory()).toBeNull();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('Windows native browse flows through the user-level directory API before final selection', async () => {
+  const root = '/home/user', chosen = `${root}/中文 项目`;
+  const chooseWorkspaceDirectory = vi.fn(async () => ({path:'\\\\wsl.localhost\\Ubuntu\\home\\user\\中文 项目',linuxPath:chosen}));
+  window.pulsaraDesktop = {platform:'win32',chooseWorkspaceDirectory} as unknown as PulsaraDesktop;
+  const originalShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'showModal');
+  Object.defineProperty(HTMLDialogElement.prototype,'showModal',{configurable:true,value:function (this: HTMLDialogElement) {this.open = true;}});
+  const controller = new AbortController();
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input),'http://localhost');
+    if (url.pathname.endsWith('/select')) return new Response(String(init?.body),{status:200});
+    const path = url.searchParams.get('path') ?? root;
+    return new Response(JSON.stringify({root,path,parent:path===root?null:root,entries:[],next_cursor:null}),{status:200});
+  });
+  stubRuntimeFetch(fetchMock);
+  let picked!: Promise<string | null>;
+  try {
+    await act(async () => {picked = new LocalHttpRuntimeAdapter().pickWorkspaceDirectory(controller.signal);});
+    fireEvent.click(await screen.findByRole('button',{name:'浏览…'}));
+    await waitFor(() => expect(screen.getByRole('status',{name:'所选文件夹'})).toHaveProperty('value',chosen));
+    expect(chooseWorkspaceDirectory).toHaveBeenCalledExactlyOnceWith();
+    expect(fetchMock.mock.calls.map(([url])=>String(url))).toContain('/api/workspace-directories?path=%2Fhome%2Fuser%2F%E4%B8%AD%E6%96%87+%E9%A1%B9%E7%9B%AE');
+    await act(async () => {fireEvent.click(screen.getByRole('button',{name:'选择文件夹'}));});
+    expect(await picked).toBe(chosen);
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/workspace-directories/select',expect.objectContaining({method:'POST',body:JSON.stringify({path:chosen})}));
+  } finally {
+    await act(async () => {controller.abort();});
+    if (originalShowModal) Object.defineProperty(HTMLDialogElement.prototype,'showModal',originalShowModal);
+    else Reflect.deleteProperty(HTMLDialogElement.prototype,'showModal');
+  }
+});
+
+it('does not open the macOS picker when its selection owner was already cancelled', async () => {
+  const fetchMock = vi.fn();
+  const chooseDirectory = vi.fn();
+  window.pulsaraDesktop = { platform: 'darwin', chooseDirectory } as unknown as PulsaraDesktop;
+  stubRuntimeFetch(fetchMock);
+  const controller = new AbortController();
+  controller.abort();
+  await expect(new LocalHttpRuntimeAdapter().pickWorkspaceDirectory(controller.signal))
+    .rejects.toMatchObject({ name: 'AbortError' });
+  expect(chooseDirectory).not.toHaveBeenCalled();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('discards a late macOS native picker result after its selection owner is cancelled', async () => {
+  const fetchMock = vi.fn();
+  let complete!: (path: string) => void;
+  const chooseDirectory = vi.fn(() => new Promise<string>(resolve => { complete = resolve; }));
+  window.pulsaraDesktop = { platform: 'darwin', chooseDirectory } as unknown as PulsaraDesktop;
+  stubRuntimeFetch(fetchMock);
+  const controller = new AbortController();
+  const selection = new LocalHttpRuntimeAdapter().pickWorkspaceDirectory(controller.signal);
+  expect(chooseDirectory).toHaveBeenCalledExactlyOnceWith();
+  controller.abort();
+  complete('/Users/pulsara/late 中文 workspace');
+  await expect(selection).rejects.toMatchObject({ name: 'AbortError' });
   expect(fetchMock).not.toHaveBeenCalled();
 });
 
