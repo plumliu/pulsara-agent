@@ -219,7 +219,7 @@ Linux x64 guest包使用现有Linux private resources和当前pins；Windows仅E
 
 更新为手动发布/安装：先正常Quit、确认原kernel/PG及已支持interop任务按合同结算且无未解决状态，再安装新版本Linux应用资源并验证，最后使用新版本。数据/工程保持；不覆盖运行中的Python/PG/Chromium文件。失败保留原数据与错误，不自动清库、升级/重建发行版或引入双版本运行fallback。旧应用资源只在确无live owner使用且新安装成功后清理；不增加持久更新journal/恢复job。PG major升级须另定数据维护合同；发行版和系统包升级由用户管理，Pulsara检测兼容性变化并报告，不替用户执行dist-upgrade。
 
-普通卸载移除Windows应用入口，**保留用户发行版、Linux settings/DB/workspaces与备份**，界面说明应用资源/数据位置和重新安装复用方式。清理Linux应用资源或应用数据须单独明确范围并确认原owner已正常结算；不得删除整套发行版、整个home或用户其他软件/工程。Pulsara不提供注销共享发行版的卸载动作，不执行`wsl --unregister`。用户自行管理WSL备份，不引入自动checkpoint或恢复authority。
+Windows主动卸载只有两个互斥选项：默认“保留个人数据”，或“彻底卸载”。两者均移除Windows应用及已绑定WSL用户的所有已验证版本运行资源；前者保留Linux settings/DB/workspaces与备份，后者同时删除有效Pulsara Home（包含快速开始文件）及Windows宿主设置、日志。清理复用现有资源安装锁、kernel锁和PG维护锁，确认原owner已正常结算后执行；无法验证或WSL清理失败即中止卸载，不得报告成功。资源已删而Windows清理中断时，可用随包资源重新准备清理入口后重试。electron-builder更新过程不执行此主动卸载清理。不得删除整套发行版、整个用户home或Pulsara Home之外的工程；不执行`wsl --unregister`，不引入自动checkpoint或恢复authority。
 
 NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckAppRunning扩展，替换默认强杀行为。运行/收尾/unknown时等待用户正常Quit、取消或明确失败，不taskkill main/wsl/PG后继续覆盖/卸载。Windows全局控制台CLI不在首版：Linux `pulsara`管理/诊断入口在已选发行版可用，设置页明确展示“WSL内CLI”，不自动改Windows PATH。首版Linux `pulsara app`仍提示从Windows图标启动/聚焦；interop开启本身不实现这条产品接入，不新增反向常驻RPC。现有Linux/macOS平台app入口保持原行为；扩展WSL CLI聚焦能力需另定有限宿主动作合同。
 

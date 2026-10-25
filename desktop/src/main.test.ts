@@ -25,6 +25,7 @@ function fixture(options: {
   stopFailure?: Error;
   wslSelected?: boolean;
   maintenance?: boolean;
+  uninstallMode?: string;
   maintenanceFailure?: Error;
   initialized?: boolean;
   windowDestroyGate?: Promise<void>;
@@ -162,7 +163,10 @@ function fixture(options: {
     Menu: { buildFromTemplate() {}, setApplicationMenu() {} },
   };
   const modules: Record<string, unknown> = {
-    './wsl-maintenance': {async checkInstalledWslMaintenance() { calls.push('maintenance-check'); if (options.maintenanceFailure) throw options.maintenanceFailure; }},
+    './wsl-maintenance': {
+      async checkInstalledWslMaintenance() { calls.push('maintenance-check'); if (options.maintenanceFailure) throw options.maintenanceFailure; },
+      async uninstallWsl(_home: string, _version: string, mode: string) { calls.push(`uninstall:${mode}`); if (options.maintenanceFailure) throw options.maintenanceFailure; },
+    },
     electron,
     'node:fs/promises': { async stat() {
       if (options.desktopState === 'missing') throw new Error('ENOENT');
@@ -213,7 +217,7 @@ function fixture(options: {
   };
   runInNewContext(readFileSync(path.join(__dirname, 'main.js'), 'utf8'), {
     exports: {}, __dirname, console, URL, Error, AbortController,
-    process: { platform: options.platform ?? 'darwin', resourcesPath: options.packagedResources, env: {}, argv:options.maintenance ? ['Pulsara.exe','--pulsara-maintenance-check'] : [] },
+    process: { platform: options.platform ?? 'darwin', resourcesPath: options.packagedResources, env: {}, argv:options.uninstallMode ? ['Pulsara.exe',`--pulsara-uninstall=${options.uninstallMode}`] : options.maintenance ? ['Pulsara.exe','--pulsara-maintenance-check'] : [] },
     require(name: string) { return Object.hasOwn(modules, name) ? modules[name] : require(name); },
   });
   return { composition, host, dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, destroying, handlers, calls, switches, failures, ready: ready! };
@@ -265,6 +269,18 @@ for (const failure of [undefined, new Error('kernel busy')]) {
     await value.ready.catch(() => {});
     await Promise.resolve();
     assert.deepEqual(value.calls, ['maintenance-check', `exit:${failure ? 1 : 0}`]);
+    assert.equal(value.handlers.size, 0);
+    assert.equal(value.composition.runtime, undefined);
+    assert.equal(value.composition.postgres, undefined);
+  });
+}
+
+for (const mode of ['keep', 'all']) for (const failure of [undefined, new Error('cleanup failed')]) {
+  test(`Windows uninstall ${mode} exits without starting the product: ${failure ? 'failed' : 'done'}`, async () => {
+    const value = fixture({platform:'win32', uninstallMode:mode, maintenanceFailure:failure});
+    await value.ready.catch(() => {});
+    await Promise.resolve();
+    assert.deepEqual(value.calls, [`uninstall:${mode}`, `exit:${failure ? 1 : 0}`]);
     assert.equal(value.handlers.size, 0);
     assert.equal(value.composition.runtime, undefined);
     assert.equal(value.composition.postgres, undefined);

@@ -18,7 +18,7 @@ import { WslSetup, loadWslPayload } from './wsl-setup';
 import { createWslPostgresOperations } from './postgres-wsl';
 import { toBackendPath, toWindowsPath } from './backend-paths';
 import { createBackendSession } from './backend-session';
-import { checkInstalledWslMaintenance } from './wsl-maintenance';
+import { checkInstalledWslMaintenance, uninstallWsl } from './wsl-maintenance';
 
 const windowsHost = process.platform === 'win32';
 // Avoid Windows occlusion/capture compositor artifacts while retaining accelerated WebGL and video.
@@ -302,7 +302,12 @@ async function requestQuit() {
   } finally { quittingRequest = false; }
 }
 
-if (windowsHost && process.argv?.includes('--pulsara-maintenance-check')) {
+const uninstallArgument = process.argv?.find(argument => argument.startsWith('--pulsara-uninstall='));
+if (windowsHost && uninstallArgument) {
+  void app.whenReady().then(() => uninstallWsl(app.getPath('userData'), app.getVersion(),
+    uninstallArgument.slice('--pulsara-uninstall='.length), path.resolve(__dirname, '..', 'assets', 'wsl-uninstall.py'), process.resourcesPath))
+    .then(() => app.exit(0), error => { console.error('WSL uninstall failed:', error instanceof Error ? error.message : String(error)); app.exit(1); });
+} else if (windowsHost && process.argv?.includes('--pulsara-maintenance-check')) {
   void app.whenReady().then(() => checkInstalledWslMaintenance(app.getPath('userData'), app.getVersion()))
     .then(() => app.exit(0), error => { console.error('WSL maintenance admission refused:', error instanceof Error ? error.message : String(error)); app.exit(1); });
 } else if (!app.requestSingleInstanceLock()) app.quit();

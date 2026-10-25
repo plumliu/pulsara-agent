@@ -39,7 +39,14 @@ Add a model connection in Settings, then start a quick session or open a project
 
 On Windows, these data paths belong to the Linux user. The Windows app-data directory holds host settings and logs; setting `PULSARA_HOME` in Windows does not select the Linux data home.
 
-Fully quit Pulsara before updating; closing its window leaves it running in the background. On macOS, replace the app in Applications. On Windows, run the new installer. Uninstalling the Windows app preserves Ubuntu, Linux resources and user data. The installer refuses to continue if tasks or database maintenance have not settled.
+Fully quit Pulsara before updating; closing its window leaves it running in the background. On macOS, replace the app in Applications. On Windows, run the new installer. The installer refuses to continue if tasks or database maintenance have not settled.
+
+The Windows uninstaller offers two choices. Both remove the app and its WSL runtime resources:
+
+- **Keep personal data** (default): retain settings, sessions and files.
+- **Uninstall completely**: also delete settings, sessions, the database and quick-start files.
+
+Ubuntu and project folders outside the Pulsara data directory are preserved. If WSL cleanup fails, uninstalling stops so you can retry.
 
 **Upgrading from 0.1.0-alpha.5 or earlier:** the database baseline changed in alpha.6, with no automatic migration from those versions. Back up your data first; retaining old sessions requires a separate migration. Do not delete the entire `~/.pulsara` directory.
 
