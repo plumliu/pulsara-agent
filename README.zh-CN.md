@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://github.com/plumliu/pulsara-agent/releases/latest">下载桌面版</a> &nbsp; | &nbsp;
   <a href="#演示">观看演示</a> &nbsp; | &nbsp;
-  <a href="INSTALL.md">安装说明</a> &nbsp; | &nbsp;
+  <a href="INSTALL.zh-CN.md">安装说明</a> &nbsp; | &nbsp;
   <a href="README.md">English</a>
 </p>
 
@@ -67,26 +67,23 @@ Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持
 
 ## 装好就能开工
 
-[下载最新桌面版](https://github.com/plumliu/pulsara-agent/releases/latest)
+[下载 Pulsara 0.1.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.1)
 
 | 操作系统 | 快捷通道 |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.6/Pulsara-0.1.0-alpha.6-macos-arm64.dmg) |
-| Ubuntu 24.04 (amd64) | [下载 deb 📦](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-amd64.deb) |
-| Ubuntu 24.04 (arm64) | [下载 deb 📦](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-arm64.deb) |
+| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-macos-arm64.dmg) |
+| Windows 11 x64 + WSL2 Ubuntu | [下载 EXE 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-windows-x64.exe) |
 
-> 💡 **Ubuntu 用户贴士**：Ubuntu 用户建议优先按[源码构建指南](DEVELOPMENT.md)构建当前版本。上方保留的 alpha.2 deb 不包含 alpha.6 的最新修复。
+本版不提供 Ubuntu 安装包，原生 Ubuntu 构建见[开发指南](DEVELOPMENT.zh-CN.md)。
 
-1. 安装并打开 Pulsara。macOS 把应用拖进“应用程序”；Ubuntu 从源码构建后安装生成的 deb。
-2. 在设置中添加模型连接，选择提供方、模型和 API 协议，按界面提示填写认证信息或自定义配置。自定义服务填写 Base URL 后即可获取模型列表，有密钥时携带、没有时匿名查询；Model ID 支持搜索选择或手填，获取失败不影响手填和保存。
+1. 安装并打开 Pulsara。macOS 把应用拖进“应用程序”；Windows 运行 EXE，首次启动时选择已有的 WSL2 Ubuntu。尚未安装时，先按 [Microsoft 说明](https://learn.microsoft.com/zh-cn/windows/wsl/install)安装 WSL2 和 Ubuntu。
+2. 在设置中添加模型连接，选择提供方、模型和 API 协议，再填写认证信息。
 3. 开一个快速开始会话，拖进文件，或者直接打开项目目录。把任务交给它。
 
-预设模型目录继续使用 models.dev 的能力信息，保留上下文至少 256,000 tokens 的选择门槛，不按 Claude、Gemini 等模型名称屏蔽。用户自行选择提供方和 API 协议；实际调用仍使用现有协议适配和能力校验。
-
-当前是桌面预览版。macOS 首次打开的系统授权、更新方式与数据位置写在[安装说明](INSTALL.md)里。偏爱终端的话，应用也带了 `pulsara` 命令行入口。
+当前是桌面预览版。macOS 系统授权、Windows 设置、更新方式与数据位置见[安装说明](INSTALL.zh-CN.md)。偏爱终端的话，应用也带了 `pulsara` 命令行入口。
 
 ## 30 秒上手，把脏活累活交出去
 
-欢迎把作品和使用体验带到 [Issues](https://github.com/plumliu/pulsara-agent/issues)，也欢迎提需求、报 Bug。想一起做 Pulsara，可以看[开发指南](DEVELOPMENT.md)和 [Pull requests](https://github.com/plumliu/pulsara-agent/pulls)。
+欢迎把作品和使用体验带到 [Issues](https://github.com/plumliu/pulsara-agent/issues)，也欢迎提需求、报 Bug。想一起做 Pulsara，可以看[开发指南](DEVELOPMENT.zh-CN.md)和 [Pull requests](https://github.com/plumliu/pulsara-agent/pulls)。
 
 如果它对你有帮助，给 Pulsara 点个 Star吧。

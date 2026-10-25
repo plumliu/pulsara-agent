@@ -67,21 +67,20 @@ Save preferences, project constraints, and decisions in memory for later tasks t
 
 ## Install it and get to work
 
-[Download the latest desktop release](https://github.com/plumliu/pulsara-agent/releases/latest)
+[Download Pulsara 0.1.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.1)
 
 | Operating system | Quick download |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.6/Pulsara-0.1.0-alpha.6-macos-arm64.dmg) |
-| Ubuntu 24.04 (amd64) | [Download deb 📦](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-amd64.deb) |
-| Ubuntu 24.04 (arm64) | [Download deb 📦](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.0-alpha.2/Pulsara-0.1.0-alpha.2-linux-arm64.deb) |
+| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-macos-arm64.dmg) |
+| Windows 11 x64 + WSL2 Ubuntu | [Download EXE 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-windows-x64.exe) |
 
-> 💡 **Tip for Ubuntu users:** We recommend [building the current version from source](DEVELOPMENT.md). The alpha.2 deb downloads above do not include the latest alpha.6 fixes.
+No Ubuntu installer is included in this release. For native Ubuntu builds, see the [development guide](DEVELOPMENT.md).
 
-1. Install and open Pulsara. On macOS, drag the app into Applications. On Ubuntu, build from source and install the resulting deb.
+1. Install and open Pulsara. On macOS, drag the app into Applications. On Windows, run the EXE and select your WSL2 Ubuntu on first launch. If needed, [install WSL2 and Ubuntu](https://learn.microsoft.com/windows/wsl/install) first.
 2. Add a model connection in Settings. Choose the provider, model, and API protocol, then follow the prompts for authentication or custom settings.
 3. Start a quick session and drop in files, or open a project directory. Give it the job.
 
-This is a desktop preview. See the [installation notes](INSTALL.md) for the first macOS launch, updates, and data locations. The app also includes a `pulsara` command-line entry if you prefer a terminal.
+This is a desktop preview. See the [installation notes](INSTALL.md) for macOS permissions, Windows setup, updates, and data locations. The app also includes a `pulsara` command-line entry if you prefer a terminal.
 
 ## Get started in 30 seconds and hand off the busywork
 
