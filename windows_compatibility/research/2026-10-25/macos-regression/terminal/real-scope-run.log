@@ -1,0 +1,83 @@
+{
+  "platform": "darwin",
+  "python": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+  "module": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/__init__.py",
+  "status": "passed",
+  "temporary_root": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/native-scope-probe-5chdqsbe",
+  "cases": [
+    {
+      "case": "mcp-root-exit-tail-repeated-close-cancel",
+      "root_pid": 38273,
+      "tail_pid": 38274,
+      "root_exit_before_close": 0,
+      "cancel_requests": 2,
+      "same_close_task_joined": true,
+      "workers_done": true,
+      "group_absent": true,
+      "elapsed": 2.009150290978141
+    },
+    {
+      "case": "hook-natural-observed",
+      "root_pid": 38322,
+      "tail_pid": 38323,
+      "root_returncode": 0,
+      "failure_code": null,
+      "stdout": "NATURAL_TAIL_DONE\n",
+      "stderr": "",
+      "attempt_joined": true,
+      "workers_done": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "case": "hook-natural",
+      "root_pid": 38322,
+      "tail_pid": 38323,
+      "root_exit_before_settlement": 0,
+      "failure_code": null,
+      "stdout": "NATURAL_TAIL_DONE\n",
+      "group_absent": true,
+      "workers_done": true,
+      "permit_restored": true
+    },
+    {
+      "case": "hook-cancel-observed",
+      "root_pid": 38339,
+      "tail_pid": 38341,
+      "root_returncode": 0,
+      "failure_code": "HOOK_CANCELLED",
+      "stdout": "",
+      "stderr": "",
+      "attempt_joined": true,
+      "workers_done": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "case": "hook-cancel",
+      "root_pid": 38339,
+      "tail_pid": 38341,
+      "root_exit_before_settlement": 0,
+      "failure_code": "HOOK_CANCELLED",
+      "stdout": "",
+      "group_absent": true,
+      "workers_done": true,
+      "permit_restored": true
+    }
+  ],
+  "temporary_root_removed": true
+}

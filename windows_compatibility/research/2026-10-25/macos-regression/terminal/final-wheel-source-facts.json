@@ -1,0 +1,10 @@
+{
+  "python": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+  "package": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "hook": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/hooks/executor.py",
+  "mcp": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
+  "root_dispatch": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/provider_dispatch.py",
+  "hook_permission_means_live": true,
+  "mcp_permission_means_live": true,
+  "root_later_head_path": true
+}

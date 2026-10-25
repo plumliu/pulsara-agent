@@ -1,0 +1,20 @@
+{
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "database": "pulsara_test_main_71791_5b349c2b81",
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "physical_close_calls": 1,
+  "actual_renewal_failure": "StaleHostWriter",
+  "old_admission_rejected": true,
+  "session_id": "session:pf23fixbr2sipx7zeovifv25vu",
+  "old_host": "host:wpcbjwgmswydinwulwmzjfcgsy",
+  "new_host": "host:yrnofzdnevklejriinmhp6dpem",
+  "old_generation": 1,
+  "new_generation": 2,
+  "same_concurrent_resume_handle": true,
+  "new_guard_read_succeeded": true,
+  "old_guard_unchanged": true,
+  "old_physical_closed": true,
+  "controller_and_core_closed": true,
+  "status": "passed",
+  "database_dropped": true
+}

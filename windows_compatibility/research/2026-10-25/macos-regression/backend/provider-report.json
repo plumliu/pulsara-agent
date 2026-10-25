@@ -1,0 +1,338 @@
+{
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "executable": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+  "connection_id": "connection:qjdnthf7ygewjmi4ktd4ppbnzq",
+  "model": "openai/gpt-6-luna",
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "scenarios": {
+    "capacity": {
+      "database": "pulsara_test_main_27165_f55d8d05fb",
+      "history_seed": {
+        "bytes": 216280,
+        "segments": 5,
+        "repetitions": 800,
+        "helper": "maintained async canonical admission fixture"
+      },
+      "admission_errors": [
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        },
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        },
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        },
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        }
+      ],
+      "result": {
+        "schema_version": "round10-subagent-dogfood.v1",
+        "completed_at_utc": "2026-10-25T12:18:20.738423+00:00",
+        "connection_id": "connection:qjdnthf7ygewjmi4ktd4ppbnzq",
+        "provider_api": "openai_chat_completions",
+        "provider_model": "openai/gpt-6-luna",
+        "reasoning_effort": null,
+        "scenario": "capacity",
+        "capacity_mcp_compaction": {
+          "passed": true,
+          "status_at_mcp_install": {
+            "cap0": "ACTIVE",
+            "cap1": "ACTIVE",
+            "cap2": "ACTIVE",
+            "cap3": "ACTIVE",
+            "mcp_queued": "PENDING_START"
+          },
+          "mcp_reload_ids": [
+            "child"
+          ],
+          "mcp_state": "READY",
+          "spawn_model_calls": 2,
+          "spawn_tool_calls": 1,
+          "spawn_final_text": "Created the five-task batch: `cap0`–`cap3` are active, and `mcp_queued` is pending start.",
+          "compaction_disposition": "COMPACTED",
+          "compaction_public_code": "COMPACTED",
+          "compaction_snapshot_id": "snapshot:c2yvgsnc35iyco7qzy2cvat4xa",
+          "compaction_internal_failures": [],
+          "runtime_handoff_has_task_board": true,
+          "runtime_handoff_task_keys": [
+            "cap0",
+            "cap1",
+            "cap2",
+            "cap3",
+            "mcp_queued"
+          ],
+          "runtime_handoff_observations": [
+            {
+              "presence": "VALUE",
+              "keys": [
+                "omitted",
+                "subagent_task_counts",
+                "subagent_tasks",
+                "terminal_monitors",
+                "terminal_processes",
+                "todo_counts",
+                "todos"
+              ],
+              "task_keys": [
+                "cap0",
+                "cap1",
+                "cap2",
+                "cap3",
+                "mcp_queued"
+              ]
+            }
+          ],
+          "wait_model_calls": 2,
+          "wait_tool_calls": 1,
+          "wait_final_text": "All five tasks completed successfully:\n\n- `cap0`–`cap3`: each reported `CAPACITY_HOLD_OK`.\n- `mcp_queued`: reported the exact remote result `direct:PRESTART_MCP_MARKER`.",
+          "mcp_child_tool_names": [
+            "mcp__child__direct_echo",
+            "report_agent_result"
+          ],
+          "mcp_child_result_summary": "Called the native MCP tool `mcp__child__direct_echo` exactly once with `PRESTART_MCP_MARKER`. Exact remote result: `direct:PRESTART_MCP_MARKER`.",
+          "final_tasks": [
+            {
+              "task_id": "task:rt6wqezb2s2ikpahely64cwwmq",
+              "task_key": "cap0",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:7kzrqihgyki7npj5kvkf3p5tim",
+              "task_key": "cap1",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:kn6ivd4z25k3l3zes35figlp4e",
+              "task_key": "cap2",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:dinpguhd5fvcelvbqcm76x4zs4",
+              "task_key": "cap3",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:4satryw2t64qi5g76pz35y4av4",
+              "task_key": "mcp_queued",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "Called the native MCP tool `mcp__child__direct_echo` exactly once with `PRESTART_MCP_MARKER`. Exact remote result: `direct:PRESTART_MCP_MARKER`.",
+              "terminal_reason": null
+            }
+          ]
+        },
+        "status": "passed"
+      },
+      "prefix_checks": [
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:rem6q36pcpbjqja3xj37l772y4",
+          "revision": 1,
+          "compared": false,
+          "messages": 16
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:rt6wqezb2s2ikpahely64cwwmq",
+          "epoch": "epoch:5b3ut7q4a2rd3w2zcyxw5q27f4",
+          "revision": 1,
+          "compared": false,
+          "messages": 6
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:7kzrqihgyki7npj5kvkf3p5tim",
+          "epoch": "epoch:xdsfzk6thjrpqciwrbt7ydxdda",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:kn6ivd4z25k3l3zes35figlp4e",
+          "epoch": "epoch:ur3gk5wsmryzfqadvtnbqr6jru",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:dinpguhd5fvcelvbqcm76x4zs4",
+          "epoch": "epoch:bmmcwhqwph3wv3pukjfulfwgmm",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:spvsyln6iwkckkguom3a65eubm",
+          "revision": 2,
+          "compared": false,
+          "messages": 10
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:7kzrqihgyki7npj5kvkf3p5tim",
+          "epoch": "epoch:xdsfzk6thjrpqciwrbt7ydxdda",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:rt6wqezb2s2ikpahely64cwwmq",
+          "epoch": "epoch:5b3ut7q4a2rd3w2zcyxw5q27f4",
+          "revision": 2,
+          "compared": true,
+          "messages": 10
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:dinpguhd5fvcelvbqcm76x4zs4",
+          "epoch": "epoch:bmmcwhqwph3wv3pukjfulfwgmm",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:kn6ivd4z25k3l3zes35figlp4e",
+          "epoch": "epoch:ur3gk5wsmryzfqadvtnbqr6jru",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:7kzrqihgyki7npj5kvkf3p5tim",
+          "epoch": "epoch:xdsfzk6thjrpqciwrbt7ydxdda",
+          "revision": 3,
+          "compared": true,
+          "messages": 14
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:4satryw2t64qi5g76pz35y4av4",
+          "epoch": "epoch:aery7vcwgsbejedezlfgxgot7u",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:4satryw2t64qi5g76pz35y4av4",
+          "epoch": "epoch:aery7vcwgsbejedezlfgxgot7u",
+          "revision": 2,
+          "compared": true,
+          "messages": 10
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:spvsyln6iwkckkguom3a65eubm",
+          "revision": 3,
+          "compared": true,
+          "messages": 16
+        },
+        {
+          "session_id": "session:txgtxjllyjnh3hlr4roykstife",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:spvsyln6iwkckkguom3a65eubm",
+          "revision": 4,
+          "compared": true,
+          "messages": 23
+        }
+      ],
+      "provider_call_count": 16,
+      "status": "passed",
+      "elapsed_seconds": 69.24804729199968,
+      "captured_output": "hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\n",
+      "database_dropped": true
+    },
+    "context": {
+      "database": "pulsara_test_main_27165_51f5c18d68",
+      "canonical_context_gate": {
+        "target": {
+          "turn_id": "turn:smdd6ugjfjqngyuhntwdx6loxu"
+        },
+        "steers": [
+          "PENDING",
+          "PENDING"
+        ]
+      },
+      "prefix_checks": [
+        {
+          "session_id": "session:i3ebeivegsfu7mqhctsdi75bye",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:s3x7k3hiwai535pi56bwawt2vm",
+          "revision": 1,
+          "compared": false,
+          "messages": 8
+        },
+        {
+          "session_id": "session:i3ebeivegsfu7mqhctsdi75bye",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:aze5avwrudi26tsergxd62zkou",
+          "epoch": "epoch:mxfp5v5x4mky7nklknplrfir7i",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:i3ebeivegsfu7mqhctsdi75bye",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:s3x7k3hiwai535pi56bwawt2vm",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        }
+      ],
+      "provider_call_count": 3,
+      "status": "failed",
+      "error_type": "StructuredModelInputCompileError",
+      "error": "structured model input compile failed: CANONICAL_PREFIX_CONFLICT",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 192, in main\n    asyncio.run(scenario(settings, workspace, name, state))\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 164, in scenario\n    state['result'] = await runner._run(settings, workspace, scenario=name,\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/dogfood/run_round10_subagent_dogfood.py\", line 1262, in _run\n    results[\"last_n_and_message\"] = await _run_last_n_and_message(\n                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 149, in context\n    return await original_context(session, workspace)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/dogfood/run_round10_subagent_dogfood.py\", line 726, in _run_last_n_and_message\n    send_result = await session.run_turn(\n                  ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 1956, in run_turn\n    result = await asyncio.shield(task)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2400, in _run_owned_root_task\n    result = await run(intent)\n             ^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2256, in _run_root_turn_chain\n    result = await self._runner.run_turn(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1229, in run_turn\n    return await self._run_turn(\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1402, in _run_turn\n    return await self.run_accepted_turn(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1802, in run_accepted_turn\n    await self._provider_dispatch.activate_prospective_root_input(\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/provider_dispatch.py\", line 2417, in activate_prospective_root_input\n    raise StructuredModelInputCompileError(\npulsara_agent.model_input.contracts.StructuredModelInputCompileError: structured model input compile failed: CANONICAL_PREFIX_CONFLICT\n",
+      "elapsed_seconds": 15.077982540940866,
+      "captured_output": "hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nROOT execution failed (kernel-turn:command:g24ewl4bdkystk4eni4yqesq24)\nTraceback (most recent call last):\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2400, in _run_owned_root_task\n    result = await run(intent)\n             ^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2256, in _run_root_turn_chain\n    result = await self._runner.run_turn(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1229, in run_turn\n    return await self._run_turn(\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1402, in _run_turn\n    return await self.run_accepted_turn(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1802, in run_accepted_turn\n    await self._provider_dispatch.activate_prospective_root_input(\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/provider_dispatch.py\", line 2417, in activate_prospective_root_input\n    raise StructuredModelInputCompileError(\npulsara_agent.model_input.contracts.StructuredModelInputCompileError: structured model input compile failed: CANONICAL_PREFIX_CONFLICT\n",
+      "database_dropped": true
+    }
+  },
+  "status": "failed"
+}

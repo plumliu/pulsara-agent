@@ -2396,6 +2396,29 @@ class ProviderDispatchCoordinator:
         handle: PreparedProviderInputHandle | None = None
         borrow_owned = True
         hook_reservation_owned = hook_reservation is not None
+        planning_owned = True
+
+        def retire_uninstalled() -> None:
+            nonlocal handle, borrow_owned, hook_reservation_owned, planning_owned
+            try:
+                if handle is not None:
+                    owned_handle, handle = handle, None
+                    owned_handle.close()
+            finally:
+                try:
+                    if borrow_owned:
+                        borrow_owned = False
+                        borrow.close()
+                finally:
+                    try:
+                        if hook_reservation_owned and hook_reservation is not None:
+                            hook_reservation_owned = False
+                            hook_reservation.retire()
+                    finally:
+                        if planning_owned:
+                            planning_owned = False
+                            self._continuity.abort_planning(prepared.planning)
+
         try:
             candidate = prepared.admission.candidate
             handle = await self._io.run(
@@ -2410,10 +2433,20 @@ class ProviderDispatchCoordinator:
                 turn_id=candidate.exact_turn_id,
                 deadline_monotonic=deadline,
             )
-            if (
-                actual_read != prepared.admission.canonical_read
-                or actual_binding != candidate.model_call_binding
-            ):
+            if actual_binding != candidate.model_call_binding:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            if actual_read != prepared.admission.canonical_read:
+                if _root_dispatch_read_has_only_later_head(
+                    prepared.admission.canonical_read, actual_read
+                ):
+                    # Acceptance is already durable. A child may have advanced
+                    # the session-wide sequence without changing this ROOT's
+                    # input. Retire only the unpublished measurement and use
+                    # the accepted turn's ordinary prepare, never accept again.
+                    retire_uninstalled()
+                    return None
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
                 )
@@ -2437,14 +2470,7 @@ class ProviderDispatchCoordinator:
                 # ordinary Runner prepare loop so its prospective wire gate and
                 # stale-plan retry run before consuming a steer or publishing a
                 # completion.
-                handle.close()
-                handle = None
-                borrow_owned = False
-                borrow.close()
-                if hook_reservation is not None:
-                    hook_reservation_owned = False
-                    hook_reservation.retire()
-                self._continuity.abort_planning(prepared.planning)
+                retire_uninstalled()
                 return None
             direct_switch_admission = None
             predecessor = self._continuity.current_cohort(prepared.planning.scope)
@@ -2506,17 +2532,7 @@ class ProviderDispatchCoordinator:
             hook_reservation_owned = False
             return dispatch, decision
         except BaseException:
-            if handle is not None:
-                handle.close()
-            try:
-                if borrow_owned:
-                    borrow.close()
-            finally:
-                try:
-                    if hook_reservation_owned and hook_reservation is not None:
-                        hook_reservation.retire()
-                finally:
-                    self._continuity.abort_planning(prepared.planning)
+            retire_uninstalled()
             raise
 
     async def prepare(
@@ -6139,6 +6155,62 @@ def _new_trigger_anchor(item: FrozenProviderInputItem) -> NewTriggerAnchor:
             },
         ),
     )
+
+
+def _root_dispatch_read_has_only_later_head(
+    prepared: FrozenCanonicalProviderDispatchRead,
+    actual: FrozenCanonicalProviderDispatchRead,
+) -> bool:
+    """Recognize only a later global cut over the identical ROOT input.
+
+    Existing DTO constructors validate every derived field while replacing the
+    actual head with the prepared one. Complete equality then covers all other
+    values, including fields added to these DTOs later. This authorizes retiring
+    an unpublished measurement, never installing it or rewriting an epoch.
+    """
+
+    before = prepared.compile_snapshot.canonical_input.identity
+    after = actual.compile_snapshot.canonical_input.identity
+    if (
+        before.conversation_scope_kind is not ModelInputScopeKind.ROOT
+        or after.provider_input_through_sequence
+        <= before.provider_input_through_sequence
+    ):
+        return False
+    try:
+        identity = replace(
+            after,
+            provider_input_through_sequence=before.provider_input_through_sequence,
+            identity_fingerprint=before.identity_fingerprint,
+        )
+        canonical = replace(
+            actual.compile_snapshot.canonical_input,
+            identity=identity,
+            snapshot_fingerprint=(
+                prepared.compile_snapshot.canonical_input.snapshot_fingerprint
+            ),
+        )
+        compile_snapshot = replace(
+            actual.compile_snapshot,
+            canonical_input=canonical,
+            canonical_read_cut_fingerprint=(
+                prepared.compile_snapshot.canonical_read_cut_fingerprint
+            ),
+        )
+        replay = replace(
+            actual.replay_manifest_cut,
+            provider_input_through_sequence=before.provider_input_through_sequence,
+            cut_fingerprint=prepared.replay_manifest_cut.cut_fingerprint,
+        )
+        normalized = replace(
+            actual,
+            compile_snapshot=compile_snapshot,
+            replay_manifest_cut=replay,
+            composite_fingerprint=prepared.composite_fingerprint,
+        )
+    except ValueError:
+        return False
+    return normalized == prepared
 
 
 def _prospective_steer_compile_snapshot(

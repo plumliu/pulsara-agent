@@ -1,0 +1,15 @@
+{
+  "application": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/root/installed/pulsara.app",
+  "source": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/root/package-fixed/mac-arm64/pulsara.app",
+  "version": "0.1.0-alpha.9",
+  "productionSourceComparison": {
+    "conversation_kernel/provider_dispatch.py": "complete bytes equal",
+    "hooks/executor.py": "complete bytes equal",
+    "conversation_kernel/mcp/sdk_facade.py": "complete bytes equal"
+  },
+  "metadataIsolation": [
+    "bundle ID",
+    "PULSARA_HOME",
+    "remove URL registration"
+  ]
+}

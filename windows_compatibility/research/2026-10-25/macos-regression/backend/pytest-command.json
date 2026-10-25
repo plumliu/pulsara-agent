@@ -1,0 +1,19 @@
+{
+  "argv": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_host_writer_availability.py",
+    "tests/test_desktop_renderer_bridge.py",
+    "tests/test_desktop_http_surface.py",
+    "tests/test_migration_resource_portability.py",
+    "tests/test_desktop_runtime.py",
+    "tests/test_desktop_wsl_backend.py",
+    "tests/test_round3_1_provider_input_prefix_continuity.py",
+    "tests/test_round5_long_horizon_postgres.py",
+    "tests/test_round5b_long_horizon_context_compaction.py"
+  ],
+  "CI": "true",
+  "PG": "root/private-pg.json exact private Unix-socket cluster"
+}

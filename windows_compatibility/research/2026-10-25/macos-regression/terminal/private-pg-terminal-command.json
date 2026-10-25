@@ -1,0 +1,14 @@
+{
+  "name": "private-pg-terminal",
+  "command": [
+    "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "-ra",
+    "tests/test_round2_terminal_host.py",
+    "tests/test_round2_terminal_postgres.py"
+  ],
+  "started": "2026-10-25T12:15:37.523985+00:00",
+  "home": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/mac-terminal-regression-aepidx9l/home"
+}

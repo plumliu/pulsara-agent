@@ -1003,6 +1003,88 @@ def test_root_stale_head_reprepares_same_intent_without_rebuilding_prefix(
     asyncio.run(scenario())
 
 
+def test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn(
+    stage2_migrated_postgres_database,
+) -> None:
+    class ChildAfterRootRepository(ConversationKernelRepository):
+        child_admission = None
+        target_command = None
+        target_intents = []
+
+        def accept_root_turn_intent(self, *args, **kwargs):
+            accepted = super().accept_root_turn_intent(*args, **kwargs)
+            if kwargs["intent"].command_id == self.target_command:
+                self.target_intents.append(kwargs["intent"])
+                assert self.child_admission is not None
+                child, self.child_admission = self.child_admission, None
+                self.accept_subagent_turn(
+                    args[0], candidate=child,
+                    deadline_monotonic=monotonic() + 10,
+                )
+            return accepted
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ChildAfterRootRepository(provider)
+    session_id, _, lease = _lease(repository)
+    task = _prepare_subagent_task(repository, lease)
+    repository.interrupt_turn(
+        lease.guard, turn_id=task.launch.task_start.parent_turn_id,
+        reason="test fixture delegated parent finished", occurred_at=datetime.now(timezone.utc),
+        actor_id="test-fixture", deadline_monotonic=monotonic() + 10,
+    )
+    model = ScriptedKernelModel([
+        _text_stream("first", block_id="first"),
+        _text_stream("second", block_id="second"),
+    ])
+    runner = _runner(repository, lease, model)
+    preparations = []
+    activations = []
+    original_prepare = runner.prepare_prospective_root_input
+    original_activate = runner._provider_dispatch.activate_prospective_root_input
+
+    async def prepare(*args, **kwargs):
+        prepared = await original_prepare(*args, **kwargs)
+        preparations.append(prepared)
+        return prepared
+
+    async def activate(prepared, **kwargs):
+        result = await original_activate(prepared, **kwargs)
+        activations.append(result is None)
+        return result
+
+    runner.prepare_prospective_root_input = prepare
+    runner._provider_dispatch.activate_prospective_root_input = activate
+
+    async def scenario():
+        await runner.run_turn(frozen_test_prompt("first"))
+        first = model.requests[0].compiled_input
+        repository.child_admission = build_prepared_subagent_turn_admission(
+            session_id=session_id, task_id=task, turn_id=_name("turn"),
+            entry_id=_name("entry"), context_binding_revision_id=_name("binding"),
+            permission_snapshot_id=_name("permission"),
+            task_start_event_id=task.launch.task_start.event_id,
+            expected_parent_permission_snapshot=task.launch.parent_permission_snapshot,
+            content=InlineContent.from_bytes(b"answer once"),
+            occurred_at=datetime.now(timezone.utc), actor_id="subagent-manager",
+        )
+        command = repository.target_command = _name("command")
+        result = await runner.run_turn(frozen_test_prompt("second"), command_id=command)
+        assert result.final_text == "second"
+        assert len(repository.target_intents) == 1
+        assert repository.child_admission is None
+        assert len(preparations) == 2
+        assert activations == [False, True]
+        assert preparations[-1].admission.candidate.exact_turn_id == result.turn_id
+        assert all(not prepared.owns_resources for prepared in preparations)
+        assert runner._safe_point._active_handle is None
+        second = model.requests[1].compiled_input
+        assert second.system_prompt == first.system_prompt
+        assert second.tools == first.tools
+        assert second.messages[:len(first.messages)] == first.messages
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("commit_before_block", (False, True))
 def test_round5_cancelled_root_admission_never_reissues_and_full_is_interrupted(
     stage2_migrated_postgres_database,

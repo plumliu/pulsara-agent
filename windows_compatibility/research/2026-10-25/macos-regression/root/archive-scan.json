@@ -1,0 +1,20 @@
+{
+  "files": 163,
+  "bytes": 22864417,
+  "exactSavedCredentialHits": 0,
+  "scanIncludesJsonEscapes": true,
+  "excludedDirectories": [
+    ".pytest_cache",
+    "__pycache__",
+    "installed",
+    "package",
+    "package-fixed",
+    "pytest-tmp",
+    "startup-diagnostic-profile"
+  ],
+  "excludedGenerated": "frontend.tsbuildinfo, app payloads, private PG/home data and diagnostic browser profiles; no per-file digests",
+  "removedUnintendedProfileFiles": [
+    "desktop/startup-diagnostic-profile/Local Storage/leveldb/000003.log",
+    "desktop/startup-diagnostic-profile/Session Storage/000003.log"
+  ]
+}

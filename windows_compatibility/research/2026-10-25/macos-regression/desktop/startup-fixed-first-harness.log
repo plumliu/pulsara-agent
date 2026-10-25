@@ -1,0 +1,8 @@
+Startup document loaded
+PASS: hide settles startup IPC and releases the renderer interaction gate
+PASS: minimize settles startup IPC and releases the renderer interaction gate
+PASS: destroy-contents settles startup IPC and releases the renderer interaction gate
+PASS: replace settles startup IPC and releases the renderer interaction gate
+Error: An object could not be cloned.
+    at IpcRendererInternal.send (node:electron/js2c/sandbox_bundle:2:93706)
+    at IpcRendererInternal.<anonymous> (node:electron/js2c/sandbox_bundle:2:93414)

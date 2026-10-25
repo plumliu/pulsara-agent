@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/root/final-package-smoke.py", line 31, in <module>
+    assert 'Usage:' in help_text
+           ^^^^^^^^^^^^^^^^^^^^^
+AssertionError

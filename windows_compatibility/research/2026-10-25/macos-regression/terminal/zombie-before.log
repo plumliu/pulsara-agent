@@ -1,0 +1,106 @@
+FF.                                                                      [100%]
+=================================== FAILURES ===================================
+___ test_unreaped_posix_group_is_live_and_signal_denial_does_not_prove_join ____
+
+tmp_path = PosixPath('/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pytest-of-plumliu/pytest-452/test_unreaped_posix_group_is_l0')
+
+    def test_unreaped_posix_group_is_live_and_signal_denial_does_not_prove_join(tmp_path):
+        process = _zombie(tmp_path)
+        try:
+            if sys.platform == "darwin":
+                try:
+                    os.killpg(process.pid, 0)
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError("Darwin zombie-only group did not expose EPERM")
+>           assert _process_group_live(process)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_posix_process_group_settlement.py:56: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+process = <Popen: returncode: 0 args: ['/Users/plumliu/Desktop/python_workspace/pulsar...>
+
+    def _process_group_live(process: asyncio.subprocess.Process) -> bool:
+        if sys.platform == "win32":
+            return process.returncode is None
+        try:
+>           os.killpg(process.pid, 0)
+E           PermissionError: [Errno 1] Operation not permitted
+
+src/pulsara_agent/hooks/executor.py:647: PermissionError
+__________ test_stdio_close_keeps_zombie_group_owned_until_real_reap ___________
+
+    async def scenario():
+        close = asyncio.create_task(_terminate_stdio_group(AsyncProcess()))
+        try:
+            await asyncio.sleep(.05)
+>           assert not close.done()
+E           AssertionError: assert not True
+E            +  where True = <built-in method done of _asyncio.Task object at 0x10f2c10c0>()
+E            +    where <built-in method done of _asyncio.Task object at 0x10f2c10c0> = <Task finished name='Task-2' coro=<_terminate_stdio_group() done, defined at /Users/plumliu/Desktop/python_workspace/p...t/src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py:571> exception=PermissionError(1, 'Operation not permitted')>.done
+
+tests/test_posix_process_group_settlement.py:77: AssertionError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = PosixPath('/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pytest-of-plumliu/pytest-452/test_stdio_close_keeps_zombie_0')
+
+    def test_stdio_close_keeps_zombie_group_owned_until_real_reap(tmp_path):
+        process = _zombie(tmp_path)
+    
+        class AsyncProcess:
+            pid = process.pid
+    
+            async def wait(self):
+                return await asyncio.to_thread(process.wait)
+    
+        async def scenario():
+            close = asyncio.create_task(_terminate_stdio_group(AsyncProcess()))
+            try:
+                await asyncio.sleep(.05)
+                assert not close.done()
+                assert process.wait(timeout=5) == 0
+                await asyncio.wait_for(close, 5)
+                assert not _process_group_live(process)
+            finally:
+                process.wait(timeout=5)
+                await close
+    
+>       asyncio.run(scenario())
+
+tests/test_posix_process_group_settlement.py:85: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_posix_process_group_settlement.py:83: in scenario
+    await close
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+process = <tests.test_posix_process_group_settlement.test_stdio_close_keeps_zombie_group_owned_until_real_reap.<locals>.AsyncProcess object at 0x10f2e00b0>
+
+    async def _terminate_stdio_group(process: asyncio.subprocess.Process) -> None:
+        def live() -> bool:
+            try:
+                os.killpg(process.pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+    
+        with suppress(ProcessLookupError):
+>           os.killpg(process.pid, signal.SIGTERM)
+E           PermissionError: [Errno 1] Operation not permitted
+
+src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py:580: PermissionError
+=========================== short test summary info ============================
+FAILED tests/test_posix_process_group_settlement.py::test_unreaped_posix_group_is_live_and_signal_denial_does_not_prove_join
+FAILED tests/test_posix_process_group_settlement.py::test_stdio_close_keeps_zombie_group_owned_until_real_reap
+2 failed, 1 passed in 1.12s

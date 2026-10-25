@@ -22,7 +22,13 @@ it.each([
   ['n', { ctrlKey: true, isComposing: true }],
   ['k', { ctrlKey: true, keyCode: 229 }],
   ['n', { ctrlKey: true, keyCode: 229 }],
-])('does not consume Ctrl+%s with extra Alt or composition state %j', async (key, state) => {
+  ['k', { metaKey: true, altKey: true }],
+  ['n', { metaKey: true, altKey: true }],
+  ['k', { metaKey: true, isComposing: true }],
+  ['n', { metaKey: true, isComposing: true }],
+  ['k', { metaKey: true, keyCode: 229 }],
+  ['n', { metaKey: true, keyCode: 229 }],
+])('does not consume command+%s with extra Alt or composition state %j', async (key, state) => {
   renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
   const composer = await screen.findByLabelText('发送给 Pulsara');
   expect(fireEvent.keyDown(composer, { key, ...state })).toBe(true);
@@ -30,15 +36,15 @@ it.each([
   expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
 });
 
-it('keeps session search open during an input composition', () => {
+it.each([{ ctrlKey: true }, { metaKey: true }])('keeps session search open during an input composition %j', modifier => {
   const onClose = vi.fn();
   render(<SessionSearchDialog adapter={{} as RuntimeAdapter} available={false} onOpen={vi.fn()} onClose={onClose} />);
   const input = screen.getByLabelText('搜索关键词');
   fireEvent.compositionStart(input);
-  expect(fireEvent.keyDown(input, { key: 'k', ctrlKey: true })).toBe(true);
+  expect(fireEvent.keyDown(input, { key: 'k', ...modifier })).toBe(true);
   expect(onClose).not.toHaveBeenCalled();
   fireEvent.compositionEnd(input);
-  fireEvent.keyDown(input, { key: 'k', ctrlKey: true });
+  expect(fireEvent.keyDown(input, { key: 'k', ...modifier })).toBe(false);
   expect(onClose).toHaveBeenCalledOnce();
 });
 
@@ -56,12 +62,12 @@ it('does not turn a mapped AltGraph character into a shortcut by physical key co
   expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
 });
 
-it('does not close session search for Ctrl+Alt+K, while Ctrl+K still closes it', () => {
+it.each([{ ctrlKey: true }, { metaKey: true }])('does not close session search for command+Alt+K, while command+K still closes it %j', modifier => {
   const onClose = vi.fn();
   render(<SessionSearchDialog adapter={{} as RuntimeAdapter} available={false} onOpen={vi.fn()} onClose={onClose} />);
   const input = screen.getByLabelText('搜索关键词');
-  expect(fireEvent.keyDown(input, { key: 'k', ctrlKey: true, altKey: true })).toBe(true);
+  expect(fireEvent.keyDown(input, { key: 'k', ...modifier, altKey: true })).toBe(true);
   expect(onClose).not.toHaveBeenCalled();
-  expect(fireEvent.keyDown(input, { key: 'k', ctrlKey: true })).toBe(false);
+  expect(fireEvent.keyDown(input, { key: 'k', ...modifier })).toBe(false);
   expect(onClose).toHaveBeenCalledOnce();
 });

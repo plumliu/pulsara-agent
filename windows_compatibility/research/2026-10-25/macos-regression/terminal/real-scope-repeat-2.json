@@ -1,0 +1,9 @@
+{
+  "platform": "darwin",
+  "python": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+  "module": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/__init__.py",
+  "status": "failed",
+  "temporary_root": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/native-scope-probe-dtgjtgwy",
+  "failure_type": "AssertionError",
+  "failure_message": ""
+}

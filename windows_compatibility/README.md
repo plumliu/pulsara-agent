@@ -15,6 +15,8 @@
 9. [目标发现与离线payload](research/2026-10-25/desktop/discovery-payload-round6/report.zh.md)、[真实kernel控制链](research/2026-10-25/terminal/kernel-control-round6/report.zh.md)：用户原环境不变；有限安装失败保数据；正常EOF关闭顺序与异常退出误判反例。该阶段尚待的整发行版故障、OAuth及睡眠恢复已在下一项最终验收中补齐。
 10. **[Windows WSL2 G0最终验收](research/2026-10-25/root/g0-w-final/report.zh.md)**：本机所选矩阵D/C/P/F/N机制可行性通过；补齐实际宿主SIGHUP/窗口退出、88.493秒睡眠恢复、Notion授权与callback rebind、原样PGDATA的真实dirty恢复。原失败、探针局限及生产待实施项均保留。
 11. [Phase B正式接入与共享修正（进行中）](research/2026-10-25/root/phase-b/report.zh.md)：用户授权后的生产实现、原回归与真实适配验证，保留新发现的失败及修正；安装包、完整GUI与真实provider验收单独列状态。
+12. [Windows共享修改后的原生macOS回归](research/2026-10-25/macos-regression/root/report.zh.md)：Mac arm64源码、真实provider、最终wheel/应用包及图形工作区验证；记录本轮EPERM与post-accept head窄修、四方审阅和未覆盖项。
+13. [本轮共享修复的Windows最小重验清单](PULSARA_WINDOWS_SHARED_FIX_MINIMAL_REVALIDATION.zh.md)：同步/新payload、98项WSL定向测试、10项真实PE集成、Windows宿主与最终包context/GUI核验；不重做整个G0，不替代发布矩阵。
 
 当前状态：**2026-10-25本机Windows WSL2所选矩阵的G0-W机制可行性验收通过；用户已授权并开始Phase B正式实施，Windows支持尚未激活。** 原生Ubuntu x64/arm64与GUI按用户要求延期，不作为本轮Windows G0验收的前置，也未被WSL结果替代。正式setup/安装器/完整产品界面、真实provider长程及发布资格仍按B与激活矩阵验收。当前实施边界见spec第24节；下面历史阶段的“未实施”描述保留为当时状态。
 
@@ -25,6 +27,8 @@ G0发现的三类问题需要分别理解。“正式代码”指仓库中当前
 后续键盘检查又发现共享前端快捷键缺陷：Ctrl+Alt+K/N及IME组合期的Ctrl+K/N会被误作普通快捷键。两处原handler的窄修已通过254项相关测试、类型/lint与交叉审阅，见[快捷键报告](research/2026-10-25/terminal/phase-b/shortcut-review/report.zh.md)；修复已随alpha.9实际安装，Ctrl+Alt+K/N不误触、普通Ctrl+K/N可用及草稿保留已由真实GUI复验。已映射的AltGr特殊字符正例在原实现也通过，不能把该缺陷扩大成“所有AltGr输入错误”，也不将合成输入当作真实AltGr布局资格。
 
 本轮Windows迁移及验收已获用户授权自主递增必要本地alpha候选版本并构建、安装，不再逐次询问版本号；Git tag和对外发布仍需另行明确授权，详见当前spec §8.3。
+
+**macOS arm64本轮已执行矩阵通过**：基线a57ce3b1加本轮共享窄修，完整前端1372项、后端244项、desktop105项、terminal原167+PG4项及修后定向68项、真实Electron browser13项分别通过（各suite有重叠，不相加宣称总数）；最终随包context8/capacity15与terminal19次真实provider调用通过。新包实际完成原生中文目录/文件引用、⌘快捷键、隐藏恢复草稿、正常Quit及冷重开保留会话/工作区。修复Darwin zombie组EPERM和ROOT accept后仅全局head前进窗口，完整失败/修后证据及四方审阅见上项报告与spec §25。真实Mac睡眠、硬件IME、Mac x64/分发资格仍待验收，Windows也须针对这次共享修复重验，不沿用旧alpha.9安装结果；Windows支持未因此激活。
 
 已修复的睡眠阻断：alpha.8构建后，在alpha.7正常Quit准备更新时，原kernel报告`StaleHostWriter`收尾失败，宿主因此保留PG并阻止更新。原会话writer lease在睡眠期间到期，旧SessionEnd读取仍要求有效writer。原GUI重试复用同PG恢复，随后空闲总览正常Quit和维护检查通过，未reset或强杀。此前alpha.7睡眠后的进程、健康检查和界面恢复证据仍成立，但没有覆盖有效writer、新消息与后续Quit，不能据此称完整通过；原失败记录保留。alpha.8未安装，修复进入alpha.9。用户已关闭内屏，重建窗口回到外屏不冒充原窗口混合DPI拖回验证。自动恢复与友好重试呈现的授权见spec §9.3。
 
@@ -38,7 +42,7 @@ G0发现的三类问题需要分别理解。“正式代码”指仓库中当前
 | PG启动失败后的`startedHere`归属 | **共享owner的错误分类缺口，跨域失联使问题显现。** G0向原TS owner注入“本次未提交/结果未知”后，实测其catch按当前同库状态误认领其他调用启动的实例。尚未证明原生macOS正常有限exec会产生同一反例。 | 区分未提交、执行结果未知与已结算非零；只有符合原读回条件的已结算失败才能走启动归属读回。WSL helper、双锁和跨域装配另属Phase B。 |
 | Runtime在child清空后漏查异常退出 | **现有共享代码缺陷。** 原`stop()`在`child`已被close回调清空时直接返回，跳过已保存的异常退出结果，可能让Quit继续停PG。此逻辑也被macOS使用；G0实证来自Windows研究宿主，尚无本次macOS原生复现。 | 在现有Runtime owner检查已结束attempt的退出结果；无需先实现Windows adapter。 |
 
-用户随后先授权独立修复Runtime与PG共享owner/POSIX错误分类，结果见[独立修正报告](research/2026-10-25/root/shared-owner-fixes/report.zh.md)：当时WSL隔离源码编译与desktop Node测试60/60通过，Windows定向回归通过。其后用户明确授权进入Phase B，先修复两个POSIX启动清理缺陷，再正式接入Windows跨域回收及其余规范功能；实施中发现的相关生产缺陷直接修复。两个POSIX缺陷已修复并通过62项定向回归，Windows接入正在实施及验证，尚不能称整套产品验收完成。Phase A及Mac本机/应用包GUI旧证据保留为当时基线，本次没有Mac原生重验；G0候选通过不能替代正式接入验收。
+用户随后先授权独立修复Runtime与PG共享owner/POSIX错误分类，结果见[独立修正报告](research/2026-10-25/root/shared-owner-fixes/report.zh.md)：当时WSL隔离源码编译与desktop Node测试60/60通过，Windows定向回归通过。其后用户明确授权进入Phase B，先修复两个POSIX启动清理缺陷，再正式接入Windows跨域回收及其余规范功能；实施中发现的相关生产缺陷直接修复。两个POSIX缺陷已修复并通过62项定向回归，Windows接入正在实施及验证，尚不能称整套产品验收完成。该历史阶段尚无Mac原生重验，Phase A旧证据只作当时基线；后续本次原生Mac回归见第12项，G0候选通过仍不能替代正式接入验收。
 
 2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，当时Windows后代生命周期等完整G0待验证，后续本机结论见最终报告。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
 

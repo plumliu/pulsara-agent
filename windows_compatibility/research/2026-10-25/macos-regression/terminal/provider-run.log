@@ -1,0 +1,8 @@
+hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+hook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+Provider owner ready
+Completed directories
+Completed interaction
+Completed pty
+Completed monitor_wake
+{"status": "completed", "cases": ["directories", "interaction", "pty", "monitor_wake"], "database_cleanup": true}

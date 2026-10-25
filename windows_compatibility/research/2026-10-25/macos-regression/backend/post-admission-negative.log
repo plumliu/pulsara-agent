@@ -1,0 +1,111 @@
+.F.............                                                          [100%]
+=================================== FAILURES ===================================
+_______ test_activation_retires_only_a_head_only_measurement[equal-head] _______
+
+drift = 'equal-head'
+
+    @pytest.mark.parametrize('drift', [None, 'equal-head', 'backward-head', 'binding', 'identity',
+                                      'payload', 'closure', 'late-outcome', 'permission', 'context', 'replay'])
+    def test_activation_retires_only_a_head_only_measurement(drift):
+>       _activation(drift=drift)
+
+tests/test_root_prospective_head_reprepare.py:102: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_root_prospective_head_reprepare.py:160: in _activation
+    asyncio.run(scenario())
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_root_prospective_head_reprepare.py:157: in scenario
+    await owner.activate_prospective_root_input(prepared, deadline=1)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.provider_dispatch.ProviderDispatchCoordinator object at 0x10ae34b90>
+prepared = namespace(admission=namespace(canonical_read=FrozenCanonicalProviderDispatchRead(compile_snapshot=FrozenCanonicalCompi...ne))), planning=<object object at 0x109f01dd0>, take_resources=<function _activation.<locals>.<lambda> at 0x10ae3f100>)
+
+    async def activate_prospective_root_input(
+        self,
+        prepared: PreparedProspectiveRootDispatch,
+        *,
+        deadline: float,
+    ) -> tuple[PreparedProviderDispatch, PreparedWireMeasurementDecision] | None:
+        """Attach post-publication safe-point authority to the measured input."""
+    
+        borrow, hook_reservation, decision = prepared.take_resources()
+        handle: PreparedProviderInputHandle | None = None
+        borrow_owned = True
+        hook_reservation_owned = hook_reservation is not None
+        planning_owned = True
+    
+        def retire_uninstalled() -> None:
+            nonlocal handle, borrow_owned, hook_reservation_owned, planning_owned
+            try:
+                if handle is not None:
+                    owned_handle, handle = handle, None
+                    owned_handle.close()
+            finally:
+                try:
+                    if borrow_owned:
+                        borrow_owned = False
+                        borrow.close()
+                finally:
+                    try:
+                        if hook_reservation_owned and hook_reservation is not None:
+                            hook_reservation_owned = False
+                            hook_reservation.retire()
+                    finally:
+                        if planning_owned:
+                            planning_owned = False
+                            self._continuity.abort_planning(prepared.planning)
+    
+        try:
+            candidate = prepared.admission.candidate
+            handle = await self._io.run(
+                self._safe_point.freeze_provider_input,
+                turn_id=candidate.exact_turn_id,
+                deadline_monotonic=deadline,
+            )
+            actual_read = await self.read_dispatch_read(handle.cut, deadline=deadline)
+            actual_binding = await self._io.run(
+                self._repository.read_turn_model_call_binding,
+                self._writer_lease.guard,
+                turn_id=candidate.exact_turn_id,
+                deadline_monotonic=deadline,
+            )
+            if actual_binding != candidate.model_call_binding:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            if actual_read != prepared.admission.canonical_read:
+                if _root_dispatch_read_has_only_later_head(
+                    prepared.admission.canonical_read, actual_read
+                ):
+                    # Acceptance is already durable. A child may have advanced
+                    # the session-wide sequence without changing this ROOT's
+                    # input. Retire only the unpublished measurement and use
+                    # the accepted turn's ordinary prepare, never accept again.
+                    retire_uninstalled()
+                    return None
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            pending_steers = await self._io.run(
+>               self._repository.read_pending_prompt_steer_facts,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                session_id=candidate.session_id,
+                target_turn_id=candidate.exact_turn_id,
+                maximum_items=1,
+                deadline_monotonic=deadline,
+            )
+E           AttributeError: 'types.SimpleNamespace' object has no attribute 'read_pending_prompt_steer_facts'
+
+src/pulsara_agent/conversation_kernel/provider_dispatch.py:2454: AttributeError
+=========================== short test summary info ============================
+FAILED tests/test_root_prospective_head_reprepare.py::test_activation_retires_only_a_head_only_measurement[equal-head]
+1 failed, 14 passed in 0.64s

@@ -1,0 +1,28 @@
+Startup document loaded
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PROBE renderer PROBE visibility hidden
+PASS: hide settles startup IPC and releases the renderer interaction gate
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PROBE renderer PROBE fade finished 0
+PROBE renderer PROBE visibility hidden
+PASS: minimize settles startup IPC and releases the renderer interaction gate
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PASS: destroy-contents settles startup IPC and releases the renderer interaction gate
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PROBE renderer PROBE visibility hidden
+PASS: replace settles startup IPC and releases the renderer interaction gate
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE before closing {"visible":true,"minimized":false,"destroyed":false}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PROBE closing cover destroyed
+PROBE closing resolved
+PASS: one startup document survives workbench navigation; logo centered; fade, error controls, trust and cleanup verified.

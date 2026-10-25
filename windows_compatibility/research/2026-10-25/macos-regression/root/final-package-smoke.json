@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0a9",
+  "module": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/root/package-fixed/mac-arm64/pulsara.app/Contents/Resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "interpreter": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/root/package-fixed/mac-arm64/pulsara.app/Contents/Resources/python/bin/python3",
+  "cwd": "/private/tmp",
+  "isolated": 1,
+  "launcher": "production generator; Chinese/space/apostrophe executable path; version/help passed",
+  "assets": true,
+  "filesystemSearch": true,
+  "terminalPrivateRipgrep": true,
+  "temporaryCleanup": true
+}

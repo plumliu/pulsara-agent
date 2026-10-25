@@ -1,0 +1,38 @@
+{
+  "platform": "darwin",
+  "python": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+  "module": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/__init__.py",
+  "status": "failed",
+  "temporary_root": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/native-scope-probe-gonqhu8z",
+  "failure_type": "PermissionError",
+  "failure_message": "[Errno 1] Operation not permitted"
+}
+Traceback (most recent call last):
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/real_scope_probe.py", line 111, in run
+    assert result.failure_code == (None if natural else "HOOK_CANCELLED")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/real_scope_probe.py", line 146, in <module>
+    main()
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/real_scope_probe.py", line 135, in main
+    report["cases"] = asyncio.run(run(root))
+                      ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/plumliu/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/plumliu/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/plumliu/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/real_scope_probe.py", line 120, in run
+    if process is not None and group_live(process.pid):
+                               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/real_scope_probe.py", line 29, in group_live
+    os.killpg(pid, 0)
+PermissionError: [Errno 1] Operation not permitted

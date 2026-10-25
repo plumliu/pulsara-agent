@@ -1,0 +1,23 @@
+{
+  "status": "passed",
+  "provider_calls": 19,
+  "tools_per_call": 38,
+  "tool_call_count": 14,
+  "system_identical": true,
+  "provider_tools_identical": true,
+  "messages_append_only": true,
+  "observed_directory_sequence": [
+    "alpha",
+    "beta",
+    "alpha"
+  ],
+  "separate_command_environment_unset": true,
+  "pipe_answer": "ANSWER:helloworld",
+  "pty_answer": "ANSWER:delayed",
+  "monitor_autonomous_wake_seconds": 38.20092354202643,
+  "monitor_exact_process_id": "process:rrw4k2uy3wz4mtzo6qlpee4u2m",
+  "monitor_exit": 0,
+  "database_dropped": true,
+  "temporary_home_workspace_removed": true,
+  "owned_repl_processes": []
+}

@@ -1,0 +1,17 @@
+{
+  "app": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/root/installed/pulsara.app",
+  "sourceApp": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/root/package/mac-arm64/pulsara.app",
+  "home": "/private/tmp/pui-pzub920x",
+  "pulsaraHome": "/private/tmp/pui-pzub920x/h",
+  "cli": "/Users/plumliu/.local/bin/pulsara",
+  "cliBackup": "/Users/plumliu/.local/bin/.pulsara-macos-regression-6573d832d9bd49fc94899aa9c6d046a1",
+  "cliOriginalInode": 98340806,
+  "cliOriginalMode": 33261,
+  "metadataIsolation": [
+    "bundle ID",
+    "PULSARA_HOME",
+    "remove URL registration"
+  ],
+  "productionAppPid": 20252,
+  "productionKernelPid": 20270
+}

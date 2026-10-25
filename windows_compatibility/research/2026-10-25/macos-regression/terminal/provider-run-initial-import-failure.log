@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/provider_probe.py", line 13, in <module>
+    from tests.dogfood import run_terminal_cognitive_dogfood as cognitive
+ModuleNotFoundError: No module named 'tests'

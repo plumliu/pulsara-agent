@@ -1,0 +1,12 @@
+........................................................................ [ 34%]
+........................................................................ [ 69%]
+..............................................................           [100%]
+=============================== warnings summary ===============================
+tests/test_desktop_renderer_bridge.py: 2 warnings
+tests/test_desktop_http_surface.py: 18 warnings
+tests/test_desktop_wsl_backend.py: 1 warning
+  /Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/lib/python3.12/site-packages/aiohttp/web_runner.py:99: DeprecationWarning: shutdown_timeout should be set on BaseRunner
+    super().__init__(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+206 passed, 21 warnings in 71.93s (0:01:11)

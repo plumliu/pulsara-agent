@@ -1,0 +1,64 @@
+{
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "activation_differences": [
+    [
+      {
+        "field": ".compile_snapshot.canonical_input.identity.provider_input_through_sequence",
+        "prepared": "6",
+        "actual": "7"
+      },
+      {
+        "field": ".compile_snapshot.canonical_input.identity.identity_fingerprint",
+        "prepared": "'sha256:5f4979ed8d1f2c37cef84af0c4f6c6703b4c312a12e01425008cc81a3e53deb3'",
+        "actual": "'sha256:150fafb4d4a768009386a7865b0dca3a3d99a5d76535aed163bf16a45a44ca0d'"
+      },
+      {
+        "field": ".compile_snapshot.canonical_input.snapshot_fingerprint",
+        "prepared": "'sha256:c62c291ab1b7924066d658f8925b53f1a70a98afae362999cf949ce9b7c4b500'",
+        "actual": "'sha256:91787501a1e0d4138fea3c3f016510e68d2f6520b026572aaa67003ae47c14fc'"
+      },
+      {
+        "field": ".compile_snapshot.canonical_read_cut_fingerprint",
+        "prepared": "'sha256:b158bb87a6f8cfa89437cc2f6463dcb1ac7bdfde5566812d296a49610d089433'",
+        "actual": "'sha256:95467a4ad11cf03d117e312c8c3ca5bf07fa4b444d9b05a88b1ada9b7722515b'"
+      },
+      {
+        "field": ".replay_manifest_cut.provider_input_through_sequence",
+        "prepared": "6",
+        "actual": "7"
+      },
+      {
+        "field": ".replay_manifest_cut.cut_fingerprint",
+        "prepared": "'sha256:5396228c100ee09fd1831a0c5bd32702019dae8e6927a13a4c7000a9b6921c4d'",
+        "actual": "'sha256:73e171cfd4136509bc898bdba94205e07ee8aa37abcb45dd2959c851a31833ec'"
+      },
+      {
+        "field": ".composite_fingerprint",
+        "prepared": "'sha256:0c78b84c29c1a6842a1872cdcbf0f8f1d27f8d8307e793d9618c5d4582f8111c'",
+        "actual": "'sha256:48fa647a193fd1d4333de5ed654d69aed8534d397ab48ad93579454ca0c8de6a'"
+      }
+    ]
+  ],
+  "retired": [
+    {
+      "turn_id": "turn:xi3lotpihz7ax3nukdd7zez7gm",
+      "resources_retired": true,
+      "safe_point_handle_retired": true,
+      "installed_view_object_unchanged": true
+    }
+  ],
+  "original_test_definitions_reused": [
+    "_KnownReadOnlyTool",
+    "_lease",
+    "_name",
+    "_prepare_subagent_task",
+    "_runner",
+    "_text_stream",
+    "test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn"
+  ],
+  "pytest_not_in_product_runtime": true,
+  "database": "pulsara_test_main_80742_97b8d96d67",
+  "status": "passed",
+  "database_dropped": true
+}

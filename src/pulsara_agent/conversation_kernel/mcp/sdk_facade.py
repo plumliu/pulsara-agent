@@ -511,7 +511,7 @@ class _BoundedStdioTransport(_BoundedTransport):
             # physical buffer contract is a slot failure, so wake the public
             # session and stop the exact process group rather than leaving a
             # silent failed reader beside a live child.
-            with suppress(ProcessLookupError):
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(self._process.pid, signal.SIGTERM)
             await self._offer_failure(exc, "MCP stderr reader cancelled")
 
@@ -575,14 +575,18 @@ async def _terminate_stdio_group(process: asyncio.subprocess.Process) -> None:
             return True
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # As in terminal ownership, EPERM (including Darwin zombie-only
+            # groups) keeps the group live until a later ESRCH proves join.
+            return True
 
-    with suppress(ProcessLookupError):
+    with suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGTERM)
     deadline = asyncio.get_running_loop().time() + 2
     while live() and asyncio.get_running_loop().time() < deadline:
         await asyncio.sleep(0.005)
     if live():
-        with suppress(ProcessLookupError):
+        with suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGKILL)
     await process.wait()
     while live():

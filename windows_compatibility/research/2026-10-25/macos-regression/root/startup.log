@@ -1,0 +1,18 @@
+
+> pulsara-desktop@0.1.0-alpha.9 test:startup
+> npm run build && electron scripts/startup-cover-smoke.cjs
+
+
+> pulsara-desktop@0.1.0-alpha.9 build
+> tsc
+
+Downloading Electron binary...
+Startup document loaded
+PASS: hide settles startup IPC and releases the renderer interaction gate
+PASS: minimize settles startup IPC and releases the renderer interaction gate
+PASS: destroy-contents settles startup IPC and releases the renderer interaction gate
+PASS: replace settles startup IPC and releases the renderer interaction gate
+Error: closing: fade never started
+    at Timeout.<anonymous> (/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/scripts/startup-cover-smoke.cjs:14:39)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)

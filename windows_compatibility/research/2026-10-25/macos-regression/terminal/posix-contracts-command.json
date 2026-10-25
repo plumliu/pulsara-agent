@@ -1,0 +1,26 @@
+{
+  "name": "posix-contracts",
+  "command": [
+    "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "-ra",
+    "tests/test_terminal_startup_cleanup.py",
+    "tests/test_terminal_output_settlement.py",
+    "tests/test_round2_terminal_output.py",
+    "tests/test_round2_terminal_environment.py",
+    "tests/test_pr03_process_termination.py",
+    "tests/test_terminal_cognitive_subtraction.py",
+    "tests/test_round2_terminal_monitor.py",
+    "tests/test_round2_terminal_safe_point.py",
+    "tests/test_round2_terminal_architecture.py",
+    "tests/test_stage2_terminal_host_lifetime.py",
+    "tests/test_round9_2_hook_subsystem.py",
+    "tests/test_mcp_transport_lifecycle.py",
+    "tests/test_mcp_credentials.py",
+    "tests/test_windows_interop_failures.py"
+  ],
+  "started": "2026-10-25T12:15:18.449459+00:00",
+  "home": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/mac-terminal-regression-aepidx9l/home"
+}

@@ -1,0 +1,6 @@
+{
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "version": "0.1.0a9",
+  "head_only_fix": true,
+  "hook_mcp_eperm_fix": true
+}

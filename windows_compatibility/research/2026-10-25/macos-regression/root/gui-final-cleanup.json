@@ -1,0 +1,22 @@
+{
+  "candidateFinalPids": [
+    97594,
+    97605,
+    97612
+  ],
+  "candidateProcessesRemaining": [],
+  "normalPgStop": true,
+  "testHomeRemoved": true,
+  "cliRestored": {
+    "sameInode": true,
+    "sameBytes": true,
+    "sameMode": true,
+    "symlinkGuardRemoved": true
+  },
+  "productionStillRunning": [
+    20252,
+    20270,
+    20275
+  ],
+  "productionProcesses": "20252     1 S    /Applications/Pulsara.app/Contents/MacOS/pulsara\n20270 20252 S    /Applications/Pulsara.app/Contents/Resources/python/bin/python3 -m pulsara_agent.desktop_runtime\n20275     1 Ss   /Applications/Pulsara.app/Contents/Resources/postgres/bin/postgres -D /Users/plumliu/.pulsara/desktop/postgres -c listen_addresses= -k /Users/plumliu/.pulsara/desktop/socket -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries=pg_search\n"
+}

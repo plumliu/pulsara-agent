@@ -1,0 +1,12 @@
+{"event": "scenario-start", "scenario": "context"}
+{"event": "prospective-retired", "scenario": "context", "turn_id": "turn:yifyl7fo7p3lp4ebhwzpndyqnq", "prospective_resources_retired": true, "safe_point_handle_retired": true, "installed_view_object_unchanged": true}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "ROOT", "task_id": null, "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m", "revision": 1, "compared": false, "messages": 8}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "SUBAGENT_TASK", "task_id": "task:nu52qovz234z6knxnco4c77xlq", "epoch": "epoch:yd4q7wjjsybetsexl7fnobprcq", "revision": 1, "compared": false, "messages": 7}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "ROOT", "task_id": null, "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m", "revision": 2, "compared": true, "messages": 11}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "ROOT", "task_id": null, "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m", "revision": 3, "compared": true, "messages": 16}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "ROOT", "task_id": null, "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m", "revision": 4, "compared": true, "messages": 19}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "SUBAGENT_TASK", "task_id": "task:nu52qovz234z6knxnco4c77xlq", "epoch": "epoch:yd4q7wjjsybetsexl7fnobprcq", "revision": 2, "compared": true, "messages": 11}
+{"event": "admission-error", "scenario": "context", "type": "PreparedRootInputHeadStale", "message": "ROOT provider input head changed"}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "ROOT", "task_id": null, "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m", "revision": 5, "compared": true, "messages": 24}
+{"event": "input-installed", "scenario": "context", "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi", "scope": "ROOT", "task_id": null, "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m", "revision": 6, "compared": true, "messages": 28}
+{"event": "scenario-end", "scenario": "context", "status": "passed", "seconds": 37.02770283294376, "database_dropped": true}

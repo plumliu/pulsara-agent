@@ -1,0 +1,877 @@
+[desktop:bootstrap] $ uv sync --locked --dev --no-install-project --default-ind…
+Resolved 87 packages in 22ms
+Uninstalled 1 package in 3ms
+ - pulsara-agent==0.1.0a9 (from file:///Users/plumliu/Desktop/python_workspace/pulsara_agent)
+[desktop:environment] $ .venv/bin/python desktop/scripts/build_environment.py
+Native build environment ready: ['darwin', 'arm64'], {'protoc': '34.0', 'node': '22.23.3', 'uv': '0.13.4', 'python': '3.12.15'}
+[desktop:postgres] sources up-to-date, skipping
+[desktop:shell-dependencies] sources up-to-date, skipping
+[desktop:frontend-dependencies] sources up-to-date, skipping
+[desktop:requirements] $ .venv/bin/python desktop/scripts/prepare_resources.py …
+Resolved 87 packages in 3ms
+[desktop:ripgrep] sources up-to-date, skipping
+[desktop:renderer] $ npm --prefix frontend run build:desktop
+
+> pulsara-desktop-workbench@0.1.0-alpha.9 build:desktop
+> vite build --config vite.desktop.config.ts
+
+vite v8.0.13 building client environment for production...
+[2Ktransforming...✓ 4505 modules transformed.
+rendering chunks...
+computing gzip size...
+../src/pulsara_agent/desktop_app/static/index.html                                           0.92 kB │ gzip:   0.52 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size3-Regular-CTq5MqoE.woff             4.42 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size4-Regular-Dl5lxZxV.woff2            4.92 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size2-Regular-Dy4dx90m.woff2            5.20 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size1-Regular-mCD8mA8B.woff2            5.46 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size4-Regular-BF-4gkZK.woff             5.98 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size2-Regular-oD1tc_U0.woff             6.18 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size1-Regular-C195tn64.woff             6.49 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Regular-Di6jR-x-.woff2      6.90 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Bold-Dq_IR9rO.woff2         6.91 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size3-Regular-DgpXs0kz.ttf              7.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Regular-CTRA-rTL.woff       7.65 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Bold-BEiXGLvX.woff          7.71 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Script-Regular-D3wIWfF6.woff2           9.64 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Regular-DDBCnlJ7.woff2       10.34 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size4-Regular-DWFBv043.ttf             10.36 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Script-Regular-D5yQViql.woff           10.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Regular-CTYiF6lA.woff2         11.31 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Bold-CL6g_b3V.woff2            11.34 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size2-Regular-B7gKUWhC.ttf             11.50 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Italic-C3H0VqGB.woff2        12.02 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Bold-D1sUS0GD.woff2          12.21 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size1-Regular-Dbsnue_I.ttf             12.22 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Regular-CS6fqUqJ.woff        12.31 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Regular-wX97UBjC.ttf       12.34 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Bold-ATXxdsX0.ttf          12.36 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Regular-Dxdc4cR9.woff          13.20 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Bold-BsDP51OF.woff             13.29 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Typewriter-Regular-CO6r4hn1.woff2      13.56 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Italic-DN2j7dab.woff         14.11 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Bold-DbIhKOiC.woff           14.40 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Typewriter-Regular-C0xS9mPB.woff       16.02 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-BoldItalic-CZnvNsCZ.woff2         16.40 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-Italic-t53AETM-.woff2             16.44 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Script-Regular-C5JkGWo-.ttf            16.64 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-BoldItalic-DxDJ3AOS.woff2         16.78 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Italic-NWA7e6Wa.woff2             16.98 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-BoldItalic-iY-2wyZ7.woff          18.66 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-Italic-DA0__PXp.woff              18.74 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-BoldItalic-SpSLRI95.woff          19.41 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Regular-BNo7hRIc.ttf         19.43 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Regular-CB_wures.ttf           19.57 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Bold-BdnERNNW.ttf              19.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Italic-BMLOBm91.woff              19.67 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Italic-YYjJ1zSn.ttf          22.36 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Bold-CFMepnvq.ttf            24.50 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Bold-Cx986IdX.woff2               25.32 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Regular-B22Nviop.woff2            26.27 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Typewriter-Regular-D3Ib7_Hf.ttf        27.55 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_AMS-Regular-BQhdFMY1.woff2             28.07 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Bold-Jm3AIy58.woff                29.91 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Regular-Dr94JaBh.woff             30.77 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-BoldItalic-B3XSjfu4.ttf           31.19 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-Italic-flOr_0UB.ttf               31.30 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-BoldItalic-DzxPMmG6.ttf           32.96 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_AMS-Regular-DMm9YOAa.woff              33.51 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Italic-3WenGoN9.ttf               33.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Bold-waoOVXN0.ttf                 51.33 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Regular-ypZvNtVU.ttf              53.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_AMS-Regular-DRggAlZN.ttf               63.63 kB
+../src/pulsara_agent/desktop_app/static/assets/workspace-directory-picker-BYggWTzY.css       1.60 kB │ gzip:   0.60 kB
+../src/pulsara_agent/desktop_app/static/assets/index-Bp-SSbeW.css                          325.74 kB │ gzip:  59.75 kB
+../src/pulsara_agent/desktop_app/static/assets/pie-WAS4IAKB-BZoYQVvT.js                      0.08 kB │ gzip:   0.09 kB
+../src/pulsara_agent/desktop_app/static/assets/info-A6RAGUB7-B2Np-JsD.js                     0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/radar-RG4KPBEZ-B5GT_IaV.js                    0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/packet-AYTQ26CC-Pn0j2-4J.js                   0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/cynefin-OW5HDTMX-cE3MY2fL.js                  0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/treemap-WGGIJYW6-g5hlxF4n.js                  0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/wardley-WFR3VGLG-DyhZxQw5.js                  0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/gitGraph-4MIJSDKK-D_GLkyA0.js                 0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-74A4TZTK-DKX-8aBG.js                 0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/treeView-Q6P3EWNA-BHI8EiEf.js                 0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-peg-WCYAUIDC-DeYICKM-.js             0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/architecture-7GRP2DOG-D4KxN2gE.js             0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-abnf-HS5TGJTU-B7oJLxm3.js            0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-ebnf-LZEXJU2U-De_NlZKk.js            0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/eventmodeling-NTZA5JFV-CBMVwcuF.js            0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/array-C6OvARI4.js                             0.15 kB │ gzip:   0.15 kB │ map:     0.53 kB
+../src/pulsara_agent/desktop_app/static/assets/channel-0Vav4F_O.js                           0.15 kB │ gzip:   0.16 kB │ map:     0.50 kB
+../src/pulsara_agent/desktop_app/static/assets/init-CwXEbkNy.js                              0.18 kB │ gzip:   0.16 kB │ map:     1.02 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-Y2CYZVJY-5alngpbY.js                    0.20 kB │ gzip:   0.19 kB │ map:     0.71 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-2Q5K7J3B-DrgHGX6v.js                    0.24 kB │ gzip:   0.21 kB │ map:     0.81 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-JWPE2WC7-f6M12WIl.js                    0.27 kB │ gzip:   0.21 kB │ map:     0.81 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-XXDRQBXY-CoeSl0y7.js                    0.31 kB │ gzip:   0.26 kB │ map:     0.99 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-6AEJRKK7-qB5gGXT4.js                    0.37 kB │ gzip:   0.29 kB │ map:     1.08 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-5VM5RSS4-DwymtPhe.js                    0.41 kB │ gzip:   0.31 kB │ map:     0.75 kB
+../src/pulsara_agent/desktop_app/static/assets/flowDiagram-KWPJA3E3-1JWYyf8C.js              0.61 kB │ gzip:   0.32 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-WEXAMYUT-CRWhiYuA.js                    0.62 kB │ gzip:   0.44 kB │ map:     2.06 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-J5ZVWO5B-L9Bldt2w.js                    0.68 kB │ gzip:   0.47 kB │ map:     2.62 kB
+../src/pulsara_agent/desktop_app/static/assets/infoDiagram-VRGFBTTK-BoAmF5dF.js              0.71 kB │ gzip:   0.46 kB │ map:     2.05 kB
+../src/pulsara_agent/desktop_app/static/assets/swimlanesDiagram-TC7HE7FX-BOYUxmo8.js         0.93 kB │ gzip:   0.54 kB │ map:     1.58 kB
+../src/pulsara_agent/desktop_app/static/assets/sizeCapture-INFHLROL-DDgpHy-w.js              0.93 kB │ gzip:   0.55 kB │ map:     3.05 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-DUW6YSOI-BUgE4Sfw.js                    0.94 kB │ gzip:   0.50 kB │ map:     2.50 kB
+../src/pulsara_agent/desktop_app/static/assets/line-CFHsdoUS.js                              0.98 kB │ gzip:   0.51 kB │ map:     3.45 kB
+../src/pulsara_agent/desktop_app/static/assets/ordinal-FpC1W7ak.js                           1.21 kB │ gzip:   0.60 kB │ map:     4.76 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-5DYCD2WN-CIaeh6x5.js                    1.47 kB │ gzip:   0.83 kB │ map:     4.53 kB
+../src/pulsara_agent/desktop_app/static/assets/railroadDiagram-XR7U4H2S-DTsA3bLl.js          1.72 kB │ gzip:   0.82 kB │ map:     4.76 kB
+../src/pulsara_agent/desktop_app/static/assets/abnfDiagram-O67JEVCF-BrvhZplg.js              1.90 kB │ gzip:   0.94 kB │ map:     5.74 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-7PRAP22T-BdM2Zl4R.js                    2.00 kB │ gzip:   0.99 kB │ map:     6.51 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-GWA4HPMP-CpNem5eU.js                    2.02 kB │ gzip:   0.93 kB │ map:     6.45 kB
+../src/pulsara_agent/desktop_app/static/assets/pegDiagram-GJSIUBJH-UafXUQHY.js               2.07 kB │ gzip:   0.99 kB │ map:     6.11 kB
+../src/pulsara_agent/desktop_app/static/assets/ebnfDiagram-ZINNZB2B-DeiImeI0.js              2.11 kB │ gzip:   0.94 kB │ map:     6.26 kB
+../src/pulsara_agent/desktop_app/static/assets/dist-CxnhIK8_.js                              2.20 kB │ gzip:   1.00 kB │ map:     6.72 kB
+../src/pulsara_agent/desktop_app/static/assets/path-BcOsB_w5.js                              2.35 kB │ gzip:   1.03 kB │ map:     9.06 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-GNY47TPC-BxkEFCq2.js                    3.47 kB │ gzip:   1.54 kB │ map:     5.71 kB
+../src/pulsara_agent/desktop_app/static/assets/arc-XjX55jTL.js                               3.51 kB │ gzip:   1.50 kB │ map:    15.26 kB
+../src/pulsara_agent/desktop_app/static/assets/workspace-directory-picker-C_4JbwgO.js        3.75 kB │ gzip:   1.73 kB │ map:    12.55 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-MLGK6HIB-BTcwZJeE.js                  4.33 kB │ gzip:   1.89 kB │ map:    12.21 kB
+../src/pulsara_agent/desktop_app/static/assets/defaultLocale-DvVxr7SB.js                     4.69 kB │ gzip:   2.16 kB │ map:    20.92 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-NETBCI7D-BpccPLTb.js                    5.49 kB │ gzip:   2.54 kB │ map:    22.40 kB
+../src/pulsara_agent/desktop_app/static/assets/linear-D0jb6Cr0.js                            5.56 kB │ gzip:   2.29 kB │ map:    25.38 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-742MDFTN-B18II5FB.js                    5.88 kB │ gzip:   2.72 kB │ map:    25.43 kB
+../src/pulsara_agent/desktop_app/static/assets/graphlib-DzpHtZZd.js                          5.90 kB │ gzip:   1.86 kB │ map:    44.09 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-MPIPVDR6-z4f-VFRv.js                  6.11 kB │ gzip:   2.61 kB │ map:    19.21 kB
+../src/pulsara_agent/desktop_app/static/assets/pieDiagram-5QR66LMP-Bm_gOT0J.js               6.29 kB │ gzip:   2.65 kB │ map:    20.80 kB
+../src/pulsara_agent/desktop_app/static/assets/_basePickBy-BW6drPW8.js                       7.63 kB │ gzip:   3.19 kB │ map:    58.64 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-CDSNMT55-BH5Plbjt.js                  8.25 kB │ gzip:   3.70 kB │ map:    26.07 kB
+../src/pulsara_agent/desktop_app/static/assets/cynefinDiagram-VND7K2PF-CKEfhSEw.js           9.96 kB │ gzip:   3.55 kB │ map:    31.19 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-ATOU4E4O-CXqcD4dB.js                 10.66 kB │ gzip:   4.14 kB │ map:    34.99 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-3FUC2YCW-BUyiv0q9.js                   10.76 kB │ gzip:   4.35 kB │ map:    38.71 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-UA2S7LBM-C6iT-YjV.js                   14.91 kB │ gzip:   4.25 kB │ map:    48.71 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-GTNCS2PH-DIdOuL7p.js                   15.69 kB │ gzip:   4.39 kB │ map:    48.49 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-3UASUU5V-DqsucC5a.js                 15.79 kB │ gzip:   5.56 kB │ map:    56.95 kB
+../src/pulsara_agent/desktop_app/static/assets/ishikawaDiagram-OU5B5YK6-lI_AyBD4.js         17.40 kB │ gzip:   6.59 kB │ map:    58.41 kB
+../src/pulsara_agent/desktop_app/static/assets/_baseUniq-D4ARhvv0.js                        18.28 kB │ gzip:   6.77 kB │ map:   151.68 kB
+../src/pulsara_agent/desktop_app/static/assets/kanban-definition-PNTS6WVX-DM8tRLQa.js       20.41 kB │ gzip:   7.23 kB │ map:    64.19 kB
+../src/pulsara_agent/desktop_app/static/assets/dist-BSkJMMTR.js                             22.12 kB │ gzip:   8.41 kB │ map:    41.47 kB
+../src/pulsara_agent/desktop_app/static/assets/sankeyDiagram-IPEJSGJF-8gzjEi-5.js           22.87 kB │ gzip:   8.31 kB │ map:    82.36 kB
+../src/pulsara_agent/desktop_app/static/assets/journeyDiagram-ZHPQQLJL-C_qG_F6k.js          23.27 kB │ gzip:   8.23 kB │ map:    74.51 kB
+../src/pulsara_agent/desktop_app/static/assets/mindmap-definition-NLK3R4M7-DqQ39P-G.js      23.55 kB │ gzip:   8.08 kB │ map:    72.70 kB
+../src/pulsara_agent/desktop_app/static/assets/wardleyDiagram-VNRHLVJA-zpia44Q1.js          25.28 kB │ gzip:   6.59 kB │ map:    75.43 kB
+../src/pulsara_agent/desktop_app/static/assets/rough.esm-D894x0pr.js                        27.15 kB │ gzip:   8.90 kB │ map:    72.38 kB
+../src/pulsara_agent/desktop_app/static/assets/purify.es-CrDe5iEZ.js                        28.12 kB │ gzip:  11.12 kB │ map:   120.94 kB
+../src/pulsara_agent/desktop_app/static/assets/gitGraphDiagram-X574FWY7-DLc1XLkT.js         29.07 kB │ gzip:   8.60 kB │ map:   110.14 kB
+../src/pulsara_agent/desktop_app/static/assets/timeline-definition-EJHVYXUP-BcpJXeRB.js     30.57 kB │ gzip:  10.10 kB │ map:   100.29 kB
+../src/pulsara_agent/desktop_app/static/assets/erDiagram-OPXOYQCR-CWSbVaI3.js               30.73 kB │ gzip:  10.61 kB │ map:    98.86 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-ZIGJFQKS-DYQXW5SQ.js                   30.92 kB │ gzip:   8.56 kB │ map:   124.39 kB
+../src/pulsara_agent/desktop_app/static/assets/requirementDiagram-PLB6GJNP-QbMdlM8D.js      31.16 kB │ gzip:   9.88 kB │ map:    95.01 kB
+../src/pulsara_agent/desktop_app/static/assets/quadrantDiagram-O4NWA36T-B55XZI_J.js         33.61 kB │ gzip:   9.79 kB │ map:   105.39 kB
+../src/pulsara_agent/desktop_app/static/assets/mermaid.core-BWv1SYUc.js                     35.49 kB │ gzip:  12.14 kB │ map:   110.98 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-Z7XXMR3K-CkSuWsJn.js                   37.46 kB │ gzip:   8.10 kB │ map:   110.75 kB
+../src/pulsara_agent/desktop_app/static/assets/dagre-6A5THRUB-C3O_idpZ.js                   40.79 kB │ gzip:  14.59 kB │ map:   221.93 kB
+../src/pulsara_agent/desktop_app/static/assets/vennDiagram-UO4OBE2U-DizmAbPF.js             41.27 kB │ gzip:  15.17 kB │ map:   174.48 kB
+../src/pulsara_agent/desktop_app/static/assets/stateDiagram-v2-GCMORJYK-CzbpFCda.js         41.72 kB │ gzip:  13.97 kB │ map:   127.60 kB
+../src/pulsara_agent/desktop_app/static/assets/blockDiagram-BEXU5L5S-CZ8iiAr_.js            42.55 kB │ gzip:  13.91 kB │ map:   131.37 kB
+../src/pulsara_agent/desktop_app/static/assets/xychartDiagram-PMCCYNJV-LfEWkvp3.js          44.25 kB │ gzip:  12.27 kB │ map:   139.81 kB
+../src/pulsara_agent/desktop_app/static/assets/src-DKuLf1fl.js                              45.77 kB │ gzip:  16.06 kB │ map:   186.41 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-LNGE3PJU-C8Pg9s9Q.js                   46.44 kB │ gzip:  15.58 kB │ map:   173.08 kB
+../src/pulsara_agent/desktop_app/static/assets/classDiagram-v2-NBCMYWYE-JsbOye9f.js         49.86 kB │ gzip:  16.24 kB │ map:   147.59 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-MBY4JIJT-BC4N-klz.js                   51.96 kB │ gzip:  16.69 kB │ map:   129.76 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-7M6MHVWA-DxdB2X6a.js                   62.89 kB │ gzip:  20.44 kB │ map:   190.22 kB
+../src/pulsara_agent/desktop_app/static/assets/c4Diagram-YGBWAQC7-BtoOhlMi.js               65.15 kB │ gzip:  18.66 kB │ map:   182.65 kB
+../src/pulsara_agent/desktop_app/static/assets/ganttDiagram-FUAMR5RP-BIlQebUN.js            69.48 kB │ gzip:  22.81 kB │ map:   229.56 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-22UHCM2B-BubeNdNo.js                 80.65 kB │ gzip:  25.25 kB │ map:   260.21 kB
+../src/pulsara_agent/desktop_app/static/assets/cose-bilkent-JH36ORCC-Rm9p2XSP.js            81.49 kB │ gzip:  21.63 kB │ map:   288.40 kB
+../src/pulsara_agent/desktop_app/static/assets/swimlanes-2SLR337P-VMjIXcUA.js              106.34 kB │ gzip:  36.18 kB │ map:   470.90 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-7INBJB4K-BZVdLK5r.js                  115.54 kB │ gzip:  29.23 kB │ map:   422.69 kB
+../src/pulsara_agent/desktop_app/static/assets/sequenceDiagram-PO4LG4MO-CxMHCrLY.js        117.50 kB │ gzip:  31.39 kB │ map:   336.67 kB
+../src/pulsara_agent/desktop_app/static/assets/architectureDiagram-NJMV4G6O-I4KX-Ls7.js    149.39 kB │ gzip:  41.25 kB │ map:   561.33 kB
+../src/pulsara_agent/desktop_app/static/assets/usecaseDiagram-POWQR4AR-CDzUnUnP.js         186.79 kB │ gzip:  50.12 kB │ map:   706.87 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-O7XYJQB3-DqQ18SKC.js                  211.58 kB │ gzip:  28.63 kB │ map:   469.08 kB
+../src/pulsara_agent/desktop_app/static/assets/cytoscape.esm-KjZwHLwX.js                   435.62 kB │ gzip: 138.01 kB │ map: 1,704.60 kB
+../src/pulsara_agent/desktop_app/static/assets/mermaid-parser.core-CZFy-1mn.js             678.12 kB │ gzip: 146.63 kB │ map: 2,012.87 kB
+../src/pulsara_agent/desktop_app/static/assets/elk-276RUBZZ-23VqaiGE.js                  1,459.08 kB │ gzip: 453.21 kB │ map: 4,110.36 kB
+../src/pulsara_agent/desktop_app/static/assets/index-F6tSyP7f.js                         2,030.48 kB │ gzip: 612.74 kB │ map: 7,651.86 kB
+
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 1.80s
+[desktop:python-dependencies] sources up-to-date, skipping
+[desktop:project] $ uv sync --locked --dev --default-index https://pypi.org/sim…
+Resolved 87 packages in 4ms
+Installed 1 package in 7ms
+ + pulsara-agent==0.1.0a9 (from file:///Users/plumliu/Desktop/python_workspace/pulsara_agent)
+[desktop:browsers] sources up-to-date, skipping
+[desktop:application] $ .venv/bin/python desktop/scripts/prepare_resources.py a…
+Building wheel...
+Successfully built /var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-wheel-0j0xpe0w/pulsara_agent-0.1.0a9-py3-none-macosx_11_0_arm64.whl
+Using Python 3.12.15 environment at: desktop/resources/python
+Resolved 1 package in 2ms
+Prepared 1 package in 97ms
+Uninstalled 1 package in 135ms
+Installed 1 package in 684ms
+Bytecode compiled 357 files in 379ms
+ - pulsara-agent==0.1.0a9 (from file:///var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-wheel-e2baz7wc/pulsara_agent-0.1.0a9-py3-none-macosx_11_0_arm64.whl)
+ + pulsara-agent==0.1.0a9 (from file:///var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-wheel-0j0xpe0w/pulsara_agent-0.1.0a9-py3-none-macosx_11_0_arm64.whl)
+[desktop:resources] $ .venv/bin/python desktop/scripts/prepare_resources.py val…
+[desktop:verify] $ npm --prefix desktop test
+
+> pulsara-desktop@0.1.0-alpha.9 test
+> npm run build && node --test dist/*.test.js
+
+
+> pulsara-desktop@0.1.0-alpha.9 build
+> tsc
+
+TAP version 13
+# Subtest: same-distribution UNC aliases preserve Linux case and Unicode identity
+ok 1 - same-distribution UNC aliases preserve Linux case and Unicode identity
+  ---
+  duration_ms: 3.743375
+  type: 'test'
+  ...
+# Subtest: domain mapping refuses Windows drives, other distributions and ambiguous components
+ok 2 - domain mapping refuses Windows drives, other distributions and ambiguous components
+  ---
+  duration_ms: 0.657209
+  type: 'test'
+  ...
+# Subtest: Linux-only names remain previewable but cannot become ambiguous host paths
+ok 3 - Linux-only names remain previewable but cannot become ambiguous host paths
+  ---
+  duration_ms: 3.603375
+  type: 'test'
+  ...
+# Subtest: one immutable full certificate and exact origin restrict every backend network request
+ok 4 - one immutable full certificate and exact origin restrict every backend network request
+  ---
+  duration_ms: 5.923542
+  type: 'test'
+  ...
+# Subtest: retirement seals admission and joins deferred native cancellation plus original owners
+ok 5 - retirement seals admission and joins deferred native cancellation plus original owners
+  ---
+  duration_ms: 7.933083
+  type: 'test'
+  ...
+# Subtest: an owner settlement failure stays a retirement failure after network cleanup
+ok 6 - an owner settlement failure stays a retirement failure after network cleanup
+  ---
+  duration_ms: 0.517375
+  type: 'test'
+  ...
+# Subtest: Windows readiness samples only HEAD on the original pinned session and shares one task
+ok 7 - Windows readiness samples only HEAD on the original pinned session and shares one task
+  ---
+  duration_ms: 263.531542
+  type: 'test'
+  ...
+# Subtest: readiness preserves authentication, TLS and other transport failures without retry
+ok 8 - readiness preserves authentication, TLS and other transport failures without retry
+  ---
+  duration_ms: 1.119792
+  type: 'test'
+  ...
+# Subtest: external cancellation aborts the forwarding sampling wait with its original reason
+ok 9 - external cancellation aborts the forwarding sampling wait with its original reason
+  ---
+  duration_ms: 1.528209
+  type: 'test'
+  ...
+# Subtest: retirement aborts and joins a native readiness request before clearing the session
+ok 10 - retirement aborts and joins a native readiness request before clearing the session
+  ---
+  duration_ms: 0.525958
+  type: 'test'
+  ...
+# Subtest: retirement joins a cancelled sampling wait and caches the same cleanup during owner reentry
+ok 11 - retirement joins a cancelled sampling wait and caches the same cleanup during owner reentry
+  ---
+  duration_ms: 1.310833
+  type: 'test'
+  ...
+# Subtest: URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+ok 12 - URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+  ---
+  duration_ms: 0.765583
+  type: 'test'
+  ...
+# Subtest: partition network policy protects control port across aliases and all request types
+ok 13 - partition network policy protects control port across aliases and all request types
+  ---
+  duration_ms: 1.014625
+  type: 'test'
+  ...
+# Subtest: native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+ok 14 - native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+  ---
+  duration_ms: 0.86175
+  type: 'test'
+  ...
+# Subtest: installed desktop CLI resolves bundled Python and preserves arguments and exit status
+ok 15 - installed desktop CLI resolves bundled Python and preserves arguments and exit status
+  ---
+  duration_ms: 2323.308083
+  type: 'test'
+  ...
+# Subtest: Linux packaged CLI dispatches before Electron without a display; GUI retains its arguments
+ok 16 - Linux packaged CLI dispatches before Electron without a display; GUI retains its arguments
+  ---
+  duration_ms: 1433.513042
+  type: 'test'
+  ...
+# Subtest: automatic registration creates and updates its own launcher after the app moves
+ok 17 - automatic registration creates and updates its own launcher after the app moves
+  ---
+  duration_ms: 5.735167
+  type: 'test'
+  ...
+# Subtest: old CLI symlinks are preserved automatically and explicit replacement never modifies their target
+ok 18 - old CLI symlinks are preserved automatically and explicit replacement never modifies their target
+  ---
+  duration_ms: 3.115084
+  type: 'test'
+  ...
+# Subtest: package entries remain package-owned; PATH shadowing is reported without changing other commands
+ok 19 - package entries remain package-owned; PATH shadowing is reported without changing other commands
+  ---
+  duration_ms: 1.635416
+  type: 'test'
+  ...
+# Subtest: home resolution remains synchronous and preserves resolver launch failures
+ok 20 - home resolution remains synchronous and preserves resolver launch failures
+  ---
+  duration_ms: 797.556583
+  type: 'test'
+  ...
+# Subtest: finite execution preserves literal argv, explicit environment, output and nonzero status
+ok 21 - finite execution preserves literal argv, explicit environment, output and nonzero status
+  ---
+  duration_ms: 55.68275
+  type: 'test'
+  ...
+# Subtest: stream execution keeps three byte pipes and the supplied working directory
+ok 22 - stream execution keeps three byte pipes and the supplied working directory
+  ---
+  duration_ms: 28.864708
+  type: 'test'
+  ...
+# Subtest: runtime storage creates private files, appends exact bytes and retains filesystem failures
+ok 23 - runtime storage creates private files, appends exact bytes and retains filesystem failures
+  ---
+  duration_ms: 2.463041
+  type: 'test'
+  ...
+# Subtest: WSL argv fixes the confirmed target and never interprets paths as shell source
+ok 24 - WSL argv fixes the confirmed target and never interprets paths as shell source
+  ---
+  duration_ms: 2.569
+  type: 'test'
+  ...
+# Subtest: Windows automatic environment forwarding is removed without disabling interop
+ok 25 - Windows automatic environment forwarding is removed without disabling interop
+  ---
+  duration_ms: 7.923334
+  type: 'test'
+  ...
+# Subtest: runtime diagnostics stay in the host log directory and preserve exact bytes
+ok 26 - runtime diagnostics stay in the host log directory and preserve exact bytes
+  ---
+  duration_ms: 10.953458
+  type: 'test'
+  ...
+# WSL maintenance admission refused: kernel busy
+# Subtest: main composes the darwin bundle once for home, runtime, PG and CLI
+ok 27 - main composes the darwin bundle once for home, runtime, PG and CLI
+  ---
+  duration_ms: 5.923791
+  type: 'test'
+  ...
+# Subtest: main composes the linux bundle once for home, runtime, PG and CLI
+ok 28 - main composes the linux bundle once for home, runtime, PG and CLI
+  ---
+  duration_ms: 2.221791
+  type: 'test'
+  ...
+# Subtest: Windows requires environment confirmation before creating a kernel or preparing PostgreSQL
+ok 29 - Windows requires environment confirmation before creating a kernel or preparing PostgreSQL
+  ---
+  duration_ms: 2.642834
+  type: 'test'
+  ...
+# Subtest: Windows installer check is finite and never starts the product: idle
+ok 30 - Windows installer check is finite and never starts the product: idle
+  ---
+  duration_ms: 0.921375
+  type: 'test'
+  ...
+# Subtest: Windows installer check is finite and never starts the product: busy
+ok 31 - Windows installer check is finite and never starts the product: busy
+  ---
+  duration_ms: 1.296333
+  type: 'test'
+  ...
+# Subtest: Windows revalidates its saved target and pins a fresh window before workbench navigation
+ok 32 - Windows revalidates its saved target and pins a fresh window before workbench navigation
+  ---
+  duration_ms: 2.632666
+  type: 'test'
+  ...
+# Subtest: Windows derives initialization permission after the PG attempt: false
+ok 33 - Windows derives initialization permission after the PG attempt: false
+  ---
+  duration_ms: 1.591583
+  type: 'test'
+  ...
+# Subtest: Windows derives initialization permission after the PG attempt: true
+ok 34 - Windows derives initialization permission after the PG attempt: true
+  ---
+  duration_ms: 2.34075
+  type: 'test'
+  ...
+# Subtest: Windows quit during native window replacement joins retirement and never navigates the retiring session
+ok 35 - Windows quit during native window replacement joins retirement and never navigates the retiring session
+  ---
+  duration_ms: 4.016125
+  type: 'test'
+  ...
+# Subtest: Windows repeated Quit retains failed Session retirement and cannot stop PostgreSQL or exit cleanly
+ok 36 - Windows repeated Quit retains failed Session retirement and cannot stop PostgreSQL or exit cleanly
+  ---
+  duration_ms: 3.180584
+  type: 'test'
+  ...
+# Subtest: Windows waits for its pinned host connection before navigation: reachable
+ok 37 - Windows waits for its pinned host connection before navigation: reachable
+  ---
+  duration_ms: 9.020958
+  type: 'test'
+  ...
+# Subtest: Windows waits for its pinned host connection before navigation: cancel
+ok 38 - Windows waits for its pinned host connection before navigation: cancel
+  ---
+  duration_ms: 1.89575
+  type: 'test'
+  ...
+# Subtest: main overlaps cover loading and kernel preparation but gates the start frame and navigation
+ok 39 - main overlaps cover loading and kernel preparation but gates the start frame and navigation
+  ---
+  duration_ms: 0.649792
+  type: 'test'
+  ...
+# Subtest: cover failure joins PostgreSQL preparation and child cleanup before showing its error
+ok 40 - cover failure joins PostgreSQL preparation and child cleanup before showing its error
+  ---
+  duration_ms: 2.107
+  type: 'test'
+  ...
+# Subtest: database failure waits for the original cover before replacing it
+ok 41 - database failure waits for the original cover before replacing it
+  ---
+  duration_ms: 0.754584
+  type: 'test'
+  ...
+# Subtest: previous-owner failure joins the cover and child cleanup without preparing PostgreSQL
+ok 42 - previous-owner failure joins the cover and child cleanup without preparing PostgreSQL
+  ---
+  duration_ms: 1.936125
+  type: 'test'
+  ...
+# Subtest: quit during the old-owner wait settles the imported child without starting PostgreSQL
+ok 43 - quit during the old-owner wait settles the imported child without starting PostgreSQL
+  ---
+  duration_ms: 1.571292
+  type: 'test'
+  ...
+# Subtest: quit stops PostgreSQL after a clean runtime exit
+ok 44 - quit stops PostgreSQL after a clean runtime exit
+  ---
+  duration_ms: 1.557708
+  type: 'test'
+  ...
+# Subtest: quit keeps PostgreSQL and reports an unclean runtime exit
+ok 45 - quit keeps PostgreSQL and reports an unclean runtime exit
+  ---
+  duration_ms: 1.300666
+  type: 'test'
+  ...
+# Subtest: directory picker uses localized desktop without changing the selected path
+ok 46 - directory picker uses localized desktop without changing the selected path
+  ---
+  duration_ms: 1.319709
+  type: 'test'
+  ...
+# Subtest: directory picker uses configured desktop elsewhere without changing the selected path
+ok 47 - directory picker uses configured desktop elsewhere without changing the selected path
+  ---
+  duration_ms: 0.738125
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop lookup unavailable without changing the selected path
+ok 48 - directory picker uses desktop lookup unavailable without changing the selected path
+  ---
+  duration_ms: 0.487042
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop missing without changing the selected path
+ok 49 - directory picker uses desktop missing without changing the selected path
+  ---
+  duration_ms: 0.800125
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop path is a file without changing the selected path
+ok 50 - directory picker uses desktop path is a file without changing the selected path
+  ---
+  duration_ms: 2.328375
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop configured as home without changing the selected path
+ok 51 - directory picker uses desktop configured as home without changing the selected path
+  ---
+  duration_ms: 0.722625
+  type: 'test'
+  ...
+# Subtest: directory picker uses cancellation without changing the selected path
+ok 52 - directory picker uses cancellation without changing the selected path
+  ---
+  duration_ms: 0.50425
+  type: 'test'
+  ...
+# Subtest: OAuth return link is an exact focus-only entry point
+ok 53 - OAuth return link is an exact focus-only entry point
+  ---
+  duration_ms: 0.4035
+  type: 'test'
+  ...
+# Subtest: local commands distinguish no submission, a settled exit and incomplete output
+    # Subtest: missing executable never submitted
+    ok 1 - missing executable never submitted
+      ---
+      duration_ms: 3.252125
+      type: 'test'
+      ...
+    # Subtest: synchronous invalid argv never submitted
+    ok 2 - synchronous invalid argv never submitted
+      ---
+      duration_ms: 0.487208
+      type: 'test'
+      ...
+    # Subtest: real numeric nonzero preserves command output
+    ok 3 - real numeric nonzero preserves command output
+      ---
+      duration_ms: 2443.232542
+      type: 'test'
+      ...
+    # Subtest: output overflow after a real side effect remains unknown
+    ok 4 - output overflow after a real side effect remains unknown
+      ---
+      duration_ms: 28.814084
+      type: 'test'
+      ...
+    1..4
+ok 54 - local commands distinguish no submission, a settled exit and incomplete output
+  ---
+  duration_ms: 2764.217041
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL operation waits for close and preserves split UTF-8
+ok 55 - finite PostgreSQL operation waits for close and preserves split UTF-8
+  ---
+  duration_ms: 39.191958
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL result requires one complete valid reply and normal carrier close
+ok 56 - finite PostgreSQL result requires one complete valid reply and normal carrier close
+  ---
+  duration_ms: 189.844375
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL physical rejection and settled command failure remain distinct
+ok 57 - finite PostgreSQL physical rejection and settled command failure remain distinct
+  ---
+  duration_ms: 55.302292
+  type: 'test'
+  ...
+# Subtest: cancellation before operation blocks late ready and joins the real helper
+ok 58 - cancellation before operation blocks late ready and joins the real helper
+  ---
+  duration_ms: 29.505333
+  type: 'test'
+  ...
+# Subtest: cancellation after the irreversible write preserves unknown and waits for close
+ok 59 - cancellation after the irreversible write preserves unknown and waits for close
+  ---
+  duration_ms: 27.668292
+  type: 'test'
+  ...
+# Subtest: maintenance uses the same finite client without a lifecycle action
+ok 60 - maintenance uses the same finite client without a lifecycle action
+  ---
+  duration_ms: 25.523375
+  type: 'test'
+  ...
+# Subtest: each finite reply stream keeps the existing four MiB boundary
+ok 61 - each finite reply stream keeps the existing four MiB boundary
+  ---
+  duration_ms: 86.508125
+  type: 'test'
+  ...
+# Subtest: initialization permission belongs only to the current confirmed initdb attempt
+ok 62 - initialization permission belongs only to the current confirmed initdb attempt
+  ---
+  duration_ms: 2.101333
+  type: 'test'
+  ...
+# Subtest: failed readiness keeps a verified started server owned for explicit shutdown
+ok 63 - failed readiness keeps a verified started server owned for explicit shutdown
+  ---
+  duration_ms: 1616.008208
+  type: 'test'
+  ...
+# Subtest: start accepts the resolved instance directory while reset requires its exact saved spelling
+ok 64 - start accepts the resolved instance directory while reset requires its exact saved spelling
+  ---
+  duration_ms: 0.56675
+  type: 'test'
+  ...
+# Subtest: only a settled numeric status code 3 permits a start and failed readiness preserves the original error
+ok 65 - only a settled numeric status code 3 permits a start and failed readiness preserves the original error
+  ---
+  duration_ms: 0.23075
+  type: 'test'
+  ...
+# Subtest: unsubmitted, unknown and unclassified start failures cannot adopt another running instance
+ok 66 - unsubmitted, unknown and unclassified start failures cannot adopt another running instance
+  ---
+  duration_ms: 0.68625
+  type: 'test'
+  ...
+# Subtest: status 3 without a confirmed process failure cannot authorize start or reset
+ok 67 - status 3 without a confirmed process failure cannot authorize start or reset
+  ---
+  duration_ms: 0.444166
+  type: 'test'
+  ...
+# Subtest: first initialization retains the original argv and only updates state after successful physical commands
+ok 68 - first initialization retains the original argv and only updates state after successful physical commands
+  ---
+  duration_ms: 0.194083
+  type: 'test'
+  ...
+# Subtest: reset never removes data after a stop failure and clears ownership only after removal succeeds
+ok 69 - reset never removes data after a stop failure and clears ownership only after removal succeeds
+  ---
+  duration_ms: 0.166042
+  type: 'test'
+  ...
+# Subtest: the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+ok 70 - the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+  ---
+  duration_ms: 0.309584
+  type: 'test'
+  ...
+# Subtest: POSIX reset refuses a linked data directory and preserves its actual target
+ok 71 - POSIX reset refuses a linked data directory and preserves its actual target
+  ---
+  duration_ms: 2.130833
+  type: 'test'
+  ...
+# Subtest: reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+ok 72 - reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+  ---
+  duration_ms: 828.48225
+  type: 'test'
+  ...
+# Subtest: WSL startup sends the fixed host identity and requires the current certificate
+ok 73 - WSL startup sends the fixed host identity and requires the current certificate
+  ---
+  duration_ms: 84.592625
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: failed-zero
+ok 74 - shutdown rejects incomplete settlement even with exit zero: failed-zero
+  ---
+  duration_ms: 33.806625
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: invalid-zero
+ok 75 - shutdown rejects incomplete settlement even with exit zero: invalid-zero
+  ---
+  duration_ms: 37.063625
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+ok 76 - shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+  ---
+  duration_ms: 32.243167
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+ok 77 - shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+  ---
+  duration_ms: 37.178584
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+ok 78 - shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+  ---
+  duration_ms: 30.895083
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-failure
+ok 79 - a submitted startup cannot be treated as an unused child: pre-ready-failure
+  ---
+  duration_ms: 29.606625
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-exit
+ok 80 - a submitted startup cannot be treated as an unused child: pre-ready-exit
+  ---
+  duration_ms: 30.611209
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-oauth
+ok 81 - OAuth bridge reports the real browser-open outcome: wsl-oauth
+  ---
+  duration_ms: 38.113042
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+ok 82 - OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+  ---
+  duration_ms: 38.321916
+  type: 'test'
+  ...
+# Subtest: host uses one child, private startup frame and correlated quit inspection
+ok 83 - host uses one child, private startup frame and correlated quit inspection
+  ---
+  duration_ms: 56.032709
+  type: 'test'
+  ...
+# Subtest: stop waits for the child to finish settlement and permits concurrent stop callers
+ok 84 - stop waits for the child to finish settlement and permits concurrent stop callers
+  ---
+  duration_ms: 88.647
+  type: 'test'
+  ...
+# Subtest: malformed status closes the control pipe and explicit stop does not write after end
+ok 85 - malformed status closes the control pipe and explicit stop does not write after end
+  ---
+  duration_ms: 31.555917
+  type: 'test'
+  ...
+# Subtest: quit during asynchronous launch preparation still stops the child once spawned
+ok 86 - quit during asynchronous launch preparation still stops the child once spawned
+  ---
+  duration_ms: 29.038667
+  type: 'test'
+  ...
+# Subtest: a ready child reporting close failure rejects shutdown completion
+ok 87 - a ready child reporting close failure rejects shutdown completion
+  ---
+  duration_ms: 28.998917
+  type: 'test'
+  ...
+# Subtest: stop before any launch is a no-op for concurrent callers
+ok 88 - stop before any launch is a no-op for concurrent callers
+  ---
+  duration_ms: 1.685208
+  type: 'test'
+  ...
+# Subtest: stop retains an already closed ready child nonzero result for every caller
+ok 89 - stop retains an already closed ready child nonzero result for every caller
+  ---
+  duration_ms: 31.058458
+  type: 'test'
+  ...
+# Subtest: stop accepts an already closed ready child with exit zero
+ok 90 - stop accepts an already closed ready child with exit zero
+  ---
+  duration_ms: 32.766334
+  type: 'test'
+  ...
+# Subtest: a fresh launch cannot erase the failed exit awaited by an older stop
+ok 91 - a fresh launch cannot erase the failed exit awaited by an older stop
+  ---
+  duration_ms: 57.675166
+  type: 'test'
+  ...
+# Subtest: a child reaching ready while stop is joining still reports its failed exit
+ok 92 - a child reaching ready while stop is joining still reports its failed exit
+  ---
+  duration_ms: 31.959334
+  type: 'test'
+  ...
+# Subtest: child starts before PostgreSQL finishes, but start and inspection frames stay gated
+ok 93 - child starts before PostgreSQL finishes, but start and inspection frames stay gated
+  ---
+  duration_ms: 28.311792
+  type: 'test'
+  ...
+# Subtest: PostgreSQL failure sends no start frame and joins the unused child before rejection
+ok 94 - PostgreSQL failure sends no start frame and joins the unused child before rejection
+  ---
+  duration_ms: 58.148542
+  type: 'test'
+  ...
+# Subtest: an early child exit is observed while PostgreSQL preparation is still settling
+ok 95 - an early child exit is observed while PostgreSQL preparation is still settling
+  ---
+  duration_ms: 62.790042
+  type: 'test'
+  ...
+# Subtest: runtime directory failure rejects before spawning or preparing PostgreSQL
+ok 96 - runtime directory failure rejects before spawning or preparing PostgreSQL
+  ---
+  duration_ms: 2.111375
+  type: 'test'
+  ...
+# Subtest: a log append failure remains a runtime event and does not replace shutdown ownership
+ok 97 - a log append failure remains a runtime event and does not replace shutdown ownership
+  ---
+  duration_ms: 28.41625
+  type: 'test'
+  ...
+# Subtest: desktop UI preferences survive a new owner independently of renderer ports
+ok 98 - desktop UI preferences survive a new owner independently of renderer ports
+  ---
+  duration_ms: 7.43675
+  type: 'test'
+  ...
+# Subtest: WSL discovery joins actual names to localized version/default observations
+ok 99 - WSL discovery joins actual names to localized version/default observations
+  ---
+  duration_ms: 1.600916
+  type: 'test'
+  ...
+# Subtest: Linux bundle paths use POSIX even on the Windows host
+ok 100 - Linux bundle paths use POSIX even on the Windows host
+  ---
+  duration_ms: 0.298583
+  type: 'test'
+  ...
+# Subtest: payload manifest carries only the fixed archive content boundary
+ok 101 - payload manifest carries only the fixed archive content boundary
+  ---
+  duration_ms: 8.566
+  type: 'test'
+  ...
+1..101
+# tests 105
+# suites 0
+# pass 105
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3844.5905
+[desktop:verify] $ .venv/bin/python desktop/scripts/smoke_resources.py
+CREATE EXTENSION
+CREATE EXTENSION
+pg_search=0.26.1
+vector=0.8.1
+CREATE TABLE
+INSERT 0 2
+CREATE INDEX
+search=1
+vector=0
+Python application import and relocated Chromium passed
+Relocated PostgreSQL, vector, pg_search, Python and Chromium passed
+[desktop:verify] $ .venv/bin/python desktop/scripts/release_artifacts.py check …
+0.1.0-alpha.9
+Finished in 36.02s

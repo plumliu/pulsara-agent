@@ -1,0 +1,19 @@
+{
+  "source": "Actual CUA native application actions and AX observations in this conversation; not a replay or DOM mock",
+  "candidate": "a57ce3b1 plus three production Python fixes, rebuilt 0.1.0-alpha.9 arm64",
+  "finalOriginFirstOpen": "http://127.0.0.1:64968/",
+  "finalOriginColdReopen": "http://127.0.0.1:65195/",
+  "originalSessionRetained": "jbtudjjg",
+  "finalSessionCreatedAndRetained": "a7wkn3ta",
+  "finalNativeCreatedWorkspace": "/private/tmp/pui-pzub920x/Mac 中文 工作区's/最终包 子目录's",
+  "nativeSelectedFile": "/private/tmp/pui-pzub920x/gui-files/附件 中文's.txt",
+  "fileLength": 37,
+  "fileOutcome": "Native file reference inserted in composer; no Windows import-copy claim",
+  "shortcuts": ["Command+N opened create session", "Command+K listed both actual sessions"],
+  "hideReactivate": "Command+W then activate same app; file reference and 最终 Mac 草稿保留验证。 retained",
+  "coldReopen": "Overview displayed 2 sessions, local data ready; entering a7wkn3ta displayed exact workspace path",
+  "draftColdReopen": "Empty, as in pre-fix package; existing process-local PromptDraftStore contract, not durable state",
+  "quit": "Both final-package runs exited via Command+Q; process checks and PostgreSQL shutdown logs preserved separately",
+  "permission": "Test-only ad-hoc re-sign invalidated old DesktopFolder code requirement; user confirmed second native prompt; ready then observed. Third cold launch same signature required no further prompt.",
+  "limitations": ["No real OS sleep/wake", "Chinese text pasted, not hardware IME input", "GUI had no saved model credential; real provider ran through isolated wheel probes", "No new Notion authorization", "No day-to-day application update"]
+}

@@ -1,0 +1,16 @@
+...............
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+/Users/plumliu/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/selectors.py:566: KeyboardInterrupt
+(to show a full traceback on KeyboardInterrupt use --full-trace)
+15 passed in 248.58s (0:04:08)
+Task was destroyed but it is pending!
+task: <Task cancelling name='Task-68' coro=<_bare_host_core_with_blocked_blob_gc.<locals>.blocked_gc() running at /Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_round5_long_horizon_execution_envelope.py:555> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[gather.<locals>._done_callback() at /Users/plumliu/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/tasks.py:767]>
+Task exception was never retrieved
+future: <Task finished name='Task-69' coro=<KernelHostCore.shutdown() done, defined at /Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/conversation_kernel/host.py:9046> exception=AttributeError("'KernelHostCore' object has no attribute '_history_maintenance'")>
+Traceback (most recent call last):
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/conversation_kernel/host.py", line 9070, in shutdown
+    task.result()
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/conversation_kernel/host.py", line 9084, in _shutdown_owner
+    if self._history_maintenance is not None:
+       ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'KernelHostCore' object has no attribute '_history_maintenance'

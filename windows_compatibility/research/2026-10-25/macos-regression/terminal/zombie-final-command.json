@@ -1,0 +1,19 @@
+{
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_posix_process_group_settlement.py",
+    "tests/test_round9_2_hook_subsystem.py",
+    "tests/test_mcp_transport_lifecycle.py",
+    "tests/test_windows_interop_failures.py"
+  ],
+  "environment": {
+    "CI": "true"
+  },
+  "python": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+  "module": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/__init__.py",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "outcome": "68 passed in 6.43s; no skips"
+}

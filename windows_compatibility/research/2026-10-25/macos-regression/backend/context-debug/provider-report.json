@@ -1,0 +1,107 @@
+{
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "executable": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+  "connection_id": "connection:qjdnthf7ygewjmi4ktd4ppbnzq",
+  "model": "openai/gpt-6-luna",
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "scenarios": {
+    "context": {
+      "database": "pulsara_test_main_33696_b42f1d8937",
+      "activation_read_differences": [
+        [
+          {
+            "field": ".compile_snapshot.canonical_input.identity.provider_input_through_sequence",
+            "prepared": "10",
+            "actual": "11"
+          },
+          {
+            "field": ".compile_snapshot.canonical_input.identity.identity_fingerprint",
+            "prepared": "'sha256:468d6003233b297bcaf81bc07dce52eb78f153785e3f0513e0ab4fd2b788a6c6'",
+            "actual": "'sha256:9a5d35507a73613373ea91daa53b781ad339011c00d7e5bc6661d08a63f93fd7'"
+          },
+          {
+            "field": ".compile_snapshot.canonical_input.snapshot_fingerprint",
+            "prepared": "'sha256:0471209c931bc46e7dc0680c9a86f1dfac21bb6624dd3717cae805c5ccef3e81'",
+            "actual": "'sha256:467b9ae8a67d9272e3addf4fb9f78f5fbb2d29dea50bb64312273552b2457f86'"
+          },
+          {
+            "field": ".compile_snapshot.canonical_read_cut_fingerprint",
+            "prepared": "'sha256:a733f06f07afbe550fd0138e23c81f34b984ff658d13ebd7651a4007ab85f8b0'",
+            "actual": "'sha256:49e2fda22bc115c52d1377ff688922616b081a0686a5ce69b871bcc414a36b8c'"
+          },
+          {
+            "field": ".replay_manifest_cut.provider_input_through_sequence",
+            "prepared": "10",
+            "actual": "11"
+          },
+          {
+            "field": ".replay_manifest_cut.cut_fingerprint",
+            "prepared": "'sha256:ecf796fa7bce9fafecc25d8b7bbd004a2fe97e90fad208333e685b3b0423054d'",
+            "actual": "'sha256:9ba7c72008de23aa0a4e5e34f124a6b9e5b97a382d72865183bcc9b073d3a56c'"
+          },
+          {
+            "field": ".composite_fingerprint",
+            "prepared": "'sha256:f96dfccd7f2de9a4ee381acc542d72cb7a7adc55947935eb2446497722a1d652'",
+            "actual": "'sha256:ca7c198d4ef80cfb75eae2388d19342b2c7d4ace5007c43789decfdfe11f8309'"
+          }
+        ]
+      ],
+      "canonical_context_gate": {
+        "target": {
+          "turn_id": "turn:jll6kc2cdphujzkhrfedr66pt4"
+        },
+        "steers": [
+          "PENDING",
+          "PENDING"
+        ]
+      },
+      "prefix_checks": [
+        {
+          "session_id": "session:wtwyqy4oa7gbswqn6agtlas3zu",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:v3ew2lqewygwzzxhbs7wdmznym",
+          "revision": 1,
+          "compared": false,
+          "messages": 8
+        },
+        {
+          "session_id": "session:wtwyqy4oa7gbswqn6agtlas3zu",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:v3ew2lqewygwzzxhbs7wdmznym",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:wtwyqy4oa7gbswqn6agtlas3zu",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:klfdyevxjjcc5kedry5je6ej6a",
+          "epoch": "epoch:42tgn2dhzl6v5ivsdqeiqwmzha",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:wtwyqy4oa7gbswqn6agtlas3zu",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:v3ew2lqewygwzzxhbs7wdmznym",
+          "revision": 3,
+          "compared": true,
+          "messages": 14
+        }
+      ],
+      "provider_call_count": 4,
+      "status": "failed",
+      "error_type": "StructuredModelInputCompileError",
+      "error": "structured model input compile failed: CANONICAL_PREFIX_CONFLICT",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 238, in main\n    asyncio.run(scenario(settings, workspace, name, state))\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 210, in scenario\n    state['result'] = await runner._run(settings, workspace, scenario=name,\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/dogfood/run_round10_subagent_dogfood.py\", line 1262, in _run\n    results[\"last_n_and_message\"] = await _run_last_n_and_message(\n                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 193, in context\n    return await original_context(session, workspace)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/dogfood/run_round10_subagent_dogfood.py\", line 726, in _run_last_n_and_message\n    send_result = await session.run_turn(\n                  ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 1956, in run_turn\n    result = await asyncio.shield(task)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2400, in _run_owned_root_task\n    result = await run(intent)\n             ^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2256, in _run_root_turn_chain\n    result = await self._runner.run_turn(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1229, in run_turn\n    return await self._run_turn(\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1402, in _run_turn\n    return await self.run_accepted_turn(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1802, in run_accepted_turn\n    await self._provider_dispatch.activate_prospective_root_input(\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 101, in activate\n    return await original_activate(owner, prepared, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/provider_dispatch.py\", line 2417, in activate_prospective_root_input\n    raise StructuredModelInputCompileError(\npulsara_agent.model_input.contracts.StructuredModelInputCompileError: structured model input compile failed: CANONICAL_PREFIX_CONFLICT\n",
+      "elapsed_seconds": 24.156389834010042,
+      "captured_output": "hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nROOT execution failed (kernel-turn:command:g24ewl4bdkystk4eni4yqesq24)\nTraceback (most recent call last):\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2400, in _run_owned_root_task\n    result = await run(intent)\n             ^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 2256, in _run_root_turn_chain\n    result = await self._runner.run_turn(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1229, in run_turn\n    return await self._run_turn(\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1402, in _run_turn\n    return await self.run_accepted_turn(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py\", line 1802, in run_accepted_turn\n    await self._provider_dispatch.activate_prospective_root_input(\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_provider.py\", line 101, in activate\n    return await original_activate(owner, prepared, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/provider_dispatch.py\", line 2417, in activate_prospective_root_input\n    raise StructuredModelInputCompileError(\npulsara_agent.model_input.contracts.StructuredModelInputCompileError: structured model input compile failed: CANONICAL_PREFIX_CONFLICT\n",
+      "database_dropped": true
+    }
+  },
+  "status": "failed"
+}

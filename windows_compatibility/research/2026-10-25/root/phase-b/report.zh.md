@@ -164,3 +164,7 @@ alpha.9完成正式构建及制品检查，见[构建报告](../../desktop/alpha
 随后以Ctrl+Q打开原退出确认框，并点击“退出Pulsara”。19:40:50的第一次只读快照处于确认尚未点击阶段，原JSON保留为中间状态，不算产品关闭失败。19:42:12再次观察应用进程0、原kernel494不存在、正式pg_ctl status3（no server running）；19:42:26已装exe维护检查exit0，应用仍0。未外部kill、手工停PG或终止共享WSL。证据为本报告`evidence/alpha9-after-sleep-*.txt`、`alpha9-quit-confirmation-ui.txt`、`alpha9-post-sleep-normal-quit*.json`及`alpha9-post-sleep-maintenance.*`。
 
 当前应用保持关闭，测试会话与用户原数据保留。至此本机alpha.9的“闲置睡眠→自动恢复→真实新消息→正常Quit”分项通过；没有把独立活动进程回收实验冒充本次睡眠时正在执行任务的证明。活动任务睡眠全矩阵、同一原窗口150%→100%返回、真实AltGr布局、其他故障环境及受影响macOS原生回归仍按各自证据边界记录，原生Ubuntu继续延期，Windows支持/B5尚未激活。
+
+## 后续原生macOS回归
+
+用户随后授权在Mac端由root与三位gpt-6.1-sol/high并行执行。a57ce3b1加本轮共享窄修的所选Mac arm64矩阵通过并经四方审阅，见[Mac最终报告](../../macos-regression/root/report.zh.md)及[冻结记录](../../macos-regression/root/freeze-review.zh.md)。完整前端/相关后端/desktop/terminal、同最终wheel真实provider、独立app原生工作区/文件/快捷键/隐藏草稿/正常Quit/冷重开及原CLI恢复均有新证据。本轮另修Darwin zombie组EPERM和ROOT accept后head-only窗口，原失败保留；不把原Windows alpha.9安装资格自动延伸到这些共享修改。真实Mac睡眠/硬件IME、其余Mac分发矩阵及Ubuntu仍待验收，Windows须重跑受影响用例，B5未激活。

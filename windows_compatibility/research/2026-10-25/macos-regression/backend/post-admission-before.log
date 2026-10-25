@@ -1,0 +1,154 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn _
+
+stage2_migrated_postgres_database = MigratedPostgresTestDatabase(database_name='pulsara_test_main_41187_132a990e8d', admin_dsn='user=pulsara_admin dbname=...runtime_dsn='user=pulsara_runtime dbname=pulsara_test_main_41187_132a990e8d host=/private/tmp/pm-1xk3ye1p/s port=5432')
+
+    def test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn(
+        stage2_migrated_postgres_database,
+    ) -> None:
+        class ChildAfterRootRepository(ConversationKernelRepository):
+            child_admission = None
+            target_command = None
+            target_intents = []
+    
+            def accept_root_turn_intent(self, *args, **kwargs):
+                accepted = super().accept_root_turn_intent(*args, **kwargs)
+                if kwargs["intent"].command_id == self.target_command:
+                    self.target_intents.append(kwargs["intent"])
+                    assert self.child_admission is not None
+                    child, self.child_admission = self.child_admission, None
+                    self.accept_subagent_turn(
+                        args[0], candidate=child,
+                        deadline_monotonic=monotonic() + 10,
+                    )
+                return accepted
+    
+        provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+        repository = ChildAfterRootRepository(provider)
+        session_id, _, lease = _lease(repository)
+        task = _prepare_subagent_task(repository, lease)
+        repository.interrupt_turn(
+            lease.guard, turn_id=task.launch.task_start.parent_turn_id,
+            reason="test fixture delegated parent finished", occurred_at=datetime.now(timezone.utc),
+            actor_id="test-fixture", deadline_monotonic=monotonic() + 10,
+        )
+        model = ScriptedKernelModel([
+            _text_stream("first", block_id="first"),
+            _text_stream("second", block_id="second"),
+        ])
+        runner = _runner(repository, lease, model)
+        preparations = []
+        activations = []
+        original_prepare = runner.prepare_prospective_root_input
+        original_activate = runner._provider_dispatch.activate_prospective_root_input
+    
+        async def prepare(*args, **kwargs):
+            prepared = await original_prepare(*args, **kwargs)
+            preparations.append(prepared)
+            return prepared
+    
+        async def activate(prepared, **kwargs):
+            result = await original_activate(prepared, **kwargs)
+            activations.append(result is None)
+            return result
+    
+        runner.prepare_prospective_root_input = prepare
+        runner._provider_dispatch.activate_prospective_root_input = activate
+    
+        async def scenario():
+            await runner.run_turn(frozen_test_prompt("first"))
+            first = model.requests[0].compiled_input
+            repository.child_admission = build_prepared_subagent_turn_admission(
+                session_id=session_id, task_id=task, turn_id=_name("turn"),
+                entry_id=_name("entry"), context_binding_revision_id=_name("binding"),
+                permission_snapshot_id=_name("permission"),
+                task_start_event_id=task.launch.task_start.event_id,
+                expected_parent_permission_snapshot=task.launch.parent_permission_snapshot,
+                content=InlineContent.from_bytes(b"answer once"),
+                occurred_at=datetime.now(timezone.utc), actor_id="subagent-manager",
+            )
+            command = repository.target_command = _name("command")
+            result = await runner.run_turn(frozen_test_prompt("second"), command_id=command)
+            assert result.final_text == "second"
+            assert len(repository.target_intents) == 1
+            assert repository.child_admission is None
+            assert len(preparations) == 2
+            assert activations == [False, True]
+            assert preparations[-1].admission.candidate.exact_turn_id == result.turn_id
+            assert all(not prepared.owns_resources for prepared in preparations)
+            assert runner._safe_point._active_handle is None
+            second = model.requests[1].compiled_input
+            assert second.system_prompt == first.system_prompt
+            assert second.tools == first.tools
+            assert second.messages[:len(first.messages)] == first.messages
+    
+>       asyncio.run(scenario())
+
+tests/test_round5_long_horizon_postgres.py:1085: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_round5_long_horizon_postgres.py:1071: in scenario
+    result = await runner.run_turn(frozen_test_prompt("second"), command_id=command)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pulsara_agent/conversation_kernel/runner.py:1229: in run_turn
+    return await self._run_turn(
+src/pulsara_agent/conversation_kernel/runner.py:1402: in _run_turn
+    return await self.run_accepted_turn(
+src/pulsara_agent/conversation_kernel/runner.py:1802: in run_accepted_turn
+    await self._provider_dispatch.activate_prospective_root_input(
+tests/test_round5_long_horizon_postgres.py:1051: in activate
+    result = await original_activate(prepared, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.provider_dispatch.ProviderDispatchCoordinator object at 0x10efe11f0>
+prepared = PreparedProspectiveRootDispatch(admission=PreparedRootProviderInputAdmission(wire_quote=FrozenProviderWireInputQuote(w...udget_source='heuristic', anchor_model_call_id=None, anchor_reported_input_tokens=None, estimated_suffix_tokens=None)))
+
+    async def activate_prospective_root_input(
+        self,
+        prepared: PreparedProspectiveRootDispatch,
+        *,
+        deadline: float,
+    ) -> tuple[PreparedProviderDispatch, PreparedWireMeasurementDecision] | None:
+        """Attach post-publication safe-point authority to the measured input."""
+    
+        borrow, hook_reservation, decision = prepared.take_resources()
+        handle: PreparedProviderInputHandle | None = None
+        borrow_owned = True
+        hook_reservation_owned = hook_reservation is not None
+        try:
+            candidate = prepared.admission.candidate
+            handle = await self._io.run(
+                self._safe_point.freeze_provider_input,
+                turn_id=candidate.exact_turn_id,
+                deadline_monotonic=deadline,
+            )
+            actual_read = await self.read_dispatch_read(handle.cut, deadline=deadline)
+            actual_binding = await self._io.run(
+                self._repository.read_turn_model_call_binding,
+                self._writer_lease.guard,
+                turn_id=candidate.exact_turn_id,
+                deadline_monotonic=deadline,
+            )
+            if (
+                actual_read != prepared.admission.canonical_read
+                or actual_binding != candidate.model_call_binding
+            ):
+>               raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+E               pulsara_agent.model_input.contracts.StructuredModelInputCompileError: structured model input compile failed: CANONICAL_PREFIX_CONFLICT
+
+src/pulsara_agent/conversation_kernel/provider_dispatch.py:2417: StructuredModelInputCompileError
+=========================== short test summary info ============================
+FAILED tests/test_round5_long_horizon_postgres.py::test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn - pulsara_agent.model_input.contracts.StructuredModelInputCompileError: structured model input compile failed: CANONICAL_PREFIX_CONFLICT
+1 failed in 1.24s

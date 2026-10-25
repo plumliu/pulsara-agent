@@ -1,0 +1,288 @@
+{
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "executable": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+  "connection_id": "connection:qjdnthf7ygewjmi4ktd4ppbnzq",
+  "model": "openai/gpt-6-luna",
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "scenarios": {
+    "capacity": {
+      "database": "pulsara_test_main_69686_0413637454",
+      "history_seed": {
+        "bytes": 216280,
+        "segments": 5,
+        "repetitions": 800,
+        "helper": "maintained async canonical admission fixture"
+      },
+      "admission_errors": [
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        },
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        },
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        },
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        }
+      ],
+      "retired_prospectives": [
+        {
+          "turn_id": "turn:jzytawakozifnind4m5dr4lpfa",
+          "prospective_resources_retired": true,
+          "safe_point_handle_retired": true,
+          "installed_view_object_unchanged": true
+        }
+      ],
+      "result": {
+        "schema_version": "round10-subagent-dogfood.v1",
+        "completed_at_utc": "2026-10-25T12:38:30.377441+00:00",
+        "connection_id": "connection:qjdnthf7ygewjmi4ktd4ppbnzq",
+        "provider_api": "openai_chat_completions",
+        "provider_model": "openai/gpt-6-luna",
+        "reasoning_effort": null,
+        "scenario": "capacity",
+        "capacity_mcp_compaction": {
+          "passed": true,
+          "status_at_mcp_install": {
+            "cap0": "ACTIVE",
+            "cap1": "ACTIVE",
+            "cap2": "ACTIVE",
+            "cap3": "ACTIVE",
+            "mcp_queued": "PENDING_START"
+          },
+          "mcp_reload_ids": [
+            "child"
+          ],
+          "mcp_state": "READY",
+          "spawn_model_calls": 2,
+          "spawn_tool_calls": 1,
+          "spawn_final_text": "Created the five tasks in the requested order. The four capacity tasks are active; `mcp_queued` is pending start.\n\n- cap0: `task:oyapqf7sfulmwfsdah5ifl2jeq`\n- cap1: `task:aldrc76g6tspzmquimbip2wesi`\n- cap2: `task:lvx47cximga4ztun4mrhy6z7f4`\n- cap3: `task:26ugl5dk4mj3rzfsmiiyk57mme`\n- mcp_queued: `task:5jr2rthn4pqgenzu6bgyeyb26e`",
+          "compaction_disposition": "COMPACTED",
+          "compaction_public_code": "COMPACTED",
+          "compaction_snapshot_id": "snapshot:lvipj6szpiiecd3a4yi4ng2zcq",
+          "compaction_internal_failures": [],
+          "runtime_handoff_has_task_board": true,
+          "runtime_handoff_task_keys": [
+            "cap0",
+            "cap1",
+            "cap2",
+            "cap3",
+            "mcp_queued"
+          ],
+          "runtime_handoff_observations": [
+            {
+              "presence": "VALUE",
+              "keys": [
+                "omitted",
+                "subagent_task_counts",
+                "subagent_tasks",
+                "terminal_monitors",
+                "terminal_processes",
+                "todo_counts",
+                "todos"
+              ],
+              "task_keys": [
+                "cap0",
+                "cap1",
+                "cap2",
+                "cap3",
+                "mcp_queued"
+              ]
+            }
+          ],
+          "wait_model_calls": 2,
+          "wait_tool_calls": 1,
+          "wait_final_text": "All five tasks completed. The four capacity tasks reported `CAPACITY_HOLD_OK`. `mcp_queued` reported the exact remote result: `direct:PRESTART_MCP_MARKER` (`isError=false`).",
+          "mcp_child_tool_names": [
+            "mcp__child__direct_echo",
+            "report_agent_result"
+          ],
+          "mcp_child_result_summary": "Called the native `mcp__child__direct_echo` tool exactly once with text `PRESTART_MCP_MARKER`. The exact remote result was `direct:PRESTART_MCP_MARKER` (tool reported success; `isError=false`).",
+          "final_tasks": [
+            {
+              "task_id": "task:oyapqf7sfulmwfsdah5ifl2jeq",
+              "task_key": "cap0",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK.",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:aldrc76g6tspzmquimbip2wesi",
+              "task_key": "cap1",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK.",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:lvx47cximga4ztun4mrhy6z7f4",
+              "task_key": "cap2",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK.",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:26ugl5dk4mj3rzfsmiiyk57mme",
+              "task_key": "cap3",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "CAPACITY_HOLD_OK",
+              "terminal_reason": null
+            },
+            {
+              "task_id": "task:5jr2rthn4pqgenzu6bgyeyb26e",
+              "task_key": "mcp_queued",
+              "status": "COMPLETED",
+              "result_source": "EXPLICIT",
+              "result_summary": "Called the native `mcp__child__direct_echo` tool exactly once with text `PRESTART_MCP_MARKER`. The exact remote result was `direct:PRESTART_MCP_MARKER` (tool reported success; `isError=false`).",
+              "terminal_reason": null
+            }
+          ]
+        },
+        "status": "passed"
+      },
+      "prefix_checks": [
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:qbbzu4otxlivp2iieobpsal7xm",
+          "revision": 1,
+          "compared": false,
+          "messages": 16
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:oyapqf7sfulmwfsdah5ifl2jeq",
+          "epoch": "epoch:kcrdx5qf5sogbrpga744ru66xe",
+          "revision": 1,
+          "compared": false,
+          "messages": 6
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:aldrc76g6tspzmquimbip2wesi",
+          "epoch": "epoch:ibfopi4bdvj5zsiprkl5hd77o4",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:lvx47cximga4ztun4mrhy6z7f4",
+          "epoch": "epoch:bcspwn4tlbz2qhyw3fro75vr4e",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:26ugl5dk4mj3rzfsmiiyk57mme",
+          "epoch": "epoch:xie426p5ao7zft6654r4ujnqsu",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:l3y466axzgdlosqd65bont4ckq",
+          "revision": 2,
+          "compared": false,
+          "messages": 10
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:lvx47cximga4ztun4mrhy6z7f4",
+          "epoch": "epoch:bcspwn4tlbz2qhyw3fro75vr4e",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:oyapqf7sfulmwfsdah5ifl2jeq",
+          "epoch": "epoch:kcrdx5qf5sogbrpga744ru66xe",
+          "revision": 2,
+          "compared": true,
+          "messages": 10
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:aldrc76g6tspzmquimbip2wesi",
+          "epoch": "epoch:ibfopi4bdvj5zsiprkl5hd77o4",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:26ugl5dk4mj3rzfsmiiyk57mme",
+          "epoch": "epoch:xie426p5ao7zft6654r4ujnqsu",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:5jr2rthn4pqgenzu6bgyeyb26e",
+          "epoch": "epoch:nuo5unacrmjxwpez6vyjfofhka",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:5jr2rthn4pqgenzu6bgyeyb26e",
+          "epoch": "epoch:nuo5unacrmjxwpez6vyjfofhka",
+          "revision": 2,
+          "compared": true,
+          "messages": 10
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:l3y466axzgdlosqd65bont4ckq",
+          "revision": 3,
+          "compared": true,
+          "messages": 16
+        },
+        {
+          "session_id": "session:r7yl7hgsoqsa6sshefme62dvwy",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:l3y466axzgdlosqd65bont4ckq",
+          "revision": 4,
+          "compared": true,
+          "messages": 23
+        }
+      ],
+      "provider_call_count": 15,
+      "status": "passed",
+      "elapsed_seconds": 60.88886262499727,
+      "captured_output": "hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\n",
+      "database_dropped": true
+    }
+  },
+  "status": "passed"
+}

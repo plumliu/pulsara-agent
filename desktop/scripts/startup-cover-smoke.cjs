@@ -16,7 +16,20 @@ async function within(promise, message) {
   } finally { clearTimeout(timer); }
 }
 function coverView() { return host.contentView.children.find(child => child.webContents !== host.webContents); }
-async function fadeStarted(contents) {
+async function fadeStarted(contents, stage) {
+  // On macOS, showInactive() can leave an occluded renderer hidden. A fade is
+  // only required for a visible page; establish that premise before observing it.
+  host.show();
+  host.focus();
+  await within(contents.executeJavaScript(`new Promise(resolve => {
+    const visible = () => {
+      if (document.hidden) return;
+      document.removeEventListener('visibilitychange', visible);
+      resolve();
+    };
+    document.addEventListener('visibilitychange', visible);
+    visible();
+  })`), `${stage}: fade requires a visible renderer`);
   await contents.executeJavaScript(`(() => {
     const animate = document.body.animate.bind(document.body);
     document.body.animate = (...args) => {
@@ -89,7 +102,7 @@ app.whenReady().then(async () => {
     await cover.show();
     const pendingView = coverView();
     const pendingContents = pendingView.webContents;
-    const { started } = await fadeStarted(pendingContents);
+    const { started } = await fadeStarted(pendingContents, transition);
     const ready = host.webContents.executeJavaScript(`(() => {
       document.getElementById('root').inert = true;
       return Promise.all([window.pulsaraDesktop.startupSettled(), window.pulsaraDesktop.startupSettled()]).then(() => {
@@ -119,6 +132,39 @@ app.whenReady().then(async () => {
     }
     console.log(`PASS: ${transition} settles startup IPC and releases the renderer interaction gate`);
   }
+
+  // A hidden cover legitimately skips the fade but must still settle the same
+  // preload -> IPC interaction gate and physically destroy its own contents.
+  host.hide();
+  await cover.show();
+  const hiddenView = coverView();
+  const hiddenContents = hiddenView.webContents;
+  assert.equal(host.isVisible(), false);
+  await within(hiddenContents.executeJavaScript(`new Promise(resolve => {
+    const hidden = () => {
+      if (!document.hidden) return;
+      document.removeEventListener('visibilitychange', hidden);
+      resolve();
+    };
+    document.addEventListener('visibilitychange', hidden);
+    hidden();
+  })`), 'hidden: renderer never became hidden');
+  await hiddenContents.executeJavaScript(`(() => {
+    document.body.animate = () => {
+      throw new Error('A hidden startup cover must not animate');
+    };
+  })()`);
+  const hiddenReady = host.webContents.executeJavaScript(`(() => {
+    document.getElementById('root').inert = true;
+    return window.pulsaraDesktop.startupSettled().then(() => {
+      document.getElementById('root').inert = false;
+    });
+  })()`);
+  await within(hiddenReady, 'hidden: startup IPC remained blocked');
+  assert.equal(await host.webContents.executeJavaScript('document.getElementById("root").inert'), false);
+  assert.equal(hiddenContents.isDestroyed(), true);
+  assert.equal(host.contentView.children.includes(hiddenView), false);
+  console.log('PASS: hidden startup skips animation and releases the renderer interaction gate');
 
   // Electron can clear view.webContents before the cover owner disposes the view.
   await cover.show();
@@ -153,7 +199,7 @@ app.whenReady().then(async () => {
   assert.deepEqual(await failureContents.executeJavaScript(`({text:document.getElementById('error-detail-text').textContent,open:document.getElementById('error-details').open,hidden:document.getElementById('error-details').hidden})`), {text:'fixture startup failure',open:false,hidden:false});
   const failureDestroyed = once(failureContents, 'destroyed');
   host.showInactive();
-  const { started: closingStarted } = await fadeStarted(failureContents);
+  const { started: closingStarted } = await fadeStarted(failureContents, 'closing');
   const closing = cover.finish();
   await within(closingStarted, 'closing: fade never started');
   host.destroy();

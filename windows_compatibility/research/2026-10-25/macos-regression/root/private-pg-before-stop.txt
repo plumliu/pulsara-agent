@@ -1,0 +1,6 @@
+/private/tmp/pm-1xk3ye1p/data|7700577008563768207
+postgres
+pulsara
+template0
+template1
+89426|pulsara|pulsara_admin|active

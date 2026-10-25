@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-25",
+  "revision": "a57ce3b103214d3a0865e0460c0f7dd0d0aa97a4",
+  "environment": {
+    "os": "macOS 26.2",
+    "build": "25C56",
+    "kernel": "Darwin 25.2.0",
+    "architecture": "arm64",
+    "node": "v22.23.3",
+    "nodeExecutable": "/Users/plumliu/.local/share/mise/installs/node/22.23.3/bin/node"
+  },
+  "checks": [
+    {
+      "cwd": "/Users/plumliu/Desktop/python_workspace/pulsara_agent",
+      "command": "mise exec -- npm --prefix frontend test -- --maxWorkers=2",
+      "exitCode": 0,
+      "filesPassed": 83,
+      "testsPassed": 1372,
+      "testsSkipped": 0,
+      "testsTodo": 0,
+      "durationSeconds": 69.99,
+      "log": "vitest-full.log"
+    },
+    {
+      "cwd": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/frontend",
+      "command": "mise exec -- ./node_modules/.bin/tsc --noEmit --tsBuildInfoFile ../output/macos-regression-20261025/desktop/frontend.tsbuildinfo",
+      "exitCode": 0,
+      "log": "types.log"
+    },
+    {
+      "cwd": "/Users/plumliu/Desktop/python_workspace/pulsara_agent",
+      "command": "mise exec -- npm --prefix frontend run lint",
+      "exitCode": 0,
+      "warnings": 0,
+      "log": "lint.log"
+    },
+    {
+      "cwd": "/Users/plumliu/Desktop/python_workspace/pulsara_agent",
+      "command": "git diff --check -- tests/frontend/app-shortcuts.test.tsx tests/frontend/runtime-adapter.test.ts",
+      "exitCode": 0
+    }
+  ],
+  "changes": [
+    "tests/frontend/app-shortcuts.test.tsx",
+    "tests/frontend/runtime-adapter.test.ts",
+    "desktop/scripts/startup-cover-smoke.cjs"
+  ],
+  "startupSmoke": {
+    "rootOriginalExitCode": 1,
+    "cause": "Animation fixture did not establish actual renderer visibility; hidden production finish completed and released IPC before fixture fade timeout",
+    "productionChanged": false,
+    "fixedFullRuns": 3,
+    "fixedExitCodes": [0, 0, 0],
+    "logs": ["startup-fixed.log", "startup-fixed-repeat-1.log", "startup-fixed-repeat-2.log"],
+    "analysis": "startup-analysis.md"
+  },
+  "productionChangesByThisAgent": false,
+  "additionalCases": 10,
+  "guiOwner": "root",
+  "hardwareImeTestedByThisAgent": false,
+  "osSleepWakeTested": false
+}

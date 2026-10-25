@@ -1,0 +1,18 @@
+[
+  {
+    "iteration": 1,
+    "command": [
+      "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+      "output/macos-regression-20261025/terminal/real_scope_probe.py"
+    ],
+    "exit_code": 0
+  },
+  {
+    "iteration": 2,
+    "command": [
+      "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python",
+      "output/macos-regression-20261025/terminal/real_scope_probe.py"
+    ],
+    "exit_code": 1
+  }
+]

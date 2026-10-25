@@ -598,6 +598,22 @@ PDF正证需要Electron内置固定extension及其自身frame发起的chrome://r
 
 - 真实provider长程验收发现共享ROOT准入会无限重发head已过期的prospective输入。仅同workspace下的head过期使用明确typed冲突；原confirm先裁定同一immutable command的FULL/ABSENT，只有确定尚无ROOT提交时才关闭旧prospective并重新prepare。已有epoch、SYSTEM/tools与已安装provider前缀保持；workspace变化及其他冲突不改为这个重准备路径，ACK unknown仍走原确认，取消后不得重新准入。不新增持久状态、命令身份、重放或重试总次数限制。此修复须由新候选重跑原真实长程场景，不能仅据源码定向测试宣称已安装产品通过。
 
+- macOS原生真实provider回归另暴露ROOT已经accept、尚未安装prospective provider输入时，子任务推进session全局head的窗口。只有actual head严格前进、model binding相同，且将actual四层既有DTO的through-sequence归回prepared值后，经原constructor校验和完整值相等证明其余canonical内容、closure、permission、context与replay完全相同，才退休本次handle、dry borrow、hook reservation和planning，回到同一已accepted ROOT的普通prepare；不再次accept、创建command/turn、复用过期wire测量或重建installed epoch/SYSTEM/tools/messages。其他漂移仍按原prefix conflict失败；任一资源退役失败原样传播，不能冒充已恢复。
+
 本节描述获授权的实现边界与已经执行的定向验证，不宣称B1–B5或发布矩阵全部通过。正式候选的构建、集成、GUI、provider长程及受影响原生平台资格按§11–13逐项记录；用户延期的原生Ubuntu资格不由WSL代替。
 
 用户先批准本地候选由`0.1.0-alpha.6`升级到`0.1.0-alpha.7`，用于安装共享ROOT修复并验证正常更新保留模型配置与会话；随后明确批准`alpha.8`及本轮后续必要本地候选递增，并要求同步修改规范。当前版本权限以§8.3为准：本地版本递增、构建和安装无需逐次确认，Git tag及对外发布仍需另行授权。
+
+
+- macOS 原生真实 fork-tail 回归发现，仅含尚未 reap 的僵尸进程组会令 Darwin killpg 返回 EPERM；新增 hooks/MCP 物理回收不能据此丢弃成功输出或把组当作空。两条现有 leaf 直接对齐 terminal/environment 已有合同：EPERM 保留可能存活事实，signal 拒绝不替代原执行/close 结果，只有后续 ESRCH 证明原进程组消失；不新增超时、进程快照权威或恢复状态。真实未 reap 子进程的 EPERM→reap→ESRCH、自然 fork-tail 输出、MCP 重复取消与物理 join 负例必须通过。
+
+## 25. Windows共享修改后的原生macOS回归（2026-10-25）
+
+用户授权root与三位gpt-6.1-sol/high并行确认共享修改保持原生Mac行为，并明确真实OS睡眠本机无法协助。基线a57ce3b1加§24本轮窄修，所选macOS26.2 arm64矩阵通过；[四方报告](research/2026-10-25/macos-regression/root/report.zh.md)保留完整改前失败、修后证据、构建来源、清理与适用边界。
+
+- 完整frontend83文件1372测试、backend最终244、desktop105、terminal原167及私有PG4、窄修后定向68、Electron browser13分别通过且无skip；suite有重叠，不累加为独立总数。真实Electron cover的fixture在可见路径先确认原PageVisibility，并独立验hidden直接结算；不增加原2秒或修改生产动画。最终统一verify及应用打包通过。
+- 最终wheel从随包site-packages运行真实provider：context8、capacity15、terminal四场景19次调用；MCP、并发/pending、压缩、PIPE/PTY输入和39.29秒自主唤醒通过。逐次SYSTEM/tools精确相同，messages按suffix追加。随机长程没触发post-accept新分支，另用同wheel+真实PG确定性head6→7反例证明仅退休未安装资源并保原accepted turn/installed view。writer expiry与并发controller恢复证明单次旧Core物理close、同session generation1→2；不称硬件睡眠。
+- 最终Mac独立app包中三条生产修复文件与当前源码完整bytes相等；实际图形原生新建中文/空格/单引号目录与会话、原生文件reference、⌘N/⌘K、关闭窗口恢复草稿、正常Quit、再次cold reopen保留会话/工作区均通过。完整Quit后未发送草稿按既有内存owner清空，不添加跨重启持久化。独立bundle重签名触发的DesktopFolder原生提示由用户确认，不能记作产品启动超时。
+- 测试使用私有PULSARA_HOME、独立PG及UUID DB；saved production settings只读并仅内存注入真实provider。未更新日用/Applications应用。所有测试进程/库/home已结算，原用户CLI恢复相同inode/bytes/mode，原生产main/kernel/PG仍运行。构建生成static散列文件只还原本轮噪声，不提交数百无前端产品变化的生成差异。
+
+本轮只关闭已执行Mac arm64矩阵。真实Mac睡眠/硬件IME、Mac x64及签名分发矩阵仍待验收；原生Ubuntu延期不变。本轮共享窄修后的Windows候选须在Windows重验受影响用例，不继承旧alpha.9安装通过事实；不自动tag、发布或激活B5。root与三位gpt-6.1-sol/high已完成最终交叉审阅，均APPROVE；所选Mac arm64矩阵和本轮窄修合同冻结，见[四方记录](research/2026-10-25/macos-regression/root/freeze-review.zh.md)。

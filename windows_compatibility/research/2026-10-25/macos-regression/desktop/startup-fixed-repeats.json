@@ -1,0 +1,12 @@
+[
+  {
+    "sample": 1,
+    "exitCode": 0,
+    "log": "startup-fixed-repeat-1.log"
+  },
+  {
+    "sample": 2,
+    "exitCode": 0,
+    "log": "startup-fixed-repeat-2.log"
+  }
+]

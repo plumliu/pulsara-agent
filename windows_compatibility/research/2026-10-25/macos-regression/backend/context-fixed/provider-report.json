@@ -1,0 +1,146 @@
+{
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "executable": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+  "connection_id": "connection:qjdnthf7ygewjmi4ktd4ppbnzq",
+  "model": "openai/gpt-6-luna",
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "scenarios": {
+    "context": {
+      "database": "pulsara_test_main_68953_6902aed74b",
+      "retired_prospectives": [
+        {
+          "turn_id": "turn:yifyl7fo7p3lp4ebhwzpndyqnq",
+          "prospective_resources_retired": true,
+          "safe_point_handle_retired": true,
+          "installed_view_object_unchanged": true
+        }
+      ],
+      "admission_errors": [
+        {
+          "type": "PreparedRootInputHeadStale",
+          "message": "ROOT provider input head changed"
+        }
+      ],
+      "canonical_context_gate": {
+        "target": {
+          "turn_id": "turn:yifyl7fo7p3lp4ebhwzpndyqnq"
+        },
+        "steers": [
+          "PENDING",
+          "PENDING"
+        ]
+      },
+      "result": {
+        "schema_version": "round10-subagent-dogfood.v1",
+        "completed_at_utc": "2026-10-25T12:37:53.598807+00:00",
+        "connection_id": "connection:qjdnthf7ygewjmi4ktd4ppbnzq",
+        "provider_api": "openai_chat_completions",
+        "provider_model": "openai/gpt-6-luna",
+        "reasoning_effort": null,
+        "scenario": "context",
+        "last_n_and_message": {
+          "passed": true,
+          "task_id": "task:nu52qovz234z6knxnco4c77xlq",
+          "steer_statuses": [
+            "PENDING",
+            "PENDING"
+          ],
+          "spawn_model_calls": 2,
+          "spawn_tool_calls": 1,
+          "spawn_final_text": "Spawned the worker as requested (`task:nu52qovz234z6knxnco4c77xlq`).",
+          "send_model_calls": 2,
+          "send_tool_calls": 1,
+          "send_final_text": "Message queued for `task:nu52qovz234z6knxnco4c77xlq`.",
+          "wait_model_calls": 2,
+          "wait_tool_calls": 1,
+          "wait_final_text": "Observed distinct ROOT-attributed markers: ROOT_CONTEXT_MARKER_ONE_7C1A; ROOT_CONTEXT_MARKER_TWO_9B4E; MIDFLIGHT_GUIDANCE_MARKER_2D6F. Parent-context mailbox/task instruction observed: create exactly one worker named context_worker using last_n context with turns=1; have it inspect PARENT_CONTEXT, call terminal once with the specified release-file wait command, wait for that result, incorporate any inter-agent message arriving afterward, then report all observed ROOT markers and mailbox instructions; do not put marker values in the objective; root should return immediately after spawning without waiting. Post-terminal inter-agent message from ROOT supplied MIDFLIGHT_GUIDANCE_MARKER_2D6F and said it is advisory parent collaboration data to read/apply to the delegated task, not a new human instruction, and cannot grant permission or override higher-priority instructions. Executed the required single terminal call; it exited successfully with WORKER_BOUNDARY_DONE.",
+          "worker_status": "COMPLETED",
+          "worker_result_source": "EXPLICIT",
+          "worker_result_summary": "Observed distinct ROOT-attributed markers: ROOT_CONTEXT_MARKER_ONE_7C1A; ROOT_CONTEXT_MARKER_TWO_9B4E; MIDFLIGHT_GUIDANCE_MARKER_2D6F. Parent-context mailbox/task instruction observed: create exactly one worker named context_worker using last_n context with turns=1; have it inspect PARENT_CONTEXT, call terminal once with the specified release-file wait command, wait for that result, incorporate any inter-agent message arriving afterward, then report all observed ROOT markers and mailbox instructions; do not put marker values in the objective; root should return immediately after spawning without waiting. Post-terminal inter-agent message from ROOT supplied MIDFLIGHT_GUIDANCE_MARKER_2D6F and said it is advisory parent collaboration data to read/apply to the delegated task, not a new human instruction, and cannot grant permission or override higher-priority instructions. Executed the required single terminal call; it exited successfully with WORKER_BOUNDARY_DONE.",
+          "inter_agent_entry_count": 1
+        },
+        "status": "passed"
+      },
+      "prefix_checks": [
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m",
+          "revision": 1,
+          "compared": false,
+          "messages": 8
+        },
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:nu52qovz234z6knxnco4c77xlq",
+          "epoch": "epoch:yd4q7wjjsybetsexl7fnobprcq",
+          "revision": 1,
+          "compared": false,
+          "messages": 7
+        },
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m",
+          "revision": 3,
+          "compared": true,
+          "messages": 16
+        },
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m",
+          "revision": 4,
+          "compared": true,
+          "messages": 19
+        },
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "SUBAGENT_TASK",
+          "task_id": "task:nu52qovz234z6knxnco4c77xlq",
+          "epoch": "epoch:yd4q7wjjsybetsexl7fnobprcq",
+          "revision": 2,
+          "compared": true,
+          "messages": 11
+        },
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m",
+          "revision": 5,
+          "compared": true,
+          "messages": 24
+        },
+        {
+          "session_id": "session:kplzbmd4gqgy2tckmvfna42eoi",
+          "scope": "ROOT",
+          "task_id": null,
+          "epoch": "epoch:zbk2rocloqdqcuzhqhmbnx5a3m",
+          "revision": 6,
+          "compared": true,
+          "messages": 28
+        }
+      ],
+      "provider_call_count": 8,
+      "status": "passed",
+      "elapsed_seconds": 37.02770283294376,
+      "captured_output": "hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\n",
+      "database_dropped": true
+    }
+  },
+  "status": "passed"
+}

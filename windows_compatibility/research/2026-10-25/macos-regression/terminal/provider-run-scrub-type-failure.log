@@ -1,0 +1,19 @@
+hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+hook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+Provider owner ready
+Traceback (most recent call last):
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/provider_probe.py", line 92, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/provider_probe.py", line 86, in main
+    save(args.output, report, saved)
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/provider_probe.py", line 68, in save
+    encoded = json.dumps(_scrub(value, secrets), ensure_ascii=False, indent=2)
+                         ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/dogfood/run_model_switch_handover_dogfood.py", line 543, in _scrub
+    return {str(_scrub(key, secrets)): _scrub(item, secrets) for key, item in value.items()}
+                ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/dogfood/run_model_switch_handover_dogfood.py", line 540, in _scrub
+    value = value.replace(secret, "<MODEL_API_KEY>")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: replace() argument 1 must be str, not bytes

@@ -90,16 +90,45 @@ it('bootstraps the app without assigning a working directory', async () => {
   expect(fetchMock).toHaveBeenCalledWith('/api/app/bootstrap', expect.any(Object));
 });
 
-it('requests a native directory selection and distinguishes cancellation', async () => {
+it('keeps the macOS native directory picker and distinguishes cancellation without Linux directory requests', async () => {
   const fetchMock = vi.fn();
-  const chooseDirectory = vi.fn().mockResolvedValueOnce('/tmp/项目 ').mockResolvedValueOnce(null);
-  window.pulsaraDesktop = { chooseDirectory } as unknown as PulsaraDesktop;
+  const selected = "/Users/pulsara/中文 项目's ";
+  const chooseDirectory = vi.fn().mockResolvedValueOnce(selected).mockResolvedValueOnce(null);
+  window.pulsaraDesktop = { platform: 'darwin', chooseDirectory } as unknown as PulsaraDesktop;
   stubRuntimeFetch(fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
   const controller = new AbortController();
-  expect(await adapter.pickWorkspaceDirectory(controller.signal)).toBe('/tmp/项目 ');
+  expect(await adapter.pickWorkspaceDirectory(controller.signal)).toBe(selected);
   expect(chooseDirectory).toHaveBeenCalledExactlyOnceWith();
   expect(await adapter.pickWorkspaceDirectory()).toBeNull();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('does not open the macOS picker when its selection owner was already cancelled', async () => {
+  const fetchMock = vi.fn();
+  const chooseDirectory = vi.fn();
+  window.pulsaraDesktop = { platform: 'darwin', chooseDirectory } as unknown as PulsaraDesktop;
+  stubRuntimeFetch(fetchMock);
+  const controller = new AbortController();
+  controller.abort();
+  await expect(new LocalHttpRuntimeAdapter().pickWorkspaceDirectory(controller.signal))
+    .rejects.toMatchObject({ name: 'AbortError' });
+  expect(chooseDirectory).not.toHaveBeenCalled();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('discards a late macOS native picker result after its selection owner is cancelled', async () => {
+  const fetchMock = vi.fn();
+  let complete!: (path: string) => void;
+  const chooseDirectory = vi.fn(() => new Promise<string>(resolve => { complete = resolve; }));
+  window.pulsaraDesktop = { platform: 'darwin', chooseDirectory } as unknown as PulsaraDesktop;
+  stubRuntimeFetch(fetchMock);
+  const controller = new AbortController();
+  const selection = new LocalHttpRuntimeAdapter().pickWorkspaceDirectory(controller.signal);
+  expect(chooseDirectory).toHaveBeenCalledExactlyOnceWith();
+  controller.abort();
+  complete('/Users/pulsara/late 中文 workspace');
+  await expect(selection).rejects.toMatchObject({ name: 'AbortError' });
   expect(fetchMock).not.toHaveBeenCalled();
 });
 

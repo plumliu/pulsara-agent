@@ -648,6 +648,10 @@ def _process_group_live(process: asyncio.subprocess.Process) -> bool:
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # Darwin may return EPERM for a zombie-only group before its final
+        # reap. A signal denial is never proof that this group disappeared.
+        return True
 
 
 async def _wait_process_scope(process, scope: WindowsInteropScope | None) -> None:
@@ -681,7 +685,9 @@ def _signal_process_group(
                 process.terminate() if terminate else process.kill()
         else:
             os.killpg(process.pid, signal.SIGTERM if terminate else signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # Keep the existing physical join: only the later ESRCH observation
+        # proves disappearance, including Darwin's transient zombie group.
         pass
 
 

@@ -1,0 +1,1 @@
+- macOS 原生真实 fork-tail 回归发现，仅含尚未 reap 的僵尸进程组会令 Darwin killpg 返回 EPERM；新增 hooks/MCP 物理回收不能据此丢弃成功输出或把组当作空。两条现有 leaf 直接对齐 terminal/environment 已有合同：EPERM 保留可能存活事实，signal 拒绝不替代原执行/close 结果，只有后续 ESRCH 证明原进程组消失；不新增超时、进程快照权威或恢复状态。真实未 reap 子进程的 EPERM→reap→ESRCH、自然 fork-tail 输出、MCP 重复取消与物理 join 负例必须通过。

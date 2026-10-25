@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/backend/run_final_counterexample.py", line 21, in <module>
+    from tests.test_round5_long_horizon_postgres import test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn as counterexample
+  File "/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_round5_long_horizon_postgres.py", line 17, in <module>
+    import pytest
+ModuleNotFoundError: No module named 'pytest'

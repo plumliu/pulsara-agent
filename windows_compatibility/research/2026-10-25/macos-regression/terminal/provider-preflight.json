@@ -1,0 +1,68 @@
+{
+  "saved_home": "/Users/plumliu/.pulsara",
+  "connections": [
+    {
+      "id": "ModelConnectionId(value='connection:kafzcwkrazuo2appkv7cqmjeja')",
+      "model": "qwen3.8-flash",
+      "route": "alibaba-cn",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:jc6rarhnpz7ob7u7nkx7l52npi')",
+      "model": "meta/muse-spark-1.3-contributor",
+      "route": "openrouter",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:qjdnthf7ygewjmi4ktd4ppbnzq')",
+      "model": "openai/gpt-6-luna",
+      "route": "openrouter",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:sfvjnqcetjd6lwedacqlb2fzo4')",
+      "model": "Qwen3.8-27B",
+      "route": "user_declared",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:eukq6cmraxudcqbq6f5mhtdeki')",
+      "model": "deepseek-flash",
+      "route": "deepseek",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:lfgeb3sjmuybuf4c6qti2xqjna')",
+      "model": "glm-5.3-flash",
+      "route": "zhipuai",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:4zua67i4b2jqg2qaagtnfmqbwu')",
+      "model": "deepseek-flash",
+      "route": "deepseek",
+      "wire_api": "openai_responses",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:aajtf7tgziupchehif7yb5hzva')",
+      "model": "qwen3.8-flash-next-nvfp4",
+      "route": "user_declared",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    },
+    {
+      "id": "ModelConnectionId(value='connection:r6ulvbqpvbfsynni3nsvss3ejq')",
+      "model": "step-5-preview",
+      "route": "user_declared",
+      "wire_api": "openai_chat_completions",
+      "credential_present": true
+    }
+  ]
+}

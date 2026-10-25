@@ -1,0 +1,21 @@
+Startup document loaded
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PROBE renderer PROBE visibility hidden
+PASS: hide settles startup IPC and releases the renderer interaction gate
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PROBE renderer PROBE fade finished 0
+PROBE renderer PROBE visibility hidden
+PASS: minimize settles startup IPC and releases the renderer interaction gate
+PROBE renderer PROBE page state {"hidden":false,"visibility":"visible"}
+PROBE renderer startup-fade-started
+PROBE renderer PROBE fade style {"hidden":false,"opacity":"1","playState":"running"}
+PASS: destroy-contents settles startup IPC and releases the renderer interaction gate
+PROBE renderer PROBE page state {"hidden":true,"visibility":"hidden"}
+Error: replace: fade never started
+    at Timeout.<anonymous> (/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/desktop/startup-cover-diagnostic.cjs:16:39)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)

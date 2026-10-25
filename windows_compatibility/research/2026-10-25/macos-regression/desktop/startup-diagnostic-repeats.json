@@ -1,0 +1,17 @@
+[
+  {
+    "sample": 1,
+    "exitCode": 1,
+    "log": "startup-diagnostic-repeat-1.log"
+  },
+  {
+    "sample": 2,
+    "exitCode": 1,
+    "log": "startup-diagnostic-repeat-2.log"
+  },
+  {
+    "sample": 3,
+    "exitCode": 1,
+    "log": "startup-diagnostic-repeat-3.log"
+  }
+]

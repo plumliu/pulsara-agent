@@ -1,0 +1,11 @@
+{
+  "home": "/private/tmp/pm-1xk3ye1p",
+  "data": "/private/tmp/pm-1xk3ye1p/data",
+  "socket": "/private/tmp/pm-1xk3ye1p/s",
+  "binaries": "/Applications/Pulsara.app/Contents/Resources/postgres/bin",
+  "pid": 11173,
+  "admin_dsn": "host='/private/tmp/pm-1xk3ye1p/s' port=5432 dbname=pulsara user=pulsara_admin",
+  "runtime_dsn": "host='/private/tmp/pm-1xk3ye1p/s' port=5432 dbname=pulsara user=pulsara_runtime",
+  "identity": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "source": "existing read-only bundled PG17 SDK, separate newly-created cluster"
+}

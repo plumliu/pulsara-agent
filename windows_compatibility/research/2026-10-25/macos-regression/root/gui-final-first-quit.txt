@@ -1,0 +1,4 @@
+  PID  PPID STAT     ELAPSED COMMAND
+20252     1 S    02-00:36:12 /Applications/Pulsara.app/Contents/MacOS/pulsara
+20270 20252 S    02-00:36:11 /Applications/Pulsara.app/Contents/Resources/python/bin/python3 -m pulsara_agent.desktop_runtime
+20275     1 Ss   02-00:36:11 /Applications/Pulsara.app/Contents/Resources/postgres/bin/postgres -D /Users/plumliu/.pulsara/desktop/postgres -c listen_addresses= -k /Users/plumliu/.pulsara/desktop/socket -c unix_socket_permissions=0700 -c port=5432 -c shared_preload_libraries=pg_search

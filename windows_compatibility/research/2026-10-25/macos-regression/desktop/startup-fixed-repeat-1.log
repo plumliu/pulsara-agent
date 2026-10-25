@@ -1,0 +1,7 @@
+Startup document loaded
+PASS: hide settles startup IPC and releases the renderer interaction gate
+PASS: minimize settles startup IPC and releases the renderer interaction gate
+PASS: destroy-contents settles startup IPC and releases the renderer interaction gate
+PASS: replace settles startup IPC and releases the renderer interaction gate
+PASS: hidden startup skips animation and releases the renderer interaction gate
+PASS: one startup document survives workbench navigation; logo centered; fade, error controls, trust and cleanup verified.

@@ -1,0 +1,25 @@
+hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+hook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+SessionEnd skipped because the Host writer is unavailable
+hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+hook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True
+{
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data||7700577008563768207",
+  "database": "pulsara_test_main_31344_268cb357d7",
+  "product_import": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "physical_close_calls": 1,
+  "actual_renewal_failure": "StaleHostWriter",
+  "old_admission_rejected": true,
+  "session_id": "session:lszfzv5uz74o6g2nnv4dcr5ljy",
+  "old_host": "host:7v24ddih5ryiibm4eaomu2xezy",
+  "new_host": "host:6etneuau3u7r3xwlc5yzpbdvdu",
+  "old_generation": 1,
+  "new_generation": 2,
+  "same_concurrent_resume_handle": true,
+  "new_guard_read_succeeded": true,
+  "old_guard_unchanged": true,
+  "old_physical_closed": true,
+  "controller_and_core_closed": true,
+  "status": "passed",
+  "database_dropped": true
+}

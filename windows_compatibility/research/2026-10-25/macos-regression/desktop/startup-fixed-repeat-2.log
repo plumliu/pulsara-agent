@@ -1,0 +1,9 @@
+Startup document loaded
+PASS: hide settles startup IPC and releases the renderer interaction gate
+PASS: minimize settles startup IPC and releases the renderer interaction gate
+PASS: destroy-contents settles startup IPC and releases the renderer interaction gate
+[40607:1025/202435.566626:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:370] SharedImageManager::ProduceOverlay: Trying to Produce a Overlay representation from a non-existent mailbox.
+[40607:1025/202435.566820:ERROR:components/viz/service/display_embedder/skia_output_device_buffer_queue.cc:258] Invalid mailbox.
+PASS: replace settles startup IPC and releases the renderer interaction gate
+PASS: hidden startup skips animation and releases the renderer interaction gate
+PASS: one startup document survives workbench navigation; logo centered; fade, error controls, trust and cleanup verified.

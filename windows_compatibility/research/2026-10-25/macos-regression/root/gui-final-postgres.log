@@ -1,0 +1,83 @@
+2026-10-25 20:19:13.720 CST [32106] LOG:  registered custom resource manager "pg_search" with ID 137
+2026-10-25 20:19:13.723 CST [32106] LOG:  starting PostgreSQL 17.9 on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-10-25 20:19:13.724 CST [32106] LOG:  listening on Unix socket "/private/tmp/pui-pzub920x/h/desktop/socket/.s.PGSQL.5432"
+2026-10-25 20:19:13.728 CST [32110] LOG:  database system was shut down at 2026-10-25 20:19:13 CST
+2026-10-25 20:19:13.731 CST [32106] LOG:  database system is ready to accept connections
+2026-10-25 20:19:14.155 CST [32133] WARNING:  key_field is deprecated as of 0.26.0 and is a no-op; it no longer needs to be provided
+2026-10-25 20:19:14.172 CST [32133] WARNING:  key_field is deprecated as of 0.26.0 and is a no-op; it no longer needs to be provided
+2026-10-25 20:24:13.730 CST [32108] LOG:  checkpoint starting: time
+2026-10-25 20:27:33.248 CST [44821] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:27:33.364 CST [32108] LOG:  checkpoint complete: wrote 1980 buffers (12.1%); 1 WAL file(s) added, 0 removed, 0 recycled; write=199.620 s, sync=0.008 s, total=199.634 s; sync files=539, longest=0.001 s, average=0.001 s; distance=8490 kB, estimate=8490 kB; lsn=0/1D29720, redo lsn=0/1CE7B08
+2026-10-25 20:28:03.272 CST [45541] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:28:33.293 CST [46210] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:29:03.315 CST [47071] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:29:33.338 CST [47760] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:30:03.358 CST [50378] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:30:33.378 CST [51628] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:31:03.398 CST [52463] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:31:33.416 CST [54215] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:32:03.438 CST [55077] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:32:33.457 CST [56559] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:33:03.467 CST [57403] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:33:33.479 CST [58688] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:34:03.489 CST [59883] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:34:13.368 CST [32108] LOG:  checkpoint starting: time
+2026-10-25 20:34:20.351 CST [32108] LOG:  checkpoint complete: wrote 70 buffers (0.4%); 0 WAL file(s) added, 0 removed, 0 recycled; write=6.981 s, sync=0.002 s, total=6.984 s; sync files=24, longest=0.001 s, average=0.001 s; distance=266 kB, estimate=7667 kB; lsn=0/1D2A4D0, redo lsn=0/1D2A478
+2026-10-25 20:34:33.503 CST [61059] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:35:03.516 CST [62833] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:35:33.529 CST [64515] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:36:03.541 CST [65760] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:36:33.556 CST [66972] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:37:03.567 CST [68363] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:37:33.578 CST [70003] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:38:03.591 CST [72789] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:38:33.604 CST [74408] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:39:03.614 CST [75718] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:39:13.353 CST [32108] LOG:  checkpoint starting: time
+2026-10-25 20:39:13.457 CST [32108] LOG:  checkpoint complete: wrote 2 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.102 s, sync=0.001 s, total=0.104 s; sync files=2, longest=0.001 s, average=0.001 s; distance=8 kB, estimate=6901 kB; lsn=0/1D2C558, redo lsn=0/1D2C500
+2026-10-25 20:39:33.626 CST [76917] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:40:03.635 CST [78263] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:40:33.645 CST [79443] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:41:03.657 CST [80647] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:41:33.673 CST [81894] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:41:46.660 CST [32106] LOG:  received fast shutdown request
+2026-10-25 20:41:46.660 CST [32106] LOG:  aborting any active transactions
+2026-10-25 20:41:46.666 CST [32106] LOG:  background worker "logical replication launcher" (PID 32113) exited with exit code 1
+2026-10-25 20:41:46.666 CST [32108] LOG:  shutting down
+2026-10-25 20:41:46.666 CST [32108] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 20:41:46.667 CST [32108] LOG:  checkpoint complete: wrote 7 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=6, longest=0.001 s, average=0.001 s; distance=16 kB, estimate=6213 kB; lsn=0/1D308F8, redo lsn=0/1D308F8
+2026-10-25 20:41:46.668 CST [32106] LOG:  database system is shut down
+2026-10-25 20:44:16.178 CST [86332] LOG:  registered custom resource manager "pg_search" with ID 137
+2026-10-25 20:44:16.180 CST [86332] LOG:  starting PostgreSQL 17.9 on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-10-25 20:44:16.181 CST [86332] LOG:  listening on Unix socket "/private/tmp/pui-pzub920x/h/desktop/socket/.s.PGSQL.5432"
+2026-10-25 20:44:16.185 CST [86335] LOG:  database system was shut down at 2026-10-25 20:41:46 CST
+2026-10-25 20:44:16.189 CST [86332] LOG:  database system is ready to accept connections
+2026-10-25 20:47:10.618 CST [90330] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:47:40.636 CST [91474] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:48:10.645 CST [92672] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:48:40.659 CST [93912] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:49:10.676 CST [95090] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:49:16.186 CST [86333] LOG:  checkpoint starting: time
+2026-10-25 20:49:16.912 CST [86333] LOG:  checkpoint complete: wrote 10 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.713 s, sync=0.001 s, total=0.727 s; sync files=9, longest=0.001 s, average=0.001 s; distance=10 kB, estimate=10 kB; lsn=0/1D33270, redo lsn=0/1D33218
+2026-10-25 20:49:40.692 CST [96264] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:50:09.713 CST [86332] LOG:  received fast shutdown request
+2026-10-25 20:50:09.714 CST [86332] LOG:  aborting any active transactions
+2026-10-25 20:50:09.716 CST [86332] LOG:  background worker "logical replication launcher" (PID 86338) exited with exit code 1
+2026-10-25 20:50:09.721 CST [86333] LOG:  shutting down
+2026-10-25 20:50:09.721 CST [86333] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 20:50:09.721 CST [86333] LOG:  checkpoint complete: wrote 2 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=2, longest=0.001 s, average=0.001 s; distance=4 kB, estimate=9 kB; lsn=0/1D342B0, redo lsn=0/1D342B0
+2026-10-25 20:50:09.723 CST [86332] LOG:  database system is shut down
+2026-10-25 20:50:17.874 CST [97612] LOG:  registered custom resource manager "pg_search" with ID 137
+2026-10-25 20:50:17.875 CST [97612] LOG:  starting PostgreSQL 17.9 on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-10-25 20:50:17.876 CST [97612] LOG:  listening on Unix socket "/private/tmp/pui-pzub920x/h/desktop/socket/.s.PGSQL.5432"
+2026-10-25 20:50:17.879 CST [97615] LOG:  database system was shut down at 2026-10-25 20:50:09 CST
+2026-10-25 20:50:17.881 CST [97612] LOG:  database system is ready to accept connections
+2026-10-25 20:50:19.021 CST [97658] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:50:49.032 CST [98809] WARNING:  Aggregate Scan not used: argument to aggregate function is neither a direct column reference nor a COALESCE expression. To disable this warning: SET paradedb.planner_warnings = 'off' (table: history_search_documents)
+2026-10-25 20:50:55.740 CST [97612] LOG:  received fast shutdown request
+2026-10-25 20:50:55.740 CST [97612] LOG:  aborting any active transactions
+2026-10-25 20:50:55.742 CST [97612] LOG:  background worker "logical replication launcher" (PID 97618) exited with exit code 1
+2026-10-25 20:50:55.743 CST [97613] LOG:  shutting down
+2026-10-25 20:50:55.743 CST [97613] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 20:50:55.744 CST [97613] LOG:  checkpoint complete: wrote 5 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=4, longest=0.001 s, average=0.001 s; distance=5 kB, estimate=5 kB; lsn=0/1D35850, redo lsn=0/1D35850
+2026-10-25 20:50:55.745 CST [97612] LOG:  database system is shut down

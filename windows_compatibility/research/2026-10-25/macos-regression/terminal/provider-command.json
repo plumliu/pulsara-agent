@@ -1,0 +1,11 @@
+{
+  "command": [
+    "/Users/plumliu/Desktop/python_workspace/pulsara_agent/desktop/resources/python/bin/python3",
+    "-I",
+    "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-regression-20261025/terminal/provider_probe.py"
+  ],
+  "cases": "directories,interaction,pty,monitor_wake",
+  "model": "openai/gpt-6-luna",
+  "saved_home": "/Users/plumliu/.pulsara",
+  "private_cluster": "/private/tmp/pm-1xk3ye1p/data"
+}
