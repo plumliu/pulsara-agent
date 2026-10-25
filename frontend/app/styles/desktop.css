@@ -145,6 +145,8 @@
 .desktop-shell[data-platform='win32'].is-workbench:not(.has-inspector) .topbar { padding-right: calc(var(--native-controls-width) + 16px); }
 .desktop-shell[data-platform='win32'].is-workbench.has-inspector .workspace-topbar { padding-right: var(--native-controls-width); }
 .desktop-shell[data-platform='win32'] .workspace-topbar .workspace-toolbar > button { margin-left: auto; }
+/* Windows uses software compositing to avoid capture artifacts; full-window blur stalls modal rendering. */
+:root:has(.desktop-shell[data-platform='win32']) .linux-directory-picker::backdrop { backdrop-filter: none; }
 /* Reserve a real box for native controls: padding would leave this drag region
    overlapping the sidebar button when the navigation column shrinks to 62px. */
 @media (min-width: 1151px) {
