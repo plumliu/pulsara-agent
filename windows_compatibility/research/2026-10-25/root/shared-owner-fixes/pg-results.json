@@ -1,0 +1,87 @@
+{
+  "git": "9e1150b7a4b16e212be36329182cbaa505c4df79",
+  "commands": [
+    {
+      "argv": [
+        "C:\\Users\\plumlocal\\AppData\\Local\\mise\\installs\\node\\22.23.3\\node.exe",
+        "desktop/node_modules/typescript/bin/tsc",
+        "-p",
+        "desktop/tsconfig.json"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "C:\\Users\\plumlocal\\AppData\\Local\\mise\\installs\\node\\22.23.3\\node.exe",
+        "--test",
+        "desktop/dist/postgres-posix.test.js"
+      ],
+      "exit": 0,
+      "stdout": "TAP version 13\n# Subtest: local commands distinguish no submission, a settled exit and incomplete output\n    # Subtest: missing executable never submitted\n    ok 1 - missing executable never submitted\n      ---\n      duration_ms: 3.8265\n      type: 'test'\n      ...\n    # Subtest: synchronous invalid argv never submitted\n    ok 2 - synchronous invalid argv never submitted\n      ---\n      duration_ms: 0.4526\n      type: 'test'\n      ...\n    # Subtest: real numeric nonzero preserves command output\n    ok 3 - real numeric nonzero preserves command output\n      ---\n      duration_ms: 198.885\n      type: 'test'\n      ...\n    # Subtest: output overflow after a real side effect remains unknown\n    ok 4 - output overflow after a real side effect remains unknown\n      ---\n      duration_ms: 48.1015\n      type: 'test'\n      ...\n    1..4\nok 1 - local commands distinguish no submission, a settled exit and incomplete output\n  ---\n  duration_ms: 284.0677\n  type: 'test'\n  ...\n1..1\n# tests 5\n# suites 0\n# pass 5\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 343.0832\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "C:\\Users\\plumlocal\\AppData\\Local\\mise\\installs\\node\\22.23.3\\node.exe",
+        "--test",
+        "--test-name-pattern=unsubmitted|status 3 without|only a settled|first initialization",
+        "desktop/dist/postgres.test.js"
+      ],
+      "exit": 0,
+      "stdout": "TAP version 13\n# Subtest: only a settled numeric status code 3 permits a start and failed readiness preserves the original error\nok 1 - only a settled numeric status code 3 permits a start and failed readiness preserves the original error\n  ---\n  duration_ms: 2.4006\n  type: 'test'\n  ...\n# Subtest: unsubmitted, unknown and unclassified start failures cannot adopt another running instance\nok 2 - unsubmitted, unknown and unclassified start failures cannot adopt another running instance\n  ---\n  duration_ms: 0.4756\n  type: 'test'\n  ...\n# Subtest: status 3 without a confirmed process failure cannot authorize start or reset\nok 3 - status 3 without a confirmed process failure cannot authorize start or reset\n  ---\n  duration_ms: 0.6946\n  type: 'test'\n  ...\n# Subtest: first initialization retains the original argv and only updates state after successful physical commands\nok 4 - first initialization retains the original argv and only updates state after successful physical commands\n  ---\n  duration_ms: 0.2518\n  type: 'test'\n  ...\n1..4\n# tests 4\n# suites 0\n# pass 4\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 65.8463\n",
+      "stderr": ""
+    }
+  ],
+  "wsl_command": [
+    "C:/Windows/System32/wsl.exe",
+    "-d",
+    "Ubuntu",
+    "-u",
+    "plumwsl",
+    "--exec",
+    "/home/plumwsl/workspaces/pulsara_agent/.venv/bin/python",
+    "/mnt/c/python_workspace/pulsara-agent/output/windows-g0/pg_admission_r3/owner-fix/verify_guest.py"
+  ],
+  "wsl_exit": 0,
+  "wsl_stderr": "",
+  "wsl": {
+    "node": "/home/plumwsl/.local/share/mise/installs/node/22.23.3/bin/node",
+    "source": "/mnt/c/python_workspace/pulsara-agent/desktop",
+    "test_directory": "/home/plumwsl/.g0pgfix-sgaux7er",
+    "uid": 1000,
+    "commands": [
+      {
+        "argv": [
+          "/home/plumwsl/.local/share/mise/installs/node/22.23.3/bin/node",
+          "/home/plumwsl/.g0pgfix-sgaux7er/node_modules/typescript/bin/tsc",
+          "-p",
+          "tsconfig.json"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "argv": [
+          "/home/plumwsl/.local/share/mise/installs/node/22.23.3/bin/node",
+          "--test",
+          "dist/postgres.test.js",
+          "dist/postgres-posix.test.js"
+        ],
+        "exit": 0,
+        "stdout": "TAP version 13\n# Subtest: local commands distinguish no submission, a settled exit and incomplete output\n    # Subtest: missing executable never submitted\n    ok 1 - missing executable never submitted\n      ---\n      duration_ms: 3.524036\n      type: 'test'\n      ...\n    # Subtest: synchronous invalid argv never submitted\n    ok 2 - synchronous invalid argv never submitted\n      ---\n      duration_ms: 0.297956\n      type: 'test'\n      ...\n    # Subtest: real numeric nonzero preserves command output\n    ok 3 - real numeric nonzero preserves command output\n      ---\n      duration_ms: 21.181163\n      type: 'test'\n      ...\n    # Subtest: output overflow after a real side effect remains unknown\n    ok 4 - output overflow after a real side effect remains unknown\n      ---\n      duration_ms: 39.125195\n      type: 'test'\n      ...\n    1..4\nok 1 - local commands distinguish no submission, a settled exit and incomplete output\n  ---\n  duration_ms: 116.912212\n  type: 'test'\n  ...\n# Subtest: failed readiness keeps a verified started server owned for explicit shutdown\nok 2 - failed readiness keeps a verified started server owned for explicit shutdown\n  ---\n  duration_ms: 19.347078\n  type: 'test'\n  ...\n# Subtest: start accepts the resolved instance directory while reset requires its exact saved spelling\nok 3 - start accepts the resolved instance directory while reset requires its exact saved spelling\n  ---\n  duration_ms: 1.218645\n  type: 'test'\n  ...\n# Subtest: only a settled numeric status code 3 permits a start and failed readiness preserves the original error\nok 4 - only a settled numeric status code 3 permits a start and failed readiness preserves the original error\n  ---\n  duration_ms: 0.372117\n  type: 'test'\n  ...\n# Subtest: unsubmitted, unknown and unclassified start failures cannot adopt another running instance\nok 5 - unsubmitted, unknown and unclassified start failures cannot adopt another running instance\n  ---\n  duration_ms: 0.712214\n  type: 'test'\n  ...\n# Subtest: status 3 without a confirmed process failure cannot authorize start or reset\nok 6 - status 3 without a confirmed process failure cannot authorize start or reset\n  ---\n  duration_ms: 0.680072\n  type: 'test'\n  ...\n# Subtest: first initialization retains the original argv and only updates state after successful physical commands\nok 7 - first initialization retains the original argv and only updates state after successful physical commands\n  ---\n  duration_ms: 0.255706\n  type: 'test'\n  ...\n# Subtest: reset never removes data after a stop failure and clears ownership only after removal succeeds\nok 8 - reset never removes data after a stop failure and clears ownership only after removal succeeds\n  ---\n  duration_ms: 0.637111\n  type: 'test'\n  ...\n# Subtest: the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior\nok 9 - the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior\n  ---\n  duration_ms: 0.198938\n  type: 'test'\n  ...\n# Subtest: POSIX reset refuses a linked data directory and preserves its actual target\nok 10 - POSIX reset refuses a linked data directory and preserves its actual target\n  ---\n  duration_ms: 6.357343\n  type: 'test'\n  ...\n# Subtest: reset keeps the raw PID-directory rejection when its caller working directory has been deleted\nok 11 - reset keeps the raw PID-directory rejection when its caller working directory has been deleted\n  ---\n  duration_ms: 34.623027\n  type: 'test'\n  ...\n1..11\n# tests 15\n# suites 0\n# pass 15\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 154.866841\n",
+        "stderr": ""
+      }
+    ],
+    "signal_probe": {
+      "exit": 0,
+      "stdout": "{\"signal\":\"SIGTERM\",\"code\":null,\"postgresExecution\":\"unknown\"}",
+      "stderr": ""
+    },
+    "passed": true,
+    "directory_removed": true
+  },
+  "passed": true
+}

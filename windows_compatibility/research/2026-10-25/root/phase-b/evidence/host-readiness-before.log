@@ -1,0 +1,54 @@
+TAP version 13
+# Subtest: Windows waits for its pinned host connection before navigation: reachable
+not ok 1 - Windows waits for its pinned host connection before navigation: reachable
+  ---
+  duration_ms: 10.4703
+  type: 'test'
+  location: 'C:\\python_workspace\\pulsara-agent\\desktop\\dist\\main.test.js:326:26'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+    
+      ok(value.calls.includes('tls-readiness'))
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (C:\python_workspace\pulsara-agent\desktop\dist\main.test.js:334:26)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: Windows waits for its pinned host connection before navigation: cancel
+not ok 2 - Windows waits for its pinned host connection before navigation: cancel
+  ---
+  duration_ms: 3.0049
+  type: 'test'
+  location: 'C:\\python_workspace\\pulsara-agent\\desktop\\dist\\main.test.js:326:26'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+    
+      ok(value.calls.includes('tls-readiness'))
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (C:\python_workspace\pulsara-agent\desktop\dist\main.test.js:334:26)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 0
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 77.7688

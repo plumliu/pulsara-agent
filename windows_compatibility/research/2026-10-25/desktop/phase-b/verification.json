@@ -1,0 +1,72 @@
+{
+  "focusedNodeTests": {
+    "passed": 12,
+    "failed": 0
+  },
+  "windowsTypeScript": "passed",
+  "hostSmoke": {
+    "raw": "host-smoke-results.json",
+    "passed": true
+  },
+  "setupFailureSmoke": {
+    "raw": "setup-failure-results.json",
+    "cases": 5,
+    "passed": true
+  },
+  "savedSelectionSmoke": {
+    "raw": "saved-selection-results.json",
+    "invalidCases": 3,
+    "passed": true
+  },
+  "backendSessionSmoke": {
+    "raw": "session-smoke-results.json",
+    "passed": true,
+    "hostExit": {
+      "exit": 0
+    }
+  },
+  "browserBaseline": {
+    "raw": "browser-baseline/results.json",
+    "passed": 10,
+    "failed": 3
+  },
+  "browserFixed": {
+    "raw": "browser-fixed/results.json",
+    "passed": 13,
+    "failed": 0,
+    "hostExit": {
+      "exit": 0
+    }
+  },
+  "buildStage": "build-stage.json",
+  "windowsMainFilter": {
+    "passed": 10,
+    "failed": 0,
+    "skipped": 0,
+    "raw": "windows-main-filter.log"
+  },
+  "windowsPackage": {
+    "exitCode": 0,
+    "raw": "windows-package-results.json"
+  },
+  "cleanup": {
+    "passed": true,
+    "raw": "cleanup-audit.json"
+  },
+  "readinessUnit": {
+    "passed": 8,
+    "failed": 0,
+    "raw": "readiness-unit.log"
+  },
+  "readinessNative": {
+    "passed": 6,
+    "failed": 0,
+    "raw": "readiness-smoke-results.json",
+    "hostExit": 0
+  },
+  "canonicalPortability": {
+    "passed": 2,
+    "failed": 0,
+    "raw": "canonical-portability.log"
+  }
+}

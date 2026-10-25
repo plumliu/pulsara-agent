@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: one immutable full certificate and exact origin restrict every backend network request
+ok 1 - one immutable full certificate and exact origin restrict every backend network request
+  ---
+  duration_ms: 1.6472
+  type: 'test'
+  ...
+# Subtest: retirement seals admission and joins deferred native cancellation plus original owners
+ok 2 - retirement seals admission and joins deferred native cancellation plus original owners
+  ---
+  duration_ms: 3.5596
+  type: 'test'
+  ...
+# Subtest: an owner settlement failure stays a retirement failure after network cleanup
+ok 3 - an owner settlement failure stays a retirement failure after network cleanup
+  ---
+  duration_ms: 0.7519
+  type: 'test'
+  ...
+# Subtest: Windows readiness samples only HEAD on the original pinned session and shares one task
+ok 4 - Windows readiness samples only HEAD on the original pinned session and shares one task
+  ---
+  duration_ms: 276.4702
+  type: 'test'
+  ...
+# Subtest: readiness preserves authentication, TLS and other transport failures without retry
+ok 5 - readiness preserves authentication, TLS and other transport failures without retry
+  ---
+  duration_ms: 1.2169
+  type: 'test'
+  ...
+# Subtest: external cancellation aborts the forwarding sampling wait with its original reason
+ok 6 - external cancellation aborts the forwarding sampling wait with its original reason
+  ---
+  duration_ms: 1.2436
+  type: 'test'
+  ...
+# Subtest: retirement aborts and joins a native readiness request before clearing the session
+ok 7 - retirement aborts and joins a native readiness request before clearing the session
+  ---
+  duration_ms: 0.5471
+  type: 'test'
+  ...
+# Subtest: retirement joins a cancelled sampling wait and caches the same cleanup during owner reentry
+ok 8 - retirement joins a cancelled sampling wait and caches the same cleanup during owner reentry
+  ---
+  duration_ms: 1.7752
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 358.1294

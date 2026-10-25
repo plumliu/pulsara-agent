@@ -1,0 +1,598 @@
+TAP version 13
+# Subtest: same-distribution UNC aliases preserve Linux case and Unicode identity
+ok 1 - same-distribution UNC aliases preserve Linux case and Unicode identity
+  ---
+  duration_ms: 2.435788
+  type: 'test'
+  ...
+# Subtest: domain mapping refuses Windows drives, other distributions and ambiguous components
+ok 2 - domain mapping refuses Windows drives, other distributions and ambiguous components
+  ---
+  duration_ms: 0.788989
+  type: 'test'
+  ...
+# Subtest: Linux-only names remain previewable but cannot become ambiguous host paths
+ok 3 - Linux-only names remain previewable but cannot become ambiguous host paths
+  ---
+  duration_ms: 1.592176
+  type: 'test'
+  ...
+# Downloading Electron binary...
+# /home/plumwsl/workspaces/pulsara_agent/desktop/node_modules/electron/index.js:43
+#       throw new Error(
+#       ^
+# Error: Electron failed to install correctly. Please delete `node_modules/electron` and run "npx install-electron --no" manually.
+#     at getElectronPath (/home/plumwsl/workspaces/pulsara_agent/desktop/node_modules/electron/index.js:43:13)
+#     at Object.<anonymous> (/home/plumwsl/workspaces/pulsara_agent/desktop/node_modules/electron/index.js:52:18)
+#     at Module._compile (node:internal/modules/cjs/loader:1781:14)
+#     at Object..js (node:internal/modules/cjs/loader:1913:10)
+#     at Module.load (node:internal/modules/cjs/loader:1505:32)
+#     at Function._load (node:internal/modules/cjs/loader:1309:12)
+#     at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+#     at Module.require (node:internal/modules/cjs/loader:1527:12)
+#     at require (node:internal/modules/helpers:147:16)
+#     at Object.<anonymous> (/home/plumwsl/workspaces/pulsara_agent/output/phase-b-desktop-8bf40t62/dist/backend-session.js:5:20)
+# Node.js v22.23.3
+# Subtest: /home/plumwsl/workspaces/pulsara_agent/output/phase-b-desktop-8bf40t62/dist/backend-session.test.js
+not ok 2 - /home/plumwsl/workspaces/pulsara_agent/output/phase-b-desktop-8bf40t62/dist/backend-session.test.js
+  ---
+  duration_ms: 89599.269646
+  type: 'test'
+  location: '/home/plumwsl/workspaces/pulsara_agent/output/phase-b-desktop-8bf40t62/dist/backend-session.test.js:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+ok 5 - URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+  ---
+  duration_ms: 1.266416
+  type: 'test'
+  ...
+# Subtest: partition network policy protects control port across aliases and all request types
+ok 6 - partition network policy protects control port across aliases and all request types
+  ---
+  duration_ms: 0.827963
+  type: 'test'
+  ...
+# Subtest: native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+ok 7 - native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+  ---
+  duration_ms: 0.896223
+  type: 'test'
+  ...
+# Subtest: installed desktop CLI resolves bundled Python and preserves arguments and exit status
+ok 8 - installed desktop CLI resolves bundled Python and preserves arguments and exit status
+  ---
+  duration_ms: 50.39232
+  type: 'test'
+  ...
+# Subtest: Linux packaged CLI dispatches before Electron without a display; GUI retains its arguments
+ok 9 - Linux packaged CLI dispatches before Electron without a display; GUI retains its arguments
+  ---
+  duration_ms: 83.673223
+  type: 'test'
+  ...
+# Subtest: automatic registration creates and updates its own launcher after the app moves
+ok 10 - automatic registration creates and updates its own launcher after the app moves
+  ---
+  duration_ms: 10.138143
+  type: 'test'
+  ...
+# Subtest: old CLI symlinks are preserved automatically and explicit replacement never modifies their target
+ok 11 - old CLI symlinks are preserved automatically and explicit replacement never modifies their target
+  ---
+  duration_ms: 7.900855
+  type: 'test'
+  ...
+# Subtest: package entries remain package-owned; PATH shadowing is reported without changing other commands
+ok 12 - package entries remain package-owned; PATH shadowing is reported without changing other commands
+  ---
+  duration_ms: 3.660736
+  type: 'test'
+  ...
+# Subtest: home resolution remains synchronous and preserves resolver launch failures
+ok 13 - home resolution remains synchronous and preserves resolver launch failures
+  ---
+  duration_ms: 21.660807
+  type: 'test'
+  ...
+# Subtest: finite execution preserves literal argv, explicit environment, output and nonzero status
+ok 14 - finite execution preserves literal argv, explicit environment, output and nonzero status
+  ---
+  duration_ms: 73.499995
+  type: 'test'
+  ...
+# Subtest: stream execution keeps three byte pipes and the supplied working directory
+ok 15 - stream execution keeps three byte pipes and the supplied working directory
+  ---
+  duration_ms: 33.847122
+  type: 'test'
+  ...
+# Subtest: runtime storage creates private files, appends exact bytes and retains filesystem failures
+ok 16 - runtime storage creates private files, appends exact bytes and retains filesystem failures
+  ---
+  duration_ms: 4.836209
+  type: 'test'
+  ...
+# Subtest: WSL argv fixes the confirmed target and never interprets paths as shell source
+ok 17 - WSL argv fixes the confirmed target and never interprets paths as shell source
+  ---
+  duration_ms: 1.683388
+  type: 'test'
+  ...
+# Subtest: Windows automatic environment forwarding is removed without disabling interop
+ok 18 - Windows automatic environment forwarding is removed without disabling interop
+  ---
+  duration_ms: 0.514438
+  type: 'test'
+  ...
+# Subtest: runtime diagnostics stay in the host log directory and preserve exact bytes
+ok 19 - runtime diagnostics stay in the host log directory and preserve exact bytes
+  ---
+  duration_ms: 11.676977
+  type: 'test'
+  ...
+# WSL maintenance admission refused: kernel busy
+# Subtest: main composes the darwin bundle once for home, runtime, PG and CLI
+ok 20 - main composes the darwin bundle once for home, runtime, PG and CLI
+  ---
+  duration_ms: 11.112875
+  type: 'test'
+  ...
+# Subtest: main composes the linux bundle once for home, runtime, PG and CLI
+ok 21 - main composes the linux bundle once for home, runtime, PG and CLI
+  ---
+  duration_ms: 8.586324
+  type: 'test'
+  ...
+# Subtest: Windows requires environment confirmation before creating a kernel or preparing PostgreSQL
+ok 22 - Windows requires environment confirmation before creating a kernel or preparing PostgreSQL
+  ---
+  duration_ms: 2.282958
+  type: 'test'
+  ...
+# Subtest: Windows installer check is finite and never starts the product: idle
+ok 23 - Windows installer check is finite and never starts the product: idle
+  ---
+  duration_ms: 2.330087
+  type: 'test'
+  ...
+# Subtest: Windows installer check is finite and never starts the product: busy
+ok 24 - Windows installer check is finite and never starts the product: busy
+  ---
+  duration_ms: 1.746047
+  type: 'test'
+  ...
+# Subtest: Windows revalidates its saved target and pins a fresh window before workbench navigation
+ok 25 - Windows revalidates its saved target and pins a fresh window before workbench navigation
+  ---
+  duration_ms: 4.007455
+  type: 'test'
+  ...
+# Subtest: Windows derives initialization permission after the PG attempt: false
+ok 26 - Windows derives initialization permission after the PG attempt: false
+  ---
+  duration_ms: 1.848983
+  type: 'test'
+  ...
+# Subtest: Windows derives initialization permission after the PG attempt: true
+ok 27 - Windows derives initialization permission after the PG attempt: true
+  ---
+  duration_ms: 1.991354
+  type: 'test'
+  ...
+# Subtest: Windows quit during native window replacement joins retirement and never navigates the retiring session
+ok 28 - Windows quit during native window replacement joins retirement and never navigates the retiring session
+  ---
+  duration_ms: 3.503737
+  type: 'test'
+  ...
+# Subtest: main overlaps cover loading and kernel preparation but gates the start frame and navigation
+ok 29 - main overlaps cover loading and kernel preparation but gates the start frame and navigation
+  ---
+  duration_ms: 1.794239
+  type: 'test'
+  ...
+# Subtest: cover failure joins PostgreSQL preparation and child cleanup before showing its error
+ok 30 - cover failure joins PostgreSQL preparation and child cleanup before showing its error
+  ---
+  duration_ms: 1.597856
+  type: 'test'
+  ...
+# Subtest: database failure waits for the original cover before replacing it
+ok 31 - database failure waits for the original cover before replacing it
+  ---
+  duration_ms: 1.565725
+  type: 'test'
+  ...
+# Subtest: previous-owner failure joins the cover and child cleanup without preparing PostgreSQL
+ok 32 - previous-owner failure joins the cover and child cleanup without preparing PostgreSQL
+  ---
+  duration_ms: 1.814548
+  type: 'test'
+  ...
+# Subtest: quit during the old-owner wait settles the imported child without starting PostgreSQL
+ok 33 - quit during the old-owner wait settles the imported child without starting PostgreSQL
+  ---
+  duration_ms: 7.176105
+  type: 'test'
+  ...
+# Subtest: quit stops PostgreSQL after a clean runtime exit
+ok 34 - quit stops PostgreSQL after a clean runtime exit
+  ---
+  duration_ms: 1.492814
+  type: 'test'
+  ...
+# Subtest: quit keeps PostgreSQL and reports an unclean runtime exit
+ok 35 - quit keeps PostgreSQL and reports an unclean runtime exit
+  ---
+  duration_ms: 1.748853
+  type: 'test'
+  ...
+# Subtest: directory picker uses localized desktop without changing the selected path
+ok 36 - directory picker uses localized desktop without changing the selected path
+  ---
+  duration_ms: 1.641679
+  type: 'test'
+  ...
+# Subtest: directory picker uses configured desktop elsewhere without changing the selected path
+ok 37 - directory picker uses configured desktop elsewhere without changing the selected path
+  ---
+  duration_ms: 3.614802
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop lookup unavailable without changing the selected path
+ok 38 - directory picker uses desktop lookup unavailable without changing the selected path
+  ---
+  duration_ms: 1.688598
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop missing without changing the selected path
+ok 39 - directory picker uses desktop missing without changing the selected path
+  ---
+  duration_ms: 1.484521
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop path is a file without changing the selected path
+ok 40 - directory picker uses desktop path is a file without changing the selected path
+  ---
+  duration_ms: 1.332933
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop configured as home without changing the selected path
+ok 41 - directory picker uses desktop configured as home without changing the selected path
+  ---
+  duration_ms: 2.318465
+  type: 'test'
+  ...
+# Subtest: directory picker uses cancellation without changing the selected path
+ok 42 - directory picker uses cancellation without changing the selected path
+  ---
+  duration_ms: 1.884891
+  type: 'test'
+  ...
+# Subtest: OAuth return link is an exact focus-only entry point
+ok 43 - OAuth return link is an exact focus-only entry point
+  ---
+  duration_ms: 2.675744
+  type: 'test'
+  ...
+# Subtest: local commands distinguish no submission, a settled exit and incomplete output
+    # Subtest: missing executable never submitted
+    ok 1 - missing executable never submitted
+      ---
+      duration_ms: 4.485043
+      type: 'test'
+      ...
+    # Subtest: synchronous invalid argv never submitted
+    ok 2 - synchronous invalid argv never submitted
+      ---
+      duration_ms: 0.519728
+      type: 'test'
+      ...
+    # Subtest: real numeric nonzero preserves command output
+    ok 3 - real numeric nonzero preserves command output
+      ---
+      duration_ms: 30.005293
+      type: 'test'
+      ...
+    # Subtest: output overflow after a real side effect remains unknown
+    ok 4 - output overflow after a real side effect remains unknown
+      ---
+      duration_ms: 41.97213
+      type: 'test'
+      ...
+    1..4
+ok 44 - local commands distinguish no submission, a settled exit and incomplete output
+  ---
+  duration_ms: 189.186058
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL operation waits for close and preserves split UTF-8
+ok 45 - finite PostgreSQL operation waits for close and preserves split UTF-8
+  ---
+  duration_ms: 49.16641
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL result requires one complete valid reply and normal carrier close
+ok 46 - finite PostgreSQL result requires one complete valid reply and normal carrier close
+  ---
+  duration_ms: 181.296033
+  type: 'test'
+  ...
+# Subtest: finite PostgreSQL physical rejection and settled command failure remain distinct
+ok 47 - finite PostgreSQL physical rejection and settled command failure remain distinct
+  ---
+  duration_ms: 44.987353
+  type: 'test'
+  ...
+# Subtest: cancellation before operation blocks late ready and joins the real helper
+ok 48 - cancellation before operation blocks late ready and joins the real helper
+  ---
+  duration_ms: 29.880535
+  type: 'test'
+  ...
+# Subtest: cancellation after the irreversible write preserves unknown and waits for close
+ok 49 - cancellation after the irreversible write preserves unknown and waits for close
+  ---
+  duration_ms: 23.014519
+  type: 'test'
+  ...
+# Subtest: maintenance uses the same finite client without a lifecycle action
+ok 50 - maintenance uses the same finite client without a lifecycle action
+  ---
+  duration_ms: 23.610632
+  type: 'test'
+  ...
+# Subtest: initialization permission belongs only to the current confirmed initdb attempt
+ok 51 - initialization permission belongs only to the current confirmed initdb attempt
+  ---
+  duration_ms: 1.668379
+  type: 'test'
+  ...
+# Subtest: failed readiness keeps a verified started server owned for explicit shutdown
+ok 52 - failed readiness keeps a verified started server owned for explicit shutdown
+  ---
+  duration_ms: 34.175145
+  type: 'test'
+  ...
+# Subtest: start accepts the resolved instance directory while reset requires its exact saved spelling
+ok 53 - start accepts the resolved instance directory while reset requires its exact saved spelling
+  ---
+  duration_ms: 1.16855
+  type: 'test'
+  ...
+# Subtest: only a settled numeric status code 3 permits a start and failed readiness preserves the original error
+ok 54 - only a settled numeric status code 3 permits a start and failed readiness preserves the original error
+  ---
+  duration_ms: 0.545957
+  type: 'test'
+  ...
+# Subtest: unsubmitted, unknown and unclassified start failures cannot adopt another running instance
+ok 55 - unsubmitted, unknown and unclassified start failures cannot adopt another running instance
+  ---
+  duration_ms: 1.02628
+  type: 'test'
+  ...
+# Subtest: status 3 without a confirmed process failure cannot authorize start or reset
+ok 56 - status 3 without a confirmed process failure cannot authorize start or reset
+  ---
+  duration_ms: 1.172538
+  type: 'test'
+  ...
+# Subtest: first initialization retains the original argv and only updates state after successful physical commands
+ok 57 - first initialization retains the original argv and only updates state after successful physical commands
+  ---
+  duration_ms: 0.479542
+  type: 'test'
+  ...
+# Subtest: reset never removes data after a stop failure and clears ownership only after removal succeeds
+ok 58 - reset never removes data after a stop failure and clears ownership only after removal succeeds
+  ---
+  duration_ms: 0.511321
+  type: 'test'
+  ...
+# Subtest: the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+ok 59 - the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+  ---
+  duration_ms: 0.569412
+  type: 'test'
+  ...
+# Subtest: POSIX reset refuses a linked data directory and preserves its actual target
+ok 60 - POSIX reset refuses a linked data directory and preserves its actual target
+  ---
+  duration_ms: 10.925109
+  type: 'test'
+  ...
+# Subtest: reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+ok 61 - reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+  ---
+  duration_ms: 56.123749
+  type: 'test'
+  ...
+# Subtest: WSL startup sends the fixed host identity and requires the current certificate
+ok 62 - WSL startup sends the fixed host identity and requires the current certificate
+  ---
+  duration_ms: 97.856354
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: failed-zero
+ok 63 - shutdown rejects incomplete settlement even with exit zero: failed-zero
+  ---
+  duration_ms: 32.74599
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: invalid-zero
+ok 64 - shutdown rejects incomplete settlement even with exit zero: invalid-zero
+  ---
+  duration_ms: 32.750629
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+ok 65 - shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+  ---
+  duration_ms: 31.027074
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+ok 66 - shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+  ---
+  duration_ms: 29.269841
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+ok 67 - shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+  ---
+  duration_ms: 30.309022
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-failure
+ok 68 - a submitted startup cannot be treated as an unused child: pre-ready-failure
+  ---
+  duration_ms: 31.025651
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-exit
+ok 69 - a submitted startup cannot be treated as an unused child: pre-ready-exit
+  ---
+  duration_ms: 28.309782
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-oauth
+ok 70 - OAuth bridge reports the real browser-open outcome: wsl-oauth
+  ---
+  duration_ms: 32.047092
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+ok 71 - OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+  ---
+  duration_ms: 27.400924
+  type: 'test'
+  ...
+# Subtest: host uses one child, private startup frame and correlated quit inspection
+ok 72 - host uses one child, private startup frame and correlated quit inspection
+  ---
+  duration_ms: 43.963474
+  type: 'test'
+  ...
+# Subtest: stop waits for the child to finish settlement and permits concurrent stop callers
+ok 73 - stop waits for the child to finish settlement and permits concurrent stop callers
+  ---
+  duration_ms: 28.039287
+  type: 'test'
+  ...
+# Subtest: malformed status closes the control pipe and explicit stop does not write after end
+ok 74 - malformed status closes the control pipe and explicit stop does not write after end
+  ---
+  duration_ms: 25.737824
+  type: 'test'
+  ...
+# Subtest: quit during asynchronous launch preparation still stops the child once spawned
+ok 75 - quit during asynchronous launch preparation still stops the child once spawned
+  ---
+  duration_ms: 27.011413
+  type: 'test'
+  ...
+# Subtest: a ready child reporting close failure rejects shutdown completion
+ok 76 - a ready child reporting close failure rejects shutdown completion
+  ---
+  duration_ms: 22.864631
+  type: 'test'
+  ...
+# Subtest: stop before any launch is a no-op for concurrent callers
+ok 77 - stop before any launch is a no-op for concurrent callers
+  ---
+  duration_ms: 2.869195
+  type: 'test'
+  ...
+# Subtest: stop retains an already closed ready child nonzero result for every caller
+ok 78 - stop retains an already closed ready child nonzero result for every caller
+  ---
+  duration_ms: 25.340208
+  type: 'test'
+  ...
+# Subtest: stop accepts an already closed ready child with exit zero
+ok 79 - stop accepts an already closed ready child with exit zero
+  ---
+  duration_ms: 26.525311
+  type: 'test'
+  ...
+# Subtest: a fresh launch cannot erase the failed exit awaited by an older stop
+ok 80 - a fresh launch cannot erase the failed exit awaited by an older stop
+  ---
+  duration_ms: 44.364636
+  type: 'test'
+  ...
+# Subtest: a child reaching ready while stop is joining still reports its failed exit
+ok 81 - a child reaching ready while stop is joining still reports its failed exit
+  ---
+  duration_ms: 24.24263
+  type: 'test'
+  ...
+# Subtest: child starts before PostgreSQL finishes, but start and inspection frames stay gated
+ok 82 - child starts before PostgreSQL finishes, but start and inspection frames stay gated
+  ---
+  duration_ms: 24.29381
+  type: 'test'
+  ...
+# Subtest: PostgreSQL failure sends no start frame and joins the unused child before rejection
+ok 83 - PostgreSQL failure sends no start frame and joins the unused child before rejection
+  ---
+  duration_ms: 23.791259
+  type: 'test'
+  ...
+# Subtest: an early child exit is observed while PostgreSQL preparation is still settling
+ok 84 - an early child exit is observed while PostgreSQL preparation is still settling
+  ---
+  duration_ms: 18.962938
+  type: 'test'
+  ...
+# Subtest: runtime directory failure rejects before spawning or preparing PostgreSQL
+ok 85 - runtime directory failure rejects before spawning or preparing PostgreSQL
+  ---
+  duration_ms: 3.926851
+  type: 'test'
+  ...
+# Subtest: a log append failure remains a runtime event and does not replace shutdown ownership
+ok 86 - a log append failure remains a runtime event and does not replace shutdown ownership
+  ---
+  duration_ms: 23.41293
+  type: 'test'
+  ...
+# Subtest: desktop UI preferences survive a new owner independently of renderer ports
+ok 87 - desktop UI preferences survive a new owner independently of renderer ports
+  ---
+  duration_ms: 4.750656
+  type: 'test'
+  ...
+# Subtest: WSL discovery joins actual names to localized version/default observations
+ok 88 - WSL discovery joins actual names to localized version/default observations
+  ---
+  duration_ms: 2.6628
+  type: 'test'
+  ...
+# Subtest: Linux bundle paths use POSIX even on the Windows host
+ok 89 - Linux bundle paths use POSIX even on the Windows host
+  ---
+  duration_ms: 0.469091
+  type: 'test'
+  ...
+# Subtest: payload manifest carries only the fixed archive content boundary
+ok 90 - payload manifest carries only the fixed archive content boundary
+  ---
+  duration_ms: 25.207926
+  type: 'test'
+  ...
+1..90
+# tests 94
+# suites 0
+# pass 93
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 89614.453266

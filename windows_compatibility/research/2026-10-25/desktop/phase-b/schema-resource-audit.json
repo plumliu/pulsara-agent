@@ -1,0 +1,158 @@
+{
+  "readOnly": true,
+  "databaseOpened": false,
+  "files": {
+    "sql/0000_conversation_kernel_baseline.sql": {
+      "windows_checkout": {
+        "path": "/mnt/c/python_workspace/pulsara-agent/src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql",
+        "bytes": 150654,
+        "CRLF": 2793,
+        "bareCR": 0,
+        "LF": 2793,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true
+      },
+      "linux_checkout": {
+        "path": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql",
+        "bytes": 147861,
+        "CRLF": 0,
+        "bareCR": 0,
+        "LF": 2793,
+        "equalsLinuxBytes": true,
+        "equalsLinuxAfterCRLFtoLF": true
+      },
+      "build_snapshot": {
+        "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/repository/src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql",
+        "bytes": 150654,
+        "CRLF": 2793,
+        "bareCR": 0,
+        "LF": 2793,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true
+      },
+      "build_resources": {
+        "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql",
+        "bytes": 150654,
+        "CRLF": 2793,
+        "bareCR": 0,
+        "LF": 2793,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true
+      },
+      "installed": {
+        "path": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql",
+        "bytes": 150654,
+        "CRLF": 2793,
+        "bareCR": 0,
+        "LF": 2793,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true
+      }
+    },
+    "resources/0000_conversation_kernel_expected_catalog_v1.json": {
+      "windows_checkout": {
+        "path": "/mnt/c/python_workspace/pulsara-agent/src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json",
+        "bytes": 1823,
+        "CRLF": 63,
+        "bareCR": 0,
+        "LF": 63,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "linux_checkout": {
+        "path": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json",
+        "bytes": 1760,
+        "CRLF": 0,
+        "bareCR": 0,
+        "LF": 63,
+        "equalsLinuxBytes": true,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "build_snapshot": {
+        "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/repository/src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json",
+        "bytes": 1823,
+        "CRLF": 63,
+        "bareCR": 0,
+        "LF": 63,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "build_resources": {
+        "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json",
+        "bytes": 1823,
+        "CRLF": 63,
+        "bareCR": 0,
+        "LF": 63,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "installed": {
+        "path": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json",
+        "bytes": 1823,
+        "CRLF": 63,
+        "bareCR": 0,
+        "LF": 63,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      }
+    },
+    "resources/0000_conversation_kernel_runtime_grants_v1.json": {
+      "windows_checkout": {
+        "path": "/mnt/c/python_workspace/pulsara-agent/src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json",
+        "bytes": 3276,
+        "CRLF": 179,
+        "bareCR": 0,
+        "LF": 179,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "linux_checkout": {
+        "path": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json",
+        "bytes": 3097,
+        "CRLF": 0,
+        "bareCR": 0,
+        "LF": 179,
+        "equalsLinuxBytes": true,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "build_snapshot": {
+        "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/repository/src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json",
+        "bytes": 3276,
+        "CRLF": 179,
+        "bareCR": 0,
+        "LF": 179,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "build_resources": {
+        "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json",
+        "bytes": 3276,
+        "CRLF": 179,
+        "bareCR": 0,
+        "LF": 179,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      },
+      "installed": {
+        "path": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json",
+        "bytes": 3276,
+        "CRLF": 179,
+        "bareCR": 0,
+        "LF": 179,
+        "equalsLinuxBytes": false,
+        "equalsLinuxAfterCRLFtoLF": true,
+        "equalsLinuxParsedJSON": true
+      }
+    }
+  },
+  "installedObservedCatalogExpected": "sha256:812aaf3157354f2ce2b0b2765ae07128c31a01579cadac3cf3ae4e3d08f80f42"
+}

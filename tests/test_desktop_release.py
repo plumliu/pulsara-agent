@@ -34,11 +34,12 @@ def test_versions_match_real_committed_metadata_and_tag(release_root):
         release.check_versions(release_root)
 
 
-def test_assembly_requires_and_copies_exactly_three_installers(release_root, tmp_path):
+def test_assembly_requires_and_copies_exactly_four_installers(release_root, tmp_path):
     source, output = tmp_path / "artifacts", tmp_path / "output"
     version = json.loads((release_root / "desktop/package.json").read_text())["version"]
     tag = f"v{version}"
     names = release.installer_names(version)
+    assert len(names) == 4 and names[-1] == f"Pulsara-{version}-windows-x64.exe"
     for index, name in enumerate(names):
         path = source / f"runner-{index}" / name
         path.parent.mkdir(parents=True)

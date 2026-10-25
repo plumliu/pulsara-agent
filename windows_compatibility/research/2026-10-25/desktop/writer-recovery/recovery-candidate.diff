@@ -1,0 +1,252 @@
+--- before/src/pulsara_agent/desktop_app/session_controller.py
++++ after/src/pulsara_agent/desktop_app/session_controller.py
+@@ -357,6 +357,8 @@
+ @dataclass(frozen=True, slots=True)
+ class _Quarantined:
+     public_code: str
++    # Keep the physical close error available on a later user retry.
++    cause: BaseException | None = None
+ 
+ 
+ @dataclass(eq=False, slots=True)
+@@ -2301,13 +2303,24 @@
+             if isinstance(current, _Quarantined):
+                 raise SessionControlRejected(
+                     current.public_code,
+-                    "Session runtime is quarantined; restart Pulsara to continue.",
+-                )
++                    ("连接恢复未完成，旧会话关闭失败。请查看日志并重新打开 Pulsara。" if current.cause is not None
++                     else "Session runtime is quarantined; restart Pulsara to continue."),
++                ) from current.cause
+             if live is not None:
+                 if no_live_observation is not None or current is not None:
+                     raise RuntimeError("Session has another current operation")
+-                return live
+-            if isinstance(current, _ResumeInFlight):
++                if not getattr(live.session, "writer_unavailable", False):
++                    return live
++                # Reuse the normal resume reservation. An unavailable writer does not
++                # release its physical owners or authorize another cold open.
++                task = asyncio.create_task(
++                    self._recover_writer_owner(session_id, live, scheduled=scheduled),
++                    name=f"desktop-resume:{session_id}",
++                )
++                self._operations[session_id] = _ResumeInFlight(task, scheduled=scheduled)
++                self._by_session.pop(session_id, None)
++                self._by_host.pop(live.host_session_id, None)
++            elif isinstance(current, _ResumeInFlight):
+                 if scheduled and not current.scheduled:
+                     raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在打开或恢复，请稍后再试。")
+                 if no_live_observation is not None:
+@@ -2333,6 +2346,35 @@
+                 )
+                 self._operations[session_id] = _ResumeInFlight(task, scheduled=scheduled)
+         return await asyncio.shield(task)
++
++    async def _recover_writer_owner(
++        self, session_id: str, previous: HostSessionHandle, *, scheduled: bool
++    ) -> HostSessionHandle:
++        try:
++            await self.core.close_session(previous.host_session_id)
++        except BaseException as exc:
++            async with self._lock:
++                current = self._operations.get(session_id)
++                if isinstance(current, _ResumeInFlight) and current.task is asyncio.current_task():
++                    self._operations[session_id] = _Quarantined("SESSION_RECOVERY_CLOSE_FAILED", exc)
++            if isinstance(exc, asyncio.CancelledError):
++                raise
++            raise SessionControlRejected(
++                "SESSION_RECOVERY_CLOSE_FAILED", "连接恢复未完成，旧会话关闭失败。请查看日志并重新打开 Pulsara。"
++            ) from exc
++        async with self._lock:
++            if self._closing:
++                current = self._operations.get(session_id)
++                if isinstance(current, _ResumeInFlight) and current.task is asyncio.current_task():
++                    self._operations.pop(session_id, None)
++                raise KernelHostCoreClosing("Desktop application is draining")
++        # Stay in this same task: publication/finally compare the existing
++        # reservation's task identity. The original cold resume owns the epoch.
++        return await self._resume_owner(session_id, scheduled=scheduled)
++
++    def host_writer_unavailable(self, host_session_id: str) -> bool:
++        handle = self._by_host.get(host_session_id)
++        return handle is not None and bool(getattr(handle.session, "writer_unavailable", False))
+ 
+     async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False, scheduled: bool = False) -> HostSessionHandle:
+         task = asyncio.current_task()
+--- before/src/pulsara_agent/desktop_app/renderer_bridge.py
++++ after/src/pulsara_agent/desktop_app/renderer_bridge.py
+@@ -1113,6 +1113,8 @@
+             raise ProtocolTransportClosed()
+         if connection is None:
+             raise KeyError(connection_id)
++        if self.sessions.host_writer_unavailable(connection.host_session_id):
++            raise ProtocolBridgeError("SESSION_WRITER_UNAVAILABLE", "连接已中断，正在恢复会话。")
+         return connection
+ 
+     @staticmethod
+--- before/src/pulsara_agent/desktop_app/http_server.py
++++ after/src/pulsara_agent/desktop_app/http_server.py
+@@ -2682,11 +2682,21 @@
+         takeover = body.get("takeover", False)
+         if not isinstance(takeover, bool):
+             raise ValueError("takeover must be boolean")
+-        payload = await self.bridge.connect(
+-            request.match_info["session_id"],
+-            browser_instance_id=browser_instance_id,
+-            takeover=takeover,
+-        )
++        try:
++            payload = await self.bridge.connect(
++                request.match_info["session_id"],
++                browser_instance_id=browser_instance_id,
++                takeover=takeover,
++            )
++        except SessionControlRejected as exc:
++            message = str(exc)
++            if exc.public_code == "SESSION_RECOVERY_CLOSE_FAILED" and exc.__cause__ is not None:
++                scrub = await self.sessions._capture_capability_notice_scrub()
++                if scrub is not None:
++                    detail = scrub.scrub_text(f"{type(exc.__cause__).__name__}: {exc.__cause__}")
++                    message += f"\n{detail}"
++            raise HttpPublicError(exc.public_code, message, status=409,
++                retryable=exc.public_code != "SESSION_RECOVERY_CLOSE_FAILED") from exc
+         return web.json_response(payload, status=201)
+ 
+     async def _disconnect(self, request: web.Request) -> web.Response:
+--- before/frontend/components/workbench-view.tsx
++++ after/frontend/components/workbench-view.tsx
+@@ -158,6 +158,8 @@
+   onQueueActionHandled: (commandId: string) => void;
+   runtimeStatus: RuntimeStatus;
+   runtimeError?: string;
++  runtimeErrorDetails?: string;
++  runtimeRecoveryBlocked?: boolean;
+   modelConfigurations: ModelConfigurationSummary[];
+   modelCatalogLoading?: boolean;
+   modelCallBinding?: ModelCallBindingPayload | null;
+@@ -1895,6 +1897,8 @@
+   onQueueActionHandled,
+   runtimeStatus,
+   runtimeError,
++  runtimeErrorDetails,
++  runtimeRecoveryBlocked = false,
+   modelConfigurations,
+   modelCatalogLoading = false,
+   modelCallBinding,
+@@ -2939,8 +2943,10 @@
+         <div className="thread-column conversation-transcript">
+           {runtimeStatus !== 'online' && (
+             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
+-              <span>{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在重新连接…' : runtimeError ?? '本地服务未连接。'}</span>
+-              {(runtimeStatus === 'offline' || runtimeStatus === 'failed') && <button onClick={onReconnect}>重新连接</button>}
++              <span role="status">{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在恢复会话…' : '连接恢复未完成'}</span>
++              {(runtimeStatus === 'offline' || runtimeStatus === 'failed') && !runtimeRecoveryBlocked && <button onClick={onReconnect}>重新连接</button>}
++              {runtimeRecoveryBlocked && <span>旧会话关闭失败，请查看技术详情与日志，并重新打开 Pulsara。</span>}
++              {(runtimeErrorDetails || runtimeError) && <details className="runtime-error-details"><summary>技术详情</summary><pre>{runtimeErrorDetails || runtimeError}</pre></details>}
+             </div>
+           )}
+           {!welcome && !session.id && messages.length === 0 && conversationSubmissions.length === 0 && runtimeStatus === 'online' && (
+--- before/frontend/app/pulsara-app.tsx
++++ after/frontend/app/pulsara-app.tsx
+@@ -329,6 +329,7 @@
+   const [userServiceStatus, setUserServiceStatus] = useState<RuntimeStatus>('starting');
+   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('starting');
+   const [runtimeError, setRuntimeError] = useState<string>();
++  const [runtimeFailure, setRuntimeFailure] = useState<{details: string; requiresRestart: boolean}>();
+   const [runtimeReopenBusy, setRuntimeReopenBusy] = useState(false);
+   const runtimeReopenOwner = useRef<RuntimeConnection | undefined>(undefined);
+   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
+@@ -1087,6 +1088,7 @@
+     setCapabilityLoading(Boolean(sessionId));
+     setRuntimeStatus(reconnecting ? 'reconnecting' : 'starting');
+     setRuntimeError(undefined);
++    setRuntimeFailure(undefined);
+     const previous = connectionRef.current;
+     const previousHistory = historyRef.current;
+     const retainedHistory = previousHistory?.sessionId === sessionId ? previousHistory : undefined;
+@@ -1155,6 +1157,10 @@
+       const message = productMessage(error instanceof Error ? error.message : undefined, '无法连接本地服务。');
+       setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
+       setRuntimeError(message);
++      setRuntimeFailure(error instanceof Error ? {
++        details: error instanceof RuntimeApiError ? `${error.code}: ${error.message}` : `${error.name}: ${error.message}`,
++        requiresRestart: error instanceof RuntimeApiError && error.code === 'SESSION_RECOVERY_CLOSE_FAILED',
++      } : undefined);
+       if (retainedHistory) {
+         setWorkspaceRecoveryError(message);
+         void adapter.workspaceAvailability(sessionId).then(value => {
+@@ -1435,6 +1441,10 @@
+             || runtimeReopenOwner.current === connection) return;
+           setRuntimeStatus('reconnecting');
+           setRuntimeError(productMessage(error instanceof Error ? error.message : undefined, '连接已中断。'));
++          setRuntimeFailure(error instanceof Error ? {
++            details: error instanceof RuntimeApiError ? `${error.code}: ${error.message}` : `${error.name}: ${error.message}`,
++            requiresRestart: error instanceof RuntimeApiError && error.code === 'SESSION_RECOVERY_CLOSE_FAILED',
++          } : undefined);
+           window.setTimeout(() => {
+             if (active && ownsConnection(connection) && runtimeReopenOwner.current !== connection) {
+               void openRuntimeSession(connection.sessionId, true);
+@@ -3139,6 +3149,8 @@
+           ))}
+           runtimeStatus={runtimeStatus}
+           runtimeError={runtimeError}
++          runtimeErrorDetails={runtimeFailure?.details}
++          runtimeRecoveryBlocked={runtimeFailure?.requiresRestart}
+           modelConfigurations={bootstrap?.model_configurations ?? []}
+           modelCatalogLoading={bootstrap?.model_catalog_loading}
+           modelCallBinding={activeSession.modelCallBinding}
+--- before/frontend/app/styles/workbench.css
++++ after/frontend/app/styles/workbench.css
+@@ -45,6 +45,9 @@
+ .runtime-banner--offline, .runtime-banner--failed { border-color: color-mix(in srgb, var(--red) 24%, var(--line)); color: var(--red); }
+ .runtime-banner > button { flex: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); color: var(--ink-soft); font-size: var(--type-caption); }
+ .runtime-banner > button:hover { border-color: var(--line-strong); background: var(--paper-deep); }
++.runtime-error-details { flex-basis: 100%; color: var(--muted); }
++.runtime-error-details summary { cursor: pointer; }
++.runtime-error-details pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; user-select: text; }
+ .observer-badge { display: inline-flex; align-items: center; gap: 5px; min-height: 27px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--blue-soft) 62%, transparent); color: var(--blue); font-size: var(--type-label); font-weight: 650; white-space: nowrap; }
+ .popover-anchor { position: relative; }
+ .menu-popover { position: absolute; z-index: 60; top: calc(100% + 7px); right: 0; min-width: 260px; padding: 7px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--paper-solid); box-shadow: var(--shadow-lg); animation: pop-in .14s ease-out; }
+--- before/desktop/assets/startup.html
++++ after/desktop/assets/startup.html
+@@ -2,4 +2,4 @@
+ <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'"><title>Pulsara</title><link rel="stylesheet" href="startup.css">
+ <body><nav id="window-controls" hidden aria-label="窗口控制"><button id="window-minimize" aria-label="最小化">—</button><button id="window-maximize" aria-label="最大化或还原">□</button><button id="window-close" aria-label="关闭窗口">×</button></nav><main><img class="mark" src="pulsara.png" width="72" height="72" alt=""><h1>Pulsara</h1><p id="status">正在准备本地工作台…</p><p class="hint" hidden></p>
+ <form id="wsl-setup" hidden><label for="wsl-distribution">已有的 WSL2 Ubuntu</label><select id="wsl-distribution" required></select><p id="wsl-identity" role="status"></p><p>应用资源和数据保存在 Linux 中。保留现有用户、Windows 互操作与自动挂载，不更改发行版的其他设置。</p><button id="wsl-confirm" type="submit" disabled>使用此环境并安装应用资源</button><button id="wsl-refresh" type="button">重新检查</button><p>尚未安装 WSL2 或 Ubuntu？请按 <a href="https://learn.microsoft.com/windows/wsl/install" id="wsl-help">Microsoft 安装说明</a>完成安装后重新检查。</p></form>
+-<div id="actions" hidden><button id="retry">重试</button><button id="logs">查看日志</button><button id="quit">退出</button></div></main><script src="startup.js"></script></body></html>
++<details id="error-details" hidden><summary>技术详情</summary><pre id="error-detail-text"></pre></details><div id="actions" hidden><button id="retry">重试</button><button id="logs">查看日志</button><button id="quit">退出</button></div></main><script src="startup.js"></script></body></html>
+--- before/desktop/assets/startup.js
++++ after/desktop/assets/startup.js
+@@ -7,13 +7,22 @@
+   document.getElementById('window-maximize').onclick = () => window.pulsaraDesktop.toggleMaximize();
+   document.getElementById('window-close').onclick = () => window.pulsaraDesktop.closeWindow();
+ }
+-if (error) document.getElementById('status').textContent = error;
++if (error) {
++  if (phase === 'failed') {
++    document.getElementById('status').textContent = error.startsWith('退出尚未完成：')
++      ? '退出尚未完成' : error.startsWith('数据库重置未完成：') ? '数据库重置未完成' : '工作台连接未完成';
++    document.getElementById('error-details').hidden = false;
++    document.getElementById('error-detail-text').textContent = error;
++  } else document.getElementById('status').textContent = error;
++}
+ document.getElementById('actions').hidden = !['failed', 'starting'].includes(phase);
+ document.getElementById('retry').hidden = phase !== 'failed';
+ document.getElementById('logs').hidden = phase !== 'failed';
+ const hint = document.querySelector('.hint');
+ hint.hidden = phase !== 'failed';
+-if (phase === 'failed') hint.textContent = '请查看具体原因。重试不会自动清除数据。';
++if (phase === 'failed') hint.textContent = error?.startsWith('退出尚未完成：')
++  ? '当前工作尚未确认安全关闭，应用与数据仍保留。可查看详情或日志。'
++  : '重试不会自动清除数据。可展开技术详情或查看日志。';
+ document.getElementById('retry').onclick = () => window.pulsaraDesktop.retryStartup();
+ document.getElementById('logs').onclick = () => window.pulsaraDesktop.showLogs();
+ document.getElementById('quit').onclick = () => window.pulsaraDesktop.quit();
+--- before/desktop/assets/startup.css
++++ after/desktop/assets/startup.css
+@@ -1,3 +1,4 @@
+ :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#3c3933;background:transparent}body{background:#f3f0e7;margin:0;min-height:100vh;display:grid;place-items:center;-webkit-app-region:drag}main{box-sizing:border-box;text-align:center;width:min(736px,100%);padding:48px}.mark{display:block;margin:0 auto;color:#b67a23;font-family:Georgia,serif;font-style:italic;font-size:72px}h1{font-family:Georgia,serif;font-size:32px;margin:8px}#status{line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.hint{font-size:13px;color:#8a857b}button{font:inherit;border:1px solid #d4cfc5;border-radius:8px;padding:8px 16px;background:#fffcf5;color:#49443b;cursor:pointer;margin:6px;-webkit-app-region:no-drag}button:hover{background:#e9dfcd}
+ #wsl-setup{text-align:left;border-top:1px solid #d4cfc5;margin-top:24px;padding-top:20px}#wsl-setup label{display:block;margin-bottom:8px}#wsl-setup select{box-sizing:border-box;width:100%;font:inherit;padding:10px;border:1px solid #d4cfc5;border-radius:8px;background:#fffcf5;color:#49443b;-webkit-app-region:no-drag}#wsl-setup p{font-size:13px;line-height:1.6}#wsl-setup a{-webkit-app-region:no-drag;color:#996a24}button:disabled{opacity:.5;cursor:default}
+ #window-controls{position:fixed;right:0;top:0;display:flex;z-index:1}#window-controls[hidden]{display:none}#window-controls button{width:46px;height:34px;border:0;border-radius:0;margin:0;padding:0;background:transparent;font-size:17px}#window-controls button:hover{background:#e9dfcd}#window-controls #window-close:hover{background:#c42b1c;color:white}
++#error-details{text-align:left;margin:18px 0;color:#8a857b;font-size:13px;-webkit-app-region:no-drag}#error-details summary{cursor:pointer}#error-detail-text{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;max-height:32vh;overflow:auto;user-select:text}

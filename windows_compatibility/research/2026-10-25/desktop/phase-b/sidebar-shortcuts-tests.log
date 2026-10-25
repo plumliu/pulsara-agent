@@ -1,0 +1,13 @@
+
+> pulsara-desktop-workbench@0.1.0-alpha.6 test
+> vitest run ../tests/frontend/desktop-window-controls.test.tsx ../tests/frontend/pulsara-app.test.tsx -t disables all creation entries|window controls|native controls|session search
+
+
+ RUN  v4.1.11 C:/python_workspace/pulsara-agent/frontend
+
+
+ Test Files  2 passed (2)
+      Tests  5 passed | 189 skipped (194)
+   Start at  16:53:57
+   Duration  6.10s (transform 2.47s, setup 109ms, import 7.26s, tests 1.64s, environment 2.52s)
+

@@ -1,0 +1,82 @@
+{
+  "phase": "candidate-wsl",
+  "model": "deepseek-flash",
+  "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy",
+  "started_at": "2026-10-25T09:28:15.495102+00:00",
+  "status": "completed",
+  "cases": [],
+  "trace": [],
+  "provider_calls": [],
+  "scope": "original owner runner; not installed Electron GUI qualification",
+  "prefix_checks": [
+    {
+      "session_id": "session:7jy7pz5cy36icas6suwrqtc2au",
+      "scope": "ROOT",
+      "task_id": null,
+      "epoch": "epoch:zbmwc2e5te45dlgegmopjt5geq",
+      "revision": 1,
+      "compared": false,
+      "messages": 4
+    },
+    {
+      "session_id": "session:7jy7pz5cy36icas6suwrqtc2au",
+      "scope": "ROOT",
+      "task_id": null,
+      "epoch": "epoch:zbmwc2e5te45dlgegmopjt5geq",
+      "revision": 2,
+      "compared": true,
+      "messages": 8
+    },
+    {
+      "session_id": "session:im4vuirjzhziwncokvporee4fq",
+      "scope": "ROOT",
+      "task_id": null,
+      "epoch": "epoch:4x6avhks6uvigi3tv7btv7soau",
+      "revision": 1,
+      "compared": false,
+      "messages": 4
+    },
+    {
+      "session_id": "session:im4vuirjzhziwncokvporee4fq",
+      "scope": "ROOT",
+      "task_id": null,
+      "epoch": "epoch:4x6avhks6uvigi3tv7btv7soau",
+      "revision": 2,
+      "compared": true,
+      "messages": 8
+    },
+    {
+      "session_id": "session:qdzbzlmptcoau7rwgvumsyuk54",
+      "scope": "ROOT",
+      "task_id": null,
+      "epoch": "epoch:sfroc6qdzttjznqxh5lwzknsue",
+      "revision": 1,
+      "compared": false,
+      "messages": 4
+    },
+    {
+      "session_id": "session:m6k2neybysza2hxmcyb4ogvqca",
+      "scope": "ROOT",
+      "task_id": null,
+      "epoch": "epoch:rjllp7tbwfp4ir5ltgsykjbr4m",
+      "revision": 1,
+      "compared": false,
+      "messages": 4
+    }
+  ],
+  "runner": "subagent",
+  "postgres": {
+    "system_identifier": "7700523439330484737",
+    "data": "/home/plumwsl/.pulsara/desktop/postgres",
+    "socket": "/home/plumwsl/.pulsara/desktop/socket",
+    "version_num": 170009,
+    "admin_root": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 user=pulsara_admin dbname=pulsara",
+    "runtime_root": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 user=pulsara_runtime dbname=pulsara"
+  },
+  "created_database": "pulsara_wsl_dogfood_a8951b91dd5b4c4faf7df22dd52f5a04",
+  "regression_cases": 6,
+  "dropped_databases": [
+    "pulsara_wsl_dogfood_a8951b91dd5b4c4faf7df22dd52f5a04"
+  ],
+  "undropped_databases": []
+}

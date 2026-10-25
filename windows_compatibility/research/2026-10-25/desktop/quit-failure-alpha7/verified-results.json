@@ -1,0 +1,143 @@
+{
+  "readonlyCollection": true,
+  "installedVersion": "0.1.0-alpha.7",
+  "rootObservedQuitFailure": "StaleHostWriter: host writer generation is stale",
+  "beforeRetry": {
+    "utc": "2026-10-25T10:49:50.200903+00:00",
+    "originalKernel": {
+      "pid": 468,
+      "exists": false
+    },
+    "originalPostgres": {
+      "pid": 498,
+      "exists": true,
+      "state": "S",
+      "starttime": "23109",
+      "namespace": "pid:[4026532223]",
+      "exe": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres"
+    },
+    "locks": [
+      {
+        "name": "kernel.lock",
+        "inode": 145305,
+        "busy": false
+      },
+      {
+        "name": "pg-lifetime.lock",
+        "inode": 171582,
+        "busy": true
+      }
+    ],
+    "formalKernelCandidates": [],
+    "diagnosticsSocketExists": false,
+    "settingsRead": false,
+    "pgConnected": false,
+    "productLifecycleAction": false
+  },
+  "numericCarrierExitCodeDirectlyCaptured": false,
+  "installedPythonFailureReturnOneIsSourceInferenceOnly": true,
+  "originalTsRepeatedQuit": "same cached exit failure rethrows; no PGstop/app.exit0",
+  "originalTsRetry": "new boot waits previous-owner lock, exact PG check/reuse and new runtime attempt; root executed GUI Retry, not this observer",
+  "retry": {
+    "kernel": {
+      "pid": 53665,
+      "starttime": "340742",
+      "pidNamespace": "pid:[4026532223]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/bin/python3.12"
+    },
+    "postgres": {
+      "pid": 498,
+      "starttime": "23109",
+      "pidNamespace": "pid:[4026532223]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres"
+    },
+    "pgFacts": {
+      "systemid": "7700523439330484737",
+      "data": "/home/plumwsl/.pulsara/desktop/postgres",
+      "socket": "/home/plumwsl/.pulsara/desktop/socket",
+      "listen": "",
+      "inetAddress": null,
+      "postmasterStarted": "2026-10-25 17:57:33.694648+08",
+      "dataInode": 171484
+    },
+    "health": {
+      "origin": "https://127.0.0.1:42805",
+      "at": 1792925584243,
+      "method": "GET",
+      "path": "/healthz",
+      "fullCertificateSame": true,
+      "authorized": true,
+      "localPort": 59058,
+      "remotePort": 42805,
+      "httpStatus": 200,
+      "health": {
+        "status": "ready"
+      }
+    },
+    "sameOriginalThreeTurns": true
+  },
+  "dpi": {
+    "utc": "2026-10-25T10:52:57.793904+00:00",
+    "activeDisplayCount": 1,
+    "monitors": [
+      {
+        "display": "\\\\.\\DISPLAY6",
+        "primary": true,
+        "resolutionPixels": [
+          1920,
+          1080
+        ],
+        "desktopRectPixels": [
+          0,
+          0,
+          1920,
+          1080
+        ],
+        "effectiveDpi": [
+          96,
+          96
+        ],
+        "effectiveScalePercent": [
+          100.0,
+          100.0
+        ]
+      }
+    ],
+    "observerProcessDpiAwareness": 2,
+    "loadedHkl": [
+      "0x8040804"
+    ],
+    "pulsaraPid": 8324,
+    "visiblePulsaraWindowThreadLayouts": [
+      {
+        "threadId": 36108,
+        "hkl": "0x8040804",
+        "languageIdHex": "0804",
+        "windowRectPixels": [
+          -32000,
+          -32000,
+          -31840,
+          -31972
+        ],
+        "minimized": true,
+        "monitorDisplay": "\\\\.\\DISPLAY6",
+        "monitorEffectiveDpi": [
+          96,
+          96
+        ],
+        "windowDpi": 96,
+        "windowScalePercent": 100.0
+      }
+    ],
+    "deviceSerialNumbersCollected": false,
+    "displayOrInputSettingsChanged": false,
+    "uiControlled": false,
+    "altGrSemantics": "HKL values and a right Alt key do not alone prove physical AltGr character behavior."
+  },
+  "correction": "53665 in inline-Python inventory is the new Retry kernel confirmed by its HTTP listener fd, not a diagnostic merely because argv used -c",
+  "scopeCaveat": "no helper observed, no new complete ordinary-PE ownership audit; root confirmed GUI idle/MCP cleared and prior provider owners already cleaned",
+  "observerLifecycleActions": false,
+  "alpha8RebuiltOrInstalled": false,
+  "sleepReportOrRootQualificationOverwritten": false,
+  "hostLeaseFixOrFutureQuitProven": false
+}

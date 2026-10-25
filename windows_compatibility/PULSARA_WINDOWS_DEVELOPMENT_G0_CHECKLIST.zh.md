@@ -4,7 +4,7 @@
 
 2026-10-24 按用户授权修订：Ubuntu发行版本号不限，接入已有发行版及默认非root用户，保留interop、Windows PATH和自动挂载，不要求新建`Pulsara`/`pulsara`。本清单命令以已观察到的`Ubuntu`/`plumwsl`及`/home/plumwsl`为示例，其他用户须替换成实际确认目标，不能把示例当固定命名要求。依赖pins、ext4应用数据和完整G0验收仍适用；原四方审阅仅覆盖修订前清单。
 
-**本文件是 Windows 接手操作说明。2026-10-25本机所选矩阵G0-W机制可行性已通过，当前验收看第11节及[最终报告](research/2026-10-25/root/g0-w-final/report.zh.md)。** 前面保留可复用操作模板及阶段记录，未打勾的模板不是当前门状态。Phase A代码与Mac实证冻结范围保持，原生Ubuntu x64/arm64与GUI按用户要求延期，Phase B未进入。生产仍有已记录的跨域缺口，研究候选通过不代表生产已修复。实验只在自有隔离目录和output，不实现生产安装器、WslHostOperations、正式picker或TLS/OAuth桥，不改用户共享发行版配置。
+**本文件是 Windows 接手操作说明。2026-10-25本机所选矩阵G0-W机制可行性已通过，当前验收看第11节及[最终报告](research/2026-10-25/root/g0-w-final/report.zh.md)。** 前面保留可复用操作模板及阶段记录，未打勾的模板不是当前门状态。原生Ubuntu x64/arm64与GUI按用户要求延期，Phase B未进入。用户随后授权的独立问题修正见spec §23及[README分类说明](README.md)；旧Phase A及Mac实证保留为历史基线，研究候选通过不代表生产已修复。G0实验只在自有隔离目录和output，不实现生产安装器、WslHostOperations、正式picker或TLS/OAuth桥，不改用户共享发行版配置。
 
 ## 1. 先看懂两边分工
 

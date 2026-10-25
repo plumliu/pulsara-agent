@@ -1,0 +1,10 @@
+Completed candidate:small
+Completed candidate:log
+Completed candidate:json
+Completed candidate:invalid_json
+Completed candidate:multi
+Completed candidate:snapshot
+Completed candidate:existing
+Completed candidate:readonly
+Completed candidate:no_terminal
+{"status": "completed", "output": "/mnt/c/python_workspace/pulsara-agent/output/phase-b/desktop/provider-acceptance/artifact-result.json", "undropped_databases": []}

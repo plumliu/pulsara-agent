@@ -1,0 +1,18 @@
+{
+  "command": "node --test desktop/dist/backend-session.test.js desktop/dist/main.test.js --test-name-pattern ...",
+  "exitCode": 1,
+  "tests": 34,
+  "passed": 33,
+  "failed": 1,
+  "cause": "test-name-pattern was placed after the file list, so Windows executed the full main suite including its existing POSIX path case",
+  "failure": {
+    "test": "main composes the linux bundle once for home, runtime, PG and CLI",
+    "expected": "/opt/Pulsara/resources/bin/pulsara",
+    "actual": "\\opt\\Pulsara\\resources\\bin\\pulsara"
+  },
+  "assertionChanged": false,
+  "correctedRuns": {
+    "backendSession": "readiness-unit.log: 8/8",
+    "windowsMain": "windows-main-filter.log: 10/10, skipped0"
+  }
+}

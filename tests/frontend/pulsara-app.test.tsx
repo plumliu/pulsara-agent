@@ -15,6 +15,45 @@ import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench } from './pulsara-app-fixture';
 
 describe('PulsaraApp', () => {
+  it('recovers a lost writer through the existing reconnect without submitting input', async () => {
+    const adapter = new FakeAdapter();
+    const connect = adapter.connect.bind(adapter);
+    let disconnect!: (error: Error) => void;
+    vi.spyOn(adapter, 'connect').mockImplementationOnce(async (...args) => {
+      const connection = await connect(...args);
+      vi.spyOn(connection, 'observe').mockImplementationOnce(() => new Promise((_resolve, reject) => { disconnect = reject; }));
+      return connection;
+    });
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    const old = adapter.lastConnection!;
+    await act(async () => disconnect(new RuntimeApiError('SESSION_WRITER_UNAVAILABLE', '连接已中断。', true)));
+    expect(await screen.findByText('连接中断，正在恢复会话…')).toBeTruthy();
+    await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
+    await waitFor(() => expect(adapter.lastConnection).not.toBe(old));
+    expect(old.closed).toBe(true);
+    expect(old.submitPrompt).not.toHaveBeenCalled();
+    expect(adapter.lastConnection!.submitPrompt).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText('连接中断，正在恢复会话…')).toBeNull());
+  });
+
+  it('shows friendly recovery failure and keeps the original API error in collapsed details', async () => {
+    const adapter = new FakeAdapter();
+    const connecting = vi.spyOn(adapter, 'connect').mockRejectedValue(new RuntimeApiError(
+      'SESSION_RECOVERY_CLOSE_FAILED', '连接恢复未完成。\nOSError: scope join failed', false,
+    ));
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    expect(await screen.findByText('连接恢复未完成')).toBeTruthy();
+    const details = screen.getByText('技术详情').closest('details')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain('SESSION_RECOVERY_CLOSE_FAILED');
+    expect(details.textContent).toContain('OSError: scope join failed');
+    expect(screen.queryByRole('button', {name:'重新连接'})).toBeNull();
+    expect(screen.getByText(/旧会话关闭失败，请查看技术详情与日志，并重新打开 Pulsara。/)).toBeTruthy();
+    expect(connecting).toHaveBeenCalledTimes(1);
+    expect(adapter.createSession).not.toHaveBeenCalled();
+  });
+
   it('keeps the original stop error when its command result is unavailable, without resending', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {

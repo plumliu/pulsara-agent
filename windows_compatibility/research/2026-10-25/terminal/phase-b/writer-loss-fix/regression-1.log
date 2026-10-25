@@ -1,0 +1,924 @@
+FFF............s.............................FFFF....................... [ 33%]
+...............................FF
+=================================== FAILURES ===================================
+____ test_failed_reconnect_is_not_ready_and_other_working_owner_still_wins _____
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-1/test_failed_reconnect_is_not_r0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7174ebbb99d0>
+
+    def test_failed_reconnect_is_not_ready_and_other_working_owner_still_wins(tmp_path, monkeypatch):
+        async def scenario():
+            blocked = False
+            listing_started = asyncio.Event()
+            release_listing = asyncio.Event()
+    
+            async def tools(_ctx, _params):
+                if blocked:
+                    listing_started.set()
+                    await release_listing.wait()
+                return types.ListToolsResult(tools=[types.Tool(
+                    name="probe", input_schema={"type": "object"},
+                )])
+    
+            async def call(_ctx, _params):
+                return types.CallToolResult(content=[types.TextContent(type="text", text="ok")])
+    
+            server = Server("live-status", on_list_tools=tools, on_call_tool=call)
+            async with _sdk_http(server) as endpoint:
+                service = LocalMcpManagementService(LocalSettingsStore(tmp_path / "settings.yaml"),
+                                                    user_config_path=tmp_path / "mcp.yaml")
+                await service.create(LocalMcpTarget("catalog"), {
+                    "required": True, "effect_policy": {"default_effect": "READ_ONLY"},
+                    "transport": {"type": "streamable_http", "endpoint": endpoint,
+                                  "allow_http_localhost": True},
+                })
+                supervisors = [McpHostSupervisor(
+                    session_id="session:scheduling", workspace_root=tmp_path,
+                    configs=service.load_configs(), credential_boundary=service.credential_boundary,
+                    connect_attempt_timeout_seconds=0.25,
+                ) for _ in range(2)]
+                controller = _controller(service, monkeypatch)
+                runtimes = []
+                try:
+                    for supervisor in supervisors:
+                        await supervisor.start()
+                        runtimes.append(supervisor.install_pending_at_safe_point())
+                    first, second = supervisors
+                    controller._by_session["first"] = SimpleNamespace(session=_session(first))
+                    assert (await _read(controller))["status"] == "READY"
+                    semantic_before = first.catalog_snapshot().semantic_fingerprint
+                    tools_before = runtimes[0].root_tool_specs
+                    blocked = True
+                    first.reconnect("catalog")
+                    _assert_unavailable(await _read(controller), "CONNECTING")
+                    await asyncio.wait_for(listing_started.wait(), 3)
+                    await asyncio.wait_for(first._tasks["catalog"], 3)
+                    row = await _read(controller)
+                    _assert_unavailable(row, "FAILED_RETRYABLE")
+                    assert row["has_failure"] and row["failure_category"] == "TimeoutError"
+                    assert first.catalog_snapshot().servers[0].status is McpServerState.READY
+                    assert first.catalog_snapshot().semantic_fingerprint == semantic_before
+                    assert runtimes[0].root_tool_specs == tools_before
+                    with pytest.raises(McpSnapshotStale):
+                        _invoke(next(iter(runtimes[0].executors.values())), "call:failed-rebind")
+    
+                    # Another exact config owner that is actually callable wins,
+                    # independently of conversation selection or insertion order.
+                    controller._by_session["second"] = SimpleNamespace(session=_session(second))
+                    row = await _read(controller)
+                    assert row["status"] == "READY" and row["tool_count"] == len(row["tools"]) == 1
+                    assert not row["has_failure"]
+                    controller._by_session = dict(reversed(tuple(controller._by_session.items())))
+                    assert (await _read(controller)) == row
+                    assert (await _invoke(next(iter(runtimes[1].executors.values())), "call:healthy")).state == "SUCCESS"
+                    controller._operations["second"] = object()
+                    _assert_unavailable(await _read(controller), "FAILED_RETRYABLE")
+    
+                    blocked = False
+                    release_listing.set()
+                    first.reconnect("catalog")
+                    await asyncio.wait_for(first._tasks["catalog"], 3)
+                    row = await _read(controller)
+                    assert row["status"] == "READY" and row["tool_count"] == len(row["tools"]) == 1
+                    assert not row["has_failure"]
+                    assert first.catalog_snapshot().semantic_fingerprint == semantic_before
+                    replacement = first.install_pending_at_safe_point()
+                    assert replacement is not None
+                    runtimes.append(replacement)
+                    assert (await _invoke(next(iter(replacement.executors.values())), "call:restored")).state == "SUCCESS"
+                    first.stop_admission()
+                    _assert_unavailable(await _read(controller), "RETIRING")
+                finally:
+                    release_listing.set()
+                    for runtime in runtimes:
+                        if runtime is not None:
+                            runtime.release()
+                    await asyncio.gather(*(owner.aclose() for owner in supervisors))
+                    await service.aclose()
+    
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path))
+>       asyncio.run(scenario())
+
+tests/test_desktop_mcp_live_status.py:156: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_desktop_mcp_live_status.py:104: in scenario
+    assert (await _read(controller))["status"] == "READY"
+            ^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_desktop_mcp_live_status.py:55: in _read
+    payload = await controller.inspect_user_capabilities()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pulsara_agent/desktop_app/session_controller.py:1120: in inspect_user_capabilities
+    live_inspections = tuple(
+src/pulsara_agent/desktop_app/session_controller.py:1121: in <genexpr>
+    handle.session.inspect_capability_catalog()
+src/pulsara_agent/conversation_kernel/host.py:1516: in inspect_capability_catalog
+    self._require_open()
+src/pulsara_agent/conversation_kernel/host.py:7591: in _require_open
+    if self.writer_unavailable:
+       ^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostSession object at 0x7174e5510620>
+
+    @property
+    def writer_unavailable(self) -> bool:
+>       return self._writer_renewal_failure is not None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'KernelHostSession' object has no attribute '_writer_renewal_failure'
+
+src/pulsara_agent/conversation_kernel/host.py:1553: AttributeError
+_ test_subscription_relist_fences_management_tools_without_changing_provider_catalog _
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-1/test_subscription_relist_fence0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7174e55c74a0>
+
+    def test_subscription_relist_fences_management_tools_without_changing_provider_catalog(tmp_path, monkeypatch):
+        async def scenario():
+            bus = InMemorySubscriptionBus()
+            listener = ListenHandler(bus)
+            refreshing = False
+            release = asyncio.Event()
+            started = asyncio.Event()
+    
+            async def tools(_ctx, _params):
+                if refreshing:
+                    started.set()
+                    await release.wait()
+                return types.ListToolsResult(tools=[types.Tool(
+                    name="probe", input_schema={"type": "object"},
+                )])
+    
+            server = Server("live-relist", on_list_tools=tools, on_subscriptions_listen=listener)
+            async with _sdk_http(server) as endpoint:
+                service = LocalMcpManagementService(LocalSettingsStore(tmp_path / "settings.yaml"),
+                                                    user_config_path=tmp_path / "mcp.yaml")
+                await service.create(LocalMcpTarget("catalog"), {
+                    "required": True,
+                    "transport": {"type": "streamable_http", "endpoint": endpoint,
+                                  "allow_http_localhost": True},
+                })
+                supervisor = McpHostSupervisor(
+                    session_id="session:scheduling", workspace_root=tmp_path,
+                    configs=service.load_configs(), credential_boundary=service.credential_boundary,
+                )
+                controller = _controller(service, monkeypatch)
+                runtime = None
+                try:
+                    await supervisor.start()
+                    runtime = supervisor.install_pending_at_safe_point()
+                    controller._by_session["owner"] = SimpleNamespace(session=_session(supervisor))
+                    semantic_before = supervisor.catalog_snapshot().semantic_fingerprint
+                    refreshing = True
+                    await bus.publish(ToolsListChanged())
+                    await asyncio.wait_for(started.wait(), 3)
+                    _assert_unavailable(await _read(controller), "DISCOVERING")
+                    assert supervisor.inspect_discovery_catalog().catalog_snapshot.servers[0].status is McpServerState.READY
+                    assert supervisor.catalog_snapshot().semantic_fingerprint == semantic_before
+                    release.set()
+                    await _until(lambda: supervisor._refresh_tasks["catalog"].done())
+                    row = await _read(controller)
+                    assert row["status"] == "READY" and row["tool_count"] == len(row["tools"]) == 1
+                    assert supervisor.catalog_snapshot().semantic_fingerprint == semantic_before
+                finally:
+                    release.set()
+                    if runtime is not None:
+                        runtime.release()
+                    await supervisor.aclose()
+                    await service.aclose()
+    
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path))
+>       asyncio.run(scenario())
+
+tests/test_desktop_mcp_live_status.py:214: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_desktop_mcp_live_status.py:198: in scenario
+    _assert_unavailable(await _read(controller), "DISCOVERING")
+                        ^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_desktop_mcp_live_status.py:55: in _read
+    payload = await controller.inspect_user_capabilities()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pulsara_agent/desktop_app/session_controller.py:1120: in inspect_user_capabilities
+    live_inspections = tuple(
+src/pulsara_agent/desktop_app/session_controller.py:1121: in <genexpr>
+    handle.session.inspect_capability_catalog()
+src/pulsara_agent/conversation_kernel/host.py:1516: in inspect_capability_catalog
+    self._require_open()
+src/pulsara_agent/conversation_kernel/host.py:7591: in _require_open
+    if self.writer_unavailable:
+       ^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostSession object at 0x7174e5571400>
+
+    @property
+    def writer_unavailable(self) -> bool:
+>       return self._writer_renewal_failure is not None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'KernelHostSession' object has no attribute '_writer_renewal_failure'
+
+src/pulsara_agent/conversation_kernel/host.py:1553: AttributeError
+________ test_replaced_connect_task_cannot_supply_status_for_new_config ________
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-1/test_replaced_connect_task_can0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7174e5570c20>
+
+    def test_replaced_connect_task_cannot_supply_status_for_new_config(tmp_path, monkeypatch):
+        async def scenario():
+            blocked = False
+            started = asyncio.Event()
+            release = asyncio.Event()
+    
+            async def tools(_ctx, _params):
+                if blocked:
+                    started.set()
+                    await release.wait()
+                return types.ListToolsResult(tools=[types.Tool(
+                    name="probe", input_schema={"type": "object"},
+                )])
+    
+            server = Server("replaced-owner", on_list_tools=tools)
+            async with _sdk_http(server) as endpoint:
+                service = LocalMcpManagementService(LocalSettingsStore(tmp_path / "settings.yaml"),
+                                                    user_config_path=tmp_path / "mcp.yaml")
+                target = LocalMcpTarget("catalog")
+                await service.create(target, {
+                    "required": True,
+                    "transport": {"type": "streamable_http", "endpoint": endpoint,
+                                  "allow_http_localhost": True},
+                })
+                supervisor = McpHostSupervisor(
+                    session_id="session:scheduling", workspace_root=tmp_path,
+                    configs=service.load_configs(), credential_boundary=service.credential_boundary,
+                    connect_attempt_timeout_seconds=5,
+                )
+                controller = _controller(service, monkeypatch)
+                runtime = None
+                try:
+                    await supervisor.start()
+                    runtime = supervisor.install_pending_at_safe_point()
+                    controller._by_session["owner"] = SimpleNamespace(session=_session(supervisor))
+                    blocked = True
+                    supervisor.reconnect("catalog")
+                    await asyncio.wait_for(started.wait(), 3)
+                    old_task = supervisor._tasks["catalog"]
+                    old_config = service.inspect(target)
+                    entry = config_to_entry(old_config)
+                    entry["default_tool_timeout_ms"] = 10_000
+                    await service.update(target, entry, expected=config_guard(old_config))
+                    _assert_unavailable(await _read(controller), "CONFIGURED")
+                    supervisor.reload_configs(service.load_configs())
+                    new_task = supervisor._tasks["catalog"]
+                    assert new_task is not old_task
+                    await asyncio.wait_for(old_task, 3)
+                    assert old_task.result().failure == "CancelledError"
+                    _assert_unavailable(await _read(controller), "CONNECTING")
+                    observed = supervisor.inspect_discovery_catalog(live=True)
+                    assert observed.configured_servers[0].status_matches_config
+                    assert observed.configured_servers[0].resolved_config_identity == service.inspect(target).resolved_config_identity
+                    release.set()
+                    await asyncio.wait_for(new_task, 3)
+                    row = await _read(controller)
+                    assert row["status"] == "READY" and row["tool_count"] == len(row["tools"]) == 1
+                finally:
+                    release.set()
+                    if runtime is not None:
+                        runtime.release()
+                    await supervisor.aclose()
+                    await service.aclose()
+    
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path))
+>       asyncio.run(scenario())
+
+tests/test_desktop_mcp_live_status.py:282: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_desktop_mcp_live_status.py:260: in scenario
+    _assert_unavailable(await _read(controller), "CONFIGURED")
+                        ^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_desktop_mcp_live_status.py:55: in _read
+    payload = await controller.inspect_user_capabilities()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pulsara_agent/desktop_app/session_controller.py:1120: in inspect_user_capabilities
+    live_inspections = tuple(
+src/pulsara_agent/desktop_app/session_controller.py:1121: in <genexpr>
+    handle.session.inspect_capability_catalog()
+src/pulsara_agent/conversation_kernel/host.py:1516: in inspect_capability_catalog
+    self._require_open()
+src/pulsara_agent/conversation_kernel/host.py:7591: in _require_open
+    if self.writer_unavailable:
+       ^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostSession object at 0x7174e599a360>
+
+    @property
+    def writer_unavailable(self) -> bool:
+>       return self._writer_renewal_failure is not None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'KernelHostSession' object has no attribute '_writer_renewal_failure'
+
+src/pulsara_agent/conversation_kernel/host.py:1553: AttributeError
+_ test_session_created_during_a_project_change_still_marks_lazy_refresh[user] __
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-1/test_session_created_during_a_0')
+scope = 'user'
+
+    @pytest.mark.parametrize("scope", ["user", "workspace"])
+    def test_session_created_during_a_project_change_still_marks_lazy_refresh(
+        tmp_path: Path, scope: str,
+    ) -> None:
+        async def exercise() -> None:
+            workspace = tmp_path / "workspace"
+            workspace.mkdir()
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            session = _Session('session:b4dko33eo7mh6y6kakzkdqeqd4', workspace)
+            session.workspace = SimpleNamespace(
+                workspace_root=workspace.resolve(),
+                workspace_kind="project",
+            )
+    
+            async def open_session(*_args, **_kwargs):
+                baseline = controller.core._workspace_capability_revisions.setdefault(workspace.resolve(), 0)
+                entered.set()
+                await release.wait()
+                await controller.core._register_prepared_session(session, baseline)
+                return session
+    
+            controller = object.__new__(LocalSessionController)
+            controller.core = _refresh_core()
+            controller.core.open_session = open_session
+            controller.core.close_session = AsyncMock()
+            controller.memory_domain_id = "u_local"
+            controller.trust_workspace_mcp_config = False
+            controller.model_role = SimpleNamespace()
+            controller.permission_policy = SimpleNamespace()
+            controller.active_skill_names = frozenset()
+            controller._by_session = {}
+            controller._by_host = {}
+            controller._operations = {}
+            controller._lock = asyncio.Lock()
+            controller._capability_mutation_lock = asyncio.Lock()
+            controller._closing = False
+            controller._close_task = None
+    
+            creating = asyncio.create_task(
+                controller.create_session(
+                    workspace_kind="project",
+                    workspace_path=str(workspace),
+                )
+            )
+            await entered.wait()
+            assert await controller._mark_capability_refresh(workspace if scope == "workspace" else None) == 0
+            release.set()
+            await creating
+            assert session.refresh_requests == 1
+    
+>       asyncio.run(exercise())
+
+tests/test_project_capability_management.py:797: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_project_capability_management.py:794: in exercise
+    await creating
+src/pulsara_agent/desktop_app/session_controller.py:2064: in create_session
+    session = await self.core.open_session(
+tests/test_project_capability_management.py:765: in open_session
+    await controller.core._register_prepared_session(session, baseline)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostCore object at 0x7174e43b2330>
+session = <tests.test_project_capability_management._Session object at 0x7174e43b2ff0>
+capability_baseline = 0
+
+    async def _register_prepared_session(
+        self, session: KernelHostSession, capability_baseline: int
+    ) -> None:
+        """Join source capture with publication without missing an in-flight edit."""
+        root = session.workspace.workspace_root.resolve(strict=False)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing(
+                    "Kernel Host shutdown won before session registration"
+                )
+            if session.host_session_id in self._sessions:
+                raise ConversationKernelConflict("IDENTITY_CONFLICT: Host identity already published")
+            self._sessions[session.host_session_id] = session
+            self._extension_routes[session.session_id] = (
+                session.host_session_id,
+                session.extensions,
+            )
+            changed = self._workspace_capability_revisions[root] > capability_baseline
+>       session._renewal_task.add_done_callback(
+        ^^^^^^^^^^^^^^^^^^^^^
+            lambda task: self._close_unavailable_writer(session, task)
+        )
+E       AttributeError: '_Session' object has no attribute '_renewal_task'
+
+src/pulsara_agent/conversation_kernel/host.py:8445: AttributeError
+_ test_session_created_during_a_project_change_still_marks_lazy_refresh[workspace] _
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-1/test_session_created_during_a_1')
+scope = 'workspace'
+
+    @pytest.mark.parametrize("scope", ["user", "workspace"])
+    def test_session_created_during_a_project_change_still_marks_lazy_refresh(
+        tmp_path: Path, scope: str,
+    ) -> None:
+        async def exercise() -> None:
+            workspace = tmp_path / "workspace"
+            workspace.mkdir()
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            session = _Session('session:b4dko33eo7mh6y6kakzkdqeqd4', workspace)
+            session.workspace = SimpleNamespace(
+                workspace_root=workspace.resolve(),
+                workspace_kind="project",
+            )
+    
+            async def open_session(*_args, **_kwargs):
+                baseline = controller.core._workspace_capability_revisions.setdefault(workspace.resolve(), 0)
+                entered.set()
+                await release.wait()
+                await controller.core._register_prepared_session(session, baseline)
+                return session
+    
+            controller = object.__new__(LocalSessionController)
+            controller.core = _refresh_core()
+            controller.core.open_session = open_session
+            controller.core.close_session = AsyncMock()
+            controller.memory_domain_id = "u_local"
+            controller.trust_workspace_mcp_config = False
+            controller.model_role = SimpleNamespace()
+            controller.permission_policy = SimpleNamespace()
+            controller.active_skill_names = frozenset()
+            controller._by_session = {}
+            controller._by_host = {}
+            controller._operations = {}
+            controller._lock = asyncio.Lock()
+            controller._capability_mutation_lock = asyncio.Lock()
+            controller._closing = False
+            controller._close_task = None
+    
+            creating = asyncio.create_task(
+                controller.create_session(
+                    workspace_kind="project",
+                    workspace_path=str(workspace),
+                )
+            )
+            await entered.wait()
+            assert await controller._mark_capability_refresh(workspace if scope == "workspace" else None) == 0
+            release.set()
+            await creating
+            assert session.refresh_requests == 1
+    
+>       asyncio.run(exercise())
+
+tests/test_project_capability_management.py:797: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_project_capability_management.py:794: in exercise
+    await creating
+src/pulsara_agent/desktop_app/session_controller.py:2064: in create_session
+    session = await self.core.open_session(
+tests/test_project_capability_management.py:765: in open_session
+    await controller.core._register_prepared_session(session, baseline)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostCore object at 0x7174ebb2eab0>
+session = <tests.test_project_capability_management._Session object at 0x7174ebb2ecf0>
+capability_baseline = 0
+
+    async def _register_prepared_session(
+        self, session: KernelHostSession, capability_baseline: int
+    ) -> None:
+        """Join source capture with publication without missing an in-flight edit."""
+        root = session.workspace.workspace_root.resolve(strict=False)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing(
+                    "Kernel Host shutdown won before session registration"
+                )
+            if session.host_session_id in self._sessions:
+                raise ConversationKernelConflict("IDENTITY_CONFLICT: Host identity already published")
+            self._sessions[session.host_session_id] = session
+            self._extension_routes[session.session_id] = (
+                session.host_session_id,
+                session.extensions,
+            )
+            changed = self._workspace_capability_revisions[root] > capability_baseline
+>       session._renewal_task.add_done_callback(
+        ^^^^^^^^^^^^^^^^^^^^^
+            lambda task: self._close_unavailable_writer(session, task)
+        )
+E       AttributeError: '_Session' object has no attribute '_renewal_task'
+
+src/pulsara_agent/conversation_kernel/host.py:8445: AttributeError
+_ test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh[user] __
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-1/test_session_resumed_from_a_st0')
+scope = 'user'
+
+    @pytest.mark.parametrize("scope", ["user", "workspace"])
+    def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
+        tmp_path: Path, scope: str,
+    ) -> None:
+        async def exercise() -> None:
+            workspace = tmp_path / "workspace"
+            workspace.mkdir()
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            session = _Session('session:hak2ydymrbusup5kc5jykgxy5m', workspace.resolve())
+    
+            async def read_resumable_session(*_args, **_kwargs):
+                return SimpleNamespace(
+                    workspace_kind="project",
+                    workspace_root=str(workspace),
+                    workspace_label="workspace",
+                    memory_domain_id="u_local",
+                )
+    
+            async def resume_session(*_args, **_kwargs):
+                baseline = controller.core._workspace_capability_revisions.setdefault(workspace.resolve(), 0)
+                entered.set()
+                await release.wait()
+                await controller.core._register_prepared_session(session, baseline)
+                return session
+    
+            controller = object.__new__(LocalSessionController)
+            controller.core = _refresh_core()
+            controller.core.read_resumable_session = read_resumable_session
+            controller.core.resume_session = resume_session
+            controller.core.close_session = AsyncMock()
+            controller.memory_domain_id = "u_local"
+            controller.trust_workspace_mcp_config = False
+            controller.model_role = SimpleNamespace()
+            controller.permission_policy = SimpleNamespace()
+            controller.active_skill_names = frozenset()
+            controller._by_session = {}
+            controller._by_host = {}
+            controller._operations = {}
+            controller._lock = asyncio.Lock()
+            controller._capability_mutation_lock = asyncio.Lock()
+            controller._closing = False
+            controller._close_task = None
+    
+            resuming = asyncio.create_task(controller.resume_session('session:hak2ydymrbusup5kc5jykgxy5m'))
+            await entered.wait()
+            assert await controller._mark_capability_refresh(workspace if scope == "workspace" else None) == 0
+            release.set()
+            handle = await resuming
+            assert handle.session_id == 'session:hak2ydymrbusup5kc5jykgxy5m'
+            assert session.refresh_requests == 1
+    
+>       asyncio.run(exercise())
+
+tests/test_project_capability_management.py:852: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_project_capability_management.py:848: in exercise
+    handle = await resuming
+             ^^^^^^^^^^^^^^
+src/pulsara_agent/desktop_app/session_controller.py:2348: in resume_session
+    return await asyncio.shield(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pulsara_agent/desktop_app/session_controller.py:2398: in _resume_owner
+    session = await self.core.resume_session(
+tests/test_project_capability_management.py:823: in resume_session
+    await controller.core._register_prepared_session(session, baseline)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostCore object at 0x7174ebb23080>
+session = <tests.test_project_capability_management._Session object at 0x7174ebb23bc0>
+capability_baseline = 0
+
+    async def _register_prepared_session(
+        self, session: KernelHostSession, capability_baseline: int
+    ) -> None:
+        """Join source capture with publication without missing an in-flight edit."""
+        root = session.workspace.workspace_root.resolve(strict=False)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing(
+                    "Kernel Host shutdown won before session registration"
+                )
+            if session.host_session_id in self._sessions:
+                raise ConversationKernelConflict("IDENTITY_CONFLICT: Host identity already published")
+            self._sessions[session.host_session_id] = session
+            self._extension_routes[session.session_id] = (
+                session.host_session_id,
+                session.extensions,
+            )
+            changed = self._workspace_capability_revisions[root] > capability_baseline
+>       session._renewal_task.add_done_callback(
+        ^^^^^^^^^^^^^^^^^^^^^
+            lambda task: self._close_unavailable_writer(session, task)
+        )
+E       AttributeError: '_Session' object has no attribute '_renewal_task'
+
+src/pulsara_agent/conversation_kernel/host.py:8445: AttributeError
+_ test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh[workspace] _
+
+tmp_path = PosixPath('/tmp/pytest-of-plumwsl/pytest-1/test_session_resumed_from_a_st1')
+scope = 'workspace'
+
+    @pytest.mark.parametrize("scope", ["user", "workspace"])
+    def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
+        tmp_path: Path, scope: str,
+    ) -> None:
+        async def exercise() -> None:
+            workspace = tmp_path / "workspace"
+            workspace.mkdir()
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            session = _Session('session:hak2ydymrbusup5kc5jykgxy5m', workspace.resolve())
+    
+            async def read_resumable_session(*_args, **_kwargs):
+                return SimpleNamespace(
+                    workspace_kind="project",
+                    workspace_root=str(workspace),
+                    workspace_label="workspace",
+                    memory_domain_id="u_local",
+                )
+    
+            async def resume_session(*_args, **_kwargs):
+                baseline = controller.core._workspace_capability_revisions.setdefault(workspace.resolve(), 0)
+                entered.set()
+                await release.wait()
+                await controller.core._register_prepared_session(session, baseline)
+                return session
+    
+            controller = object.__new__(LocalSessionController)
+            controller.core = _refresh_core()
+            controller.core.read_resumable_session = read_resumable_session
+            controller.core.resume_session = resume_session
+            controller.core.close_session = AsyncMock()
+            controller.memory_domain_id = "u_local"
+            controller.trust_workspace_mcp_config = False
+            controller.model_role = SimpleNamespace()
+            controller.permission_policy = SimpleNamespace()
+            controller.active_skill_names = frozenset()
+            controller._by_session = {}
+            controller._by_host = {}
+            controller._operations = {}
+            controller._lock = asyncio.Lock()
+            controller._capability_mutation_lock = asyncio.Lock()
+            controller._closing = False
+            controller._close_task = None
+    
+            resuming = asyncio.create_task(controller.resume_session('session:hak2ydymrbusup5kc5jykgxy5m'))
+            await entered.wait()
+            assert await controller._mark_capability_refresh(workspace if scope == "workspace" else None) == 0
+            release.set()
+            handle = await resuming
+            assert handle.session_id == 'session:hak2ydymrbusup5kc5jykgxy5m'
+            assert session.refresh_requests == 1
+    
+>       asyncio.run(exercise())
+
+tests/test_project_capability_management.py:852: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_project_capability_management.py:848: in exercise
+    handle = await resuming
+             ^^^^^^^^^^^^^^
+src/pulsara_agent/desktop_app/session_controller.py:2348: in resume_session
+    return await asyncio.shield(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pulsara_agent/desktop_app/session_controller.py:2398: in _resume_owner
+    session = await self.core.resume_session(
+tests/test_project_capability_management.py:823: in resume_session
+    await controller.core._register_prepared_session(session, baseline)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostCore object at 0x7174e43b3950>
+session = <tests.test_project_capability_management._Session object at 0x7174e43b20c0>
+capability_baseline = 0
+
+    async def _register_prepared_session(
+        self, session: KernelHostSession, capability_baseline: int
+    ) -> None:
+        """Join source capture with publication without missing an in-flight edit."""
+        root = session.workspace.workspace_root.resolve(strict=False)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing(
+                    "Kernel Host shutdown won before session registration"
+                )
+            if session.host_session_id in self._sessions:
+                raise ConversationKernelConflict("IDENTITY_CONFLICT: Host identity already published")
+            self._sessions[session.host_session_id] = session
+            self._extension_routes[session.session_id] = (
+                session.host_session_id,
+                session.extensions,
+            )
+            changed = self._workspace_capability_revisions[root] > capability_baseline
+>       session._renewal_task.add_done_callback(
+        ^^^^^^^^^^^^^^^^^^^^^
+            lambda task: self._close_unavailable_writer(session, task)
+        )
+E       AttributeError: '_Session' object has no attribute '_renewal_task'
+
+src/pulsara_agent/conversation_kernel/host.py:8445: AttributeError
+___ test_round5b_empty_session_manual_compaction_never_starts_summary[False] ___
+
+force = False
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_round5b_empty_session_manual_compaction_never_starts_summary(force: bool) -> None:
+        host = object.__new__(KernelHostSession)
+        host._scheduled_tasks = None
+        host._lock = asyncio.Lock()
+        host._closing = False
+        host._active_task = None
+        host._active_turn_id = None
+        host._query_command_row = AsyncMock(return_value=None)
+        host._canonical_deadline = lambda: 123.0
+        host._lease = SimpleNamespace(guard=object())
+        read_terminal = Mock(return_value=None)
+        host.repository = SimpleNamespace(read_latest_terminal_scope_turn_id=read_terminal)
+        host._io = SimpleNamespace(run=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)))
+        host._settle_manual_compaction_command = AsyncMock()
+        host._runner = SimpleNamespace(compact_idle_turn=AsyncMock())
+        host._compaction = SimpleNamespace(request_manual=AsyncMock())
+    
+>       outcome = asyncio.run(host.compact_context(command_id='command:riky2xot32nm3mkqbgvkblreh4', force=force))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_round5b_long_horizon_context_compaction.py:1976: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+src/pulsara_agent/conversation_kernel/host.py:2001: in compact_context
+    self._require_open()
+src/pulsara_agent/conversation_kernel/host.py:7591: in _require_open
+    if self.writer_unavailable:
+       ^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostSession object at 0x7174ebb22930>
+
+    @property
+    def writer_unavailable(self) -> bool:
+>       return self._writer_renewal_failure is not None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'KernelHostSession' object has no attribute '_writer_renewal_failure'
+
+src/pulsara_agent/conversation_kernel/host.py:1553: AttributeError
+___ test_round5b_empty_session_manual_compaction_never_starts_summary[True] ____
+
+force = True
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_round5b_empty_session_manual_compaction_never_starts_summary(force: bool) -> None:
+        host = object.__new__(KernelHostSession)
+        host._scheduled_tasks = None
+        host._lock = asyncio.Lock()
+        host._closing = False
+        host._active_task = None
+        host._active_turn_id = None
+        host._query_command_row = AsyncMock(return_value=None)
+        host._canonical_deadline = lambda: 123.0
+        host._lease = SimpleNamespace(guard=object())
+        read_terminal = Mock(return_value=None)
+        host.repository = SimpleNamespace(read_latest_terminal_scope_turn_id=read_terminal)
+        host._io = SimpleNamespace(run=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)))
+        host._settle_manual_compaction_command = AsyncMock()
+        host._runner = SimpleNamespace(compact_idle_turn=AsyncMock())
+        host._compaction = SimpleNamespace(request_manual=AsyncMock())
+    
+>       outcome = asyncio.run(host.compact_context(command_id='command:riky2xot32nm3mkqbgvkblreh4', force=force))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_round5b_long_horizon_context_compaction.py:1976: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+src/pulsara_agent/conversation_kernel/host.py:2001: in compact_context
+    self._require_open()
+src/pulsara_agent/conversation_kernel/host.py:7591: in _require_open
+    if self.writer_unavailable:
+       ^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostSession object at 0x7174e59a2e70>
+
+    @property
+    def writer_unavailable(self) -> bool:
+>       return self._writer_renewal_failure is not None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'KernelHostSession' object has no attribute '_writer_renewal_failure'
+
+src/pulsara_agent/conversation_kernel/host.py:1553: AttributeError
+=============================== warnings summary ===============================
+tests/test_pr03_control_feedback.py:730
+  /home/plumwsl/.hostlease-source-vccncr0j/tests/test_pr03_control_feedback.py:730: PytestUnknownMarkWarning: Unknown pytest.mark.postgres - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.postgres
+
+tests/conftest.py:29
+  /home/plumwsl/.hostlease-source-vccncr0j/tests/conftest.py:29: PytestUnknownMarkWarning: Unknown pytest.mark.postgres - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    postgres_marker = pytest.mark.postgres
+
+tests/test_project_capability_management.py::test_three_sidebar_add_flows_persist_only_in_the_selected_workspace
+  /home/plumwsl/workspaces/pulsara_agent/.venv/lib/python3.12/site-packages/aiohttp/web_runner.py:99: DeprecationWarning: shutdown_timeout should be set on BaseRunner
+    super().__init__(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_desktop_mcp_live_status.py::test_failed_reconnect_is_not_ready_and_other_working_owner_still_wins
+FAILED tests/test_desktop_mcp_live_status.py::test_subscription_relist_fences_management_tools_without_changing_provider_catalog
+FAILED tests/test_desktop_mcp_live_status.py::test_replaced_connect_task_cannot_supply_status_for_new_config
+FAILED tests/test_project_capability_management.py::test_session_created_during_a_project_change_still_marks_lazy_refresh[user]
+FAILED tests/test_project_capability_management.py::test_session_created_during_a_project_change_still_marks_lazy_refresh[workspace]
+FAILED tests/test_project_capability_management.py::test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh[user]
+FAILED tests/test_project_capability_management.py::test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh[workspace]
+FAILED tests/test_round5b_long_horizon_context_compaction.py::test_round5b_empty_session_manual_compaction_never_starts_summary[False]
+FAILED tests/test_round5b_long_horizon_context_compaction.py::test_round5b_empty_session_manual_compaction_never_starts_summary[True]
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+/home/plumwsl/.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:123: KeyboardInterrupt
+(to show a full traceback on KeyboardInterrupt use --full-trace)
+9 failed, 95 passed, 1 skipped, 3 warnings in 90.98s (0:01:30)
+Task exception was never retrieved
+future: <Task finished name='Task-361' coro=<KernelHostSession.compact_context() done, defined at /home/plumwsl/.hostlease-source-vccncr0j/src/pulsara_agent/conversation_kernel/host.py:1963> exception=AttributeError("'KernelHostSession' object has no attribute '_writer_renewal_failure'")>
+Traceback (most recent call last):
+  File "/home/plumwsl/.hostlease-source-vccncr0j/src/pulsara_agent/conversation_kernel/host.py", line 2001, in compact_context
+    self._require_open()
+  File "/home/plumwsl/.hostlease-source-vccncr0j/src/pulsara_agent/conversation_kernel/host.py", line 7591, in _require_open
+    if self.writer_unavailable:
+       ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.hostlease-source-vccncr0j/src/pulsara_agent/conversation_kernel/host.py", line 1553, in writer_unavailable
+    return self._writer_renewal_failure is not None
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'KernelHostSession' object has no attribute '_writer_renewal_failure'

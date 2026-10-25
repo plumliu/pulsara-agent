@@ -1,0 +1,11 @@
+CREATE EXTENSION
+CREATE EXTENSION
+pg_search=0.26.1
+vector=0.8.1
+CREATE TABLE
+INSERT 0 2
+CREATE INDEX
+search=1
+vector=0
+Python application import and relocated Chromium passed
+Relocated PostgreSQL, vector, pg_search, Python and Chromium passed

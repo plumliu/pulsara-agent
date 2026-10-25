@@ -1,0 +1,23 @@
+{
+  "target": {
+    "distro": "Ubuntu",
+    "user": "plumwsl",
+    "uid": 1000,
+    "home": "/home/plumwsl"
+  },
+  "home": "/home/plumwsl/.pulsara-host-smoke-6Pxc23Zf",
+  "child": {
+    "uid": 1000,
+    "cwd": "/home/plumwsl/.pulsara-host-smoke-6Pxc23Zf",
+    "home": "/home/plumwsl/.pulsara-host-smoke-6Pxc23Zf",
+    "unlisted": null,
+    "bytes": "AP8BCuS4rQ=="
+  },
+  "finite": {
+    "stdout": "中文 literal $() \"",
+    "stderr": ""
+  },
+  "convertedHostPath": "/mnt/c/python_workspace/pulsara-agent/desktop/native/windows-interop-helper/Program.cs",
+  "passed": true,
+  "homeRemoved": true
+}

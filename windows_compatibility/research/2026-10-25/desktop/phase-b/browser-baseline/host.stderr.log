@@ -1,0 +1,60 @@
+(node:42832) electron: Failed to load URL: http://127.0.0.1:1/fail with error: ERR_UNSAFE_PORT
+(Use `electron --trace-warnings ...` to show where the warning was created)
+Could not clear retired browser partition AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+false !== true
+
+    at part.session.clearData (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:34:50)
+    at BrowserOwner.forgetSession (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\browser-owner.js:358:32)
+    at C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:38:16
+    at async test (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:12:47)
+    at async main (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:29:2) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+FAIL forget joins an earlier tab close until the actual destroyed event AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+true !== false
+
+    at C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:40:32
+    at async test (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:12:47)
+    at async main (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:29:2) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: true,
+  expected: false,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+FAIL host retirement joins already running forget and other live partitions AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+true !== false
+
+    at C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:55:79
+    at async test (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:12:47)
+    at async main (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:47:2) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: true,
+  expected: false,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+FAIL destroying host window closes its separately owned WebContents AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+false !== true
+
+    at C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:63:409
+    at async test (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:12:47)
+    at async main (C:\python_workspace\pulsara-agent\output\windows-b\host-setup\browser-baseline\smoke.cjs:63:2) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: 'strictEqual',
+  diff: 'simple'
+}

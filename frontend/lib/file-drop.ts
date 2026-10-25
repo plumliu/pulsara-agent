@@ -13,7 +13,9 @@ export function rejectDirectoryDrop(transfer: DataTransfer, notify: (title: stri
       if (file && host.pathForFile(file)) {
         directories.add(file);
         for (const transferred of Array.from(transfer.files)) if (host.pathForFile(transferred) === host.pathForFile(file)) directories.add(transferred);
-      } else { notify('目录未加入草稿', '无法取得该目录的原始路径，请使用目录选择器。'); return true; }
+      } else { notify('目录未加入草稿', host.platform === 'win32'
+        ? '请先通过资源管理器将目录复制到所选 WSL 的 workspaces 目录，再选择或拖入；不会自动递归导入 Windows 目录。'
+        : '无法取得该目录的原始路径，请使用目录选择器。'); return true; }
     }
     return false;
   }

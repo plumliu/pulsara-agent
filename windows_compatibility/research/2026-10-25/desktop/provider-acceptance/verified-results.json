@@ -1,0 +1,184 @@
+{
+  "artifact": {
+    "status": "original runner completed; 9 primary contracts independently checked",
+    "cases": [
+      {
+        "case": "small",
+        "primaryContractPassed": true,
+        "toolCalls": 2,
+        "producerExecutions": 1,
+        "exports": [],
+        "occupiedFilePreserved": true,
+        "qualification": null
+      },
+      {
+        "case": "log",
+        "primaryContractPassed": true,
+        "toolCalls": 4,
+        "producerExecutions": 1,
+        "exports": [
+          {
+            "artifact_id": "artifact:jwblre7vvzluzjx3m6hyujcxfa",
+            "bytes_written": 130175,
+            "path": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara 中文 验收 x90asay3/log/log_saved_output.txt",
+            "source_coverage": "COMPLETE",
+            "source_coverage_reason": null,
+            "status": "success"
+          }
+        ],
+        "occupiedFilePreserved": true,
+        "qualification": null
+      },
+      {
+        "case": "json",
+        "primaryContractPassed": true,
+        "toolCalls": 3,
+        "producerExecutions": 1,
+        "exports": [
+          {
+            "artifact_id": "artifact:53jpkva4th6swcivi6phbhcfly",
+            "bytes_written": 67732,
+            "path": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara 中文 验收 x90asay3/json/fixture_output_json.txt",
+            "source_coverage": "COMPLETE",
+            "source_coverage_reason": null,
+            "status": "success"
+          }
+        ],
+        "occupiedFilePreserved": true,
+        "qualification": null
+      },
+      {
+        "case": "invalid_json",
+        "primaryContractPassed": true,
+        "toolCalls": 4,
+        "producerExecutions": 1,
+        "exports": [
+          {
+            "artifact_id": "artifact:yysdpbvogpilc57sdzdwkcbukq",
+            "bytes_written": 130195,
+            "path": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara 中文 验收 x90asay3/invalid_json/saved_invalid_json_output.txt",
+            "source_coverage": "COMPLETE",
+            "source_coverage_reason": null,
+            "status": "success"
+          }
+        ],
+        "occupiedFilePreserved": true,
+        "qualification": null
+      },
+      {
+        "case": "multi",
+        "primaryContractPassed": true,
+        "toolCalls": 6,
+        "producerExecutions": 2,
+        "exports": [
+          {
+            "artifact_id": "artifact:osr33kofzac3zkf33yspqh4riy",
+            "bytes_written": 32980,
+            "path": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara 中文 验收 x90asay3/multi/multi_left.json",
+            "source_coverage": "COMPLETE",
+            "source_coverage_reason": null,
+            "status": "success"
+          },
+          {
+            "artifact_id": "artifact:obfokml5qrxk26755fbt5uo6se",
+            "bytes_written": 29887,
+            "path": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara 中文 验收 x90asay3/multi/multi_right.json",
+            "source_coverage": "COMPLETE",
+            "source_coverage_reason": null,
+            "status": "success"
+          }
+        ],
+        "occupiedFilePreserved": true,
+        "qualification": null
+      },
+      {
+        "case": "snapshot",
+        "primaryContractPassed": true,
+        "toolCalls": 4,
+        "producerExecutions": 1,
+        "exports": [
+          {
+            "artifact_id": "artifact:xzbslrs4jvze47qruxzscwck4i",
+            "bytes_written": 65536,
+            "path": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara 中文 验收 x90asay3/snapshot/saved_outputs/snapshot_run.txt",
+            "source_coverage": "RETAINED_SNAPSHOT",
+            "source_coverage_reason": "TERMINAL_RETENTION_GAP",
+            "status": "success"
+          }
+        ],
+        "occupiedFilePreserved": true,
+        "qualification": "Snapshot primary gap/coverage conclusion is honest; final prose's incidental endpoint 01397 is inaccurate against visible source tail01399. No raw evidence rewritten."
+      },
+      {
+        "case": "existing",
+        "primaryContractPassed": true,
+        "toolCalls": 4,
+        "producerExecutions": 1,
+        "exports": [
+          {
+            "artifact_id": "artifact:mfbffw6ourppadz227tn7myvwm",
+            "bytes_written": 67732,
+            "path": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara 中文 验收 x90asay3/existing/producer_run1_output.json",
+            "source_coverage": "COMPLETE",
+            "source_coverage_reason": null,
+            "status": "success"
+          }
+        ],
+        "occupiedFilePreserved": true,
+        "qualification": "Model avoided occupied.txt; this is preservation, not an induced no-clobber error."
+      },
+      {
+        "case": "readonly",
+        "primaryContractPassed": true,
+        "toolCalls": 1,
+        "producerExecutions": 1,
+        "exports": [],
+        "occupiedFilePreserved": true,
+        "qualification": null
+      },
+      {
+        "case": "no_terminal",
+        "primaryContractPassed": true,
+        "toolCalls": 2,
+        "producerExecutions": 1,
+        "exports": [],
+        "occupiedFilePreserved": true,
+        "qualification": null
+      }
+    ],
+    "providerCalls": 46,
+    "fullProductionExportToolAdvertised": true
+  },
+  "other": {
+    "memory": {
+      "status": "completed",
+      "providerCalls": 20,
+      "prefixInstallations": 20,
+      "sameEpochComparisons": 18,
+      "undroppedDatabases": []
+    },
+    "history": {
+      "status": "completed",
+      "providerCalls": 14,
+      "prefixInstallations": 13,
+      "sameEpochComparisons": 10,
+      "undroppedDatabases": []
+    },
+    "interruption": {
+      "status": "completed",
+      "providerCalls": 3,
+      "prefixInstallations": 3,
+      "sameEpochComparisons": 2,
+      "undroppedDatabases": []
+    },
+    "crash": {
+      "status": "completed",
+      "providerCalls": 5,
+      "prefixInstallations": 3,
+      "sameEpochComparisons": 2,
+      "undroppedDatabases": []
+    }
+  },
+  "executionBoundaries": "Original provider/owner loops; output-only PG/home/recording adapters. UserStop is distinct from OS Host loss.",
+  "crashChildRecordedWirePrefixComparisons": 1
+}

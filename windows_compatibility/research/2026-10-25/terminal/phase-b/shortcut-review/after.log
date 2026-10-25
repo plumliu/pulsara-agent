@@ -1,0 +1,31 @@
+
+ RUN  v4.1.11 C:/python_workspace/pulsara-agent/frontend
+
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > selects with arrows, prevents IME Enter and revalidates before opening 262ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > requires explicit restore and reports deleted results without navigating 61ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > ignores stale queries and aborts requests on unmount 308ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > appends pages once per session and retries errors without hiding existing results 282ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > searches literal punctuation, highlights text safely and filters archived sessions 493ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > brings a late keyword into the compact preview with surrounding text and case-insensitive highlighting 236ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > shows only five recent sessions without preselection, while keyword search can show more 285ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > supports scope-menu arrows, Escape and outside dismissal without closing search 77ms
+ ✓ ../tests/frontend/session-search-dialog.test.tsx > refreshes the recent five within each chosen scope 168ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > keeps ordinary command shortcut k {"ctrlKey":true} active 367ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > keeps ordinary command shortcut n {"ctrlKey":true} active 148ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > keeps ordinary command shortcut k {"metaKey":true} active 157ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > keeps ordinary command shortcut n {"metaKey":true} active 152ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+k with extra Alt or composition state {"ctrlKey":true,"altKey":true} 114ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+n with extra Alt or composition state {"ctrlKey":true,"altKey":true} 107ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+k with extra Alt or composition state {"ctrlKey":true,"isComposing":true} 154ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+n with extra Alt or composition state {"ctrlKey":true,"isComposing":true} 149ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+k with extra Alt or composition state {"ctrlKey":true,"keyCode":229} 141ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+n with extra Alt or composition state {"ctrlKey":true,"keyCode":229} 135ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > keeps session search open during an input composition 6ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not turn a mapped AltGraph character into a shortcut by physical key code 120ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not close session search for Ctrl+Alt+K, while Ctrl+K still closes it 4ms
+
+ Test Files  2 passed (2)
+      Tests  22 passed (22)
+   Start at  18:33:39
+   Duration  6.90s (transform 1.59s, setup 107ms, import 4.04s, tests 3.93s, environment 2.53s)
+

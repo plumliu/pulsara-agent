@@ -1,0 +1,191 @@
+...............................s........................................ [ 22%]
+.................................................F...................... [ 45%]
+........................................................................ [ 68%]
+........................................................................ [ 91%]
+............................                                             [100%]
+=================================== FAILURES ===================================
+______ test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner _______
+
+    def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
+        owner = HostCompactionRuntimeOwner(
+            policy=ResolvedCompactionPolicy(automatic_enabled=False)
+        )
+        host = object.__new__(KernelHostSession)
+        host._writer_renewal_failure = None
+        host._scheduled_tasks = None
+        host.session_id = 'session:336wrfwkamrr3up6kjtsgvgcte'
+        host._lock = asyncio.Lock()
+        host._closing = False
+        host._pending_root_successor = None
+        host._user_control_attempts = {}
+        host._active_turn_id = 'turn:vmlprtvcqs6oi7vfc6vmq2kihm'
+        host._active_cancellation_intent = None
+        host._active_command_id = 'command:7mamexfpd2cwpaabzipvhuaqyi'
+        host._active_root_phase = object()
+        host._queue_wake = asyncio.Event()
+        host._monitor_wake = asyncio.Event()
+        host._compaction = owner
+        idle_calls: list[tuple[str, str, bool]] = []
+    
+        class _Compaction:
+            async def compact_idle_turn(
+                self, *, turn_id: str, command_id: str, force: bool
+            ) -> CompactionOutcome:
+                idle_calls.append((turn_id, command_id, force))
+                return CompactionOutcome(
+                    CompactionDisposition.COMPACTED,
+                    turn_id,
+                    'snapshot:utq7x4hsfyf57wmay7ezztmgwi',
+                    1,
+                    "COMPACTED",
+                )
+    
+        class _Runner:
+            async def compact_idle_turn(
+                self, *, turn_id: str, command_id: str, force: bool
+            ) -> CompactionOutcome:
+                return await _Compaction().compact_idle_turn(
+                    turn_id=turn_id,
+                    command_id=command_id,
+                    force=force,
+                )
+    
+        idle_marks: list[str] = []
+        host._runner = _Runner()
+        host._tools = SimpleNamespace(
+            offer_todo_installation=lambda _installation: None,
+            todo_owner=SimpleNamespace(
+                mark_root_idle=lambda *, exact_turn_id: idle_marks.append(exact_turn_id)
+            )
+        )
+    
+        async def no_command(_command_id: str):
+            return None
+    
+        async def full_confirmation(_candidate):
+            from pulsara_agent.conversation_kernel.compaction.contracts import (
+                CompactionConfirmationKind,
+            )
+    
+            return CompactionConfirmationKind.FULL
+    
+        host._query_command_row = no_command
+        host._settle_manual_compaction_command = full_confirmation
+    
+        async def exercise() -> CompactionOutcome:
+            provider_started = asyncio.Event()
+            provider_release = asyncio.Event()
+    
+            async def active_owner() -> None:
+                provider_started.set()
+                await provider_release.wait()
+                current = asyncio.current_task()
+                assert current is not None
+                await host._settle_active_root_task(current)
+    
+            active_task = asyncio.create_task(active_owner())
+            host._active_task = active_task
+            await provider_started.wait()
+            compact = asyncio.create_task(
+                host.compact_context(command_id='command:u5fuuol2z2xsyv3uxg27btghta', force=True)
+            )
+            while (
+                await owner.find_manual(
+                    command_id='command:u5fuuol2z2xsyv3uxg27btghta',
+                    scope_kind=ModelInputScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
+                is None
+            ):
+                await asyncio.sleep(0)
+            provider_release.set()
+            await active_task
+            outcome = await asyncio.wait_for(compact, timeout=1)
+            await owner.aclose()
+            return outcome
+    
+>       outcome = asyncio.run(exercise())
+                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_round5b_long_horizon_context_compaction.py:2086: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_round5b_long_horizon_context_compaction.py:2081: in exercise
+    await active_task
+tests/test_round5b_long_horizon_context_compaction.py:2063: in active_owner
+    await host._settle_active_root_task(current)
+src/pulsara_agent/conversation_kernel/host.py:2480: in _settle_active_root_task
+    await asyncio.shield(settlement)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <pulsara_agent.conversation_kernel.host.KernelHostSession object at 0x7982d22e03b0>
+request = ManualCompactionRequest(request_id='request:lgw2irh4m4d3jswm4qe5abs77a', command_id='command:u5fuuol2z2xsyv3uxg27btght...utScopeKind.ROOT: 'ROOT'>, scope_subagent_task_id=None, expected_turn_id='turn:vmlprtvcqs6oi7vfc6vmq2kihm', force=True)
+
+    async def _execute_idle_manual_compaction(
+        self, request: ManualCompactionRequest
+    ) -> None:
+        target_turn_id = request.expected_turn_id
+        if target_turn_id is None:
+            outcome = CompactionOutcome(
+                CompactionDisposition.FAILED,
+                "idle",
+                None,
+                None,
+                "TARGET_TURN_CHANGED",
+            )
+        else:
+            try:
+                outcome = await self._runner.compact_idle_turn(
+                    turn_id=target_turn_id,
+                    command_id=request.command_id,
+                    force=request.force,
+                )
+            except StaleHostWriter:
+                outcome = CompactionOutcome(
+                    CompactionDisposition.FAILED,
+                    target_turn_id,
+                    None,
+                    None,
+                    "WRITER_REPLACED",
+                )
+            except asyncio.CancelledError:
+                outcome = CompactionOutcome(
+                    CompactionDisposition.FAILED,
+                    target_turn_id,
+                    None,
+                    None,
+                    "HOST_CLOSING" if self._closing else "COMPACTION_CANCELLED",
+                )
+                await self._compaction.settle_manual(request, outcome)
+                raise
+            except BaseException:
+                outcome = CompactionOutcome(
+                    CompactionDisposition.FAILED,
+                    target_turn_id,
+                    None,
+                    None,
+                    "COMPACTION_FAILED",
+                )
+        if outcome.disposition is CompactionDisposition.COMPACTED:
+>           self._ephemeral.invalidate()
+            ^^^^^^^^^^^^^^^
+E           AttributeError: 'KernelHostSession' object has no attribute '_ephemeral'
+
+src/pulsara_agent/conversation_kernel/host.py:2159: AttributeError
+=============================== warnings summary ===============================
+tests/test_project_capability_management.py::test_three_sidebar_add_flows_persist_only_in_the_selected_workspace
+  /home/plumwsl/workspaces/pulsara_agent/.venv/lib/python3.12/site-packages/aiohttp/web_runner.py:99: DeprecationWarning: shutdown_timeout should be set on BaseRunner
+    super().__init__(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_round5b_long_horizon_context_compaction.py::test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner
+1 failed, 314 passed, 1 skipped, 1 warning in 71.16s (0:01:11)

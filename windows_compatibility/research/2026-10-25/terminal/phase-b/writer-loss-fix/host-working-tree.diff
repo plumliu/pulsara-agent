@@ -1,0 +1,231 @@
+diff --git a/src/pulsara_agent/conversation_kernel/host.py b/src/pulsara_agent/conversation_kernel/host.py
+index b92a3a23..0241daaf 100644
+--- a/src/pulsara_agent/conversation_kernel/host.py
++++ b/src/pulsara_agent/conversation_kernel/host.py
+@@ -982,6 +982,7 @@ class KernelHostSession:
+         self._close_async_lock = asyncio.Lock()
+         self._closing = False
+         self._closed = False
++        self._writer_renewal_failure: Exception | None = None
+         self._queue_wake = asyncio.Event()
+         self._renewal_task = asyncio.create_task(
+             self._renew_writer(), name=f"kernel-writer-renew:{session_id}"
+@@ -1543,6 +1544,14 @@ class KernelHostSession:
+     def writer_generation(self) -> int:
+         return self._lease.guard.writer_generation
+ 
++    @property
++    def writer_lost(self) -> bool:
++        return isinstance(self._writer_renewal_failure, StaleHostWriter)
++
++    @property
++    def writer_unavailable(self) -> bool:
++        return self._writer_renewal_failure is not None
++
+     @property
+     def active_skill_names(self) -> frozenset[str]:
+         return self._capabilities.configured_active_skill_names
+@@ -7358,33 +7367,41 @@ class KernelHostSession:
+                 close_error = close_error or exc
+             try:
+                 terminal_view = await self._hooks.fence_ordinary()
+-                current_binding = await self._io.run(
+-                    self.repository.read_session_model_call_binding,
+-                    self._lease.guard,
+-                    deadline_monotonic=deadline,
+-                )
+-                terminal_input = SessionEndInput(
+-                    session_id=self.session_id,
+-                    cwd=str(session_end_cwd),
+-                    model=(
+-                        "unconfigured"
+-                        if current_binding is None
+-                        else self._model_identity(current_binding)
+-                    ),
+-                    reason="other",
+-                )
+-                await self._hooks.dispatch_terminal(
+-                    HookDispatchEnvelope(
+-                        terminal_view,
+-                        self._hook_root_scope,
+-                        terminal_input,
+-                        SessionEndRef(object()),
+-                        deadline,
+-                    ),
+-                    matcher_subject=event_matcher_subject(
+-                        terminal_input.event_type, reason=terminal_input.reason
+-                    ),
+-                )
++                try:
++                    current_binding = await self._io.run(
++                        self.repository.read_session_model_call_binding,
++                        self._lease.guard,
++                        deadline_monotonic=deadline,
++                    )
++                except StaleHostWriter:
++                    # An expired/replaced writer cannot authorize SessionEnd;
++                    # this observation does not invalidate physical close.
++                    logging.getLogger(__name__).warning(
++                        "SessionEnd skipped because the Host writer is unavailable"
++                    )
++                else:
++                    terminal_input = SessionEndInput(
++                        session_id=self.session_id,
++                        cwd=str(session_end_cwd),
++                        model=(
++                            "unconfigured"
++                            if current_binding is None
++                            else self._model_identity(current_binding)
++                        ),
++                        reason="other",
++                    )
++                    await self._hooks.dispatch_terminal(
++                        HookDispatchEnvelope(
++                            terminal_view,
++                            self._hook_root_scope,
++                            terminal_input,
++                            SessionEndRef(object()),
++                            deadline,
++                        ),
++                        matcher_subject=event_matcher_subject(
++                            terminal_input.event_type, reason=terminal_input.reason
++                        ),
++                    )
+             except BaseException as exc:
+                 close_error = close_error or exc
+             try:
+@@ -7438,15 +7455,19 @@ class KernelHostSession:
+     async def _renew_writer(self) -> None:
+         while True:
+             await asyncio.sleep(self._deadlines.policy.writer_renew_interval_seconds)
+-            self._lease = await self._io.run(
+-                self.repository.renew_host_writer,
+-                self._lease.guard,
+-                lease_seconds=self._deadlines.policy.writer_lease_seconds,
+-                memory_domain_id=self._memory_domain_id,
+-                deadline_monotonic=self._deadlines.deadline(
+-                    KernelWatchdogOwner.WRITER_RENEWAL
+-                ),
+-            )
++            try:
++                self._lease = await self._io.run(
++                    self.repository.renew_host_writer,
++                    self._lease.guard,
++                    lease_seconds=self._deadlines.policy.writer_lease_seconds,
++                    memory_domain_id=self._memory_domain_id,
++                    deadline_monotonic=self._deadlines.deadline(
++                        KernelWatchdogOwner.WRITER_RENEWAL
++                    ),
++                )
++            except Exception as error:
++                self._writer_renewal_failure = error
++                raise
+ 
+     def _new_child_runner(
+         self, hook_scope: HookDispatchScopeRef | None
+@@ -7567,6 +7588,12 @@ class KernelHostSession:
+         )
+ 
+     def _require_open(self) -> None:
++        if self.writer_unavailable:
++            if self.writer_lost:
++                raise StaleHostWriter("Host writer is unavailable; reopen this runtime")
++            raise RuntimeError(
++                "Host writer renewal failed; reopen this runtime"
++            ) from self._writer_renewal_failure
+         if self._closing:
+             raise RuntimeError("kernel Host session is closing")
+         if getattr(self, "_runtime_reopen_quiescence", None) is not None:
+@@ -7845,8 +7872,11 @@ class KernelHostCore:
+         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
+         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
+         credential_boundary: ProcessCredentialBoundary | None = None,
++        open_browser: Callable[[str], Awaitable[None]] | None = None,
++        workspace_validator: Callable[[Path], None] | None = None,
+     ) -> None:
+         self._model_runtime = model_runtime
++        self._workspace_validator = workspace_validator
+         self._deadlines = KernelExecutionDeadlineFactory(
+             watchdog_policy or DEFAULT_KERNEL_WATCHDOG_POLICY
+         )
+@@ -7875,7 +7905,8 @@ class KernelHostCore:
+         self._credential_boundary = credential_boundary or ProcessCredentialBoundary()
+         self.scheduled_tasks = None
+         self.mcp_management = LocalMcpManagementService(
+-            model_runtime.settings, credential_boundary=self._credential_boundary
++            model_runtime.settings, credential_boundary=self._credential_boundary,
++            open_browser=open_browser,
+         )
+ 
+     def _canonical_deadline(self) -> float:
+@@ -7971,6 +8002,8 @@ class KernelHostCore:
+         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
+         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
+         credential_boundary: ProcessCredentialBoundary | None = None,
++        open_browser: Callable[[str], Awaitable[None]] | None = None,
++        workspace_validator: Callable[[Path], None] | None = None,
+     ) -> "KernelHostCore":
+         return cls(
+             model_runtime=model_runtime,
+@@ -7979,6 +8012,8 @@ class KernelHostCore:
+             ),
+             watchdog_policy=watchdog_policy,
+             credential_boundary=credential_boundary,
++            open_browser=open_browser,
++            workspace_validator=workspace_validator,
+         )
+ 
+     async def prepare_resources(self) -> None:
+@@ -8179,6 +8214,12 @@ class KernelHostCore:
+             intent="RESTORE" if restore_missing_workspace else
+                    "NEW" if session_start_source == "startup" else "EXISTING",
+         )
++        if self._workspace_validator is not None and workspace.workspace_kind == "project":
++            # The ordinary resolver may resolve links; WSL admission must reject
++            # that changed spelling before any database/capability side effect.
++            if Path(workspace_input.workspace_root) != workspace.workspace_root:
++                raise ValueError("WSL workspace path identity changed")
++            self._workspace_validator(workspace.workspace_root)
+         repository = await self._ensure_resources()
+         deadline = self._canonical_deadline()
+         async with self._lock:
+@@ -8401,9 +8442,39 @@ class KernelHostCore:
+                 session.extensions,
+             )
+             changed = self._workspace_capability_revisions[root] > capability_baseline
++        session._renewal_task.add_done_callback(
++            lambda task: self._close_unavailable_writer(session, task)
++        )
+         if changed:
+             await session.request_capability_refresh()
+ 
++    def _close_unavailable_writer(
++        self, session: KernelHostSession, renewal: asyncio.Task[None]
++    ) -> None:
++        if renewal.cancelled():
++            return
++        error = renewal.exception()
++        if error is None or not session.writer_unavailable:
++            return
++        # The renewal owner is already done. This waiter requests the same
++        # Core-owned close attempt that shutdown and recovery must join.
++        closing = asyncio.create_task(
++            self.close_session(session.host_session_id),
++            name=f"kernel-writer-unavailable-close:{session.host_session_id}",
++        )
++
++        def observed(task: asyncio.Task[None]) -> None:
++            if task.cancelled():
++                return
++            failure = task.exception()
++            if failure is not None:
++                logging.getLogger(__name__).error(
++                    "unavailable Host writer physical close failed",
++                    exc_info=(type(failure), failure, failure.__traceback__),
++                )
++
++        closing.add_done_callback(observed)
++
+     async def memory_management_projects(
+         self, *, memory_domain_id, limit=40, cursor=None
+     ):

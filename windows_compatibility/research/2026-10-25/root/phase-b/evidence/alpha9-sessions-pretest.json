@@ -1,0 +1,40 @@
+{
+  "sessions": [
+    {
+      "id": "session:36omh67maz3ezaef3amghzb6ka",
+      "title": null,
+      "workspace_id": "workspace:zlmsxoedty2ev4f2r5m7mrsjxm",
+      "writer_generation": 1,
+      "writer_lease_owner_id": "host:vluuyqd74zjwtk5ysfxro6zkfu",
+      "writer_lease_expires_at": "2026-10-25 19:27:52.869929+08:00",
+      "lease_valid": true
+    },
+    {
+      "id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "title": "WSL中文工作目录smoke.txt写入读取验收",
+      "workspace_id": "workspace:wiosodqkjdu7hp4r2d3vgho6lm",
+      "writer_generation": 6,
+      "writer_lease_owner_id": "host:r6i3heys6dtsrvk2x2c6qi3c64",
+      "writer_lease_expires_at": "2026-10-25 19:27:59.935843+08:00",
+      "lease_valid": true
+    }
+  ],
+  "turns": [
+    {
+      "id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "status": "COMPLETED"
+    },
+    {
+      "id": "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "status": "COMPLETED"
+    },
+    {
+      "id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "session_id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "status": "COMPLETED"
+    }
+  ],
+  "readOnly": true
+}

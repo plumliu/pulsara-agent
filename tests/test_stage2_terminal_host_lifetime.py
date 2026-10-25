@@ -72,6 +72,7 @@ def test_capacity_raise_releases_host_lock_before_child_todo_activation() -> Non
 
     async def exercise():
         host = object.__new__(KernelHostSession)
+        host._writer_renewal_failure = None
         host._lock = asyncio.Lock()
         host._closing = host._closed = False
         host._deadlines = KernelExecutionDeadlineFactory()
@@ -617,6 +618,7 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
                 return operation(*args, **kwargs)
 
         session = object.__new__(KernelHostSession)
+        session._writer_renewal_failure = None
         session._deadlines = deadlines  # type: ignore[attr-defined]
         session._lease = initial  # type: ignore[attr-defined]
         session._memory_domain_id = "u_local"  # type: ignore[attr-defined]

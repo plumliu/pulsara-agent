@@ -1,0 +1,13 @@
+
+> pulsara-desktop-workbench@0.1.0-alpha.8 test
+> vitest run ../tests/frontend/pulsara-app.test.tsx -t recovers a lost writer|shows friendly recovery failure
+
+
+ RUN  v4.1.11 C:/python_workspace/pulsara-agent/frontend
+
+
+ Test Files  1 passed (1)
+      Tests  2 passed | 192 skipped (194)
+   Start at  19:13:53
+   Duration  6.54s (transform 1.60s, setup 57ms, import 3.97s, tests 973ms, environment 1.36s)
+

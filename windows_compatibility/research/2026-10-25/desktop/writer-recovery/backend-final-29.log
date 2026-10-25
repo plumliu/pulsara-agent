@@ -1,0 +1,9 @@
+.............................                                            [100%]
+=============================== warnings summary ===============================
+tests/test_desktop_renderer_bridge.py::test_runtime_reopen_post_detach_exception_quarantines_gate_and_operation
+tests/test_desktop_renderer_bridge.py::test_history_http_round_trips_protobuf_cursor_without_losing_cut_or_precision
+  /home/plumwsl/workspaces/pulsara_agent/.venv/lib/python3.12/site-packages/aiohttp/web_runner.py:99: DeprecationWarning: shutdown_timeout should be set on BaseRunner
+    super().__init__(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+29 passed, 2 warnings in 1.52s

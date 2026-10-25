@@ -1,0 +1,8 @@
+{
+  "creation": 134373907264310300,
+  "command": "\"C:\\python_workspace\\pulsara-agent\\desktop\\node_modules\\electron\\dist\\electron.exe\" C:/python_workspace/pulsara-agent/output/windows-b/host-setup/readiness-smoke.cjs",
+  "pid": 42172,
+  "exactHandleCreation": 134373907264310308,
+  "terminatedFixtureMain": true,
+  "reason": "First instrumentation attempted assignment to a native SDK property; gate did not release. No production operation submitted."
+}

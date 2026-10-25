@@ -1,0 +1,186 @@
+{
+  "stage": "after-wake-turn",
+  "observed_at": "2026-10-25T11:39:25.672476+00:00",
+  "session_id": "session:36omh67maz3ezaef3amghzb6ka",
+  "identity": {
+    "system_identifier": "7700523439330484737",
+    "postmaster_start": "2026-10-25 19:23:28.015074+08"
+  },
+  "session": {
+    "id": "session:36omh67maz3ezaef3amghzb6ka",
+    "title": "alpha.9 睡眠自动恢复验收测试会话",
+    "writer_generation": 2
+  },
+  "turns": [
+    {
+      "id": "turn:3gayxsfhbqg2pcsiwzicm3ud4i",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "initial_entry_id": "entry:exfix4e5kkom6mfc2i5m555eay",
+      "final_entry_id": "entry:hsvqx6x4dj3lkiuxmc7uqiwtaa"
+    },
+    {
+      "id": "turn:ayj2dbwvk6jtfchjr7nl3dorwu",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "initial_entry_id": "entry:wq2f4flfn75ehhp6f3rgbdunoi",
+      "final_entry_id": "entry:wq6cyjpohruovd5d5b4hoxqire"
+    }
+  ],
+  "entries": [
+    {
+      "id": "entry:wq2f4flfn75ehhp6f3rgbdunoi",
+      "turn_id": "turn:ayj2dbwvk6jtfchjr7nl3dorwu",
+      "entry_sequence": 1,
+      "entry_kind": "USER_MESSAGE",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"这是 alpha.9 睡眠自动恢复验收的独立测试会话。请只回复“睡眠前连接正常”，不要调用任何工具，不要读写文件。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:wq6cyjpohruovd5d5b4hoxqire",
+      "turn_id": "turn:ayj2dbwvk6jtfchjr7nl3dorwu",
+      "entry_sequence": 2,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:c4fb309e98194ed5bc103e4e4a6ca5c44e70a474386ec999730ef72ceb82ac93\",\"kind\":\"TEXT\",\"size\":21}],\"draft_identity\":\"entry:wq6cyjpohruovd5d5b4hoxqire\"}"
+    },
+    {
+      "id": "entry:exfix4e5kkom6mfc2i5m555eay",
+      "turn_id": "turn:3gayxsfhbqg2pcsiwzicm3ud4i",
+      "entry_sequence": 3,
+      "entry_kind": "USER_MESSAGE",
+      "content_codec": "utf-8",
+      "content": "{\"parts\":[{\"text\":\"这是睡醒后的第二条验收消息。请只回复“自动恢复后模型调用正常”，不要调用工具，不要读写文件。\",\"type\":\"text\"}],\"schema\":\"pulsara.prompt/v2\"}"
+    },
+    {
+      "id": "entry:hsvqx6x4dj3lkiuxmc7uqiwtaa",
+      "turn_id": "turn:3gayxsfhbqg2pcsiwzicm3ud4i",
+      "entry_sequence": 4,
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "content_codec": "utf-8",
+      "content": "{\"blocks\":[{\"digest\":\"sha256:529b90084768a1f1dbda7101933b43fe8ff5a4880ed8f24aa1035f7752941797\",\"kind\":\"TEXT\",\"size\":33}],\"draft_identity\":\"entry:hsvqx6x4dj3lkiuxmc7uqiwtaa\"}"
+    }
+  ],
+  "assistant_blocks": [
+    {
+      "assistant_entry_id": "entry:hsvqx6x4dj3lkiuxmc7uqiwtaa",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "content_codec": "utf-8",
+      "content": "自动恢复后模型调用正常"
+    },
+    {
+      "assistant_entry_id": "entry:wq6cyjpohruovd5d5b4hoxqire",
+      "block_ordinal": 0,
+      "block_kind": "TEXT",
+      "tool_name": null,
+      "content_codec": "utf-8",
+      "content": "睡眠前连接正常"
+    }
+  ],
+  "commands": [
+    {
+      "command_id": "command:6qs7uat67hphwmpwdedi4dodxa",
+      "command_kind": "QUEUE_PROMPT",
+      "target_turn_id": null,
+      "target_entry_id": null
+    },
+    {
+      "command_id": "command:zyaxngjoiftpz66ltkpijwx644",
+      "command_kind": "QUEUE_PROMPT",
+      "target_turn_id": null,
+      "target_entry_id": null
+    }
+  ],
+  "original_session": {
+    "id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+    "title": "WSL中文工作目录smoke.txt写入读取验收",
+    "workspace_id": "workspace:wiosodqkjdu7hp4r2d3vgho6lm",
+    "model_call_binding": {
+      "reasoning": {
+        "kind": "effort",
+        "value": "high"
+      },
+      "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+    },
+    "lifecycle": "OPEN"
+  },
+  "original_turns": [
+    {
+      "id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:yvln7qusryfu5rrcvc6zvfkrsm",
+      "final_entry_id": "entry:chzxwu7f2kcrvn3xkk4tw4k7sm"
+    },
+    {
+      "id": "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:mst4nqhkyau443rh2pheezhypu",
+      "final_entry_id": "entry:4scnuqh4gret2okmk6ogrguznq"
+    },
+    {
+      "id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:bqi6edyvxhht2jlbcnuoxjl5hi",
+      "final_entry_id": "entry:mpl5cpni43c7lbmg4ytlx4xobu"
+    }
+  ],
+  "original_entry_counts": [
+    {
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "total": 3
+    },
+    {
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "total": 9
+    },
+    {
+      "entry_kind": "TOOL_RESULT",
+      "total": 13
+    },
+    {
+      "entry_kind": "USER_MESSAGE",
+      "total": 3
+    }
+  ],
+  "entry_counts": {
+    "USER_MESSAGE": 2,
+    "ASSISTANT_MESSAGE": 2
+  },
+  "original_preserved": {
+    "session": true,
+    "turns": true,
+    "entry_counts": true
+  },
+  "complete": true,
+  "no_duplicate_or_tool_entries": true,
+  "two_prompt_commands": false
+}

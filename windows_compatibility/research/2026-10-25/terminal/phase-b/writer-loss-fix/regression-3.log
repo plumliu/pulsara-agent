@@ -1,0 +1,12 @@
+...............................s........................................ [ 22%]
+........................................................................ [ 45%]
+........................................................................ [ 68%]
+........................................................................ [ 91%]
+............................                                             [100%]
+=============================== warnings summary ===============================
+tests/test_project_capability_management.py::test_three_sidebar_add_flows_persist_only_in_the_selected_workspace
+  /home/plumwsl/workspaces/pulsara_agent/.venv/lib/python3.12/site-packages/aiohttp/web_runner.py:99: DeprecationWarning: shutdown_timeout should be set on BaseRunner
+    super().__init__(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+315 passed, 1 skipped, 1 warning in 69.84s (0:01:09)

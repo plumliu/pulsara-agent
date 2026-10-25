@@ -10,6 +10,6 @@ export function DesktopTitlebar({ title, workbench = false, onToggleSidebar, onT
 /** Window controls belong to the shell, outside session-scoped drag regions. */
 export function DesktopWindowControls() {
   const host = desktopHost();
-  if (host?.platform !== 'linux') return null;
+  if (!host || host.platform === 'darwin') return null;
   return <div className="desktop-window-controls" role="group" aria-label="窗口控制"><button aria-label="最小化" onClick={() => void host.minimize()}><Minus size={14} /></button><button aria-label="最大化或还原" onClick={() => void host.toggleMaximize()}><Square size={12} /></button><button aria-label="关闭窗口" onClick={() => void host.closeWindow()}><X size={15} /></button></div>;
 }

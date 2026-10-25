@@ -1,0 +1,10 @@
+{
+  "appCount": 0,
+  "pgStatus": 3,
+  "pgOutput": "pg_ctl: no server running",
+  "originalKernelPid": 494,
+  "kernelProcExistsExitCode": 1,
+  "observedAt": "2026-10-25T19:42:12.3329672+08:00",
+  "exitMethod": "Pulsara Ctrl+Q followed by its exit confirmation",
+  "externalKillUsed": false
+}

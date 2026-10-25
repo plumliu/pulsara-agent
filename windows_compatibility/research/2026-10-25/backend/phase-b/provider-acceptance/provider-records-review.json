@@ -1,0 +1,302 @@
+{
+  "terminal-real-provider.json": {
+    "status": "failed",
+    "provider_calls": 22,
+    "system_equal": true,
+    "tools_equal": true,
+    "messages_append_only": true,
+    "configured_secret_found": false,
+    "undropped_databases": [],
+    "scratch_removed": null,
+    "test_home_removed": null,
+    "cases": [
+      {
+        "case": "directories",
+        "tool_calls": 4,
+        "result_states": [
+          "SYSTEM_ERROR",
+          "SYSTEM_ERROR",
+          "SYSTEM_ERROR",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "interaction",
+        "tool_calls": 2,
+        "result_states": [
+          "SYSTEM_ERROR",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "pty",
+        "tool_calls": 1,
+        "result_states": [
+          "SYSTEM_ERROR"
+        ]
+      },
+      {
+        "case": "long",
+        "tool_calls": 2,
+        "result_states": [
+          "SYSTEM_ERROR",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "truncation",
+        "tool_calls": 1,
+        "result_states": [
+          "SYSTEM_ERROR"
+        ]
+      },
+      {
+        "case": "monitor_race",
+        "tool_calls": 2,
+        "result_states": [
+          "SYSTEM_ERROR",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "monitor",
+        "tool_calls": 1,
+        "result_states": [
+          "SYSTEM_ERROR"
+        ]
+      },
+      {
+        "case": "monitor_long_wake",
+        "tool_calls": null,
+        "result_states": []
+      }
+    ],
+    "reasoning": [
+      "{\"kind\": \"effort\", \"value\": \"high\"}"
+    ]
+  },
+  "terminal-short-home-real-provider.json": {
+    "status": "completed",
+    "provider_calls": 38,
+    "system_equal": true,
+    "tools_equal": true,
+    "messages_append_only": true,
+    "configured_secret_found": false,
+    "undropped_databases": [],
+    "scratch_removed": true,
+    "test_home_removed": true,
+    "cases": [
+      {
+        "case": "directories",
+        "tool_calls": 5,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "interaction",
+        "tool_calls": 4,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "pty",
+        "tool_calls": 3,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "long",
+        "tool_calls": 2,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "truncation",
+        "tool_calls": 2,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "monitor_race",
+        "tool_calls": 3,
+        "result_states": [
+          "SUCCESS",
+          "APPLICATION_ERROR",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "monitor",
+        "tool_calls": 3,
+        "result_states": [
+          "SUCCESS",
+          "APPLICATION_ERROR",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "monitor_long_wake",
+        "tool_calls": 2,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "capacity",
+        "tool_calls": 18,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "APPLICATION_ERROR",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      }
+    ],
+    "reasoning": [
+      "{\"kind\": \"effort\", \"value\": \"high\"}"
+    ],
+    "capacity_eight_exact_kills": true,
+    "monitor_autonomous_120s": true
+  },
+  "terminal-input-closure-real-provider.json": {
+    "status": "failed",
+    "provider_calls": 7,
+    "system_equal": true,
+    "tools_equal": true,
+    "messages_append_only": true,
+    "configured_secret_found": false,
+    "undropped_databases": [],
+    "scratch_removed": null,
+    "test_home_removed": null,
+    "cases": [
+      {
+        "case": "interaction",
+        "tool_calls": 6,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "INVALID_ARGUMENTS",
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      }
+    ],
+    "reasoning": [
+      "{\"kind\": \"effort\", \"value\": \"high\"}"
+    ]
+  },
+  "terminal-input-closure-clarified-real-provider.json": {
+    "status": "completed",
+    "provider_calls": 10,
+    "system_equal": true,
+    "tools_equal": true,
+    "messages_append_only": true,
+    "configured_secret_found": false,
+    "undropped_databases": [],
+    "scratch_removed": true,
+    "test_home_removed": true,
+    "cases": [
+      {
+        "case": "interaction",
+        "tool_calls": 4,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      },
+      {
+        "case": "pty",
+        "tool_calls": 4,
+        "result_states": [
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS"
+        ]
+      }
+    ],
+    "reasoning": [
+      "{\"kind\": \"effort\", \"value\": \"high\"}"
+    ]
+  },
+  "terminal-toolchain-real-provider.json": {
+    "status": "failed",
+    "provider_calls": 2,
+    "system_equal": true,
+    "tools_equal": true,
+    "messages_append_only": true,
+    "configured_secret_found": false,
+    "undropped_databases": [],
+    "scratch_removed": null,
+    "test_home_removed": null,
+    "cases": [
+      {
+        "case": "directories",
+        "tool_calls": 1,
+        "result_states": [
+          "APPLICATION_ERROR"
+        ]
+      }
+    ],
+    "reasoning": [
+      "{\"kind\": \"effort\", \"value\": \"high\"}"
+    ]
+  },
+  "terminal-toolchain-explicit-node-real-provider.json": {
+    "status": "completed",
+    "provider_calls": 2,
+    "system_equal": true,
+    "tools_equal": true,
+    "messages_append_only": true,
+    "configured_secret_found": false,
+    "undropped_databases": [],
+    "scratch_removed": true,
+    "test_home_removed": true,
+    "cases": [
+      {
+        "case": "directories",
+        "tool_calls": 1,
+        "result_states": [
+          "SUCCESS"
+        ]
+      }
+    ],
+    "reasoning": [
+      "{\"kind\": \"effort\", \"value\": \"high\"}"
+    ]
+  }
+}

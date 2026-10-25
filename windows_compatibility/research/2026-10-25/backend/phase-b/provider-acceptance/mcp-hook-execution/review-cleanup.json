@@ -1,0 +1,45 @@
+{
+  "records": {
+    "first.result.json": {
+      "status": "failed",
+      "provider_calls": 4,
+      "system_equal": true,
+      "tools_equal": true,
+      "messages_append_only": true,
+      "configured_secret_found": false
+    },
+    "bytes.result.json": {
+      "status": "failed",
+      "provider_calls": 3,
+      "system_equal": true,
+      "tools_equal": true,
+      "messages_append_only": true,
+      "configured_secret_found": false
+    },
+    "eof.result.json": {
+      "status": "completed",
+      "provider_calls": 3,
+      "system_equal": true,
+      "tools_equal": true,
+      "messages_append_only": true,
+      "configured_secret_found": false
+    }
+  },
+  "test_databases_absent": [
+    "pulsara_wsl_dogfood_94fc1828b33b43788b5245bfd4678f28",
+    "pulsara_wsl_dogfood_c1331cbedba74d428ecf2cb7a949158b",
+    "pulsara_wsl_dogfood_6550c914800745c2a542c4bf1fa65352"
+  ],
+  "remaining_exact_fixture_processes": [],
+  "inaccessible_same_uid_pids": [
+    355,
+    357,
+    154903
+  ],
+  "removed": [
+    "/home/plumwsl/.pa-y0zjgxcd",
+    "/home/plumwsl/.pa-mul20aeq",
+    "/home/plumwsl/workspaces/.provider-accept-80k6ptzi"
+  ],
+  "production_pg_stopped_or_reset": false
+}

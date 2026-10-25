@@ -61,6 +61,7 @@ class _Repository:
 
 def _host(clock: _Clock) -> KernelHostSession:
     host = object.__new__(KernelHostSession)
+    host._writer_renewal_failure = None
     host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'
     host.host_session_id = 'host:gubylb5v44ganghpuxoqfvlrji'
     host._control_monotonic = clock

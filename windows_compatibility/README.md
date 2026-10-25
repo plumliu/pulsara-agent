@@ -14,8 +14,31 @@
 8. [MCP跨域回收](research/2026-10-25/terminal/mcp-round5/report.zh.md)、[hooks/environment跨域回收](research/2026-10-25/terminal/hooks-environment-round5/report.zh.md)、[PG其余失联边界](research/2026-10-25/backend/pg-boundaries-round5/report.zh.md)：真实产品owner研究集成、会话与调用范围区分、双锁与有限协议、ext4检索/搬移/reset实证。
 9. [目标发现与离线payload](research/2026-10-25/desktop/discovery-payload-round6/report.zh.md)、[真实kernel控制链](research/2026-10-25/terminal/kernel-control-round6/report.zh.md)：用户原环境不变；有限安装失败保数据；正常EOF关闭顺序与异常退出误判反例。该阶段尚待的整发行版故障、OAuth及睡眠恢复已在下一项最终验收中补齐。
 10. **[Windows WSL2 G0最终验收](research/2026-10-25/root/g0-w-final/report.zh.md)**：本机所选矩阵D/C/P/F/N机制可行性通过；补齐实际宿主SIGHUP/窗口退出、88.493秒睡眠恢复、Notion授权与callback rebind、原样PGDATA的真实dirty恢复。原失败、探针局限及生产待实施项均保留。
+11. [Phase B正式接入与共享修正（进行中）](research/2026-10-25/root/phase-b/report.zh.md)：用户授权后的生产实现、原回归与真实适配验证，保留新发现的失败及修正；安装包、完整GUI与真实provider验收单独列状态。
 
-当前状态：**2026-10-25本机Windows WSL2所选矩阵的G0-W机制可行性验收通过；Phase B未实施，Windows支持未激活。** Phase A代码及Mac本机/应用包GUI实证冻结范围保持；原生Ubuntu x64/arm64与GUI按用户要求延期，不作为本轮Windows G0验收的前置，也未被WSL结果替代。原terminal仍缺跨域存活/结算边界，原PG owner仍缺未提交/unknown分类，原Runtime在child清空后可能漏查异常退出；output候选实证不代表生产已修复。正式setup/安装器/完整产品界面、真实provider长程及发布资格仍按B与激活矩阵验收。
+当前状态：**2026-10-25本机Windows WSL2所选矩阵的G0-W机制可行性验收通过；用户已授权并开始Phase B正式实施，Windows支持尚未激活。** 原生Ubuntu x64/arm64与GUI按用户要求延期，不作为本轮Windows G0验收的前置，也未被WSL结果替代。正式setup/安装器/完整产品界面、真实provider长程及发布资格仍按B与激活矩阵验收。当前实施边界见spec第24节；下面历史阶段的“未实施”描述保留为当时状态。
+
+Phase B已实际安装开发候选，并完成图形中文工作区、真实模型文件读写、Windows选择/拖放、HTML/image/PDF预览及图片下载字节比对。终端、记忆/历史和真实provider记录见各分工报告。进一步验收发现**共享ROOT准入缺陷**：候选输入的canonical head过期后，原owner反复重发同一旧候选而无法前进；这不是Windows跨域回收问题。窄修已通过6项真实PG定向回归、28项相关测试，进入用户批准的本地alpha.7安装包后，原capacity/context真实provider场景及跨压缩的真实Linux/Windows进程跟进也已严格通过。正常Quit/冷重开、alpha.6→alpha.7更新、普通卸载/重装保数据、正式安装版Notion OAuth与约80秒睡眠恢复均已实际通过；用户现场确认中文输入法、托盘恢复保留草稿及鼠标贴靠/还原正常。用户随后补充可使用笔记本内屏与HDMI外屏，混合DPI待核验；右Alt键本身不能证明有AltGr布局。受影响macOS原生回归、其他安装/故障环境及发布矩阵尚未齐全，不能把本机分项通过写成B5激活或全部平台完成。
+
+G0发现的三类问题需要分别理解。“正式代码”指仓库中当前被产品调用的实现；其中的共享代码也供macOS使用，但不能把Windows实验中的所有反例都称为已在macOS复现的缺陷。
+
+后续键盘检查又发现共享前端快捷键缺陷：Ctrl+Alt+K/N及IME组合期的Ctrl+K/N会被误作普通快捷键。两处原handler的窄修已通过254项相关测试、类型/lint与交叉审阅，见[快捷键报告](research/2026-10-25/terminal/phase-b/shortcut-review/report.zh.md)；修复已随alpha.9实际安装，Ctrl+Alt+K/N不误触、普通Ctrl+K/N可用及草稿保留已由真实GUI复验。已映射的AltGr特殊字符正例在原实现也通过，不能把该缺陷扩大成“所有AltGr输入错误”，也不将合成输入当作真实AltGr布局资格。
+
+本轮Windows迁移及验收已获用户授权自主递增必要本地alpha候选版本并构建、安装，不再逐次询问版本号；Git tag和对外发布仍需另行明确授权，详见当前spec §8.3。
+
+已修复的睡眠阻断：alpha.8构建后，在alpha.7正常Quit准备更新时，原kernel报告`StaleHostWriter`收尾失败，宿主因此保留PG并阻止更新。原会话writer lease在睡眠期间到期，旧SessionEnd读取仍要求有效writer。原GUI重试复用同PG恢复，随后空闲总览正常Quit和维护检查通过，未reset或强杀。此前alpha.7睡眠后的进程、健康检查和界面恢复证据仍成立，但没有覆盖有效writer、新消息与后续Quit，不能据此称完整通过；原失败记录保留。alpha.8未安装，修复进入alpha.9。用户已关闭内屏，重建窗口回到外屏不冒充原窗口混合DPI拖回验证。自动恢复与友好重试呈现的授权见spec §9.3。
+
+上述修复已随alpha.9安装：续约异常封旧准入，原Core完成物理close后由原controller冷开，普通断连继续沿原前端重连；真实关闭失败保留quarantine且不可普通重试。原安装alpha.7的独立PG反例、候选真实Windows子进程回收及并发恢复、Host新增9项、相关315项（另1项原环境条件skip）、renderer29项、前端363项及真实Electron cover验证均已通过。
+
+**alpha.9本机闲置睡眠验收已通过**：正常更新保留模型、原会话和数据库；用户实际睡眠108.491秒后，同一Windows主进程、kernel和PG保持，会话writer generation从1自动恢复到2，未发送草稿保留，无需手动重试。实际发送睡后消息得到“自动恢复后模型调用正常”，独立数据库核对两轮均只消费一次、无工具调用；随后原确认流程正常Quit，应用与kernel退出、PG停止，维护检查exit0。应用现保持关闭，interop与Hiddify TUN未关闭。详见[alpha.9睡眠与收尾报告](research/2026-10-25/desktop/alpha9-sleep/report.zh.md)及[Phase B汇总](research/2026-10-25/root/phase-b/report.zh.md)。本项覆盖闲置睡眠、自动恢复、真实新消息和正常退出，不扩为活动任务睡眠全矩阵或B5激活。
+
+| 问题 | 性质与已有证据 | 修复边界 |
+| --- | --- | --- |
+| terminal及MCP/hooks/environment跨域存活与回收 | **Windows接入缺口。** 原POSIX进程组只能覆盖Linux/POSIX进程；WSL interop产生的Windows后代可能在Linux组退出后仍存活。G0已复现提前完成/释放资源，但这不是macOS原生任务的复现结果。 | 完整修复需要把Windows Job及WSL转发范围接入各原owner的存活、取消和物理结算；属于正式Windows接入，不能用只改Linux判断或研究探针冒充完成。 |
+| PG启动失败后的`startedHere`归属 | **共享owner的错误分类缺口，跨域失联使问题显现。** G0向原TS owner注入“本次未提交/结果未知”后，实测其catch按当前同库状态误认领其他调用启动的实例。尚未证明原生macOS正常有限exec会产生同一反例。 | 区分未提交、执行结果未知与已结算非零；只有符合原读回条件的已结算失败才能走启动归属读回。WSL helper、双锁和跨域装配另属Phase B。 |
+| Runtime在child清空后漏查异常退出 | **现有共享代码缺陷。** 原`stop()`在`child`已被close回调清空时直接返回，跳过已保存的异常退出结果，可能让Quit继续停PG。此逻辑也被macOS使用；G0实证来自Windows研究宿主，尚无本次macOS原生复现。 | 在现有Runtime owner检查已结束attempt的退出结果；无需先实现Windows adapter。 |
+
+用户随后先授权独立修复Runtime与PG共享owner/POSIX错误分类，结果见[独立修正报告](research/2026-10-25/root/shared-owner-fixes/report.zh.md)：当时WSL隔离源码编译与desktop Node测试60/60通过，Windows定向回归通过。其后用户明确授权进入Phase B，先修复两个POSIX启动清理缺陷，再正式接入Windows跨域回收及其余规范功能；实施中发现的相关生产缺陷直接修复。两个POSIX缺陷已修复并通过62项定向回归，Windows接入正在实施及验证，尚不能称整套产品验收完成。Phase A及Mac本机/应用包GUI旧证据保留为当时基线，本次没有Mac原生重验；G0候选通过不能替代正式接入验收。
 
 2026-10-24 用户授权修订：Ubuntu发行版本号不限，接入已有发行版及其默认非root用户，取消`Pulsara`/`pulsara`固定命名；保留interop、Windows PATH和自动挂载，不管理或终止共享发行版。应用资源/PG/工程仍使用Linux ext4，依赖pins保留。当前本机Ubuntu26.04.1/plumwsl的版本准入及基本interop已观察，当时Windows后代生命周期等完整G0待验证，后续本机结论见最终报告。历史四方批准仅覆盖旧合同，不作为本修订通过证据。
 

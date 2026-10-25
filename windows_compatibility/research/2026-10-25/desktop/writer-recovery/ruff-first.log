@@ -1,0 +1,34 @@
+E701 Multiple statements on one line (colon)
+    --> tests\test_desktop_renderer_bridge.py:1208:55
+     |
+1206 |         if cancel_first_waiter:
+1207 |             first.cancel()
+1208 |             with pytest.raises(asyncio.CancelledError):await first
+     |                                                       ^
+1209 |         release.set()
+1210 |         resumed = await second
+     |
+
+E701 Multiple statements on one line (colon)
+    --> tests\test_desktop_renderer_bridge.py:1211:35
+     |
+1209 |         release.set()
+1210 |         resumed = await second
+1211 |         if not cancel_first_waiter:assert await first is resumed
+     |                                   ^
+1212 |         assert core.closed_host_ids == [old.host_session_id]
+1213 |         assert core.resume_count == 1
+     |
+
+E702 Multiple statements on one line (semicolon)
+    --> tests\test_desktop_renderer_bridge.py:1270:44
+     |
+1268 |         rejection = SessionControlRejected('SESSION_RECOVERY_CLOSE_FAILED', '连接恢复未完成。')
+1269 |         rejection.__cause__ = cause
+1270 |         scrub = ProcessCredentialScrubSet();scrub.observe(secret)
+     |                                            ^
+1271 |         server = object.__new__(LocalHttpServer)
+1272 |         server._json_body = AsyncMock(return_value={'browser_instance_id': derive_id('transport', 'test-fixture', 'browser')})
+     |
+
+Found 3 errors.

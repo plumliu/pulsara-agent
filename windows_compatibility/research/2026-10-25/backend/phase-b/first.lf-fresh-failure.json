@@ -1,0 +1,12 @@
+{
+  "message": "Invalid URL",
+  "stack": "TypeError: Invalid URL\n    at new URL (node:internal/url:818:25)\n    at request (node:https:665:32)\n    at Object.get (node:https:720:15)\n    at C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\phase-b-pg\\lf_fresh_owner.cjs:44:11\n    at new Promise (<anonymous>)\n    at bootstrap (C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\phase-b-pg\\lf_fresh_owner.cjs:43:10)\n    at C:\\python_workspace\\pulsara-agent\\output\\windows-g0\\pg_admission_r3\\phase-b-pg\\lf_fresh_owner.cjs:57:22\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)",
+  "events": [
+    {
+      "type": "starting"
+    },
+    {
+      "type": "ready"
+    }
+  ]
+}

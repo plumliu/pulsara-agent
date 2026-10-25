@@ -1,0 +1,14 @@
+{
+  "config": {
+    "directory": "/home/plumwsl/.hostlease-_hgka8qh",
+    "home": "/home/plumwsl/.hostlease-_hgka8qh/home",
+    "workspace": "/home/plumwsl/.hostlease-_hgka8qh/workspace"
+  },
+  "formalClusterTouched": false,
+  "probe": {
+    "stdout": "{\"mode\": \"controller-expired-concurrent-resume\", \"status\": \"passed\", \"oldGuard\": \"HostWriterGuard(session_id='session:i4rxvonmnaduipjtzdirj6paua', writer_generation=1, writer_owner_id='host:prch627sp3ajhzz7aurwmeaify')\", \"newGuard\": \"HostWriterGuard(session_id='session:i4rxvonmnaduipjtzdirj6paua', writer_generation=2, writer_owner_id='host:5lyznepdic56n7c2nbvuaxlfoq')\", \"sameHandle\": true, \"oldClosed\": true, \"originalControllerClose\": \"completed\", \"originalCoreShutdown\": \"completed\"}\n",
+    "stderr": "hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nSessionEnd skipped because the Host writer is unavailable\nhook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\n"
+  },
+  "pgResetCompleted": true,
+  "cleanup": "{\"removed\": \"/home/plumwsl/.hostlease-_hgka8qh\"}\n"
+}

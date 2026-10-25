@@ -1,0 +1,25 @@
+# 只读协查：真实provider context语义失败
+
+2026-10-25。root要求协助另一agent诊断余项；本次只读context，capacity由tasks继续精确进程/原阶段诊断，未同时修改同文件。未发新的provider调用、未读取凭据、未改生产/测试断言、未操作正式PG或GUI。
+
+原证据：`output/phase-b/terminal/provider-acceptance/20261025T090646Z-subagent-context-b10adc18/{result.json,progress.jsonl,process-result.json}`。8次真实模型调用，进程exit1/semantic_failure，但原core关闭和独立DB/scratch清理均完成。
+
+确定观察：两次steer状态均REJECTED，原报告没有记录public_code/detail；全部8个provider_input没有任何`ROOT_CONTEXT_MARKER_ONE_7C1A`/`ROOT_CONTEXT_MARKER_TWO_9B4E`。worker COMPLETED/EXPLICIT，正确报告PARENT_CONTEXT里没有具体ROOT marker；它准确收到并列出MIDFLIGHT_GUIDANCE_MARKER_2D6F，inter_agent_entry_count=1。不能把这个结果解释为模型丢读、SDK吞消息或scope未结算，也不能把原语义失败改判通过。
+
+源码支持的最小边界解释：旧 `run_round10_subagent_dogfood._active_root_turn_id` 只等待私有 `session._active_turn_id != None`。Host `run_turn` 先 `_install_active_root_task_locked` 发布本地task/turnID，再由该异步task调用原runner开始canonical ROOT；原 `_repository/prompts.py` 在steer写事务中要求准确target row存在、scope ROOT、status RUNNING。故这两个边界之间可合法返回STEER_TARGET_STALE。由于原outcome没有code，本次拒绝具体为该code仍是与源码和原观察一致的高置信推断，不是已留存的原始事实。
+
+建议由tasks在output-only harness补真实准入门：至少确认exact canonical ROOT RUNNING再发两steer，并完整保存原KernelCommandOutcome非秘密字段；如需确定性阻止spawn超前，用原async执行/transport边界门暂停，而不是计时sleep或重试被拒command。现provider_input_installed_observer是同步callback，只能发信号，不能阻塞同一async loop或返回无人await的协程。若借原recording execution的async read_next门，须同时检查实际steer消费和PARENT_CONTEXT时点，不能仅凭PENDING臆测marker已给worker。
+
+保留原PENDING、COMPLETED、两ROOT marker+MIDFLIGHT、唯一message断言；不得复制marker入worker objective、重写SYSTEM/tools或放宽assert为仅含MIDFLIGHT。原epoch输入连续性检查仍保留；门仅研究本次测试安排，不新增生产等待队列/registry/总寿命cap。
+
+当前没有证明需要生产修复。已将上述事实与同步observer陷阱发给root/tasks，由tasks运行原断言下的最小补验；capacity的13calls及compaction挂起不由本报告解释或重复运行。
+
+## 后续独立capacity缺陷：ROOT stale-head四文件只读复审
+
+tasks随后在capacity原运行捕获了不同的生产问题：ROOT provider input head changed后，原确认ABSENT仍重复提交同一旧candidate；该问题与本报告context的两个REJECTED测试门不是同一个结论。任务分工由tasks修复，本人只读当前 `repository_errors.py`、`_repository/conversation.py`、`turn_admission.py`、`runner.py` 及 `test_round5_long_horizon_postgres.py` 新增用例，不运行或编辑。
+
+复审未发现该窄修新增具体阻断：仓库只把latest_entry_sequence变化分出PreparedRootInputHeadStale，workspace/Plan等其它冲突不冒充可重prepare；admission仍优先确认FULL原赢家及CONFLICT，只有ABSENT+明确typed stale才向runner释放旧准备。runner先close原dry prospective，再以同一intent/冻结model resolution读当前canonical候选；Hook commit在loop外，不重新执行，也不改已安装SYSTEM/tools或重置epoch。
+
+取消补丁在每次准备前核原intent.cause和Task.cancelling，避免确认await消费cancel后typed stale又准入。新增测试包含confirm线程门的cancel→仅一次accept、无ROOT/no provider，以及直接stale/未知后再stale的同intent/输入前缀断言。本人只读 `output/phase-b/terminal/provider-acceptance/20261025T092814Z-subagent-root-regression-34130612` 的process exit0、regression_cases6、独立DB drop事实，不冒领复跑结果。
+
+该结论是源码及已有确定性PG记录支持，不是新alpha7正式安装的capacity/context通过证据；原alpha6失败保留，后续实际候选复验仍由root/tasks处理。

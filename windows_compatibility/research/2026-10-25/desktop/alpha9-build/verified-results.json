@@ -1,0 +1,20 @@
+{
+  "ready": true,
+  "version": "0.1.0-alpha.9",
+  "python": "0.1.0a9",
+  "installer": {
+    "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\Pulsara-0.1.0-alpha.9-windows-x64.exe",
+    "bytes": 537003766
+  },
+  "manifest": {
+    "version": "0.1.0-alpha.9",
+    "sha256": "987a6947525351bca339f429a384a4d630632083158c9b8d94c06666e10c57e6",
+    "platform": "linux-x86_64"
+  },
+  "guestTarget": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.9",
+  "nsisSession2545Exit": 0,
+  "alpha8RetainedUninstalled": true,
+  "installedByThisAgent": false,
+  "tagCommitPublish": false,
+  "recoveryValidation": "../writer-recovery/verified-results.json"
+}

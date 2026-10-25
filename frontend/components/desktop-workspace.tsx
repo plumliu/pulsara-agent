@@ -219,9 +219,9 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab }: WorkspaceProps) 
       onLostPointerCapture={finishDrag} />
     <div className="workspace-surface">
     <header className="workspace-topbar">
-    <div className="workspace-toolbar">{desktopHost()?.platform !== 'linux' && toolbar}<button type="button" title="收起工作区" aria-label="收起工作区" onClick={onClose}><PanelRightClose size={15} /></button></div>
+    <div className="workspace-toolbar">{!['linux', 'win32'].includes(desktopHost()?.platform ?? '') && toolbar}<button type="button" title="收起工作区" aria-label="收起工作区" onClick={onClose}><PanelRightClose size={15} /></button></div>
     </header>
-    {desktopHost()?.platform === 'linux' && <div className="workspace-toolbar workspace-categories">{toolbar}</div>}
+    {['linux', 'win32'].includes(desktopHost()?.platform ?? '') && <div className="workspace-toolbar workspace-categories">{toolbar}</div>}
     <WorkspaceTabStrip key={sessionId} tabs={workspace.tabs} selectedId={selected?.id} activate={workspace.activate} close={closeTab} />
     <div className="workspace-content" role="tabpanel" key={selected?.id} ref={element => { if (element && selected?.view) { element.scrollTop = selected.view.top; element.scrollLeft = selected.view.left; } }} onScroll={event => { if (selected?.view) { selected.view.top = event.currentTarget.scrollTop; selected.view.left = event.currentTarget.scrollLeft; } }}>{selected?.browser ? <BrowserPanel record={selected.browser} tabs={workspace.browserTabs} isOpen={isOpen} /> : selected ? (selected.render ? selected.render() : renderTab(selected)) : isOpen ? <div className="workspace-empty"><FolderKanban size={28} /><strong>打开能力、任务或后台进程，也可以从对话打开文件。</strong></div> : null}</div>
     </div>

@@ -1,0 +1,38 @@
+{
+  "exitCode": 0,
+  "command": "npm --prefix desktop run package -- --win --x64 --publish never",
+  "files": [
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\Pulsara-0.1.0-alpha.9-windows-x64.exe",
+      "bytes": 537003766
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\pulsara.exe",
+      "bytes": 247185408
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\resources\\wsl-payload\\payload.tar",
+      "bytes": 1595791360
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\resources\\wsl-payload\\manifest.json",
+      "bytes": 143
+    },
+    {
+      "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\win-unpacked\\resources\\windows-interop\\pulsara-interop.exe",
+      "bytes": 17920
+    }
+  ],
+  "manifest": {
+    "version": "0.1.0-alpha.9",
+    "sha256": "987a6947525351bca339f429a384a4d630632083158c9b8d94c06666e10c57e6",
+    "platform": "linux-x86_64"
+  },
+  "packagedTarDigestVerified": true,
+  "packagedHelper": {
+    "stdout": "pulsara-interop 1\n",
+    "exitCode": 0
+  },
+  "nsisCompiled": true,
+  "installerRunByThisAgent": false
+}

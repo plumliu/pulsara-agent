@@ -1,0 +1,15 @@
+{
+  "config": {
+    "directory": "/home/plumwsl/.hostlease-1kim_7z7",
+    "home": "/home/plumwsl/.hostlease-1kim_7z7/home",
+    "workspace": "/home/plumwsl/.hostlease-1kim_7z7/workspace"
+  },
+  "formalClusterTouched": false,
+  "probeError": {
+    "message": "Command failed: C:\\WINDOWS\\System32\\wsl.exe -d Ubuntu -u plumwsl --cd /home/plumwsl/.hostlease-1kim_7z7/home --exec /usr/bin/env -- PULSARA_HOME=/home/plumwsl/.hostlease-1kim_7z7/home /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/bin/python3 /mnt/c/python_workspace/pulsara-agent/output/phase-b/terminal/writer-loss-fix/pytest_probe.py /mnt/c/python_workspace/pulsara-agent/output/phase-b/terminal/writer-loss-fix/regression-pg-1-config.json\nTraceback (most recent call last):\n  File \"/mnt/c/python_workspace/pulsara-agent/output/phase-b/terminal/writer-loss-fix/pytest_probe.py\", line 9, in <module>\n    import pytest\nModuleNotFoundError: No module named 'pytest'\n",
+    "stdout": "",
+    "stderr": "Traceback (most recent call last):\n  File \"/mnt/c/python_workspace/pulsara-agent/output/phase-b/terminal/writer-loss-fix/pytest_probe.py\", line 9, in <module>\n    import pytest\nModuleNotFoundError: No module named 'pytest'\n"
+  },
+  "pgResetCompleted": true,
+  "cleanup": "{\"removed\": \"/home/plumwsl/.hostlease-1kim_7z7\"}\n"
+}

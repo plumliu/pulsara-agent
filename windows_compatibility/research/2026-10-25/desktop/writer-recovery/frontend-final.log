@@ -1,0 +1,13 @@
+
+> pulsara-desktop-workbench@0.1.0-alpha.8 test
+> vitest run ../tests/frontend/pulsara-app.test.tsx ../tests/frontend/workbench-view.test.tsx --fileParallelism=false
+
+
+ RUN  v4.1.11 C:/python_workspace/pulsara-agent/frontend
+
+
+ Test Files  2 passed (2)
+      Tests  363 passed (363)
+   Start at  19:08:01
+   Duration  70.37s (transform 1.53s, setup 72ms, import 4.48s, tests 63.26s, environment 2.21s)
+

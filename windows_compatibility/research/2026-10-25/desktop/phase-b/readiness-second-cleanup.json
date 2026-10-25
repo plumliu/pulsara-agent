@@ -1,0 +1,8 @@
+{
+  "command": "\"C:\\python_workspace\\pulsara-agent\\desktop\\node_modules\\electron\\dist\\electron.exe\" C:/python_workspace/pulsara-agent/output/windows-b/host-setup/readiness-smoke.cjs",
+  "creation": 134373909928960260,
+  "pid": 16500,
+  "exactHandleCreation": 134373909928960262,
+  "terminatedFixtureMain": true,
+  "reason": "Fixture compared a string event name with the complete event object; prepared gate never released and no HEAD or operation submitted."
+}

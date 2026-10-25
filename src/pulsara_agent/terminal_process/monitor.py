@@ -454,9 +454,7 @@ class TerminalMonitorCoordinator:
             self._close_locked(registration, TerminalMonitorCloseReason.CANCELLED)
             return "cancelled"
 
-    def cancel_for_process(
-        self, process_id: str
-    ) -> TerminalMonitorCancelResult | None:
+    def cancel_for_process(self, process_id: str) -> TerminalMonitorCancelResult | None:
         """Close the exact optional live monitor associated with one process."""
 
         with self._lock:

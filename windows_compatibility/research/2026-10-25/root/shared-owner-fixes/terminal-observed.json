@@ -1,0 +1,13 @@
+{
+  "productionHead": "9e1150b7a4b16e212be36329182cbaa505c4df79",
+  "records": [
+    {"case": "foreground-timer-start-failure", "error": "review injected foreground Timer.start failure", "launching": {"host:inovwtwkd2ht2l54oo2yyy3pjq": 1}, "decisions": 1, "states": 0, "nextAdmissionError": "terminal process limit reached: max 1"},
+    {"case": "pty-popen-failure", "error": {"type": "FileNotFoundError", "errno": 2}, "masterOpenAfterException": true, "slaveOpenAfterException": false, "masterClosedByProbe": true, "launching": {}, "decisions": 0, "states": 0}
+  ],
+  "focusedCheck": {
+    "command": "wsl -d Ubuntu -u plumwsl --cd /home/plumwsl/workspaces/pulsara_agent --exec .venv/bin/python -m pytest tests/test_round2_terminal_output.py -q",
+    "result": "28 passed in 4.62s"
+  },
+  "productionEdited": false,
+  "processStartedByProbe": false
+}

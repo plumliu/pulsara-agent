@@ -1,0 +1,203 @@
+
+> pulsara-desktop-workbench@0.1.0-alpha.8 test
+> vitest run ../tests/frontend/pulsara-app.test.tsx ../tests/frontend/workbench-view.test.tsx
+
+
+ RUN  v4.1.11 C:/python_workspace/pulsara-agent/frontend
+
+Not implemented: navigation to another Document
+ ❯ ../tests/frontend/pulsara-app.test.tsx (194 tests | 2 failed) 51860ms
+     × shows friendly recovery failure and keeps the original API error in collapsed details 1133ms
+     × keeps the complete durable child-task history inside its session 369ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../tests/frontend/pulsara-app.test.tsx > PulsaraApp > shows friendly recovery failure and keeps the original API error in collapsed details
+AssertionError: expected "connect" to be called 2 times, but got 1 times
+
+Ignored nodes: comments, script, style
+<html
+  data-theme="light"
+>
+  <head />
+  <body>
+    <div>
+      <main
+        class="pulsara-shell desktop-shell is-workbench"
+      >
+        <header
+          class="desktop-titlebar "
+        >
+          <button
+            aria-label="切换会话侧栏"
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              class="lucide lucide-panel-left"
+              fill="none"
+              height="15"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              viewBox="0 0 24 24"
+              width="15"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <rect
+                height="18"
+                rx="2"
+                width="18"
+                x="3"
+                y="3"
+              />
+              <path
+                d="M9 3v18"
+              />
+            </svg>
+          </button>
+        </header>
+        <div
+          class="desktop-navigation"
+        >
+          <nav
+            aria-label="主要功能"
+            class="activity-rail"
+          >
+            <button
+              aria-label="返回 Pulsara 总览"
+              class="rail-logo"
+            >
+              <img
+                alt=""
+                aria-hidden="true"
+                class="brand-mark is-compact"
+                draggable="false"
+                height="46"
+                src="/assets/pulsara-icon.png"
+                width="46"
+              />
+            </button>
+            <div
+              class="rail-nav"
+            >
+              <button
+                aria-label="总览"
+                class="rail-button"
+                data-tooltip="总览"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-gauge"
+                  fill="none"
+                  height="17"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.8"
+                  viewBox="0 0 24 24"
+                  width="17"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="m12 14 4-4"
+                  />
+                  <path
+                    d="M3.34 19a10 10 0 1 1 17.32 0"
+                  />
+                </svg>
+              </button>
+              <button
+                aria-current="page"
+                aria-label="会话"
+                class="rail-button is-active"
+                data-tooltip="会话"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-message-circle"
+                  fill="none"
+                  height="17"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.8"
+                  viewBox="0 0 24 24"
+                  width="17"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"
+                  />
+                </svg>
+              </button>
+              <button
+                aria-label="能力"
+                class="rail-button"
+                data-tooltip="能力"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-blocks"
+                  fill="none"
+                  height="17"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.8"
+                  viewBox="0 0 24 24"
+                  width="17"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"
+                  />
+                  <rect
+                    height="8"
+                    rx="1"
+                    width="8"
+                    x="14"
+                    y="2"
+                  />
+                </svg>
+              </button>
+              <button
+                aria-label="记忆"
+                class="rail-button"
+                data-tooltip="记忆"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="luc...
+ ❯ ../tests/frontend/pulsara-app.test.tsx:54:44
+     52|     expect(connecting).toHaveBeenCalledTimes(1);
+     53|     fireEvent.click(screen.getByRole('button', {name:'重新连接'}));
+     54|     await waitFor(() => expect(connecting).toHaveBeenCalledTimes(2));
+       |                                            ^
+     55|     expect(adapter.createSession).not.toHaveBeenCalled();
+     56|   });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  ../tests/frontend/pulsara-app.test.tsx > PulsaraApp > keeps the complete durable child-task history inside its session
+AssertionError: expected "vi.fn()" to be called 1 times, but got 2 times
+ ❯ ../tests/frontend/pulsara-app.test.tsx:3784:47
+    3782|     });
+    3783|     expect(adapter.readSessionTask).toHaveBeenCalledTimes(reads);
+    3784|     expect(adapter.listSessionTaskActivities).toHaveBeenCalledTimes(ac…
+       |                                               ^
+    3785|     expect(background).not.toHaveBeenCalled();
+    3786|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  2 failed | 361 passed (363)
+   Start at  19:04:19
+   Duration  57.71s (transform 2.69s, setup 140ms, import 6.82s, tests 61.91s, environment 3.58s)
+

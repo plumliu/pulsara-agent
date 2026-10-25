@@ -1,0 +1,23 @@
+[
+  {
+    "mode": "--version",
+    "input": null,
+    "exit": 0,
+    "stdout": "pulsara-interop 1\r\n",
+    "stderr": ""
+  },
+  {
+    "mode": "--scope",
+    "input": "{\"distribution\":\"unsubmitted\"}",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "EndOfStreamException: Partial interop control frame\r\n"
+  },
+  {
+    "mode": "--probe",
+    "input": "{\"job\":\"unsubmitted\"}",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "EndOfStreamException: Partial interop control frame\r\n"
+  }
+]

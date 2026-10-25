@@ -1,0 +1,69 @@
+{
+  "passed": true,
+  "comparisons": {
+    "sameWindowsMain": true,
+    "sameKernel": true,
+    "samePostgres": true,
+    "sameNamespaceAndBoot": true,
+    "sameBusyLocks": true,
+    "sameControlSocket": true,
+    "samePublicCertificate": true,
+    "sameHttpListener": true,
+    "sameOriginalSession": true,
+    "validatedOriginalCertificateAndHealth": true
+  },
+  "windowsMainPid": 8324,
+  "kernelPid": 468,
+  "postgresPid": 498,
+  "systemid": "7700523439330484737",
+  "powerEventsChronological": [
+    {
+      "id": 506,
+      "recordId": 1448,
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "utc": "2026-10-25T10:21:37.0856655Z"
+    },
+    {
+      "id": 507,
+      "recordId": 1450,
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "utc": "2026-10-25T10:22:57.0034213Z"
+    }
+  ],
+  "event506To507Seconds": "79.9177558",
+  "snapshotIntervalSeconds": 239.920636,
+  "connectionSnapshots": {
+    "sameNetworkOwner": true,
+    "pid": 26656,
+    "creationFileTime": 134373958403754432,
+    "beforeLocalPorts": [
+      49377,
+      50062,
+      62023,
+      64405
+    ],
+    "afterLocalPorts": [
+      53145,
+      53255,
+      53894,
+      57212,
+      57929,
+      59373
+    ],
+    "oldPortsStillPresent": [],
+    "observedTcpState": 5,
+    "scope": "established snapshots only; does not prove uninterrupted TCP, SSE, or per-request delivery"
+  },
+  "observerCleanup": {
+    "windowsAndGuestCommandsReturned": true,
+    "linuxPidfdsAndWindowsHandlesClosedByFinally": true,
+    "readOnlySqlConnectionContextClosed": true,
+    "httpAgentFalseAndFiniteProbeExited": true,
+    "formalAppAndPgIntentionallyRemainRunning": true
+  },
+  "settingsRead": false,
+  "tokensOrAuthUrlRecorded": false,
+  "sleepTriggeredByObserver": false,
+  "restarts": false,
+  "businessOperationReplayedByObserver": false
+}

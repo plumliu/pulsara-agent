@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "config": {
+    "directory": "/home/plumwsl/.g0bpg-5x5bwhgf",
+    "source": "/home/plumwsl/.g0bpg-5x5bwhgf/source",
+    "home": "/home/plumwsl/.g0bpg-5x5bwhgf/home",
+    "uid": 1000
+  },
+  "running": {
+    "kernel.lock": {
+      "busy": false,
+      "inode": 146449
+    },
+    "pg-lifetime.lock": {
+      "busy": true,
+      "inode": 146453
+    },
+    "dataExists": true,
+    "outside": "preserved"
+  },
+  "removed": {
+    "kernel.lock": {
+      "busy": false,
+      "inode": 146449
+    },
+    "pg-lifetime.lock": {
+      "busy": false,
+      "inode": 146453
+    },
+    "dataExists": false,
+    "outside": "preserved"
+  },
+  "stopped": {
+    "kernel.lock": {
+      "busy": false,
+      "inode": 146449
+    },
+    "pg-lifetime.lock": {
+      "busy": false,
+      "inode": 146453
+    },
+    "dataExists": true,
+    "outside": "preserved"
+  },
+  "realOwner": true,
+  "productionClient": true,
+  "productionWslHost": true
+}

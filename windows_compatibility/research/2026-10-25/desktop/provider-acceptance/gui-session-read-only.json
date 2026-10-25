@@ -1,0 +1,133 @@
+{
+  "readOnly": true,
+  "home": "/home/plumwsl/.pulsara",
+  "postgres": {
+    "data": "/home/plumwsl/.pulsara/desktop/postgres",
+    "socket": "/home/plumwsl/.pulsara/desktop/socket",
+    "systemid": "7700523439330484737",
+    "address": null
+  },
+  "session": {
+    "id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+    "title": "WSL中文工作目录smoke.txt写入读取验收",
+    "workspace_id": "workspace:wiosodqkjdu7hp4r2d3vgho6lm"
+  },
+  "tools": [
+    {
+      "tool_name": "read_file",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/smoke.txt"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "status": "ok",
+        "path": "smoke.txt",
+        "content_revision": "revision:4svp7m34ilhf23mcw3dssog64ggeagewkzc5zf7swb52cdbst4mq",
+        "access_scope": "workspace",
+        "workspace_relative": true,
+        "offset": 1,
+        "limit": 2000,
+        "total_lines": 1,
+        "file_size": 31,
+        "truncated": false,
+        "content": "1|Windows WSL 中文验收通过"
+      }
+    },
+    {
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "ls -la --time-style=full-iso; echo '--- bytes ---'; wc -c smoke.txt; od -c smoke.txt | head -5; echo '--- sha256 ---'; sha256sum smoke.txt",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/home/plumwsl/workspaces/Windows 中文 验收 20261025",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "total 12\ndrwxr-xr-x 2 plumwsl plumwsl 4096 2026-10-25 16:59:51.031260725 +0800 .\ndrwxr-xr-x 7 plumwsl plumwsl 4096 2026-10-25 16:55:52.285353752 +0800 ..\n-rw------- 1 plumwsl plumwsl   31 2026-10-25 16:59:51.026878959 +0800 smoke.txt\n--- bytes ---\n31 smoke.txt\n0000000   W   i   n   d   o   w   s       W   S   L     344 270 255 346\n0000020 226 207 351 252 214 346 224 266 351 200 232 350 277 207  \\n\n0000037\n--- sha256 ---\ne4aaffb37c42ce5d6d82b6c72938dee18c4018965645dc97f2b07ba10c329f19  smoke.txt\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjU0OWI0MWNiZjM0ZjkxN2ZhNzBjNDQ2OGE2NGZkM2Y0N2Y5MmU2ZmQxODAyZjU4YTFiZjgwYmU3NWQ2YTIxYzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOjNlbXhvZnI0d3VqaHkzN3p0ZGN3d3p2bHFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo1MDAsInN0cmVhbV9pZCI6InN0cmVhbTplYXNoNWZidnFlaGR0b2w0d2VicWN1aGFtbSJ9fQ",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "process:3emxofr4wujhy37ztdcwwzvlqa",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjJmYzczZDhmNDgwZGE4NGYxNDhmNjFlYTc4YWFlYmM1ZjdlMzM5ZTI2YTZjZjFlZDQ1YjRjZDY4ZjFjODQxZDYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOjNlbXhvZnI0d3VqaHkzN3p0ZGN3d3p2bHFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06ZWFzaDVmYnZxZWhkdG9sNHdlYnFjdWhhbW0ifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "tool_name": "read_file",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/AGENTS.md"
+      },
+      "result_state": "APPLICATION_ERROR",
+      "result": {
+        "error": "FILE_NOT_FOUND",
+        "message": "The requested file does not exist.",
+        "path": "AGENTS.md",
+        "_hint": "Check the path. Use write_file only when creating a new file."
+      }
+    },
+    {
+      "tool_name": "terminal",
+      "tool_arguments": {
+        "command": "pwd; ls -la",
+        "workdir": "/home/plumwsl/workspaces/Windows 中文 验收 20261025"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/home/plumwsl/workspaces/Windows 中文 验收 20261025",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "/home/plumwsl/workspaces/Windows 中文 验收 20261025\ntotal 8\ndrwxr-xr-x 2 plumwsl plumwsl 4096 Oct 25 16:54 .\ndrwxr-xr-x 7 plumwsl plumwsl 4096 Oct 25 16:55 ..\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjkxNTY0ZjM0NzQxNWQ5NTQ5ZjU2MjdjNjAyMjA2NDcwZDViNTIyODgxMTEyMmRjNWIyMzQ3YjBiNjI1YzkzY2IiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmpvZ3dvcGZvN2RvZ3BpZm9zaHFiYjN4bm1tIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxNjMsInN0cmVhbV9pZCI6InN0cmVhbTpxeWI3eWJpcGZpazZxdW5obDQzcWNueWNudSJ9fQ",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "process:jogwopfo7dogpifoshqbb3xnmm",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjYyZTRlMWNlZWQ4ZGVhNTZlOGExY2Y4NDU0ZmNkMzQ5MTU4MDI4YjkwYTcwOWQwMzhiYmY5NzY4YTRlNWY1MTQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpkaHRuc2txcXZvaWh3aml6cmF5emJudHBsYSIsInByb2Nlc3NfaWQiOiJwcm9jZXNzOmpvZ3dvcGZvN2RvZ3BpZm9zaHFiYjN4bm1tIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJzdHJlYW06cXliN3liaXBmaWs2cXVuaGw0M3FjbnljbnUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "tool_name": "write_file",
+      "tool_arguments": {
+        "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/smoke.txt",
+        "content": "Windows WSL 中文验收通过\n"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "status": "ok",
+        "path": "smoke.txt",
+        "content_revision": "revision:4svp7m34ilhf23mcw3dssog64ggeagewkzc5zf7swb52cdbst4mq",
+        "bytes_written": 31,
+        "files_modified": [
+          "smoke.txt"
+        ]
+      }
+    }
+  ],
+  "file": {
+    "path": "/home/plumwsl/workspaces/Windows 中文 验收 20261025/smoke.txt",
+    "bytes": 31,
+    "text": "Windows WSL 中文验收通过\n",
+    "mode": "0o600",
+    "uid": 1000,
+    "CRLF": 0
+  },
+  "assertions": {
+    "writeSuccess": true,
+    "readSuccess": true
+  }
+}

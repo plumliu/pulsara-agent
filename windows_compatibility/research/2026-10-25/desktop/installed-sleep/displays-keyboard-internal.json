@@ -1,0 +1,80 @@
+{
+  "utc": "2026-10-25T10:35:10.093521+00:00",
+  "activeDisplayCount": 2,
+  "monitors": [
+    {
+      "display": "\\\\.\\DISPLAY6",
+      "primary": true,
+      "resolutionPixels": [
+        1920,
+        1080
+      ],
+      "desktopRectPixels": [
+        0,
+        0,
+        1920,
+        1080
+      ],
+      "effectiveDpi": [
+        96,
+        96
+      ],
+      "effectiveScalePercent": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "display": "\\\\.\\DISPLAY1",
+      "primary": false,
+      "resolutionPixels": [
+        2560,
+        1600
+      ],
+      "desktopRectPixels": [
+        1920,
+        0,
+        4480,
+        1600
+      ],
+      "effectiveDpi": [
+        144,
+        144
+      ],
+      "effectiveScalePercent": [
+        150.0,
+        150.0
+      ]
+    }
+  ],
+  "observerProcessDpiAwareness": 2,
+  "loadedHkl": [
+    "0x8040804"
+  ],
+  "pulsaraPid": 8324,
+  "visiblePulsaraWindowThreadLayouts": [
+    {
+      "threadId": 36108,
+      "hkl": "0x8040804",
+      "languageIdHex": "0804",
+      "windowRectPixels": [
+        2061,
+        96,
+        4245,
+        1488
+      ],
+      "minimized": false,
+      "monitorDisplay": "\\\\.\\DISPLAY1",
+      "monitorEffectiveDpi": [
+        144,
+        144
+      ],
+      "windowDpi": 144,
+      "windowScalePercent": 150.0
+    }
+  ],
+  "deviceSerialNumbersCollected": false,
+  "displayOrInputSettingsChanged": false,
+  "uiControlled": false,
+  "altGrSemantics": "HKL values and a right Alt key do not alone prove physical AltGr character behavior."
+}

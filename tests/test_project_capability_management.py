@@ -91,6 +91,7 @@ class _Session:
             workspace_kind="project",
         )
         self.refresh_requests = 0
+        self._renewal_task = SimpleNamespace(add_done_callback=lambda callback: None)
         self.extensions = object()
 
     def inspect_capability_catalog(self):

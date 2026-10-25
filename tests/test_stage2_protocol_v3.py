@@ -388,6 +388,7 @@ class _PresentationNoticeInteractions:
 
 def test_stage2_presentation_notice_is_ephemeral_and_controller_bound() -> None:
     host = object.__new__(KernelHostSession)
+    host._writer_renewal_failure = None
     interactions = _PresentationNoticeInteractions('attachment:7cx2vyhggdz6wnr5qmqinptwwq')
     host._interactions = interactions
     host._presentation_notices = {}
@@ -854,6 +855,7 @@ def _removed_stage2_host_exposes_job_result_acceptance_to_production_protocol() 
             return AcceptedEntry('entry:vpv7agjg6bk6d3zu3bspq54g4q', 'turn:b565wrncq4ezfqthehjqni5ilm', 4, 7)
 
     host = object.__new__(KernelHostSession)
+    host._writer_renewal_failure = None
     host._closing = False
     host._deadlines = KernelExecutionDeadlineFactory()
     host._runner = _Runner()

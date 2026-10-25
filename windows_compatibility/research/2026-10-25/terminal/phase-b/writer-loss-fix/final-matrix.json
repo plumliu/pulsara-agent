@@ -1,0 +1,122 @@
+{
+  "historicalInstalledVersion": "0.1.0a7",
+  "baseline": "idle-baseline-result.json",
+  "sourceCandidate": true,
+  "hostFreezeUtc": "2026-10-25T11:05:03.6377037Z",
+  "realCases": [
+    {
+      "mode": "expired-idle",
+      "session": "session:b5gp5hmexyhcsrsrm4xqcboose",
+      "oldGuard": "HostWriterGuard(session_id='session:b5gp5hmexyhcsrsrm4xqcboose', writer_generation=1, writer_owner_id='host:2nm63ukedvpgkl5zwdswae4m3q')",
+      "expiredRow": [
+        1,
+        "host:2nm63ukedvpgkl5zwdswae4m3q",
+        "2026-10-25 19:08:15.764317+08:00"
+      ],
+      "status": "passed",
+      "originalCoreShutdown": "completed"
+    },
+    {
+      "mode": "expired-with-windows",
+      "session": "session:xyrrdvgczrpvrqv2yzva53waci",
+      "oldGuard": "HostWriterGuard(session_id='session:xyrrdvgczrpvrqv2yzva53waci', writer_generation=1, writer_owner_id='host:hqpetbxt7aaii2pqsuq32igbze')",
+      "expiredRow": [
+        1,
+        "host:hqpetbxt7aaii2pqsuq32igbze",
+        "2026-10-25 19:08:16.720741+08:00"
+      ],
+      "physical": {
+        "completion": true,
+        "readerAlive": false,
+        "watcherAlive": false,
+        "scopeJoined": true,
+        "scopeWorkerAlive": false,
+        "helperExit": 0,
+        "scopeDirectoryRetired": true
+      },
+      "resumedGuard": "HostWriterGuard(session_id='session:xyrrdvgczrpvrqv2yzva53waci', writer_generation=2, writer_owner_id='host:zft5fbjzlaizds2sqefcgxqdfu')",
+      "status": "passed",
+      "originalCoreShutdown": "completed"
+    },
+    {
+      "mode": "renewal-io",
+      "session": "session:amd45rpyakvpoo5fhieihgq3oa",
+      "oldGuard": "HostWriterGuard(session_id='session:amd45rpyakvpoo5fhieihgq3oa', writer_generation=1, writer_owner_id='host:kipr6xp2plinduec2mafa4eefm')",
+      "resumedGuard": "HostWriterGuard(session_id='session:amd45rpyakvpoo5fhieihgq3oa', writer_generation=2, writer_owner_id='host:pdrin5zygofbuhmycirjg3bjvq')",
+      "status": "passed",
+      "originalCoreShutdown": "completed"
+    },
+    {
+      "mode": "controller-expired-concurrent-resume",
+      "status": "passed",
+      "oldGuard": "HostWriterGuard(session_id='session:i4rxvonmnaduipjtzdirj6paua', writer_generation=1, writer_owner_id='host:prch627sp3ajhzz7aurwmeaify')",
+      "newGuard": "HostWriterGuard(session_id='session:i4rxvonmnaduipjtzdirj6paua', writer_generation=2, writer_owner_id='host:5lyznepdic56n7c2nbvuaxlfoq')",
+      "sameHandle": true,
+      "oldClosed": true,
+      "originalControllerClose": "completed",
+      "originalCoreShutdown": "completed"
+    }
+  ],
+  "focusedPostgresTests": 9,
+  "relatedTests": {
+    "passed": 315,
+    "skipped": 1
+  },
+  "latestControllerBridgeTests": 29,
+  "cleanup": {
+    "homes": [
+      {
+        "result": "baseline-result.json",
+        "directory": "/home/plumwsl/.hostlease-58q174am",
+        "exists": false,
+        "originalPgResetCompleted": true
+      },
+      {
+        "result": "candidate-1-result.json",
+        "directory": "/home/plumwsl/.hostlease-n7fopqt5",
+        "exists": false,
+        "originalPgResetCompleted": true
+      },
+      {
+        "result": "candidate-2-result.json",
+        "directory": "/home/plumwsl/.hostlease-enw5j_tb",
+        "exists": false,
+        "originalPgResetCompleted": true
+      },
+      {
+        "result": "candidate-controller-final-result.json",
+        "directory": "/home/plumwsl/.hostlease-_hgka8qh",
+        "exists": false,
+        "originalPgResetCompleted": true
+      },
+      {
+        "result": "candidate-controller-result.json",
+        "directory": "/home/plumwsl/.hostlease-vwyfgn1w",
+        "exists": false,
+        "originalPgResetCompleted": true
+      },
+      {
+        "result": "idle-baseline-result.json",
+        "directory": "/home/plumwsl/.hostlease-6wzv8z86",
+        "exists": false,
+        "originalPgResetCompleted": true
+      },
+      {
+        "result": "regression-pg-1-result.json",
+        "directory": "/home/plumwsl/.hostlease-1kim_7z7",
+        "exists": false,
+        "originalPgResetCompleted": true
+      },
+      {
+        "result": "regression-pg-2-result.json",
+        "directory": "/home/plumwsl/.hostlease-6iqcbjtq",
+        "exists": false,
+        "originalPgResetCompleted": true
+      }
+    ],
+    "remainingExactOwned": [],
+    "snapshot": "/home/plumwsl/.hostlease-source-vccncr0j",
+    "snapshotRemoved": true,
+    "formalClusterOperation": "none"
+  }
+}

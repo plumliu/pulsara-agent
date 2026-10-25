@@ -1,0 +1,93 @@
+{
+  "utc": "2026-10-25T10:52:07.433992+00:00",
+  "processes": [
+    {
+      "pid": 498,
+      "parent": 491,
+      "state": "S",
+      "starttime": "23109",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres",
+      "formalHomeEnvironment": true,
+      "interopModuleMentioned": false,
+      "desktopRuntimeMentioned": false,
+      "runtimeWaitOwner": false,
+      "inlinePython": true
+    },
+    {
+      "pid": 514,
+      "parent": 498,
+      "state": "S",
+      "starttime": "23144",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres",
+      "formalHomeEnvironment": false,
+      "interopModuleMentioned": false,
+      "desktopRuntimeMentioned": false,
+      "runtimeWaitOwner": false,
+      "inlinePython": false
+    },
+    {
+      "pid": 515,
+      "parent": 498,
+      "state": "S",
+      "starttime": "23144",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres",
+      "formalHomeEnvironment": false,
+      "interopModuleMentioned": false,
+      "desktopRuntimeMentioned": false,
+      "runtimeWaitOwner": false,
+      "inlinePython": false
+    },
+    {
+      "pid": 517,
+      "parent": 498,
+      "state": "S",
+      "starttime": "23150",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres",
+      "formalHomeEnvironment": false,
+      "interopModuleMentioned": false,
+      "desktopRuntimeMentioned": false,
+      "runtimeWaitOwner": false,
+      "inlinePython": false
+    },
+    {
+      "pid": 518,
+      "parent": 498,
+      "state": "S",
+      "starttime": "23150",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres",
+      "formalHomeEnvironment": false,
+      "interopModuleMentioned": false,
+      "desktopRuntimeMentioned": false,
+      "runtimeWaitOwner": false,
+      "inlinePython": false
+    },
+    {
+      "pid": 519,
+      "parent": 498,
+      "state": "S",
+      "starttime": "23150",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres",
+      "formalHomeEnvironment": false,
+      "interopModuleMentioned": false,
+      "desktopRuntimeMentioned": false,
+      "runtimeWaitOwner": false,
+      "inlinePython": false
+    },
+    {
+      "pid": 53665,
+      "parent": 53664,
+      "state": "S",
+      "starttime": "340742",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/bin/python3.12",
+      "formalHomeEnvironment": true,
+      "interopModuleMentioned": false,
+      "desktopRuntimeMentioned": true,
+      "runtimeWaitOwner": false,
+      "inlinePython": true
+    }
+  ],
+  "observerPidExcluded": 53859,
+  "readOnly": true,
+  "argsOrEnvironmentSerialized": false,
+  "scope": "current user visible alpha7 executable path or exact formal PULSARA_HOME; not a complete Windows job membership proof"
+}

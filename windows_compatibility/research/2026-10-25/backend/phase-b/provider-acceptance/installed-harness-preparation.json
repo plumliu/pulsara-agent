@@ -1,0 +1,15 @@
+{
+  "directory": "/home/plumwsl/workspaces/.provider-accept-80k6ptzi",
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/bin/python3",
+  "script": "/home/plumwsl/workspaces/.provider-accept-80k6ptzi/run_terminal_wsl.py",
+  "scratch_root": "/home/plumwsl/workspaces/.provider-accept-80k6ptzi/scratch",
+  "uid": 1000,
+  "imports": {
+    "exit": 0,
+    "stdout": "Installed package: /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/__init__.py\nImports resolved; no settings read, database connection, scope creation, or provider call.\n",
+    "stderr": ""
+  },
+  "saved_settings_read": false,
+  "database_connected": false,
+  "provider_called": false
+}

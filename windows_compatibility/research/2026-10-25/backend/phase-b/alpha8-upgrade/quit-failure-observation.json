@@ -1,0 +1,36 @@
+{
+  "observed_at": "2026-10-25T10:48:43.188706+00:00",
+  "identity": {
+    "system_identifier": "7700523439330484737",
+    "data": "/home/plumwsl/.pulsara/desktop/postgres",
+    "socket": "/home/plumwsl/.pulsara/desktop/socket",
+    "postmaster_start": "2026-10-25 17:57:33.694648+08"
+  },
+  "sessions": [
+    {
+      "id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "writer_generation": 4,
+      "writer_lease_owner_id": "host:7qax3apinsxdmcnce6tnx5hlbq",
+      "writer_lease_expires_at": "2026-10-25 18:21:57.736407+08",
+      "lease_unexpired": false,
+      "latest_entry_sequence": 28,
+      "latest_event_sequence": 70,
+      "updated_at": "2026-10-25 18:21:27.744315+08"
+    }
+  ],
+  "connections": [
+    {
+      "pid": 53588,
+      "datname": "pulsara",
+      "usename": "pulsara_admin",
+      "application_name": "",
+      "backend_start": "2026-10-25 18:48:43.190334+08",
+      "xact_start": "2026-10-25 18:48:43.192397+08",
+      "state": "active",
+      "wait_event_type": null,
+      "wait_event": null
+    }
+  ],
+  "data_inode": 171484,
+  "postmaster_pid": 498
+}

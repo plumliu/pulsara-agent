@@ -1,0 +1,16 @@
+{
+  "directory": "/home/plumwsl/workspaces/.provider-tasks-a079alrb",
+  "scratch_root": "/home/plumwsl/.pvt-1vw1i3vp",
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/bin/python3",
+  "script": "/home/plumwsl/workspaces/.provider-tasks-a079alrb/run_remaining_wsl.py",
+  "bootstrap": "import sys,runpy,pulsara_agent;assert pulsara_agent.__file__.startswith('/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/'); print('Installed package: '+pulsara_agent.__file__,flush=True);sys.path.insert(0,sys.argv.pop(1));sys.argv=sys.argv[1:];runpy.run_path(sys.argv[0],run_name='__main__')",
+  "uid": 1000,
+  "check": {
+    "exit": 0,
+    "stdout": "Installed package: /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/__init__.py\nInstalled owners and original runners imported; no saved settings, PG or provider accessed.\n",
+    "stderr": ""
+  },
+  "settings_read": false,
+  "pg_connected": false,
+  "provider_called": false
+}

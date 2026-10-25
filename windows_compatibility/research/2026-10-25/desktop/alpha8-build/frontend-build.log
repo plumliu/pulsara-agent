@@ -1,0 +1,181 @@
+
+> pulsara-desktop-workbench@0.1.0-alpha.8 build:desktop
+> vite build --config vite.desktop.config.ts
+
+vite v8.0.13 building client environment for production...
+[2K
+transforming...✓ 4505 modules transformed.
+rendering chunks...
+computing gzip size...
+../src/pulsara_agent/desktop_app/static/index.html                                           0.92 kB │ gzip:   0.52 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size3-Regular-CTq5MqoE.woff             4.42 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size4-Regular-Dl5lxZxV.woff2            4.92 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size2-Regular-Dy4dx90m.woff2            5.20 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size1-Regular-mCD8mA8B.woff2            5.46 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size4-Regular-BF-4gkZK.woff             5.98 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size2-Regular-oD1tc_U0.woff             6.18 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size1-Regular-C195tn64.woff             6.49 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Regular-Di6jR-x-.woff2      6.90 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Bold-Dq_IR9rO.woff2         6.91 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size3-Regular-DgpXs0kz.ttf              7.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Regular-CTRA-rTL.woff       7.65 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Bold-BEiXGLvX.woff          7.71 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Script-Regular-D3wIWfF6.woff2           9.64 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Regular-DDBCnlJ7.woff2       10.34 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size4-Regular-DWFBv043.ttf             10.36 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Script-Regular-D5yQViql.woff           10.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Regular-CTYiF6lA.woff2         11.31 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Bold-CL6g_b3V.woff2            11.34 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size2-Regular-B7gKUWhC.ttf             11.50 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Italic-C3H0VqGB.woff2        12.02 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Bold-D1sUS0GD.woff2          12.21 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Size1-Regular-Dbsnue_I.ttf             12.22 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Regular-CS6fqUqJ.woff        12.31 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Regular-wX97UBjC.ttf       12.34 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Caligraphic-Bold-ATXxdsX0.ttf          12.36 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Regular-Dxdc4cR9.woff          13.20 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Bold-BsDP51OF.woff             13.29 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Typewriter-Regular-CO6r4hn1.woff2      13.56 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Italic-DN2j7dab.woff         14.11 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Bold-DbIhKOiC.woff           14.40 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Typewriter-Regular-C0xS9mPB.woff       16.02 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-BoldItalic-CZnvNsCZ.woff2         16.40 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-Italic-t53AETM-.woff2             16.44 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Script-Regular-C5JkGWo-.ttf            16.64 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-BoldItalic-DxDJ3AOS.woff2         16.78 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Italic-NWA7e6Wa.woff2             16.98 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-BoldItalic-iY-2wyZ7.woff          18.66 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-Italic-DA0__PXp.woff              18.74 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-BoldItalic-SpSLRI95.woff          19.41 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Regular-BNo7hRIc.ttf         19.43 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Regular-CB_wures.ttf           19.57 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Fraktur-Bold-BdnERNNW.ttf              19.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Italic-BMLOBm91.woff              19.67 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Italic-YYjJ1zSn.ttf          22.36 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_SansSerif-Bold-CFMepnvq.ttf            24.50 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Bold-Cx986IdX.woff2               25.32 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Regular-B22Nviop.woff2            26.27 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Typewriter-Regular-D3Ib7_Hf.ttf        27.55 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_AMS-Regular-BQhdFMY1.woff2             28.07 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Bold-Jm3AIy58.woff                29.91 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Regular-Dr94JaBh.woff             30.77 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-BoldItalic-B3XSjfu4.ttf           31.19 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Math-Italic-flOr_0UB.ttf               31.30 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-BoldItalic-DzxPMmG6.ttf           32.96 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_AMS-Regular-DMm9YOAa.woff              33.51 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Italic-3WenGoN9.ttf               33.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Bold-waoOVXN0.ttf                 51.33 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_Main-Regular-ypZvNtVU.ttf              53.58 kB
+../src/pulsara_agent/desktop_app/static/assets/KaTeX_AMS-Regular-DRggAlZN.ttf               63.63 kB
+../src/pulsara_agent/desktop_app/static/assets/workspace-directory-picker-BYggWTzY.css       1.60 kB │ gzip:   0.60 kB
+../src/pulsara_agent/desktop_app/static/assets/index-D6uFNw_L.css                          325.49 kB │ gzip:  59.71 kB
+../src/pulsara_agent/desktop_app/static/assets/pie-WAS4IAKB-7Jg_-HIs.js                      0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/info-A6RAGUB7-BVZXy1Gb.js                     0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/radar-RG4KPBEZ-DawZho6C.js                    0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/packet-AYTQ26CC-va4y49Ea.js                   0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/cynefin-OW5HDTMX-mIu8K7A4.js                  0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/treemap-WGGIJYW6-DGRxX71A.js                  0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/wardley-WFR3VGLG-Bk5sdPxb.js                  0.08 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/gitGraph-4MIJSDKK-BG9RgvnM.js                 0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-74A4TZTK-CJpqukkl.js                 0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/treeView-Q6P3EWNA-CIafEAPa.js                 0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-peg-WCYAUIDC-BGjgs46E.js             0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/architecture-7GRP2DOG-C2fES-Pf.js             0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-abnf-HS5TGJTU-BvpXDiv7.js            0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/railroad-ebnf-LZEXJU2U-CeyS1Rbt.js            0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/eventmodeling-NTZA5JFV-2JMSoEKz.js            0.09 kB │ gzip:   0.10 kB
+../src/pulsara_agent/desktop_app/static/assets/array-C6OvARI4.js                             0.15 kB │ gzip:   0.15 kB │ map:     0.53 kB
+../src/pulsara_agent/desktop_app/static/assets/channel-BvPx2Q8u.js                           0.15 kB │ gzip:   0.16 kB │ map:     0.50 kB
+../src/pulsara_agent/desktop_app/static/assets/init-CwXEbkNy.js                              0.18 kB │ gzip:   0.16 kB │ map:     1.02 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-Y2CYZVJY-5alngpbY.js                    0.20 kB │ gzip:   0.19 kB │ map:     0.71 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-2Q5K7J3B-DrgHGX6v.js                    0.24 kB │ gzip:   0.21 kB │ map:     0.81 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-JWPE2WC7-f6M12WIl.js                    0.27 kB │ gzip:   0.21 kB │ map:     0.81 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-XXDRQBXY-Cr-MbhLS.js                    0.31 kB │ gzip:   0.26 kB │ map:     0.99 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-6AEJRKK7-DTRMOxbq.js                    0.37 kB │ gzip:   0.29 kB │ map:     1.08 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-5VM5RSS4-DwymtPhe.js                    0.41 kB │ gzip:   0.31 kB │ map:     0.75 kB
+../src/pulsara_agent/desktop_app/static/assets/flowDiagram-KWPJA3E3-CIxnCV-V.js              0.61 kB │ gzip:   0.32 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-WEXAMYUT-CUVlChtG.js                    0.62 kB │ gzip:   0.44 kB │ map:     2.06 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-J5ZVWO5B-L9Bldt2w.js                    0.68 kB │ gzip:   0.47 kB │ map:     2.62 kB
+../src/pulsara_agent/desktop_app/static/assets/infoDiagram-VRGFBTTK-BWyMArAq.js              0.71 kB │ gzip:   0.46 kB │ map:     2.05 kB
+../src/pulsara_agent/desktop_app/static/assets/swimlanesDiagram-TC7HE7FX-MOvoG6qN.js         0.93 kB │ gzip:   0.53 kB │ map:     1.58 kB
+../src/pulsara_agent/desktop_app/static/assets/sizeCapture-INFHLROL-DDgpHy-w.js              0.93 kB │ gzip:   0.55 kB │ map:     3.05 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-DUW6YSOI-BUgE4Sfw.js                    0.94 kB │ gzip:   0.50 kB │ map:     2.50 kB
+../src/pulsara_agent/desktop_app/static/assets/line-Cj3P6JiP.js                              0.98 kB │ gzip:   0.51 kB │ map:     3.45 kB
+../src/pulsara_agent/desktop_app/static/assets/ordinal-FpC1W7ak.js                           1.21 kB │ gzip:   0.60 kB │ map:     4.76 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-5DYCD2WN-CuMTp45I.js                    1.47 kB │ gzip:   0.84 kB │ map:     4.53 kB
+../src/pulsara_agent/desktop_app/static/assets/railroadDiagram-XR7U4H2S-BSMXyM4m.js          1.72 kB │ gzip:   0.82 kB │ map:     4.76 kB
+../src/pulsara_agent/desktop_app/static/assets/abnfDiagram-O67JEVCF-BMjfqfMa.js              1.90 kB │ gzip:   0.95 kB │ map:     5.74 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-7PRAP22T-CFa_j76f.js                    2.00 kB │ gzip:   0.99 kB │ map:     6.51 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-GWA4HPMP-BT-Yk3b3.js                    2.02 kB │ gzip:   0.93 kB │ map:     6.45 kB
+../src/pulsara_agent/desktop_app/static/assets/pegDiagram-GJSIUBJH-Bu7jYZsI.js               2.07 kB │ gzip:   0.99 kB │ map:     6.11 kB
+../src/pulsara_agent/desktop_app/static/assets/ebnfDiagram-ZINNZB2B-DqikS0NJ.js              2.11 kB │ gzip:   0.94 kB │ map:     6.26 kB
+../src/pulsara_agent/desktop_app/static/assets/dist-CMZ0oX8K.js                              2.20 kB │ gzip:   1.00 kB │ map:     6.72 kB
+../src/pulsara_agent/desktop_app/static/assets/path-BcOsB_w5.js                              2.35 kB │ gzip:   1.03 kB │ map:     9.06 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-GNY47TPC-BZ0Hlhym.js                    3.47 kB │ gzip:   1.54 kB │ map:     5.71 kB
+../src/pulsara_agent/desktop_app/static/assets/arc-BztF2Uz6.js                               3.51 kB │ gzip:   1.50 kB │ map:    15.26 kB
+../src/pulsara_agent/desktop_app/static/assets/workspace-directory-picker-rzKYOmq8.js        3.75 kB │ gzip:   1.73 kB │ map:    12.55 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-MLGK6HIB-fLfzqhz1.js                  4.33 kB │ gzip:   1.90 kB │ map:    12.21 kB
+../src/pulsara_agent/desktop_app/static/assets/defaultLocale-DvVxr7SB.js                     4.69 kB │ gzip:   2.16 kB │ map:    20.92 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-NETBCI7D-m3WmFF_5.js                    5.49 kB │ gzip:   2.54 kB │ map:    22.40 kB
+../src/pulsara_agent/desktop_app/static/assets/linear-CHlXZGtJ.js                            5.56 kB │ gzip:   2.29 kB │ map:    25.38 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-742MDFTN-XMW4nMfZ.js                    5.88 kB │ gzip:   2.72 kB │ map:    25.43 kB
+../src/pulsara_agent/desktop_app/static/assets/graphlib-DzpHtZZd.js                          5.90 kB │ gzip:   1.86 kB │ map:    44.09 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-MPIPVDR6-DnFAzUBe.js                  6.11 kB │ gzip:   2.61 kB │ map:    19.21 kB
+../src/pulsara_agent/desktop_app/static/assets/pieDiagram-5QR66LMP-DUxmFW4f.js               6.29 kB │ gzip:   2.65 kB │ map:    20.80 kB
+../src/pulsara_agent/desktop_app/static/assets/_basePickBy-BW6drPW8.js                       7.63 kB │ gzip:   3.19 kB │ map:    58.64 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-CDSNMT55-DSPKCnl0.js                  8.25 kB │ gzip:   3.70 kB │ map:    26.07 kB
+../src/pulsara_agent/desktop_app/static/assets/cynefinDiagram-VND7K2PF-Dd2poC1W.js           9.96 kB │ gzip:   3.55 kB │ map:    31.19 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-ATOU4E4O-BLqanpJk.js                 10.66 kB │ gzip:   4.14 kB │ map:    34.99 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-3FUC2YCW-DtLESnns.js                   10.76 kB │ gzip:   4.35 kB │ map:    38.71 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-UA2S7LBM-DUeX4SC2.js                   14.91 kB │ gzip:   4.25 kB │ map:    48.71 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-GTNCS2PH-DCqtRNR2.js                   15.69 kB │ gzip:   4.40 kB │ map:    48.49 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-3UASUU5V-BWoFkDsv.js                 15.79 kB │ gzip:   5.56 kB │ map:    56.95 kB
+../src/pulsara_agent/desktop_app/static/assets/ishikawaDiagram-OU5B5YK6-BOesFy9m.js         17.40 kB │ gzip:   6.59 kB │ map:    58.41 kB
+../src/pulsara_agent/desktop_app/static/assets/_baseUniq-D4ARhvv0.js                        18.28 kB │ gzip:   6.77 kB │ map:   151.68 kB
+../src/pulsara_agent/desktop_app/static/assets/kanban-definition-PNTS6WVX-Cr0T6mKS.js       20.41 kB │ gzip:   7.23 kB │ map:    64.19 kB
+../src/pulsara_agent/desktop_app/static/assets/dist-BSkJMMTR.js                             22.12 kB │ gzip:   8.41 kB │ map:    41.47 kB
+../src/pulsara_agent/desktop_app/static/assets/sankeyDiagram-IPEJSGJF-DUFFlBbT.js           22.87 kB │ gzip:   8.31 kB │ map:    82.36 kB
+../src/pulsara_agent/desktop_app/static/assets/journeyDiagram-ZHPQQLJL-BSUq7tqh.js          23.27 kB │ gzip:   8.22 kB │ map:    74.51 kB
+../src/pulsara_agent/desktop_app/static/assets/mindmap-definition-NLK3R4M7-CgChgi55.js      23.55 kB │ gzip:   8.08 kB │ map:    72.70 kB
+../src/pulsara_agent/desktop_app/static/assets/wardleyDiagram-VNRHLVJA-C6fHJcCC.js          25.28 kB │ gzip:   6.59 kB │ map:    75.43 kB
+../src/pulsara_agent/desktop_app/static/assets/rough.esm-D894x0pr.js                        27.15 kB │ gzip:   8.90 kB │ map:    72.38 kB
+../src/pulsara_agent/desktop_app/static/assets/purify.es-CrDe5iEZ.js                        28.12 kB │ gzip:  11.12 kB │ map:   120.94 kB
+../src/pulsara_agent/desktop_app/static/assets/gitGraphDiagram-X574FWY7-CC2PGQ0-.js         29.07 kB │ gzip:   8.60 kB │ map:   110.14 kB
+../src/pulsara_agent/desktop_app/static/assets/timeline-definition-EJHVYXUP-CYF7yJfX.js     30.57 kB │ gzip:  10.10 kB │ map:   100.29 kB
+../src/pulsara_agent/desktop_app/static/assets/erDiagram-OPXOYQCR-CzyDTOwc.js               30.73 kB │ gzip:  10.61 kB │ map:    98.86 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-ZIGJFQKS-D840ONM-.js                   30.92 kB │ gzip:   8.56 kB │ map:   124.39 kB
+../src/pulsara_agent/desktop_app/static/assets/requirementDiagram-PLB6GJNP-D4oTkS_b.js      31.16 kB │ gzip:   9.88 kB │ map:    95.01 kB
+../src/pulsara_agent/desktop_app/static/assets/quadrantDiagram-O4NWA36T-DCMBKtQt.js         33.61 kB │ gzip:   9.79 kB │ map:   105.39 kB
+../src/pulsara_agent/desktop_app/static/assets/mermaid.core-Bmfay2sO.js                     35.49 kB │ gzip:  12.14 kB │ map:   110.98 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-Z7XXMR3K-DeB-JZGG.js                   37.46 kB │ gzip:   8.10 kB │ map:   110.75 kB
+../src/pulsara_agent/desktop_app/static/assets/dagre-6A5THRUB-VTz6HJZ2.js                   40.79 kB │ gzip:  14.59 kB │ map:   221.93 kB
+../src/pulsara_agent/desktop_app/static/assets/vennDiagram-UO4OBE2U-CaH0hBHC.js             41.27 kB │ gzip:  15.17 kB │ map:   174.48 kB
+../src/pulsara_agent/desktop_app/static/assets/stateDiagram-v2-GCMORJYK-DQvoq8ge.js         41.72 kB │ gzip:  13.97 kB │ map:   127.60 kB
+../src/pulsara_agent/desktop_app/static/assets/blockDiagram-BEXU5L5S-BFP1Dx6N.js            42.55 kB │ gzip:  13.91 kB │ map:   131.37 kB
+../src/pulsara_agent/desktop_app/static/assets/xychartDiagram-PMCCYNJV-rFuyPLdb.js          44.25 kB │ gzip:  12.27 kB │ map:   139.81 kB
+../src/pulsara_agent/desktop_app/static/assets/src-Ba3Syc4O.js                              45.77 kB │ gzip:  16.06 kB │ map:   186.41 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-LNGE3PJU-C8Pg9s9Q.js                   46.44 kB │ gzip:  15.58 kB │ map:   173.08 kB
+../src/pulsara_agent/desktop_app/static/assets/classDiagram-v2-NBCMYWYE-8Pycr0F7.js         49.86 kB │ gzip:  16.24 kB │ map:   147.59 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-MBY4JIJT-CYtH7--3.js                   51.96 kB │ gzip:  16.69 kB │ map:   129.76 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-7M6MHVWA-DmeHbJix.js                   62.89 kB │ gzip:  20.44 kB │ map:   190.22 kB
+../src/pulsara_agent/desktop_app/static/assets/c4Diagram-YGBWAQC7-DP4O7UUD.js               65.15 kB │ gzip:  18.66 kB │ map:   182.65 kB
+../src/pulsara_agent/desktop_app/static/assets/ganttDiagram-FUAMR5RP-cnootnm9.js            69.48 kB │ gzip:  22.81 kB │ map:   229.56 kB
+../src/pulsara_agent/desktop_app/static/assets/diagram-22UHCM2B-B1uUnaj3.js                 80.65 kB │ gzip:  25.25 kB │ map:   260.21 kB
+../src/pulsara_agent/desktop_app/static/assets/cose-bilkent-JH36ORCC-CYbUgOTn.js            81.49 kB │ gzip:  21.63 kB │ map:   288.40 kB
+../src/pulsara_agent/desktop_app/static/assets/swimlanes-2SLR337P-VH4kJgis.js              106.34 kB │ gzip:  36.19 kB │ map:   470.90 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-7INBJB4K-BCqZjE9K.js                  115.54 kB │ gzip:  29.23 kB │ map:   422.69 kB
+../src/pulsara_agent/desktop_app/static/assets/sequenceDiagram-PO4LG4MO-CJgdDKwp.js        117.50 kB │ gzip:  31.39 kB │ map:   336.67 kB
+../src/pulsara_agent/desktop_app/static/assets/architectureDiagram-NJMV4G6O-35J58Etq.js    149.39 kB │ gzip:  41.25 kB │ map:   561.33 kB
+../src/pulsara_agent/desktop_app/static/assets/usecaseDiagram-POWQR4AR-CGg3r33r.js         186.79 kB │ gzip:  50.12 kB │ map:   706.87 kB
+../src/pulsara_agent/desktop_app/static/assets/chunk-O7XYJQB3-B8X_86m5.js                  211.58 kB │ gzip:  28.63 kB │ map:   469.08 kB
+../src/pulsara_agent/desktop_app/static/assets/cytoscape.esm-KjZwHLwX.js                   435.62 kB │ gzip: 138.01 kB │ map: 1,704.60 kB
+../src/pulsara_agent/desktop_app/static/assets/mermaid-parser.core-Cq-2WO8S.js             678.12 kB │ gzip: 146.63 kB │ map: 2,012.87 kB
+../src/pulsara_agent/desktop_app/static/assets/elk-276RUBZZ-B9kzXs7s.js                  1,459.08 kB │ gzip: 453.21 kB │ map: 4,110.36 kB
+../src/pulsara_agent/desktop_app/static/assets/index-rI4KiH0F.js                         2,029.66 kB │ gzip: 612.43 kB │ map: 7,707.01 kB
+
+✓ built in 3.76s
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.

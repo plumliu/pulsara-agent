@@ -1,0 +1,55 @@
+Building wheel...
+Successfully built /tmp/pulsara-wheel-n9tk10i7/pulsara_agent-0.1.0a6-py3-none-linux_x86_64.whl
+Using Python 3.12.15 environment at: /home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python
+Resolved 1 package in 1ms
+Prepared 1 package in 51ms
+Uninstalled 1 package in 45ms
+Installed 1 package in 117ms
+Bytecode compiled 357 files in 191ms
+ - pulsara-agent==0.1.0a6 (from file:///tmp/pulsara-wheel-speiq2i3/pulsara_agent-0.1.0a6-py3-none-linux_x86_64.whl)
+ + pulsara-agent==0.1.0a6 (from file:///tmp/pulsara-wheel-n9tk10i7/pulsara_agent-0.1.0a6-py3-none-linux_x86_64.whl)
+{
+  "root": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb",
+  "resources": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources",
+  "uid": 1000,
+  "phase": "final-payload-ready-awaiting-final-helper",
+  "source": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources",
+  "snapshot": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/repository",
+  "snapshotStarted": "2026-10-25T08:00:15.182379+00:00",
+  "sourceRepository": "/mnt/c/python_workspace/pulsara-agent",
+  "snapshotFinished": "2026-10-25T08:00:18.267825+00:00",
+  "staticSource": "/mnt/c/python_workspace/pulsara-agent/src/pulsara_agent/desktop_app/static",
+  "nativeRipgrepSource": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/_vendor/ripgrep",
+  "nativeDependencyCopy": "read-only existing Linux payload copied before wheel replacement",
+  "wheelInstalledAt": "2026-10-25T08:00:20.345226+00:00",
+  "payloadFinished": "2026-10-25T08:01:14.737141+00:00",
+  "manifest": {
+    "version": "0.1.0-alpha.6",
+    "sha256": "c1048ea3d052930fca018ec63f943bc7f641b0216e7f0b9e2d9b8f49ea741411",
+    "platform": "linux-x86_64"
+  },
+  "previousCandidates": [
+    {
+      "snapshotStarted": "2026-10-25T07:50:14.366416+00:00",
+      "payloadFinished": "2026-10-25T07:51:11.788218+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "27adc6ae4251bc8a53dee7586f5a5c18ea700bafe3e033fc0e4f7695c1653c15",
+        "platform": "linux-x86_64"
+      },
+      "reason": "superseded before installation by final scope cancellation/control-EOF corrections"
+    },
+    {
+      "snapshotStarted": "2026-10-25T07:53:00.801721+00:00",
+      "payloadFinished": "2026-10-25T07:53:57.482512+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "992e85d13542faaa1c5218f4071e1f84dfcd734de7995949b0e4f745eac938cf",
+        "platform": "linux-x86_64"
+      },
+      "reason": "superseded before installation by final interop failure-settlement corrections"
+    }
+  ],
+  "scopeSource": "/mnt/c/python_workspace/pulsara-agent/src/pulsara_agent/windows_interop/scope.py",
+  "manifestWithheldFromApp": true
+}

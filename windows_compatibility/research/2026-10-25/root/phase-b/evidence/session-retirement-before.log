@@ -1,0 +1,32 @@
+TAP version 13
+# Subtest: Windows repeated Quit retains failed Session retirement and cannot stop PostgreSQL or exit cleanly
+not ok 1 - Windows repeated Quit retains failed Session retirement and cannot stop PostgreSQL or exit cleanly
+  ---
+  duration_ms: 8.347
+  type: 'test'
+  location: 'C:\\python_workspace\\pulsara-agent\\desktop\\dist\\main.test.js:297:22'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    true !== false
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\python_workspace\pulsara-agent\desktop\dist\main.test.js:306:26)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 79.5497

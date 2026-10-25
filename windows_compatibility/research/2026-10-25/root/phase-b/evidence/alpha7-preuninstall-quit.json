@@ -1,0 +1,5 @@
+{
+  "appProcessCount": 0,
+  "pgStatusExit": 3,
+  "pgStatus": "pg_ctl: no server running"
+}

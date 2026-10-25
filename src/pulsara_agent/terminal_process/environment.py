@@ -12,9 +12,12 @@ import re
 import selectors
 import signal
 import subprocess
-from threading import Condition, RLock
+from threading import Condition, RLock, Timer
 from time import monotonic, sleep
 from typing import Mapping
+
+from pulsara_agent.windows_interop import create_scope
+from pulsara_agent.windows_interop.scope import InteropScopeError, WindowsInteropScope
 
 
 _MAXIMUM_SNAPSHOT_BYTES = 1_000_000
@@ -123,6 +126,7 @@ class _ProbeAttempt:
     snapshot: _Snapshot | None = None
     error_code: str | None = None
     process: subprocess.Popen[bytes] | None = None
+    interop_scope: WindowsInteropScope | None = None
 
 
 @dataclass(slots=True)
@@ -246,19 +250,60 @@ class TerminalEnvironmentOwner:
             error_code = "PROBE_TIMEOUT"
         except OverflowError:
             error_code = "PROBE_OVERSIZE"
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except (OSError, ValueError, subprocess.SubprocessError, InteropScopeError):
             error_code = "PROBE_FAILED"
-        with self._lock:
-            attempt.snapshot = snapshot
-            attempt.error_code = error_code
-            attempt.done = True
-            if snapshot is not None and not self._closed:
-                self._cache[key] = snapshot
-            attempt.condition.notify_all()
-            self._attempts.pop(key, None)
+        finally:
+            with self._lock:
+                joined = (
+                    snapshot is not None or attempt.state is _ProbeAttemptState.JOINED
+                ) and (
+                    attempt.interop_scope is None
+                    or attempt.interop_scope.physically_joined.is_set()
+                )
+                attempt.snapshot = snapshot if joined else None
+                attempt.error_code = (
+                    error_code if joined else "PROBE_PHYSICAL_JOIN_FAILED"
+                )
+                attempt.done = True
+                if joined and snapshot is not None and not self._closed:
+                    self._cache[key] = snapshot
+                attempt.condition.notify_all()
+                if joined:
+                    self._attempts.pop(key, None)
         return snapshot, error_code
 
     def _run_probe(
+        self, shell: TerminalShellConfig, attempt: _ProbeAttempt
+    ) -> dict[str, str]:
+        scope = create_scope()
+        with self._lock:
+            attempt.interop_scope = scope
+            if scope is not None and self._closed:
+                scope.request_cancel()
+        if scope is not None:
+            timer = Timer(
+                self.config.shell_snapshot_timeout_seconds, scope.request_cancel
+            )
+            timer.daemon = False
+            try:
+                timer.start()
+                scope.prepare()
+                return self._run_owned_probe(shell, attempt)
+            except InteropScopeError:
+                if scope.cancelled.is_set() and not scope.failed.is_set():
+                    raise TimeoutError from None
+                raise
+            finally:
+                timer.cancel()
+                if timer.ident is not None:
+                    timer.join()
+                scope.finish(cancel=True)
+                scope.retire()
+                with self._lock:
+                    attempt.state = _ProbeAttemptState.JOINED
+        return self._run_owned_probe(shell, attempt)
+
+    def _run_owned_probe(
         self, shell: TerminalShellConfig, attempt: _ProbeAttempt
     ) -> dict[str, str]:
         command = "printf 'PULSARA_TERMINAL_ENV_V1\\0'; env -0"
@@ -271,25 +316,28 @@ class TerminalEnvironmentOwner:
                 attempt.condition.notify_all()
                 raise TimeoutError
             try:
+                environment = {
+                    name: value
+                    for name, value in self.parent_env.items()
+                    if name
+                    in {
+                        "HOME",
+                        "USER",
+                        "LOGNAME",
+                        "SHELL",
+                        "PATH",
+                        "LANG",
+                        "LC_ALL",
+                        "LC_CTYPE",
+                        "TERM",
+                    }
+                }
+                if attempt.interop_scope is not None:
+                    environment = attempt.interop_scope.environment(environment)
                 process = subprocess.Popen(
                     shell.probe_argv(command),
                     cwd=self.workspace_root,
-                    env={
-                        name: value
-                        for name, value in self.parent_env.items()
-                        if name
-                        in {
-                            "HOME",
-                            "USER",
-                            "LOGNAME",
-                            "SHELL",
-                            "PATH",
-                            "LANG",
-                            "LC_ALL",
-                            "LC_CTYPE",
-                            "TERM",
-                        }
-                    },
+                    env=environment,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
@@ -310,6 +358,11 @@ class TerminalEnvironmentOwner:
         reached_eof = False
         try:
             while not reached_eof:
+                if (
+                    attempt.interop_scope is not None
+                    and attempt.interop_scope.failed.is_set()
+                ):
+                    raise InteropScopeError(attempt.interop_scope.failure)
                 with self._lock:
                     if self._closed:
                         raise TimeoutError
@@ -331,7 +384,18 @@ class TerminalEnvironmentOwner:
             # physical-success boundary for cache installation.
             if _process_group_exists(process.pid):
                 raise ValueError("shell probe left a live process group")
+            if attempt.interop_scope is not None:
+                if not attempt.interop_scope.finish(
+                    timeout=max(0.0, deadline - monotonic())
+                ):
+                    raise TimeoutError
+                if attempt.interop_scope.failure:
+                    raise InteropScopeError(attempt.interop_scope.failure)
+                if attempt.interop_scope.cancelled.is_set():
+                    raise TimeoutError
         except BaseException:
+            if attempt.interop_scope is not None:
+                attempt.interop_scope.request_cancel()
             _terminate_and_join(process)
             raise
         finally:
@@ -365,6 +429,9 @@ class TerminalEnvironmentOwner:
             self._closed = True
             attempts = tuple(self._attempts.values())
             for attempt in attempts:
+                if attempt.interop_scope is not None:
+                    attempt.interop_scope.request_cancel()
+            for attempt in attempts:
                 attempt.condition.notify_all()
             for attempt in attempts:
                 while not attempt.done:
@@ -374,7 +441,10 @@ class TerminalEnvironmentOwner:
                             "terminal environment probe did not physically join"
                         )
                     attempt.condition.wait(remaining)
-                if attempt.state is not _ProbeAttemptState.JOINED:
+                if attempt.state is not _ProbeAttemptState.JOINED or (
+                    attempt.interop_scope is not None
+                    and not attempt.interop_scope.physically_joined.is_set()
+                ):
                     raise RuntimeError(
                         "terminal environment probe completed without physical join"
                     )
@@ -387,11 +457,17 @@ class TerminalEnvironmentOwner:
             self._closed = True
             attempts = tuple(self._attempts.values())
             for attempt in attempts:
+                if attempt.interop_scope is not None:
+                    attempt.interop_scope.request_cancel()
+            for attempt in attempts:
                 attempt.condition.notify_all()
             for attempt in attempts:
                 while not attempt.done:
                     attempt.condition.wait()
-                if attempt.state is not _ProbeAttemptState.JOINED:
+                if attempt.state is not _ProbeAttemptState.JOINED or (
+                    attempt.interop_scope is not None
+                    and not attempt.interop_scope.physically_joined.is_set()
+                ):
                     raise RuntimeError(
                         "terminal environment probe completed without physical join"
                     )

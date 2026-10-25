@@ -1113,6 +1113,8 @@ class RendererBridge:
             raise ProtocolTransportClosed()
         if connection is None:
             raise KeyError(connection_id)
+        if self.sessions.host_writer_unavailable(connection.host_session_id):
+            raise ProtocolBridgeError("SESSION_WRITER_UNAVAILABLE", "连接已中断，正在恢复会话。")
         return connection
 
     @staticmethod

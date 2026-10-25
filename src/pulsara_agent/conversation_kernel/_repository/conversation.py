@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.identity import derive_id
+from pulsara_agent.conversation_kernel.repository_errors import PreparedRootInputHeadStale
 
 
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
@@ -565,12 +566,13 @@ class _ConversationOperations:
             )
             if actual_handoff != expected_handoff:
                 raise ConversationKernelConflict("ROOT provider Plan handoff changed")
+            if str(session["workspace_id"]) != prospective.workspace_id:
+                raise ConversationKernelConflict("ROOT provider workspace changed")
             if (
-                str(session["workspace_id"]) != prospective.workspace_id
-                or int(session["latest_entry_sequence"])
+                int(session["latest_entry_sequence"])
                 != prospective.expected_latest_entry_sequence
             ):
-                raise ConversationKernelConflict("ROOT provider input head changed")
+                raise PreparedRootInputHeadStale("ROOT provider input head changed")
             base_kind, snapshot_id, source_through = (
                 self._initial_context_binding_values(
                     connection,

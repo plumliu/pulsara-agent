@@ -1,0 +1,35 @@
+{
+  "stage": "cleared",
+  "package_version": "0.1.0a7",
+  "owner": {
+    "kind": "local",
+    "scope_key": "user",
+    "server_id": "notion-oauth-alpha7-smoke",
+    "plugin_id": null
+  },
+  "config_exists": false,
+  "config_disabled": null,
+  "endpoint_matches_notion": null,
+  "grant_exists": false,
+  "grant_metadata": null,
+  "managed_credentials_for_owner": 0,
+  "connections": [
+    {
+      "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy",
+      "model_id": "deepseek-flash",
+      "wire_api": "openai_chat_completions",
+      "reasoning_wire_profile": "catalog_standard",
+      "credential_present": true
+    }
+  ],
+  "preserved": {
+    "connections": true,
+    "session": true,
+    "turns": true,
+    "transcript_entry_counts": true,
+    "pg_identity": true
+  },
+  "observation_limits": "No in-process OAuth pending/listener access; no token/client serialization exported. Model comparison uses the recorded non-secret connection fields plus canonical session bindings. Settings stat may legitimately change for OAuth.",
+  "linux_callback_port_connect_errno": 111,
+  "linux_callback_port_refused": true
+}

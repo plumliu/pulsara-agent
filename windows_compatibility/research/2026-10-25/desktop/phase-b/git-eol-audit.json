@@ -1,0 +1,9 @@
+{
+  "readOnly": true,
+  "core.autocrlf": "true",
+  "gitLsFilesEol": [
+    "i/lf    w/crlf  attr/text eol=lf      \tsrc/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json",
+    "i/lf    w/crlf  attr/text eol=lf      \tsrc/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json",
+    "i/lf    w/crlf  attr/text eol=lf      \tsrc/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql"
+  ]
+}

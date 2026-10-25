@@ -1,0 +1,14 @@
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ 491.984375
+- 492
+
+    at C:\python_workspace\pulsara-agent\desktop\scripts\startup-cover-smoke.cjs:69:12 {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: 491.984375,
+  expected: 492,
+  operator: 'strictEqual',
+  diff: 'simple'
+}

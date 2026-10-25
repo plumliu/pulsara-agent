@@ -1,8 +1,8 @@
-import {execFile} from 'node:child_process';
+import {execFile, type ChildProcess, type ExecFileException} from 'node:child_process';
 import {promisify} from 'node:util';
 import {mkdir, readFile, chmod, stat, realpath, rm} from 'node:fs/promises';
 import path from 'node:path';
-import type {PostgresOperations} from './postgres-operations';
+import type {PostgresCommandError, PostgresOperations} from './postgres-operations';
 
 const execute = promisify(execFile);
 
@@ -39,9 +39,22 @@ export function createPosixPostgresOperations(postgresBin: string, home: string)
       return {uid: info.uid, currentUserUid: process.getuid?.(), isDirectory: info.isDirectory()};
     },
     async run(binary, args) {
-      return execute(path.join(postgresBin, binary), [...args], {
-        env: {...process.env, LC_ALL: 'C'}, maxBuffer: 4 * 1024 * 1024,
-      });
+      let child: ChildProcess | undefined;
+      try {
+        const command = execute(path.join(postgresBin, binary), [...args], {
+          env: {...process.env, LC_ALL: 'C'}, maxBuffer: 4 * 1024 * 1024,
+        });
+        child = command.child;
+        return await command;
+      } catch (error) {
+        const failure = error as ExecFileException;
+        const postgresExecution: PostgresCommandError['postgresExecution'] = !child?.pid
+          ? 'not-submitted'
+          : typeof failure.code === 'number' && Number.isInteger(failure.code) && failure.code > 0 && !failure.signal && !failure.killed
+            ? 'failed' : 'unknown';
+        // A signal or truncated output cannot prove that a startup had no effect.
+        throw Object.assign(failure, {postgresExecution});
+      }
     },
     async removeDataDirectory() {
       await rm(directory, {recursive: true});

@@ -1,0 +1,11 @@
+frontend/app/pulsara-app.tsx
+frontend/components/session-search-dialog.tsx
+tests/frontend/app-shortcuts.test.tsx
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/after.log
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/before.log
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/commands.ps1
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/lint.log
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/production.diff
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/regression.log
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/report.zh.md
+windows_compatibility/research/2026-10-25/terminal/phase-b/shortcut-review/results.json

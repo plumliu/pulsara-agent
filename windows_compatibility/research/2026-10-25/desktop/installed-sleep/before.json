@@ -1,0 +1,187 @@
+{
+  "stage": "before",
+  "utc": "2026-10-25T10:19:40.410625+00:00",
+  "port": 40363,
+  "linux": {
+    "readOnly": true,
+    "utc": "2026-10-25T10:19:35.387738+00:00",
+    "version": "0.1.0a7",
+    "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+    "bootId": "31380487-debe-48b2-b67f-acf89b79de19",
+    "kernel": {
+      "pid": 468,
+      "starttime": "22382",
+      "pidNamespace": "pid:[4026532223]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/bin/python3.12"
+    },
+    "postgres": {
+      "pid": 498,
+      "starttime": "23109",
+      "pidNamespace": "pid:[4026532223]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres"
+    },
+    "pidfdsOpenedAndClosedForObservation": true,
+    "pgFacts": {
+      "systemid": "7700523439330484737",
+      "data": "/home/plumwsl/.pulsara/desktop/postgres",
+      "socket": "/home/plumwsl/.pulsara/desktop/socket",
+      "listen": "",
+      "inetAddress": null,
+      "postmasterStarted": "2026-10-25 17:57:33.694648+08",
+      "dataInode": 171484
+    },
+    "locks": [
+      {
+        "path": "/home/plumwsl/.pulsara/desktop/kernel.lock",
+        "inode": 145305,
+        "device": 2096,
+        "uid": 1000,
+        "mode": "0o600",
+        "busy": true
+      },
+      {
+        "path": "/home/plumwsl/.pulsara/desktop/pg-lifetime.lock",
+        "inode": 171582,
+        "device": 2096,
+        "uid": 1000,
+        "mode": "0o600",
+        "busy": true
+      }
+    ],
+    "diagnosticsSocketInode": 192175,
+    "http": {
+      "origin": "https://127.0.0.1:40363",
+      "listenInode": "31687",
+      "ownedByKernel": true,
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBiTCCAS+gAwIBAgIUPSzdqSELg2RKhDymZeAvnz6k8uUwCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwIBcNNzAwMTAxMDAw\nMDAwWhgPOTk5OTEyMzEyMzU5NTlaMCIxIDAeBgNVBAMMF1B1bHNhcmEgcHJpdmF0\nZSBkZXNrdG9wMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETkq0YUvpFWd+L+5z\nEw+y9i/8ZtzX3+NOVKRzCgjEEE1xotkmU/d8cVzBwHZTMI5AIsixwI+Gi4hC1Edd\nXHKT+aNBMD8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAwGA1UdEwEB/wQC\nMAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCgYIKoZIzj0EAwIDSAAwRQIgS7zk4mdu\nMc4O2ue2XGED43xu6NsWD+qXV9gifWcq7FICIQDMaTq651PfbRFrL9N2sUDGCDnT\npeoAuFIpqhGmQDzHAA==\n-----END CERTIFICATE-----\n"
+    },
+    "session": [
+      "session:r3d6okwuq2trl3ribxzct6rbuy",
+      "WSL中文工作目录smoke.txt写入读取验收",
+      "workspace:wiosodqkjdu7hp4r2d3vgho6lm",
+      28
+    ],
+    "turns": [
+      [
+        "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+        "COMPLETED"
+      ],
+      [
+        "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+        "COMPLETED"
+      ],
+      [
+        "turn:z56osfvtrgeyyhbifxuct7y3ru",
+        "COMPLETED"
+      ]
+    ],
+    "settingsRead": false,
+    "kernelSpawned": false,
+    "pgLifecycleCommands": false
+  },
+  "windows": {
+    "loopback": [
+      {
+        "OwningProcess": 26656,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 64405,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 40363,
+        "State": 5
+      },
+      {
+        "OwningProcess": 26656,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 62023,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 40363,
+        "State": 5
+      },
+      {
+        "OwningProcess": 26656,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 50062,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 40363,
+        "State": 5
+      },
+      {
+        "OwningProcess": 26656,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 49377,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 40363,
+        "State": 5
+      }
+    ],
+    "eventBookmark": 1446,
+    "powerEvents": [],
+    "main": {
+      "pid": 8324,
+      "creationFileTime": 134373958392475087,
+      "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+      "alive": true,
+      "parent": 23492,
+      "auxiliary": false,
+      "maintenance": false
+    },
+    "processes": [
+      {
+        "pid": 8324,
+        "creationFileTime": 134373958392475087,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 23492,
+        "auxiliary": false,
+        "maintenance": false
+      },
+      {
+        "pid": 17516,
+        "creationFileTime": 134373958403617641,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 8324,
+        "auxiliary": true,
+        "maintenance": false
+      },
+      {
+        "pid": 26656,
+        "creationFileTime": 134373958403754432,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 8324,
+        "auxiliary": true,
+        "maintenance": false
+      },
+      {
+        "pid": 3628,
+        "creationFileTime": 134373958552553635,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 8324,
+        "auxiliary": true,
+        "maintenance": false
+      }
+    ]
+  },
+  "http": {
+    "origin": "https://127.0.0.1:40363",
+    "at": 1792923575455,
+    "method": "GET",
+    "path": "/healthz",
+    "fullCertificateSame": true,
+    "authorized": true,
+    "localPort": 64074,
+    "remotePort": 40363,
+    "httpStatus": 200,
+    "health": {
+      "status": "ready"
+    }
+  },
+  "httpExit": 0,
+  "readOnly": true,
+  "sleepInvoked": false,
+  "settingsRead": false,
+  "businessOperationReplayed": false,
+  "beforeReady": true
+}

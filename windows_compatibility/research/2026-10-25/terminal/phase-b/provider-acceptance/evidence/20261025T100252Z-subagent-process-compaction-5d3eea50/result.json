@@ -1,0 +1,47 @@
+{
+  "phase": "candidate-wsl",
+  "model": "deepseek-flash",
+  "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy",
+  "started_at": "2026-10-25T10:02:53.394116+00:00",
+  "status": "failed",
+  "cases": [],
+  "trace": [],
+  "provider_calls": [],
+  "scope": "original owner runner; not installed Electron GUI qualification",
+  "prefix_checks": [],
+  "runner": "subagent",
+  "postgres": {
+    "system_identifier": "7700523439330484737",
+    "data": "/home/plumwsl/.pulsara/desktop/postgres",
+    "socket": "/home/plumwsl/.pulsara/desktop/socket",
+    "version_num": 170009,
+    "admin_root": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 user=pulsara_admin dbname=pulsara",
+    "runtime_root": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 user=pulsara_runtime dbname=pulsara"
+  },
+  "created_database": "pulsara_wsl_dogfood_1d3ca641e95d4799abd92f4624b57216",
+  "scratch": "/home/plumwsl/.pvt-1vw1i3vp/Pulsara 中文 验收 3i5pbt2y",
+  "test_home": "/home/plumwsl/.pa-9bz_iw61",
+  "workspace_utf8_bytes": 68,
+  "pg_socket_utf8_bytes": 55,
+  "interop_control_utf8_bytes": 47,
+  "history_seed": {
+    "helper": "run_model_switch_handover_dogfood._seed_completed_history",
+    "segments": 5,
+    "repetitions": 800,
+    "bytes": 216280,
+    "provider_native_replay_fabricated": false
+  },
+  "process_compaction_prompts": [
+    "Call terminal exactly once with command \"/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/bin/python3 -u '/home/plumwsl/.pvt-1vw1i3vp/Pulsara 中文 验收 3i5pbt2y/中文 空格工程/process_compaction.py' '/home/plumwsl/.pvt-1vw1i3vp/Pulsara 中文 验收 3i5pbt2y/中文 空格工程/.process-compaction-release'; /mnt/c/Windows/System32/cmd.exe /d /c echo PROCESS_COMPACTION_PE_DONE\", tty=false and yield_time_ms=0. Return immediately after it reports a running process. Do not wait, register a monitor, call terminal_process, read the fixture or start another command. The external test driver will release this exact process after a real compaction.",
+    "Find the existing running terminal process retained in COMPACTION_RUNTIME_HANDOFF. Follow that exact process with terminal_process wait until natural completion. Do not start or restart any command, kill a process, read the fixture, or register a monitor. Report the exact Linux and Windows completion markers and exit code. The test driver releases the existing process after this actual provider input is installed."
+  ],
+  "failure_traceback": "Traceback (most recent call last):\n  File \"/home/plumwsl/workspaces/.provider-tasks-a079alrb/run_remaining_wsl.py\", line 546, in run\n    result = await subagent._run(\n             ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/plumwsl/workspaces/.provider-tasks-a079alrb/tests/dogfood/run_round10_subagent_dogfood.py\", line 1274, in _run\n    results[\"capacity_mcp_compaction\"] = await _run_capacity_mcp_compaction(\n                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/plumwsl/workspaces/.provider-tasks-a079alrb/run_remaining_wsl.py\", line 251, in capacity_with_current_admission\n    return await process_compaction(session, workspace)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/plumwsl/workspaces/.provider-tasks-a079alrb/run_remaining_wsl.py\", line 369, in process_compaction\n    first = await session.run_turn(\n            ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/host.py\", line 1864, in run_turn\n    identity = build_direct_root_turn_identity(self.session_id, command)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/steer.py\", line 379, in build_direct_root_turn_identity\n    require_id(command_id, \"command\")\n  File \"/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/identity.py\", line 128, in require_id\n    raise ValueError(\"INVALID_ID: noncanonical identity or wrong kind\")\nValueError: INVALID_ID: noncanonical identity or wrong kind\n",
+  "scratch_retained": true,
+  "test_home_retained": true,
+  "dropped_databases": [
+    "pulsara_wsl_dogfood_1d3ca641e95d4799abd92f4624b57216"
+  ],
+  "failure_type": "ValueError",
+  "failure_message": "INVALID_ID: noncanonical identity or wrong kind",
+  "undropped_databases": []
+}

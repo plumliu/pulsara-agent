@@ -1,0 +1,13 @@
+{
+  "work": "/home/plumwsl/workspaces/pulsara_agent/output/phase-b-desktop-8bf40t62",
+  "checks": [
+    {
+      "name": "build",
+      "returncode": 0
+    },
+    {
+      "name": "tests",
+      "returncode": 1
+    }
+  ]
+}

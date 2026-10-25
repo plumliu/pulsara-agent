@@ -1,0 +1,16 @@
+{
+  "python": "0.1.0a9",
+  "npm": "0.1.0-alpha.9",
+  "files": [
+    "pyproject.toml",
+    "src/pulsara_agent/__init__.py",
+    "uv.lock",
+    "desktop/package.json",
+    "desktop/package-lock.json",
+    "frontend/package.json",
+    "frontend/package-lock.json"
+  ],
+  "dependencyValuesUnchanged": true,
+  "alpha8Installed": false,
+  "installerRunByThisAgent": false
+}

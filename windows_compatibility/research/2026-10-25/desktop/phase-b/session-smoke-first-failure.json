@@ -1,0 +1,37 @@
+{
+  "records": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:40185",
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUZPVd+kSGEQyDe5UQEx/m4HAwoU4wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA3MjQ0OFoXDTI2MTAy\nNjA3MjQ0OFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEA/EWNR+yY1bthxaPS4m0z+JGapExnBnDlkzK3Ji7S/39a\n2McFhq8n9e8UlkQ+K1UhnEzClhiHcJZo5ELymd1YALBXBpkvpg2LNUDLMyhKw0dR\nzCPb+q8qjAlOOJfzIg+jl3izGGzdm0L0g3VIrYMYrLonGgqBORT8ATDI0u+7ce8d\nbEGOPDu0CpQAWHSg8Nw8BqFKfcjCLwzyeYf3GnpH68oMMUOIGUG126oGSsAzmxm0\nG37CnwVyaVxpbtxJX7p+cZB4l49TxlaNLnvo3SkfnWc6TCNF0a1FgsYz6wmXifS3\nMhya9Jkh8gUjIJ3gUjHM1C2+MNtm0BxFcZ0SJCfHewIDAQABo1MwUTAdBgNVHQ4E\nFgQUdCptGGXa8+got9gustWc3dYr6OMwHwYDVR0jBBgwFoAUdCptGGXa8+got9gu\nstWc3dYr6OMwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAKxUd\ngk5QBGelusr7+dfLlhJbw/8vkcGjaR/t9eea4LGwIc5SqKwEERUT9MX6chUVD3/K\nJGJXQNUP62x8JwEG9MZ9ekIFtAof4s0XgSxoUHxLwLtZH+MC7fZ5z/4W2nGgKqLK\nnPCk22ib4jaIScC0Tv7Gkn4PX2KTw+IACBpIhZGbGIaYyra+U2mBMOJJeivvncYO\n6VfXtKcUAGUhTOqksaTYYCQoj4dZjsd8ySidt5cjeu4u/qOLAqoweJRFNZ7RyBbI\nVDUaIt+O4EBPrzaIQ8qgQXWZLuKm8mDV7+Mvl7hZFbizll3u6wVQiJjEZu+MXvSZ\n0qoTJgj774ZU2hoxuQ==\n-----END CERTIFICATE-----\n",
+      "pid": 481,
+      "starttime": "40686",
+      "home": "/home/plumwsl/.pulsara-session-smoke-ke6c__79"
+    },
+    {
+      "event": "handler-closed",
+      "path": "/"
+    },
+    {
+      "event": "handler-closed",
+      "path": "/"
+    },
+    {
+      "event": "cleaned",
+      "exists": false
+    }
+  ],
+  "ready": {
+    "event": "ready",
+    "origin": "https://127.0.0.1:40185",
+    "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUZPVd+kSGEQyDe5UQEx/m4HAwoU4wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA3MjQ0OFoXDTI2MTAy\nNjA3MjQ0OFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEA/EWNR+yY1bthxaPS4m0z+JGapExnBnDlkzK3Ji7S/39a\n2McFhq8n9e8UlkQ+K1UhnEzClhiHcJZo5ELymd1YALBXBpkvpg2LNUDLMyhKw0dR\nzCPb+q8qjAlOOJfzIg+jl3izGGzdm0L0g3VIrYMYrLonGgqBORT8ATDI0u+7ce8d\nbEGOPDu0CpQAWHSg8Nw8BqFKfcjCLwzyeYf3GnpH68oMMUOIGUG126oGSsAzmxm0\nG37CnwVyaVxpbtxJX7p+cZB4l49TxlaNLnvo3SkfnWc6TCNF0a1FgsYz6wmXifS3\nMhya9Jkh8gUjIJ3gUjHM1C2+MNtm0BxFcZ0SJCfHewIDAQABo1MwUTAdBgNVHQ4E\nFgQUdCptGGXa8+got9gustWc3dYr6OMwHwYDVR0jBBgwFoAUdCptGGXa8+got9gu\nstWc3dYr6OMwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAKxUd\ngk5QBGelusr7+dfLlhJbw/8vkcGjaR/t9eea4LGwIc5SqKwEERUT9MX6chUVD3/K\nJGJXQNUP62x8JwEG9MZ9ekIFtAof4s0XgSxoUHxLwLtZH+MC7fZ5z/4W2nGgKqLK\nnPCk22ib4jaIScC0Tv7Gkn4PX2KTw+IACBpIhZGbGIaYyra+U2mBMOJJeivvncYO\n6VfXtKcUAGUhTOqksaTYYCQoj4dZjsd8ySidt5cjeu4u/qOLAqoweJRFNZ7RyBbI\nVDUaIt+O4EBPrzaIQ8qgQXWZLuKm8mDV7+Mvl7hZFbizll3u6wVQiJjEZu+MXvSZ\n0qoTJgj774ZU2hoxuQ==\n-----END CERTIFICATE-----\n",
+    "pid": 481,
+    "starttime": "40686",
+    "home": "/home/plumwsl/.pulsara-session-smoke-ke6c__79"
+  },
+  "failure": "Error: An object could not be cloned.\n    at IpcRendererInternal.send (node:electron/js2c/sandbox_bundle:2:93706)\n    at IpcRendererInternal.<anonymous> (node:electron/js2c/sandbox_bundle:2:93414)",
+  "carrierExit": {
+    "code": 0,
+    "signal": null
+  }
+}

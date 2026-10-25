@@ -1,0 +1,11 @@
+{
+  "name": "pulsara-desktop",
+  "productName": "Pulsara",
+  "desktopName": "pulsara-desktop.desktop",
+  "version": "0.1.0-alpha.7",
+  "description": "Pulsara local agent workbench",
+  "author": "Pulsara",
+  "private": true,
+  "main": "dist/main.js",
+  "homepage": "https://github.com/plumliu/pulsara-agent"
+}

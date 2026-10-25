@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<frozen runpy>", line 287, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/plumwsl/.provider-files-623ld4rm/run_files_wsl.py", line 109, in <module>
+    if __name__=='__main__':raise SystemExit(main())
+                                             ^^^^^^
+  File "/home/plumwsl/.provider-files-623ld4rm/run_files_wsl.py", line 102, in main
+    with redirect_stdout(stdout),redirect_stderr(stderr):return pg_adapter.run(args,api)
+                                                                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/plumwsl/.provider-files-623ld4rm/pg_adapter.py", line 253, in run
+    original_prompt_content = api.terminal.PromptContent
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'types.SimpleNamespace' object has no attribute 'PromptContent'

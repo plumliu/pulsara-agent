@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "Candidate source: /home/plumwsl/workspaces/.provider-tasks-a079alrb/candidate-src/pulsara_agent/__init__.py\n{\"status\": \"completed\", \"output\": \"/mnt/c/python_workspace/pulsara-agent/output/phase-b/terminal/provider-acceptance/20261025T092814Z-subagent-root-regression-34130612/result.json\", \"undropped_databases\": []}\n",
+  "stderr": ""
+}

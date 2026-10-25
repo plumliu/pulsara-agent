@@ -1,0 +1,346 @@
+{
+  "cases": [
+    {
+      "name": "delayed-listen",
+      "events": [
+        {
+          "event": "prepared",
+          "origin": "https://127.0.0.1:40957",
+          "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUO12XuUx6ED2fC3mwf6OMhOK9BPAwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4NDAwOFoXDTI2MTAy\nNjA4NDAwOFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAs7ITqAppZroCmyqCg1PvEYe+k97FxX/TUxZuSwnDqvGY\nivyHb5FmeAKlbTudwYVPt4S6Ecagor2FbNO+gqUDJr7yWUsUIbTNr4ICEvpvllXz\nT/+41SyesYgvERIIXpIjuDMMoOWhVDUJ7LqjiQC2GpjRjFzvag4S/y4//j2OcJZu\n0S9n+VV1WIKbMBB5N3fDo03jhe2g82FvpXHEtApI26BprmGalbNklaJJpjLLq7m9\nlR5WaQV9mXcqOTyDTxyocvlQHHKhwwJjeHIl/Vh4xkoy11oGUvnSVL87PgI2d9WC\nORCi8i03K/x7zYbtq2UOqCGBw8zpko67UWmOeUH2eQIDAQABo1MwUTAdBgNVHQ4E\nFgQUbzO50jRdXUGyhttyGEoI9He4ck8wHwYDVR0jBBgwFoAUbzO50jRdXUGyhtty\nGEoI9He4ck8wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEABCJU\nP8HoTjYAL0NeEZfA7lIzFe3TtHxymfKk6aAn3ribs+Txucv4HMmlM//ac+9mOswm\nOOdKN0pnBFyhha/CnqoBZxpO1+Ng461IzqYRdHlRHHeR5e6LrfdmGAMmnssVvxAd\nqQn3Q8rw9YGUu4xCwhpAl59eBb1ZQHfSf3xDaAlYl/7KVnK8QwaLgoOsn6krahfo\nTgZIT9eiIEk2difm9ystl+mnw5cdZR7lcV5JzF2n4MUh81tiHmM1SgcS9o/wygap\nmYbLSo6Z4cvKf5t0BzN+5f+mw3zvfiyCh5PugRstuOvQ/ua+FL7n0akeQcm96sVv\nB443DhilWdU63Hlx3g==\n-----END CERTIFICATE-----\n",
+          "pid": 331,
+          "starttime": "52545",
+          "home": "/home/plumwsl/.pulsara-readiness-41ojevop"
+        },
+        {
+          "event": "serving",
+          "mode": "normal"
+        },
+        {
+          "event": "head-start",
+          "path": "/",
+          "mode": "normal"
+        },
+        {
+          "event": "head-closed"
+        },
+        {
+          "event": "inspect",
+          "active": 0
+        },
+        {
+          "event": "cleaned",
+          "exists": false
+        }
+      ],
+      "requests": [
+        {
+          "url": "https://127.0.0.1:40957/",
+          "method": "HEAD",
+          "at": 1792917608230,
+          "error": {
+            "name": "Error",
+            "message": "net::ERR_CONNECTION_REFUSED"
+          }
+        },
+        {
+          "url": "https://127.0.0.1:40957/",
+          "method": "HEAD",
+          "at": 1792917610569,
+          "error": {
+            "name": "Error",
+            "message": "net::ERR_CONNECTION_REFUSED"
+          }
+        },
+        {
+          "url": "https://127.0.0.1:40957/",
+          "method": "HEAD",
+          "at": 1792917612860,
+          "status": 200
+        }
+      ],
+      "identity": {
+        "pid": 331,
+        "starttime": "52545",
+        "origin": "https://127.0.0.1:40957",
+        "home": "/home/plumwsl/.pulsara-readiness-41ojevop"
+      },
+      "nativeFetchDescriptor": {},
+      "after": {
+        "event": "inspect",
+        "active": 0
+      },
+      "passed": true,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "name": "sampling-retire",
+      "events": [
+        {
+          "event": "prepared",
+          "origin": "https://127.0.0.1:33431",
+          "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUIce7rwlBHCfvcsCzhhuKsKsMfLcwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4NDAxNFoXDTI2MTAy\nNjA4NDAxNFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAwUjQeFKcqQL+IcFNvFbg55q3V4DK9kINfVbMim4XOF7A\n7j2kfZWOMjuMy+P3SdHqUzE2TbnE/h5+f7B+0A+iufLjC1Xi82iuO/1aADpCbsGM\nDAINxs1aSudCBsIh85vraihmcnILd624uw/oVK4UKi4CEVTrfEARRVDZNtpfP6ie\nydDz2y+17kd6iWTeaitFVgc1MEC4vo5HcS6LlEKOr9orFVXxBRCAYuiSmaXEjF0W\nDADySp7mcflR6U6i3N7TGloLbUM2YG3F1TJkliNQA6EjOhJAaq7gHAMLdLyXIrMQ\ngIJaWGtKBnX6pM5WAc0HQ8NTrgHvKRgXsmIf5rbvMwIDAQABo1MwUTAdBgNVHQ4E\nFgQUbw+yiC71Gst0Pf3/AWSAJKwEKsswHwYDVR0jBBgwFoAUbw+yiC71Gst0Pf3/\nAWSAJKwEKsswDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAGreH\n3+aVcs4j2nsYzKHZgKdU0svwbD03dpB0BdX1zm6uKWnYyPZzXa+Yx2BA3uHZmYcF\ncBJsxSfIIUeBe4t70k+j/gyYBwaeuiIbVX6apJlGG2/B0Wd4iubokQyvAJ7WmQSb\n22SqeAnAIJp/gz+qYeD7BDsLnQbNP+jPWG/FpyHiZfn9/U6Y0I8Cfi+3yIfEXQrS\nRp9p6pp5JX8xXYvlVO4L5N1yVvciIYKXUD9I0a9mPVPjPqpwExmBrnO3OzGBRfkj\nWsTnwBAsnLfcXUevyxHrqlDDnTp6rN+M8YUMgw3VltfSUSH+WkT2z4vtuS/zjU7T\na82env1VEFzMBt65oA==\n-----END CERTIFICATE-----\n",
+          "pid": 445,
+          "starttime": "53345",
+          "home": "/home/plumwsl/.pulsara-readiness-ucvdu_xp"
+        },
+        {
+          "event": "inspect",
+          "active": 0
+        },
+        {
+          "event": "cleaned",
+          "exists": false
+        }
+      ],
+      "requests": [
+        {
+          "url": "https://127.0.0.1:33431/",
+          "method": "HEAD",
+          "at": 1792917614430,
+          "error": {
+            "name": "Error",
+            "message": "net::ERR_CONNECTION_REFUSED"
+          }
+        }
+      ],
+      "identity": {
+        "pid": 445,
+        "starttime": "53345",
+        "origin": "https://127.0.0.1:33431",
+        "home": "/home/plumwsl/.pulsara-readiness-ucvdu_xp"
+      },
+      "nativeFetchDescriptor": {},
+      "after": {
+        "event": "inspect",
+        "active": 0
+      },
+      "passed": true,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "name": "external-cancel",
+      "events": [
+        {
+          "event": "prepared",
+          "origin": "https://127.0.0.1:38825",
+          "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUfCzem8cVHDaasKaEEbArmWC7ln0wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4NDAxNloXDTI2MTAy\nNjA4NDAxNlowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAyAchoFfFrbIKNOvxNDS0B03itdzoPMqO/2tjUOMAqSPq\nb4JDv5HvN4mwP00JBo9Rfr/OaMQLzcfqELTI2WbuhZ4OEb0aImcyD8vhnmiCbIBn\nmN0oq1lvHdiCeuTkxH8k6Ql17ueZzGHLbJsQZaV/JwWivBn38ErK4Mk2FCKU9D83\nAWuSFP4uzkd7Ir9kzkA2z/nef3P/ByZDvbUzkhtG5rbpAnc1Naq4tNAGbLmdi40S\nwTjg7/yZux8IHxF+I7bBwXTO0fLfsVtKmZ7M7Bzt0HNdKYlbKz1wyt33H1B74yfc\n8mrkWMYkvBhbEHjH8Z8ACWioH56OknpqgF2GulG+uQIDAQABo1MwUTAdBgNVHQ4E\nFgQUO6Gv2Yrs3Nrs03chMp40V4Ei0mgwHwYDVR0jBBgwFoAUO6Gv2Yrs3Nrs03ch\nMp40V4Ei0mgwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAiVJy\nELMhfTUtNP/6chN2xGY9rkWPrYfI06fGSGP/C1ysFJgF6SKhQcOBz917F9yxsBgS\n6lw1GoaSVu8uuNTjGpIgclTErHv7044XWfwbCREkGOwMnsQWde+DRplmHTjtWKfq\nRNDxydO1JI3EPZGpuGtSczqO0z3l6/SzlJEu38xLKQTH0myXsiz97lXBeQM5Ogcd\nc+mwBmqKsRjyyOPGCvbN2I23Mkwk7wpN6y4YP2GGWgw9fXSSGAxAyERomxJ3f2/2\nBEUlmEHFNm8Fcl1L2vC+NovfrYkioNMJYHSJgdFID9bHkkuBqfGqccR+32EFovIG\nzfKUmtDyOH5Pa7yMuQ==\n-----END CERTIFICATE-----\n",
+          "pid": 449,
+          "starttime": "53583",
+          "home": "/home/plumwsl/.pulsara-readiness-do8dpp1h"
+        },
+        {
+          "event": "inspect",
+          "active": 0
+        },
+        {
+          "event": "cleaned",
+          "exists": false
+        }
+      ],
+      "requests": [
+        {
+          "url": "https://127.0.0.1:38825/",
+          "method": "HEAD",
+          "at": 1792917616818,
+          "error": {
+            "name": "Error",
+            "message": "net::ERR_CONNECTION_REFUSED"
+          }
+        }
+      ],
+      "identity": {
+        "pid": 449,
+        "starttime": "53583",
+        "origin": "https://127.0.0.1:38825",
+        "home": "/home/plumwsl/.pulsara-readiness-do8dpp1h"
+      },
+      "nativeFetchDescriptor": {},
+      "after": {
+        "event": "inspect",
+        "active": 0
+      },
+      "passed": true,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "name": "pending-retire",
+      "events": [
+        {
+          "event": "prepared",
+          "origin": "https://127.0.0.1:32843",
+          "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUBcCMM3nl27/0/v1YB+f06PxEErowDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4NDAxOVoXDTI2MTAy\nNjA4NDAxOVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAm117JZL84AKrnX8/krKXVCdk5dotyIBASy/CPjl3QnTG\nMqC8VF7u2mV58Y126h8vyX0NJNrL2QLkU0FadAJuveQpTulhZW0IFrRXCGsIlsFX\nQJC4wFq2rJPjSChkiN2y/6foOlHr3wFHrHiwKcFWJmXSnsbpZbPZVGz0DvjLqxlr\no+z+qgcrfW7gtqPLkaYJYfGxRf5iKXfb069EMItsx71DKg+mGKkq3VPHBOwGF4ET\nOWeTINHGahyjjfMjnt6E04ICOIqO02ZpiSWySsgu4qZjh1v1ZWPRRxX0BrwKPmS6\ntzIaO8XCLS3WQiiAZdBMHGEFSiKqgrgmWBCBHaeOXwIDAQABo1MwUTAdBgNVHQ4E\nFgQULd/sjcsVFgYkNk3q3j1ImPc7bUwwHwYDVR0jBBgwFoAULd/sjcsVFgYkNk3q\n3j1ImPc7bUwwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAB3/c\nOcBm1I3qMnQbkHlrpVQejUZwJvpNmrUw80ILNsGmkw8PRh3etOIoSHViPKccMB7q\nKOzGKhS3rC7OXRTYTY3h+C/EPdq/MgD4je92clfFKZncVfooBq9miNx4lDxg6j56\nIhs+JHO0kS5pJilH6SuRobCQSoTCk6yAWLA8aL49IkvvWrtwKOWbOJj128zgr2FL\nK4b+X1MverbTmZASn3WtJ1AMLGS7uUq+FmO9KgMDXEJz+MszxuifICM/wWsrYyvn\ndO0ygSrbeVO31sH6tMjxrReDaR4ai8Fd5qEhHJAhMC1VcLkT7H/iliYPLMmwirhV\nQC9+UNT8QdGKczLZUQ==\n-----END CERTIFICATE-----\n",
+          "pid": 453,
+          "starttime": "53821",
+          "home": "/home/plumwsl/.pulsara-readiness-sgq9e7jr"
+        },
+        {
+          "event": "serving",
+          "mode": "pending"
+        },
+        {
+          "event": "head-start",
+          "path": "/",
+          "mode": "pending"
+        },
+        {
+          "event": "head-closed"
+        },
+        {
+          "event": "inspect",
+          "active": 0
+        },
+        {
+          "event": "cleaned",
+          "exists": false
+        }
+      ],
+      "requests": [
+        {
+          "url": "https://127.0.0.1:32843/",
+          "method": "HEAD",
+          "at": 1792917619213,
+          "error": {
+            "name": "AbortError",
+            "message": "This operation was aborted"
+          }
+        }
+      ],
+      "identity": {
+        "pid": 453,
+        "starttime": "53821",
+        "origin": "https://127.0.0.1:32843",
+        "home": "/home/plumwsl/.pulsara-readiness-sgq9e7jr"
+      },
+      "nativeFetchDescriptor": {},
+      "after": {
+        "event": "inspect",
+        "active": 0
+      },
+      "passed": true,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "name": "wrong-certificate",
+      "events": [
+        {
+          "event": "prepared",
+          "origin": "https://127.0.0.1:37475",
+          "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUEF/xrAWTdpC/QzuGWXKTcufABQIwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4NDAyMFoXDTI2MTAy\nNjA4NDAyMFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAqCCGJB9m1t1j9yvr+/4SDmiu4jp2mo3riDVOMEjuzXKL\nO9Et3alwHzebvB6tw/RgFgqbfXwlUzoH1982fEjfxSiRxt6YGpgR4/IWy+7YOlFd\nV/zXoFuNWXHK9SGuctgvGWXShq5XdZCI906Rxi7Vfq5d9rFOd8n/rQ84PlouqY/P\nwGVw/HIb/FNpXiKSH6fwpyv52jVszX/mA2DhkkVG3eq1UhJItNQ8dtP3l+WNMy63\nYyPaHFKQxlqYHRUp8tdjhCJ1sB/z4CVEns6MvrXJjwCwEz0r04GDnhyaulaMGqQk\nG8gqkUjsD0+e8cNNdMN3M4zVaHHF6oyOH9Z7TNYYHQIDAQABo1MwUTAdBgNVHQ4E\nFgQU6Bvb3+/xaizcnk8o5HE3HLThhogwHwYDVR0jBBgwFoAU6Bvb3+/xaizcnk8o\n5HE3HLThhogwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAYNwK\nPjAyNYVvVnk4TY7bdsGycLgY2YA9marht/kheOMn+BSmDq5CfUrfjNmPa5X7A42+\nBUVb/GrhVun3axN2WbLL7Twm7Hg8y+ERCxALwmHHeqbMxDOpacwRT55eZV9B7jQe\npaH6kcYg3HEED5KcSyB2mFv6Y42Mu2Q2/pzSZCVbJP4NwUDG5Z+VxbIj/wF5y7Rf\n08wyUh7MZjCknToVS30nXwhGhcJ3ZgXNDONRniqBsNu/wryljlpBpJpBeILOUMke\nSxUZmnOdLWQ+1SVEERyAUWY7ukmIzudFBu1MLx8knQGmA/AOZLOI6BP5K9scCF9k\nY/it/5F7kxF90oulkg==\n-----END CERTIFICATE-----\n",
+          "pid": 459,
+          "starttime": "53956",
+          "home": "/home/plumwsl/.pulsara-readiness-m55d0h6q"
+        },
+        {
+          "event": "serving",
+          "mode": "normal"
+        },
+        {
+          "event": "inspect",
+          "active": 0
+        },
+        {
+          "event": "cleaned",
+          "exists": false
+        }
+      ],
+      "requests": [
+        {
+          "url": "https://127.0.0.1:37475/",
+          "method": "HEAD",
+          "at": 1792917620547,
+          "error": {
+            "name": "Error",
+            "message": "net::ERR_FAILED"
+          }
+        }
+      ],
+      "identity": {
+        "pid": 459,
+        "starttime": "53956",
+        "origin": "https://127.0.0.1:37475",
+        "home": "/home/plumwsl/.pulsara-readiness-m55d0h6q"
+      },
+      "nativeFetchDescriptor": {},
+      "startupFailure": "net::ERR_FAILED",
+      "after": {
+        "event": "inspect",
+        "active": 0
+      },
+      "passed": true,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "name": "unauthorized",
+      "events": [
+        {
+          "event": "prepared",
+          "origin": "https://127.0.0.1:41599",
+          "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUJ67q/ANTe+F0Aq/1PGCJqzmxY9MwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4NDAyMloXDTI2MTAy\nNjA4NDAyMlowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAmF3eUoDmjePvNpNknHnAn0t3GMcWrtUXLpXyvxNor2Jc\nEkrKuyLRaIRokXM3tM375L8v/UKMfYkmmC0VJNky2uGX/OfFw0wIo1eQr6gaAVT2\ngqeV54HbmMnFoa4n1o3iKVe8bcjgW9gmbWfBykjCXPbjq/PYiBxh6rboU4JXb1AL\nFI/bLrEi9REzVwZM8IR+HSvZSqbMdd5Lw1b7u4aldDLMffUvMAdOCjUBsT6DReJK\n9EZ1V8R68wO/D6u6EpA8Fxte37vMe+nnc88v8Yg28vdNCE64+8dwAJNddjfHvSL3\nQ3mAxdaIAd0wkSDrpkSLbabIG1OZmgLtbShagheOAwIDAQABo1MwUTAdBgNVHQ4E\nFgQULlehjH33XL9V2MotENCN9wXuEH4wHwYDVR0jBBgwFoAULlehjH33XL9V2Mot\nENCN9wXuEH4wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAL8EW\nc1yhVPEOFrBYnqvK8iHca0YQV4gZjC18vMgUPns2WgyoNp3Ajb3LTNf+xYi4wD1o\nNThFuPmIzIU+EVy8Z3jo7+IxWxXJUM0HVfFmw8wqVHxf3DdccfVnyUsodvVqsfxu\nQ+eBTyWKrxNMzS8IV5VS7lPgyWhK2I0V0Cuqr5zVCENaKaRN3oazMKebUyldfqSq\nMpTVI9q+I0CxGXnyO7AnO6d0A5MFnjUSnqjg/Zgrlg/j2awYmg6D/QAqWxphMMaD\nHR4W6IdezqCp5Ei5Qfw1542IRSlNHSXD+v3xD8UjXnKIpLeuIw6UHQ8Bz6Rn6Itz\nKMjlNQdMalkP71NRvQ==\n-----END CERTIFICATE-----\n",
+          "pid": 464,
+          "starttime": "54141",
+          "home": "/home/plumwsl/.pulsara-readiness-huq22tjk"
+        },
+        {
+          "event": "serving",
+          "mode": "unauthorized"
+        },
+        {
+          "event": "head-start",
+          "path": "/",
+          "mode": "unauthorized"
+        },
+        {
+          "event": "head-closed"
+        },
+        {
+          "event": "inspect",
+          "active": 0
+        },
+        {
+          "event": "cleaned",
+          "exists": false
+        }
+      ],
+      "requests": [
+        {
+          "url": "https://127.0.0.1:41599/",
+          "method": "HEAD",
+          "at": 1792917622417,
+          "status": 401
+        }
+      ],
+      "identity": {
+        "pid": 464,
+        "starttime": "54141",
+        "origin": "https://127.0.0.1:41599",
+        "home": "/home/plumwsl/.pulsara-readiness-huq22tjk"
+      },
+      "nativeFetchDescriptor": {},
+      "after": {
+        "event": "inspect",
+        "active": 0
+      },
+      "passed": true,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    }
+  ],
+  "passed": true
+}

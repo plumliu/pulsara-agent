@@ -1,0 +1,44 @@
+{
+  "utc": "2026-10-25T10:28:48.860785+00:00",
+  "activeDisplayCount": 1,
+  "monitors": [
+    {
+      "display": "\\\\.\\DISPLAY6",
+      "primary": true,
+      "resolutionPixels": [
+        1920,
+        1080
+      ],
+      "desktopRectPixels": [
+        0,
+        0,
+        1920,
+        1080
+      ],
+      "effectiveDpi": [
+        96,
+        96
+      ],
+      "effectiveScalePercent": [
+        100.0,
+        100.0
+      ]
+    }
+  ],
+  "observerProcessDpiAwareness": 2,
+  "loadedHkl": [
+    "0x8040804"
+  ],
+  "pulsaraPid": 8324,
+  "visiblePulsaraWindowThreadLayouts": [
+    {
+      "threadId": 36108,
+      "hkl": "0x8040804",
+      "languageIdHex": "0804"
+    }
+  ],
+  "deviceSerialNumbersCollected": false,
+  "displayOrInputSettingsChanged": false,
+  "uiControlled": false,
+  "altGrSemantics": "HKL values and a right Alt key do not alone prove physical AltGr character behavior."
+}

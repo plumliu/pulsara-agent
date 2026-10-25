@@ -1,0 +1,106 @@
+{
+  "root": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb",
+  "resources": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources",
+  "uid": 1000,
+  "phase": "final-windows-nsis-and-unpacked-built",
+  "source": "/home/plumwsl/workspaces/pulsara_agent/desktop/resources",
+  "snapshot": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/repository",
+  "snapshotStarted": "2026-10-25T11:15:05.768899+00:00",
+  "sourceRepository": "/mnt/c/python_workspace/pulsara-agent",
+  "snapshotFinished": "2026-10-25T11:15:12.288851+00:00",
+  "staticSource": "/mnt/c/python_workspace/pulsara-agent/src/pulsara_agent/desktop_app/static",
+  "nativeRipgrepSource": "/home/plumwsl/workspaces/pulsara_agent/src/pulsara_agent/_vendor/ripgrep",
+  "nativeDependencyCopy": "read-only existing Linux payload copied before wheel replacement",
+  "wheelInstalledAt": "2026-10-25T11:15:14.348518+00:00",
+  "payloadFinished": "2026-10-25T11:16:25.349911+00:00",
+  "manifest": {
+    "version": "0.1.0-alpha.9",
+    "sha256": "987a6947525351bca339f429a384a4d630632083158c9b8d94c06666e10c57e6",
+    "platform": "linux-x86_64"
+  },
+  "previousCandidates": [
+    {
+      "snapshotStarted": "2026-10-25T07:50:14.366416+00:00",
+      "payloadFinished": "2026-10-25T07:51:11.788218+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "27adc6ae4251bc8a53dee7586f5a5c18ea700bafe3e033fc0e4f7695c1653c15",
+        "platform": "linux-x86_64"
+      },
+      "reason": "superseded before installation by final scope cancellation/control-EOF corrections"
+    },
+    {
+      "snapshotStarted": "2026-10-25T07:53:00.801721+00:00",
+      "payloadFinished": "2026-10-25T07:53:57.482512+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "992e85d13542faaa1c5218f4071e1f84dfcd734de7995949b0e4f745eac938cf",
+        "platform": "linux-x86_64"
+      },
+      "reason": "superseded before installation by final interop failure-settlement corrections"
+    },
+    {
+      "snapshotStarted": "2026-10-25T08:00:15.182379+00:00",
+      "payloadFinished": "2026-10-25T08:01:14.737141+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "c1048ea3d052930fca018ec63f943bc7f641b0216e7f0b9e2d9b8f49ea741411",
+        "platform": "linux-x86_64"
+      },
+      "reason": "superseded before installation by final interop failure-settlement corrections"
+    },
+    {
+      "snapshotStarted": "2026-10-25T08:02:23.913924+00:00",
+      "payloadFinished": "2026-10-25T08:03:28.161123+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "77332ad0f6f0e11d2f5e990f1811a45ee29992fe745a1393b3ef15aab24dcac9",
+        "platform": "linux-x86_64"
+      },
+      "reason": "superseded before installation by final output retention publication correction"
+    },
+    {
+      "snapshotStarted": "2026-10-25T08:10:35.906057+00:00",
+      "payloadFinished": "2026-10-25T08:11:38.022932+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "23781d9893174f015b4e37899ecff52a8ee9f7bd6f608d30ad8dfb2a62e52238",
+        "platform": "linux-x86_64"
+      },
+      "reason": "superseded after the first failed development install by canonical migration resources and MCP close-owner correction; explicit development replacement only"
+    },
+    {
+      "snapshotStarted": "2026-10-25T08:36:55.947397+00:00",
+      "payloadFinished": "2026-10-25T08:37:56.849743+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.6",
+        "sha256": "be6afac1663c37c7101f6bdeae68d5fd6863a7da828ba9b50a2dd988730d73b9",
+        "platform": "linux-x86_64"
+      },
+      "reason": "user-approved local alpha.7 successor with ROOT stale-head/cancellation correction; alpha.6 and its evidence remain preserved, no same-version live overwrite"
+    },
+    {
+      "snapshotStarted": "2026-10-25T09:49:35.304710+00:00",
+      "payloadFinished": "2026-10-25T09:50:43.498367+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.7",
+        "sha256": "9d433825e7ec99d65138d4937c454d16ef52ddc4a5755fe34e707749ab44255a",
+        "platform": "linux-x86_64"
+      },
+      "reason": "user-approved local alpha.8 successor with composing and AltGraph shortcut fix; alpha.7 installer and evidence retained; no live overwrite"
+    },
+    {
+      "snapshotStarted": "2026-10-25T10:41:13.974005+00:00",
+      "payloadFinished": "2026-10-25T10:42:20.820310+00:00",
+      "manifest": {
+        "version": "0.1.0-alpha.8",
+        "sha256": "a5f5ddca6cea8fdd612c9300e2b7f99ee8a01e4909bb9a42f384989c3f6c1237",
+        "platform": "linux-x86_64"
+      },
+      "reason": "user-approved local alpha.9 successor with writer renewal failure close and controller cold recovery plus friendly details UI; alpha.8 retained uninstalled; no live overwrite"
+    }
+  ],
+  "scopeSource": "/mnt/c/python_workspace/pulsara-agent/src/pulsara_agent/windows_interop/scope.py",
+  "manifestWithheldFromApp": false,
+  "packageResult": "windows-package-results.json"
+}

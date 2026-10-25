@@ -1,0 +1,7 @@
+[38936:1025/172054.531:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: 拒绝访问。 (0x5)
+[38936:1025/172054.547:ERROR:net\disk_cache\disk_cache.cc:290] Unable to create cache
+[38936:1025/172054.548:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+[38936:1025/172054.830:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: 拒绝访问。 (0x5)
+[38936:1025/172054.831:ERROR:net\disk_cache\disk_cache.cc:290] Unable to create cache
+[38936:1025/172054.832:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+WSL maintenance admission refused: [Errno 11] Resource temporarily unavailable

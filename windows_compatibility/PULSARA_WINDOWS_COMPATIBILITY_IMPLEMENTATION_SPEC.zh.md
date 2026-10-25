@@ -1,10 +1,10 @@
 # Pulsara Windows 兼容实施规格：Windows Electron + WSL2 内核
 
-日期：2026-10-24；G0验收更新：2026-10-25。状态：**Windows Electron + WSL2接入已有发行版/默认非root用户，保留interop与自动挂载。本机所选矩阵G0-W-D/C/P/F/N机制可行性验收通过（§22）。Phase A代码与Mac证据冻结范围保持；Ubuntu原生/图形资格按用户要求延期，Phase B未实施，Windows支持未激活。原四方冻结审阅属于修订前合同。**
+日期：2026-10-24；G0验收与Phase B授权更新：2026-10-25。状态：**Windows Electron + WSL2接入已有发行版/默认非root用户，保留interop与自动挂载。本机所选矩阵G0-W-D/C/P/F/N机制可行性验收通过（§22）。共享owner独立修正见§23；用户现已授权并开始Phase B正式实施（§24）。旧Phase A与Mac证据保留为历史基线，Ubuntu原生/图形资格按用户要求延期，Windows支持尚未激活。原四方冻结审阅属于修订前合同。**
 
 2026-10-24 用户授权修订：删除Ubuntu发行版本号及`Pulsara`/`pulsara`固定命名要求；默认接入用户已有WSL2 Ubuntu及其默认非root用户，允许interop、Windows PATH注入和自动挂载。Ubuntu 26.04.1 LTS可作为候选，实际兼容性由资源与G0-W实测决定。无需另立解冻结流程；历史研究/批准记录保留原貌，本次修订及跨域生命周期仍须实际验证。
 
-2026-10-25 用户明确本轮聚焦Windows WSL2，原生Ubuntu x64/arm64与GUI资格延期，不能以WSL代证，也不作为继续G0-W的阻塞。继续复用三位研究agent，保持interop及用户Hiddify TUN，不进入Phase B。G0验收对象是隔离探针与真实现有owner的机制可行性；§13.2中的正式NSIS/产品setup与生产界面闭环仍属B及激活验收，不能要求先实现B再给G0结论。研究接缝与fixture范围须逐项注明，不以此减免G0必须实测的控制、文件、网络与失联合同。
+2026-10-25 G0阶段用户明确聚焦Windows WSL2，原生Ubuntu x64/arm64与GUI资格延期，不能以WSL代证，也不作为继续G0-W的阻塞。当时继续复用三位研究agent，保持interop及用户Hiddify TUN，不进入Phase B；后续正式实施授权见§24。G0验收对象是隔离探针与真实现有owner的机制可行性；§13.2中的正式NSIS/产品setup与生产界面闭环属B及激活验收，不能要求先实现B再给G0结论。研究接缝与fixture范围须逐项注明，不以此减免G0必须实测的控制、文件、网络与失联合同。
 
 调研基线：Git `60e8f21d37ca2c650500ae14438630006d3e62fb`。路线冻结时仅修规格；后续按用户授权实施收窄Phase A，实际记录见第16节。不部署WSL发行版、不修改保存配置、不调用真实provider；真实PG实验仅操作已确认的独立临时实例。冻结规格、完成A、通过G0-W、Windows激活是四个不同状态。
 
@@ -14,7 +14,7 @@
 
 本次完整取代此前原生Win32内核路线与其宽Phase A：**ConPTY/Job、PowerShell载荷、Win32 HANDLE/NTFS全消费者binding、Windows PG DLL、内核named-pipe/Proactor迁移全部退出当前计划。** 不保留两条Windows内核路径，不把旧G0-D/T/F/R或88–154人日总数当当前验收/预算，也不以WSL失败自动回退原生Windows、WSL1、Git Bash、远程PG或Docker Desktop。
 
-上段排除的是原生Windows内核的整套迁移。保留interop后的G0研究已实测用于Windows普通后代回收的窄Job候选（§18）；这不恢复ConPTY/原生kernel路线，也不批准生产Job/relay适配或进入B。
+上段排除的是原生Windows内核的整套迁移。保留interop后的G0研究已实测用于Windows普通后代回收的窄Job候选（§18）；这不恢复ConPTY/原生kernel路线。生产Job/relay适配现按§24的Phase B授权实施。
 
 首批资格矩阵为Windows 11 25H2 x64普通用户、受支持且固定验证版本的WSL2、用户选定的已有Ubuntu x64发行版；Ubuntu不预设发行版本号门槛，记录实际OS build/WSL包及Linux kernel/发行版来源与版本，按实测结果声明支持组合。26H2、ARM64、Server、WSL1、其他Linux发行版、DrvFs/网络盘工程需另行目标验收后才扩声明。选择25H2作为首批测试矩阵不代表它是唯一当前Windows版本。[Windows官方版本信息](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information)
 
@@ -121,7 +121,7 @@ reset先取得原kernel锁并核对准确实例，必要时执行有限stop；�
 
 第五轮有限helper候选将请求收窄为：持锁ready之后，恰一条完整LF结尾operation JSONL及stdin EOF才接纳执行；拒绝提前、重复、尾随残片。该EOF是一次有限调用的输入结束，不用于长连接desktop_runtime。回复须完整fatal UTF-8 decode、唯一ready/result、次序/方法/必要值类型正确，且carrier正常结束才采用；已发操作后的坏帧/截断仍为unknown。仅复用既有有限exec每流4MiB资源边界，不增加任务寿命限制。部分删除后失联如实保留unknown及部分目录，不自动恢复、重删或初始化；unknown不承诺撤销已生效副作用。
 
-物理错误须向原TS owner区分“本次未提交”“可能执行但结果不明”“子命令已结算非零”，不能都由同一catch读当前status再更新startedHere。第四轮真实反例证明：本次未提交后，其他调用可在合法间隙启动同库，原owner随后status/readInstance会误记startedHere=true。当前候选对未提交/unknown原样抛错，不据此次catch认领实例；已结算PG非零仍保持原readback和原错误。已有startedHere不因新错误被清空，不增第二份状态。研究字段`postgresExecution`及两行guard仅为§20的output合同草案，生产错误接口尚未实现；不能用数值code3或当前同路径实例代替操作执行类别。
+物理错误须向原TS owner区分“本次未提交”“可能执行但结果不明”“子命令已结算非零”，不能都由同一catch读当前status再更新startedHere。第四轮真实反例证明：本次未提交后，其他调用可在合法间隙启动同库，原owner随后status/readInstance会误记startedHere=true。§23已在共享owner和POSIX实现落实`PostgresCommandError.postgresExecution`的`not-submitted`/`unknown`/`failed`分类：未提交/unknown原样抛错，不据此次catch认领实例；明确已结算PG非零仍保持原readback和原错误。已有startedHere不因新错误被清空，不增第二份状态；status3也必须是已结算失败才可准入。未来WSL helper仍须真实实现该合同及双锁，不能用数值code3、当前同路径实例或本次POSIX修正代替跨域执行/准入事实。
 
 **第三至六轮候选已有真实PG机制、TS owner与实际bundled kernel集成证据（§19–21），尚无生产WSL helper。** 已覆盖晚start拒绝、有限stop/initdb后代持锁、双锁内删除/重建、真实TS reset、有限framing、remove前中后失联、方法间竞争、真实PG非零readback及正常kernel退出后PGstop。明确未提交须关闭准入、拒晚ready写帧并等helper退出；发帧后不因EOF撤回副作用。宿主异常退出与整发行版/睡眠等组合仍须按当前证据分别裁定，不能把这些子项当整门资格。被否定的单helper CLOEXEC方案只作§18历史反例保留。
 
@@ -153,9 +153,9 @@ probe继续原default-deny、single-flight/TTL、shell候选、`.venv/bin`与实
 
 kernel、私有PG、Protocol-v3和应用资源仍使用Linux机制与ext4。自动挂载可用不扩大workspace/PG的存储接纳范围，首版C盘工程仍按第6/7节显式导入。宿主UI、OAuth、下载/reveal仍经原可信Electron owner，不改为拼接shell调用Windows程序。普通任务可使用互操作能力，受现有权限和副作用规则约束；不以PATH隐藏或通用命令黑名单冒充禁止Windows执行。
 
-**跨域生命周期仍按当前G0-W-C组合证据验收，未接入生产。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。Windows模型任务的取消/关闭范围与可观测机制必须在G0证据中闭合，之后才可进入B；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
+**跨域生命周期的G0-W-C机制验收已通过，当前正式接入及验证见§24。** 原Linux PGID/root/drain/join只证明其Linux范围，不证明interop启动的Windows后代已退出。必须实测Windows命令退出码、子进程持pipe、父先退/后代继续、取消、载体失联和正常Quit；不能确认的结果按unknown保留，不自动重发，也不把它升级为完整结算。正式接入须在生产owner重新验证Windows模型任务的取消/关闭范围，不能仅沿用G0探针结果；不能用关闭interop、杀整套WSL或削弱原物理结算断言放行。用户明确系统打开动作继续其已有OS交接语义，不承诺关闭外部编辑器/浏览器。
 
-第五轮真实MCP/hooks/environment研究证明跨域scope必须接在原spawn/关闭边界，不能套用terminal槽或另建调度器。MCP stdio服务进程属于连接/会话生命周期；一次tool cancel可释放原call permit但不能擅自结束仍READY的服务会话，session close才结算其Linux/Windows范围。原timeout的remote UNKNOWN与现transport failure/fence处理保持，不重放工具。hooks成功/失败/取消、environment probe缓存写入均须等待其同一物理scope结算；credential guard拒绝应发生在scope prepare/spawn之前。证据见§21，生产仍未改。
+第五轮真实MCP/hooks/environment研究证明跨域scope必须接在原spawn/关闭边界，不能套用terminal槽或另建调度器。MCP stdio服务进程属于连接/会话生命周期；一次tool cancel可释放原call permit但不能擅自结束仍READY的服务会话，session close才结算其Linux/Windows范围。原timeout的remote UNKNOWN与现transport failure/fence处理保持，不重放工具。hooks成功/失败/取消、environment probe缓存写入均须等待其同一物理scope结算；credential guard拒绝应发生在scope prepare/spawn之前。研究证据见§21，当前生产接入见§24。
 
 §18–20的无breakaway Job、专属anchor及私有socket字节转发只通过明确的机制/集成子场景。首次绑定候选由anchor自己打开上游O_PATH fd，经标准SCM_RIGHTS转交，以SO_PEERCRED/pidfd及本次可信anchor身份核对，避免另一进程重开旧PID路径。第四轮已把它放进真实terminal的启动预约内，与选定取消门合成；其余交错仍待验。裸WSL_INTEROP失效会回退，私有socket须保留到旧调用者结算，不能由Job空就提前unlink。
 
@@ -247,7 +247,9 @@ model/service连接在设置页写Linux现有owner；Windows壳不读取并缓�
 
 Linux x64 guest包使用现有Linux private resources和当前pins；Windows仅Electron/必要host资源，不构建win_amd64 Python wheel、Windowspg_search DLL或捆pwsh。应用部署仍用明确stdin制品流/固定Linux解包入口传输到用户私有ext4资源根；即使automount开启，也不把`/mnt/c`当Linux资源运行位置。权限、symlink和架构由Linuxrecipe验证。拆recipe须在当片更新mise sources/outputs/cache fixture；内容校验沿既有真实制品边界，不增hash registry。
 
-沿现build owner分开目标：native Ubuntu x64构建/验证guest wheel和Linux payload，Windows原生runner构建Electron/NSIS并装入同版本已验证制品；不能在Windows误跑Mac/Linux native recipe，不能把Windows壳平台写成guest wheel平台。跨job传递保留既有不可变制品验证/版本完整性，mise分别声明payload/host输入与输出，新模块变更立即失效。开发构建脚本如需Python仍用该平台仓库uv环境（Windows为`.venv/Scripts/python.exe`），这是构建依赖而非Windows内核。release集合在原`release_artifacts.py`加入精确`Pulsara-${version}-windows-x64.exe`，同步package/mise/workflow/文档和许可，保留DMG/两个deb及手动触发/发布权限；验证构建publish never，不自行bump/tag/publish。
+沿现build owner分开目标：native Ubuntu x64构建/验证guest wheel和Linux payload，Windows原生runner构建Electron/NSIS并装入同版本已验证制品；不能在Windows误跑Mac/Linux native recipe，不能把Windows壳平台写成guest wheel平台。跨job传递保留既有不可变制品验证/版本完整性，mise分别声明payload/host输入与输出，新模块变更立即失效。开发构建脚本如需Python仍用该平台仓库uv环境（Windows为`.venv/Scripts/python.exe`），这是构建依赖而非Windows内核。release集合在原`release_artifacts.py`加入精确`Pulsara-${version}-windows-x64.exe`，同步package/mise/workflow/文档和许可，保留DMG/两个deb及手动触发/发布权限。
+
+按用户明确授权，本轮Windows迁移与验收可自主递增必要的本地alpha候选版本号，并构建、安装和验证，不再为每次版本递增单独询问。版本变更须同步Python/npm及对应锁文件中的本包版本，通过既有release owner的一致性检查，并按正常维护路径保留用户配置、数据库与工程；不得以同版本覆盖或修改payload摘要标记替代。验证构建继续使用`--publish never`；Git tag、上传制品和对外发布仍须另行明确授权，本地候选通过不等于Windows支持激活。
 
 更新为手动发布/安装：先正常Quit、确认原kernel/PG及已支持interop任务按合同结算且无未解决状态，再安装新版本Linux应用资源并验证，最后使用新版本。数据/工程保持；不覆盖运行中的Python/PG/Chromium文件。失败保留原数据与错误，不自动清库、升级/重建发行版或引入双版本运行fallback。旧应用资源只在确无live owner使用且新安装成功后清理；不增加持久更新journal/恢复job。PG major升级须另定数据维护合同；发行版和系统包升级由用户管理，Pulsara检测兼容性变化并报告，不替用户执行dist-upgrade。
 
@@ -270,7 +272,7 @@ NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckApp
 
 关闭窗口继续沿现tray/后台工作提示；用户明确Quit才进入原requestQuit。inspect失败/超时表示状态未知，只影响提示，不授权强杀。封新工作→发送原shutdown或关闭stdin→Linux原application.aclose结算terminal/MCP/hooks/worker与持有资源→停止Unix diagnostics/HTTP、释放kernel flock→实际退出。当前finally即使failed也可能发stopped/释放锁；**正常完成须本次没有收尾failed、实际Linux正常exit0、控制帧/pipe完整收回，锁只是并发准入事实，单独不是工具成功/物理回收证明。**
 
-`runtime.ts`当前`child`在close后清空，`stop()`若child已无会直接return；WSL接入必须保留本次已结束attempt的退出/失败/unknown并在stop/quit检查，不能因为carrier先消失便升级为clean success并让main停PG。复用现owner的process-local字段，不建durable退出receipt；刚创建尚未start-frame的无工作child可按原可证明not-started路径收回。
+G0发现`runtime.ts`的`child`在close后清空时，原`stop()`会直接return而漏查异常退出；§23已在共享owner修复：stop仍检查已保存的本次exit结果，ready事实随同一个结果保存，不能被新attempt重置。该修正保持原判据“曾ready且实际exit非0则失败”，不以此宣称已完成WSL carrier/控制帧/信号的完整unknown合同。WSL接入仍须保证不能因carrier先消失便升级为clean success并让main停PG；复用process-local事实，不建durable退出receipt，刚创建尚未start-frame的无工作child沿原可证明not-started路径收回。
 
 第六轮在真实宿主强退后观察到kernel收到SIGHUP（未记录发送者siginfo），原默认动作会先于stdin EOF收尾终止kernel。研究启动接缝仅忽略该载体挂断信号后，Node/Electron两项均实际进入原EOF/application.aclose，关闭门持有时kernel活且原锁忙，放门后完成原收尾并由独立pidfd确认退出。B必须在Linux启动边界保留该挂断处理与原EOF所有权，不能靠存活carrier或原默认signal行为推定已清洁关闭；不新增daemon/第二kernel owner，不忽略任意致命信号。宿主已死仍不能获得新的clean回复，本次未确认输入保持unknown。
 
@@ -286,6 +288,10 @@ NSIS沿electron-builder维护机制使用per-user安装及tracked customCheckApp
 | 睡眠/恢复、VPN/代理/转发暂断 | UI显示失联并封相关新动作；只可重新验证同一live启动身份/连接，保留原任务；无法确认则按unknown+原锁重开路径 | 不把网络断连当用户取消/任务完成，不在后台再spawn第二个kernel |
 | PG/helper可能执行但lost reply | 不采用未闭合回复；保PG/data，报告unknown；重新进入须锁与当前精确实例验证 | 不重放start/delete、复制startedHere、用旧postmaster.pid或Windowsstat作authority |
 | 用户改WSL配置/挂载/root身份 | 重新观察实际目标/能力/ext4/权限；不合格项给具体错误，root执行拒绝，默认用户改变不自动换已保存身份 | 不覆盖用户配置，不把interop/自动挂载开启判作不合格，不静默切其他目标 |
+
+睡眠恢复验收不能止于进程存活、健康检查和历史界面可见：还须验证原会话在writer资格仍有效或已失效两种情况下的后续操作，以及正常Quit的物理收尾。writer失效不得继续提交，也不得为恢复而静默重建已有epoch的provider输入；恢复沿原会话关闭/冷开边界。资格失效不能阻止旧owner完成自己已经持有的物理资源回收；真实scope、hook、MCP或I/O关闭失败仍须保留原失败屏障，不因捕获`StaleHostWriter`而统一报告成功。
+
+2026-10-25用户进一步授权睡眠后的自动恢复与友好失败界面。优先复用现有连接观察、重连、会话关闭及冷开owner：普通传输中断重新连接原live实例；writer已失效则封旧准入，先完成原会话物理关闭，再打开新的冷会话实例。不得复活旧lease、在原epoch内重建前缀、自动重发用户消息或模型工具，也不得为恢复启动第二kernel。前端保持历史与本页内存草稿，显示“正在恢复连接”；自动恢复不能完成时显示明确的恢复失败状态、重试入口和可展开技术详情。真实物理关闭失败继续阻断冷开/维护，不以友好文案遮蔽异常；用户级页面继续独立于活动会话。复用现有单次恢复尝试与用户重试，不另造恢复调度器、持久任务或寿命上限。
 
 正常Quit、reset、升级和卸载均不终止用户共享发行版，不执行`wsl --terminate`、`--shutdown`或`--unregister`；只处理已确认归本应用所有的进程/资源。外部强制终止仅为故障输入，其破坏性实验在另备可丢弃环境执行，不拿用户日常Ubuntu试杀后宣称cleanup成功。[WSL命令范围](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
 
@@ -566,3 +572,32 @@ PDF正证需要Electron内置固定extension及其自身frame发起的chrome://r
 原反例、修正前源码与有限探针失败保留，不弱化原测试、不把最终源码未整套重跑写成已重跑。官方制品摘要/签名只用于真实下载边界；无代码/证据hash、durable receipt、恢复队列、第二lifecycle owner或新产品寿命cap。各研究进程/PG/home/大资源及临时发行版精确清理；可选Electron缓存自动审批拒删，保留ignored output，不绕过、不归档。R7注销后共享Ubuntu实际曾观测Stopped，保留原要求Running的探针断言失败，不猜原因；命令审计及注册/default核对证明未主动终止它，后续Git同步显式重开与该历史观察分别记录。
 
 **G0通过只表示所选机制可用于后续实施决策。** 生产跨域scope、PG typed helper、Runtime退出/信号接缝、目录与TLS/OAuth/Session装配仍未实施；正式setup/NSIS、tray/IME/DPI、更新卸载、真实provider长程和受影响平台回归仍按§11–13验收。用户本轮明确不进入B，故不启动这些生产改动或宣称Windows支持已完成。
+
+## 23. G0之后的独立问题修正（2026-10-25）
+
+用户在§22验收之后授权澄清README并单独修复三类问题，同时明确暂不进入Phase B。§16和§17–22的源码状态、失败及通过记录保留为各自当时事实，不随新修正改写为通过。新的共享代码修改不能沿用旧Mac应用包GUI证据作为自身回归资格。
+
+- Runtime：`child`清空后跳过退出检查是macOS/Linux共用owner中的逻辑缺陷；本轮在该owner保留并检查现有attempt结果，不增加WSL adapter或新的持久状态。G0复现来自Windows研究宿主，不能据此宣称已在macOS原生复现。
+- PG：本轮在现有`PostgresOperations`及POSIX实现明确未提交、结果未知和已结算失败的错误分类，原`BundledPostgres`只对已结算的启动失败进行原实例读回；未提交/unknown不得凭当前同路径实例认领本次启动，亦不得凭携带的数值code3准入启动或删除。保留原错误细节、已有归属及真实已结算非零后的读回，不另建PG状态owner。WSL有限helper、双锁和跨域装配仍属B，不由本轮接口修正宣称已实现。
+- terminal及其他执行owner：Linux PGID不能证明Windows后代已退出，这是Windows接入缺口；完整修复需要§5的Job/relay范围及各原owner的真实集成。仅改变Linux存活判断、加入未使用scope接口或导入output探针均不算修复；是否单独提前实施这一部分须与用户的“不进入B”约束明确协调。
+
+本轮已正式修正Runtime与PG共享owner，WSL隔离源码编译及全部desktop Node测试60/60通过，Windows定向真实子进程测试通过，交叉审阅无阻断。结果、原失败与适用范围见[独立修正报告](research/2026-10-25/root/shared-owner-fixes/report.zh.md)。完整Windows跨域回收仍未实施，等待上述范围取舍；不改变interop、Hiddify TUN、共享Ubuntu配置或Windows未激活状态。本次没有原生macOS/应用包GUI重验，不能把WSL回归记作原生Ubuntu资格。
+
+## 24. Phase B正式实施授权与接缝（2026-10-25，进行中）
+
+用户在§23之后明确授权进入Phase B，先修复两个POSIX启动清理缺陷，再按本规范正式接入；实施期间发现的相关生产缺陷直接修复。继续复用三位gpt-6.1-sol/high并行实施，保持已有Ubuntu/plumwsl、interop及Hiddify TUN。§16–23记录各历史时点，不能将其“未进入B”解释为当前禁令，也不能将当时G0通过视作生产接入通过。
+
+- POSIX原owner先收敛：foreground timer创建/启动失败必须释放本次预约并结算原decision；Popen成功后的stream包装、线程或state构造失败必须关闭本次fd并终止、join实际进程组后才能释放预约。新反例在原实现7/7失败，修正后相关62项通过；测试在WSL隔离ext4源码运行，不记作macOS原生重验。
+- Windows宿主接入沿用原PythonRuntime/BundledPostgres/Application与前端API。WSL有限helper承担已明确的双锁、一次命令及物理结果；TS owner继续承担启动归属与Quit顺序。安装器调用已安装主exe的有限`--pulsara-maintenance-check`，使用同一helper的kernel EX→PG EX及真实status观察；busy/unknown/unavailable均拒绝维护，不启动、终止或删除数据库。空布局只允许建立原协调锁，不添加维护receipt或新状态owner。
+- Windowsinterop辅助程序使用C# P/Invoke调用原生Job/HANDLE API，构建机编译成独立PE，运行时不执行PowerShell/Add-Type，也不要求Windows Python或pywin32。目标Windows11 25H2自带.NET Framework4.8.1，参见[Microsoft平台说明](https://learn.microsoft.com/en-us/dotnet/framework/install/on-windows-and-server)。依赖只拥有平台机制；Pulsara的任务范围、首次绑定、取消和最终结算仍由§5的原执行owner承担。若helper死亡后须独立保有准确Job/member HANDLE以完成物理join，只允许同scope、有限、私有pipe的monitor；不引入后台daemon、PID推断或产品生命周期注册表。
+- 每次WSL内核启动经私有控制pipe交付完整临时TLS证书；Windows创建独立内存Session并绑定精确origin/证书。退出或重启先封住旧请求，再等待旧窗口、BrowserOwner、启动cover、下载与连接实际退休。OAuth仅将原SDK的浏览器打开请求交给Windows系统浏览器并返回打开结果；PKCE/state/token仍由原SDK拥有。
+- 正式首启实测中，Linux ready后Windows localhost转发仍有约半秒不可达窗口。导航前由同一BackendSession使用Electron SDK、同一完整证书pin执行只读`HEAD /`；只有明确`ERR_CONNECTION_REFUSED`继续等待，其他传输/证书/HTTP错误原样失败。250ms仅为转发可达性的采样间隔，不是总等待时限；不设重试总次数，不重发业务操作。Quit/Session退休取消原请求与等待并join后再退出，Linux ready不冒充Windows已可达。
+- Windows首次安装暴露迁移资源的checkout换行差异：CRLF进入PL/pgSQL函数正文，使新库不符合原LF catalog。仓库迁移SQL/JSON统一为LF输入，现有registry在校验、身份计算和执行前使用同一规范文本；原baseline身份保持，observed catalog仍严格检查。不得修改失败库函数/ledger或放宽verifier来伪装首启成功；本轮未配置的空测试库经精确身份核验后按开发重置合同重建。
+- 工程目录服务属于用户级API，初始根为Linux系统用户home下`workspaces`，不是PULSARA_HOME下的目录。GET不隐式创建，显式初始化/单层新建/选择及createSession分别重验Linux对象；前端选择器不依赖活动会话。Windows本地File走原上传副本协议，同发行版UNC只做固定目标路径转换；不增加Windows读文件IPC。
+- Runtime除§23退出结果修正外，以本attempt是否实际发送start帧划分未使用child与已提交启动；已提交后即使尚未ready，failed/异常退出也不能当作空进程回收。控制消息必须完整LF及合法UTF8，拒绝ready后failed/无效帧却exit0，以及WSL未收到完整stopped的“成功退出”；数字0不能替代原应用收尾事实。PG的`initialized`只表示本次start内已确认成功的initdb，宿主在PG准备完成后读取该事实；既有cluster缺库/角色明确报错，不借后续启动自动补建。相应反例纳入正式回归。
+
+- 真实provider长程验收发现共享ROOT准入会无限重发head已过期的prospective输入。仅同workspace下的head过期使用明确typed冲突；原confirm先裁定同一immutable command的FULL/ABSENT，只有确定尚无ROOT提交时才关闭旧prospective并重新prepare。已有epoch、SYSTEM/tools与已安装provider前缀保持；workspace变化及其他冲突不改为这个重准备路径，ACK unknown仍走原确认，取消后不得重新准入。不新增持久状态、命令身份、重放或重试总次数限制。此修复须由新候选重跑原真实长程场景，不能仅据源码定向测试宣称已安装产品通过。
+
+本节描述获授权的实现边界与已经执行的定向验证，不宣称B1–B5或发布矩阵全部通过。正式候选的构建、集成、GUI、provider长程及受影响原生平台资格按§11–13逐项记录；用户延期的原生Ubuntu资格不由WSL代替。
+
+用户先批准本地候选由`0.1.0-alpha.6`升级到`0.1.0-alpha.7`，用于安装共享ROOT修复并验证正常更新保留模型配置与会话；随后明确批准`alpha.8`及本轮后续必要本地候选递增，并要求同步修改规范。当前版本权限以§8.3为准：本地版本递增、构建和安装无需逐次确认，Git tag及对外发布仍需另行授权。

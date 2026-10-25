@@ -1,0 +1,15 @@
+
+PASS create returns blank hidden instance; sandbox and no bridge
+PASS hide and stale layout preserve same document state
+PASS same session storage shares; other session isolated; closing all retains partition
+PASS native redirect, SPA, POST and history observed
+PASS slow navigation returns immediately and stop is scoped; genuine failure retry works
+PASS permission denied; popup forwarded original owner without native child
+PASS control port blocked for explicit navigation fetch websocket and worker
+PASS forget joins an earlier tab close until the actual destroyed event
+PASS host retirement joins already running forget and other live partitions
+PASS retire tabless partition rejects pending worker then new same-session partition is fresh
+PASS crash destroys native resource and sends retained error state
+PASS host reload retires every partition including tabless owners
+PASS destroying host window closes its separately owned WebContents
+{ passed: 13, failed: 0 }

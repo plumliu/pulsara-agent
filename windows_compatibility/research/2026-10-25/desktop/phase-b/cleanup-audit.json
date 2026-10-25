@@ -1,0 +1,109 @@
+{
+  "directories": [
+    {
+      "path": "/home/plumwsl/.pulsara-host-smoke-6Pxc23Zf",
+      "exists": false
+    },
+    {
+      "path": "/home/plumwsl/.pulsara-session-smoke-hxv95lul",
+      "exists": false
+    }
+  ],
+  "sessionExactIdentityAlive": false,
+  "sessionCarrier": {
+    "code": 0,
+    "signal": null
+  },
+  "sessionHost": {
+    "exit": 0
+  },
+  "browserHost": {
+    "exit": 0
+  },
+  "buildDirectory": {
+    "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb",
+    "exists": true,
+    "uid": 1000,
+    "retainedFor": "current candidate reproducible build, not a live application owner"
+  },
+  "globalChanges": false,
+  "readiness": [
+    {
+      "case": "delayed-listen",
+      "pid": 331,
+      "starttime": "52545",
+      "sameProcessAlive": false,
+      "home": "/home/plumwsl/.pulsara-readiness-41ojevop",
+      "homeExists": false,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "case": "sampling-retire",
+      "pid": 445,
+      "starttime": "53345",
+      "sameProcessAlive": false,
+      "home": "/home/plumwsl/.pulsara-readiness-ucvdu_xp",
+      "homeExists": false,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "case": "external-cancel",
+      "pid": 449,
+      "starttime": "53583",
+      "sameProcessAlive": false,
+      "home": "/home/plumwsl/.pulsara-readiness-do8dpp1h",
+      "homeExists": false,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "case": "pending-retire",
+      "pid": 453,
+      "starttime": "53821",
+      "sameProcessAlive": false,
+      "home": "/home/plumwsl/.pulsara-readiness-sgq9e7jr",
+      "homeExists": false,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "case": "wrong-certificate",
+      "pid": 459,
+      "starttime": "53956",
+      "sameProcessAlive": false,
+      "home": "/home/plumwsl/.pulsara-readiness-m55d0h6q",
+      "homeExists": false,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "case": "unauthorized",
+      "pid": 464,
+      "starttime": "54141",
+      "sameProcessAlive": false,
+      "home": "/home/plumwsl/.pulsara-readiness-huq22tjk",
+      "homeExists": false,
+      "carrier": {
+        "code": 0,
+        "signal": null
+      }
+    }
+  ],
+  "readinessHost": {
+    "exit": 0
+  },
+  "readinessFixtureDirectoriesRemaining": [],
+  "passed": true
+}

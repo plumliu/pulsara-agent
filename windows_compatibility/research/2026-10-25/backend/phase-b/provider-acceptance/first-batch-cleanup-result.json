@@ -1,0 +1,21 @@
+{
+  "same_production_system_id": "7700523439330484737",
+  "test_databases_absent": [
+    "pulsara_wsl_dogfood_1ee008546df649739a5f6285a3b2b98e",
+    "pulsara_wsl_dogfood_3b6282f6fff045cbb61b582885e56cab",
+    "pulsara_wsl_dogfood_042d214362514d39825b330ea326095f",
+    "pulsara_wsl_dogfood_cbc9bfc36e524d4b9fde4bf2b87ea4d2"
+  ],
+  "remaining_exact_test_processes": [],
+  "inaccessible_same_uid_pids": [
+    355,
+    357
+  ],
+  "removed": [
+    "/home/plumwsl/.pa-vvdgh4hq",
+    "/home/plumwsl/workspaces/.provider-accept-xqgw_1ur"
+  ],
+  "prepared_root_absent": true,
+  "production_pg_stopped_or_reset": false,
+  "production_settings_written": false
+}

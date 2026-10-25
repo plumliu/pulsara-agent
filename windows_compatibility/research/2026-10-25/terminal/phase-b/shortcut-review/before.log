@@ -1,0 +1,84 @@
+
+ RUN  v4.1.11 C:/python_workspace/pulsara-agent/frontend
+
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > keeps ordinary Ctrl+k active 340ms
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > keeps ordinary Ctrl+n active 194ms
+ × ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+k with extra Alt or composition state {"ctrlKey":true,"altKey":true} 188ms
+   → expected false to be true // Object.is equality
+ × ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+n with extra Alt or composition state {"ctrlKey":true,"altKey":true} 167ms
+   → expected false to be true // Object.is equality
+ × ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+k with extra Alt or composition state {"ctrlKey":true,"isComposing":true} 119ms
+   → expected false to be true // Object.is equality
+ × ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+n with extra Alt or composition state {"ctrlKey":true,"isComposing":true} 157ms
+   → expected false to be true // Object.is equality
+ ✓ ../tests/frontend/app-shortcuts.test.tsx > does not turn a mapped AltGraph character into a shortcut by physical key code 140ms
+ × ../tests/frontend/app-shortcuts.test.tsx > does not close session search for Ctrl+Alt+K, while Ctrl+K still closes it 7ms
+   → expected false to be true // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+k with extra Alt or composition state {"ctrlKey":true,"altKey":true}
+ FAIL  ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+n with extra Alt or composition state {"ctrlKey":true,"altKey":true}
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ ../tests/frontend/app-shortcuts.test.tsx:23:58
+     21|   renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
+     22|   const composer = await screen.findByLabelText('发送给 Pulsara');
+     23|   expect(fireEvent.keyDown(composer, { key, ...state })).toBe(true);
+       |                                                          ^
+     24|   expect(screen.queryByRole('dialog', { name: '搜索会话' })).toBeNull();
+     25|   expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+k with extra Alt or composition state {"ctrlKey":true,"isComposing":true}
+ FAIL  ../tests/frontend/app-shortcuts.test.tsx > does not consume Ctrl+n with extra Alt or composition state {"ctrlKey":true,"isComposing":true}
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ ../tests/frontend/app-shortcuts.test.tsx:23:58
+     21|   renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
+     22|   const composer = await screen.findByLabelText('发送给 Pulsara');
+     23|   expect(fireEvent.keyDown(composer, { key, ...state })).toBe(true);
+       |                                                          ^
+     24|   expect(screen.queryByRole('dialog', { name: '搜索会话' })).toBeNull();
+     25|   expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  ../tests/frontend/app-shortcuts.test.tsx > does not close session search for Ctrl+Alt+K, while Ctrl+K still closes it
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ ../tests/frontend/app-shortcuts.test.tsx:46:79
+     44|   render(<SessionSearchDialog adapter={{} as RuntimeAdapter} available…
+     45|   const input = screen.getByLabelText('搜索关键词');
+     46|   expect(fireEvent.keyDown(input, { key: 'k', ctrlKey: true, altKey: t…
+       |                                                                               ^
+     47|   expect(onClose).not.toHaveBeenCalled();
+     48|   expect(fireEvent.keyDown(input, { key: 'k', ctrlKey: true })).toBe(f…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed | 3 passed (8)
+   Start at  18:32:48
+   Duration  6.17s (transform 1.45s, setup 57ms, import 3.51s, tests 1.31s, environment 1.10s)
+

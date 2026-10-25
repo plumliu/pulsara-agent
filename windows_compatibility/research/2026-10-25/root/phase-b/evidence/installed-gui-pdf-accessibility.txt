@@ -1,0 +1,286 @@
+Window: "Pulsara — 本地智能工作台", App: pulsara.exe.
+	0 窗口 Pulsara — 本地智能工作台 Secondary Actions: Raise
+		1 窗格 (disabled)
+		2 区域 Pulsara — 本地智能工作台
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 区域
+								8 区域
+									9 文档 Pulsara — 本地智能工作台 Value: https://127.0.0.1:40407/ ID: RootWebArea
+										82 组
+											971 组 ID: root
+												972 主要
+													973 章节标题
+														974 按钮 切换会话侧栏
+													975 导航 主要功能
+														976 按钮 返回 Pulsara 总览
+														977 按钮 总览
+														978 按钮 会话
+														979 按钮 能力
+														980 按钮 记忆
+														981 按钮 定时任务
+														982 按钮 设置
+														983 按钮 用户设置
+															984 图形 用户头像
+													985 补充
+														986 章节标题
+															987 文本 本地智能工作台
+															988 标题 Pulsara
+															989 组 Description: 已连接本地服务
+														990 按钮 搜索会话 ⌘ K
+														991 按钮 新建会话 ⌘ N
+														992 区域 会话目录
+															993 区域 从目录中打开
+																994 按钮 从目录中打开
+																995 按钮 选择目录并创建会话 Description: 选择目录并创建会话
+																996 区域 Windows 中文 验收 20261025 会话
+																	997 按钮 Windows 中文 验收 20261025 Description: /home/plumwsl/workspaces/Windows 中文 验收 20261025
+																	998 按钮 在 Windows 中文 验收 20261025 中创建会话 Description: 在 Windows 中文 验收 20261025 中创建会话
+																	999 按钮 WSL中文工作目录smoke.txt写入读取验收 当前会话
+																	1000 详细信息
+																		1001 开合三角标记 WSL中文工作目录smoke.txt写入读取验收 更多操作
+															1002 区域 快速开始
+																1003 按钮 快速开始
+																1004 按钮 创建快速开始会话 Description: 创建快速开始会话
+																1005 文本 还没有快速开始会话
+														1006 文本 已连接本地服务
+													1007 区域 会话工作台
+														1008 章节标题
+															1009 文本 已完成
+															1010 标题 WSL中文工作目录smoke.txt写入读取验收
+															1011 按钮 更多会话操作
+															1012 按钮 压缩上下文
+															1013 按钮 切换检查器
+														1014 文章
+															1015 章节标题
+																1016 文本 你
+																1017 图形 用户头像
+															1018 文本 本次是安装版的中文工作目录与真实模型验收。请仅在当前工作目录里创建 smoke.txt，写入一行“Windows WSL 中文验收通过”，然后读取该文件确认内容。请使用实际工具完成，并汇报文件的绝对路径和读回内容；不要修改其他目录或系统设置。
+															1019 按钮 复制消息 Description: 复制消息
+															1020 time
+																1021 文本 16:59
+														1022 章节标题
+															1023 文本 Pulsara
+														1024 按钮 展开处理过程
+														1025 文章
+															1026 组
+																1027 文本 验收通过。
+																1028 文本 文件绝对路径
+																1029 区域 TEXT 代码块
+																	1030 文本 TEXT
+																	1031 切换按钮 按宽度换行 Description: 按宽度换行
+																	1032 按钮 复制代码 Description: 复制代码
+																	1033 文本 1
+																	1034 文本 /home/plumwsl/workspaces/Windows 中文 验收 20261025/smoke.txt
+																1035 文本 读回内容
+																1036 文本 （read_file 工具，1 行）
+																1037 区域 TEXT 代码块
+																	1038 文本 TEXT
+																	1039 切换按钮 按宽度换行 Description: 按宽度换行
+																	1040 按钮 复制代码 Description: 复制代码
+																	1041 文本 1
+																	1042 文本 Windows WSL 中文验收通过
+																1043 文本 实测校验
+																1044 列表
+																	1045 列表项目 大小 31 字节，末尾单个换行（od -c 显示 \n 结尾，无 CR，即 LF 换行）
+																		1046 文本 od -c
+																		1047 文本 \n
+																	1048 列表项目 中文按 UTF-8 三字节编码，例：344 270 255 = U+4E2D「中」，351 252 214 = U+9A8C「验」
+																		1049 文本 344 270 255
+																		1050 文本 351 252 214
+																	1051 列表项目 sha256：e4aaffb37c42ce5d6d82b6c72938dee18c4018965645dc97f2b07ba10c329f19
+																		1052 文本 e4aaffb37c42ce5d6d82b6c72938dee18c4018965645dc97f2b07ba10c329f19
+																	1053 列表项目 工作目录创建前后对比：目录原为空，现在仅有 smoke.txt 一个文件，未触碰其他目录，也未改任何系统设置
+																		1054 文本 smoke.txt
+																1055 文本 一点说明：文件权限为
+																1056 文本 -rw-------
+																1057 文本 （600），是写入工具采用的保守默认值。如果后续验收要求其他用户或 Windows 侧可读，告诉我目标权限即可调整。
+															1058 按钮 复制回复
+															1059 按钮 从此处分叉 Description: 从此处分叉
+															1060 time
+																1061 文本 16:59
+														1062 文章
+															1063 章节标题
+																1064 文本 你
+																1065 图形 用户头像
+															1066 按钮 文件：Windows 中文附件.bin
+															1067 文本 继续验收：这个附件是本次生成的纯测试文件，请只读检查大小并汇报。然后仅在当前工作目录新建 preview.html、preview.png、preview.pdf：HTML 显示“Windows WSL 预览通过”，无外部资源，并在页面显示 typeof require 和 typeof window.pulsaraDesktop 的实际值；PNG 用简单的彩色图案；PDF 写一页英文 Windows WSL PDF OK。可用现有工具生成，不安装依赖，不改配置。完成后请给出三个文件的可点击 Markdown 链接，并嵌入 PNG 供界面预览。
+															1068 按钮 复制消息 Description: 复制消息
+															1069 time
+																1070 文本 17:08
+														1071 章节标题
+															1072 文本 Pulsara
+														1073 按钮 展开处理过程
+														1074 文章
+															1075 组
+																1076 文本 三个预览文件均已创建并通过校验。
+																1077 文本 附件只读检查（未修改，只读取 stat/sha256）
+																1078 列表
+																	1079 列表项目 路径：/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin
+																		1080 文本 /home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin
+																	1081 列表项目 大小 285 字节（权限 0400，file 识别为 data，无固定格式签名）
+																		1082 文本 285 字节
+																		1083 文本 0400
+																		1084 文本 file
+																		1085 文本 data
+																	1086 列表项目 sha256：6fc07515514dd31174a809e7b88d2ebcb1c186bf8d3321ffe3b273fdb623e86e
+																		1087 文本 6fc07515514dd31174a809e7b88d2ebcb1c186bf8d3321ffe3b273fdb623e86e
+																1088 文本 新建文件（仅当前工作目录，无依赖安装、无配置改动）
+																1089 表格
+																	1090 行
+																		1091 列标题 文件
+																		1092 列标题 大小
+																		1093 列标题 说明
+																	1094 行
+																		1095 项 preview.html
+																		1096 项 3018 B
+																		1097 项 单文件，内联 CSS/JS，零外部资源
+																	1098 行
+																		1099 项 preview.png
+																		1100 项 17701 B
+																		1101 项 480×320 RGB 彩色图案
+																	1102 行
+																		1103 项 preview.pdf
+																		1104 项 592 B
+																		1105 项 1 页 A4，英文 “Windows WSL PDF OK”
+																1106 文本 可点击链接
+																1107 列表
+																	1108 列表项目 [preview.html](/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.html)
+																	1109 列表项目 [preview.png](/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.png)
+																	1110 列表项目 [preview.pdf](/home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.pdf)
+																1111 文本 校验结果
+																1112 列表
+																	1113 列表项目 HTML：标题渲染为「Windows WSL 预览通过」；页面实时求值显示 typeof require = undefined、typeof window.pulsaraDesktop = undefined；grep 未发现 http(s)://、src=、@import、url() 等外部引用。
+																		1114 文本 typeof require
+																		1115 文本 undefined
+																		1116 文本 typeof window.pulsaraDesktop
+																		1117 文本 undefined
+																		1118 文本 http(s)://
+																		1119 文本 src=
+																		1120 文本 @import
+																		1121 文本 url()
+																	1122 列表项目 PNG：IHDR/IDAT/IEND 三段 CRC 全部正确，解压后 461120 字节 = 320×(1+480×3)，颜色类型 2（真彩 RGB），与预期完全一致；已用看图确认图案正常显示。
+																	1123 列表项目 PDF：file 识别为 PDF 1.4 单页；startxref 指向 xref，5 个对象偏移逐条命中 N 0 obj，/Count 1，content stream 长度自检一致，提取文字为 Windows WSL PDF OK，MediaBox 0 0 595 842。
+																		1124 文本 file
+																		1125 文本 xref
+																		1126 文本 N 0 obj
+																		1127 文本 /Count 1
+																		1128 文本 Windows WSL PDF OK
+																		1129 文本 0 0 595 842
+																1130 文本 一点如实说明：上述
+																1131 文本 typeof
+																1132 文本 值是在我截图所用的隔离浏览器环境中实测的（页面显示运行环境为 about，来自
+																1133 文本 location.protocol
+																1134 文本 ）。若在桌面右侧预览标签里打开，
+																1135 文本 window.pulsaraDesktop
+																1136 文本 可能因注入而存在——页面每次加载都实时求值，不做任何写死或兜底替换，所以看到的仍是当时环境的真实值。
+																1137 区域 可视化图集
+																	1138 按钮 在标签中打开图片 Description: 在标签中打开图片
+																	1139 按钮 查看图片：preview.png
+																		1140 图形 preview.png
+																1141 文本 目录内现共 4 个文件：
+																1142 文本 smoke.txt
+																1143 文本 、
+																1144 文本 preview.html
+																1145 文本 、
+																1146 文本 preview.png
+																1147 文本 、
+																1148 文本 preview.pdf
+																1149 文本 ，未触碰其他目录或系统设置。
+															1150 按钮 复制回复
+															1151 按钮 从此处分叉 Description: 从此处分叉
+															1152 time
+																1153 文本 17:09
+														1214 文章
+															1215 章节标题
+																1216 文本 你
+																1217 图形 用户头像
+															1218 文本 刚才三个链接的路径含空格，Markdown 没有解析成可点击链接。请仅重发这三个链接，目标路径用尖括号包住，例如 [HTML](</home/plumwsl/workspaces/Windows 中文 验收 20261025/preview.html>)。不要重新创建文件，不需调用工具。
+															1219 按钮 复制消息 Description: 复制消息
+															1222 time
+																1223 文本 17:13
+														1237 文章
+															1238 章节标题
+																1239 文本 Pulsara
+															1240 组
+																1244 链接 preview.html Value: https://127.0.0.1:40407/home/plumwsl/workspaces/Windows%20%E4%B8%AD%E6%96%87%20%E9%AA%8C%E6%94%B6%2020261025/preview.html
+																1245 链接 preview.png Value: https://127.0.0.1:40407/home/plumwsl/workspaces/Windows%20%E4%B8%AD%E6%96%87%20%E9%AA%8C%E6%94%B6%2020261025/preview.png
+																1246 链接 preview.pdf Value: https://127.0.0.1:40407/home/plumwsl/workspaces/Windows%20%E4%B8%AD%E6%96%87%20%E9%AA%8C%E6%94%B6%2020261025/preview.pdf
+															1247 按钮 复制回复
+															1248 按钮 从此处分叉 Description: 从此处分叉
+															1249 time
+																1250 文本 17:13
+														1209 编辑 (settable, string) 发送给 Pulsara Value: 
+															1210 文本 
+														1156 按钮 添加文件、技能或规划
+														1157 按钮 完全访问
+														1158 按钮 上下文占用 5%
+														1159 按钮 DeepSeek V4.1 Flash 1017 Description: DeepSeek · DeepSeek V4.1 Flash 1017 · Chat
+														1160 按钮 推理 high Description: 推理 high
+														1161 按钮 (disabled) 发送
+													1162 补充 会话标签工作区
+														1163 缩略图 调整工作区宽度 Value: 50
+														1164 章节标题
+															1165 按钮 收起工作区 Description: 收起工作区
+														1166 导航 工作区入口
+															1167 按钮 项目能力 Description: 项目能力
+															1168 按钮 任务 Description: 任务
+															1169 按钮 后台进程 Description: 后台进程
+															1170 按钮 新建网页 Description: 新建网页
+														1171 选项卡 打开的内容
+															1172 选项卡项目 (selectable) Windows 中文附件.bin Description: Windows 中文附件.bin
+															1173 按钮 关闭 Windows 中文附件.bin Description: 关闭视图
+															1251 选项卡项目 (selectable) Windows WSL 预览通过 Description: Windows WSL 预览通过
+															1252 按钮 关闭 Windows WSL 预览通过 Description: 关闭视图
+															1283 选项卡项目 (selectable) preview.png Description: preview.png
+															1284 按钮 关闭 preview.png Description: 关闭视图
+															1302 选项卡项目 (selectable) preview.pdf Description: preview.pdf
+															1303 按钮 关闭 preview.pdf Description: 关闭视图
+														1174 按钮 (disabled) 向左滚动标签页 Description: 向左滚动
+														1175 按钮 (disabled) 向右滚动标签页 Description: 向右滚动
+														1368 选项卡面板
+															1369 区域 文件预览：preview.pdf
+																1370 章节标题
+																	1371 导航 文件操作
+																		1372 按钮 (disabled) 后退 Description: 后退
+																		1373 按钮 (disabled) 前进 Description: 前进
+																		1374 按钮 刷新文件 Description: 刷新文件
+																		1375 按钮 复制路径 Description: 复制路径
+																		1376 按钮 打开所在文件夹 Description: 打开所在文件夹
+																1377 对象 preview.pdf
+																	1378 文档 Value: https://127.0.0.1:40407/api/file-previews/7XAQ48SSaJUN3n60Th3wBa0JKM2d1kkJ3Gn1gqRaAD8/content ID: RootWebArea
+																		1379 文档 content Value: chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html ID: RootWebArea
+																			1382 编辑 (settable, string) 页码 Value: 1 ID: pageSelector
+																			1383 文本 /
+																			1384 文本 1
+																			1385 按钮 缩小 Description: 缩小
+																			1386 按钮 放大 Description: 放大
+																			1387 按钮 逆时针旋转 Description: 逆时针旋转 ID: rotate
+																			1388 切换按钮 绘制 Description: 绘制 ID: annotate
+																			1389 按钮 (disabled) 撤销 Description: 撤销 ID: undo
+																			1390 按钮 (disabled) 重做 Description: 重做 ID: redo
+																			1391 按钮 下载 Description: 下载 ID: save
+																			1392 组 ID: menu
+																			1393 按钮 打印 Description: 打印 ID: print
+																			1394 按钮 更多操作 Description: 更多操作 ID: more
+																			1381 组 ID: menu
+																			1395 文档 ID: RootWebArea
+																				1396 文档 包含 1 页内容的 PDF 文档
+																					1397 横幅
+																						1398 状态 PDF 已加载完毕
+																							1399 文本 PDF 已加载完毕
+																					1400 区域 第 1 页
+																						1401 文本 Windows WSL PDF OK
+													1189 组 窗口控制
+														1190 按钮 最小化
+														1191 按钮 最大化或还原
+														1192 按钮 关闭窗口
+											1193 组
+								57 区域
+
+Document text: ```
+PDF 已加载完毕
+Windows WSL PDF OK
+```

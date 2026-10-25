@@ -1,0 +1,51 @@
+{
+  "ready": true,
+  "version": "0.1.0-alpha.8",
+  "pythonVersion": "0.1.0a8",
+  "guestTarget": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.8",
+  "installer": {
+    "path": "C:\\python_workspace\\pulsara-agent\\desktop\\release\\Pulsara-0.1.0-alpha.8-windows-x64.exe",
+    "bytes": 537005517
+  },
+  "manifest": {
+    "version": "0.1.0-alpha.8",
+    "sha256": "a5f5ddca6cea8fdd612c9300e2b7f99ee8a01e4909bb9a42f384989c3f6c1237",
+    "platform": "linux-x86_64"
+  },
+  "sourceSnapshot": {
+    "sourceRepository": "/mnt/c/python_workspace/pulsara-agent",
+    "snapshotStarted": "2026-10-25T10:41:13.974005+00:00",
+    "snapshotFinished": "2026-10-25T10:41:21.341402+00:00",
+    "wheelInstalledAt": "2026-10-25T10:41:23.504626+00:00",
+    "payloadFinished": "2026-10-25T10:42:20.820310+00:00"
+  },
+  "tests": {
+    "canonicalVersionCheck": 0,
+    "uvLockOffline87Packages": 0,
+    "releaseTestsPassed": 5,
+    "frontendBuild": 0,
+    "bundledVersionsCheck": 0,
+    "wheelAudit": 0,
+    "windowsPackageSession44546": 0,
+    "actualPackagedPayloadAndHelperCheck": 0
+  },
+  "shortcutFixActualMapAndJs": [
+    {
+      "source": "frontend/components/session-search-dialog.tsx",
+      "sameTextAsFrozenFrontend": true,
+      "compositionAndAltGraphGuard": true
+    },
+    {
+      "source": "frontend/app/pulsara-app.tsx",
+      "sameTextAsFrozenFrontend": true,
+      "compositionAndAltGraphGuard": true
+    }
+  ],
+  "priorAlpha7InstallerBytes": 537005857,
+  "alpha7EvidenceOverwritten": false,
+  "installedByThisAgent": false,
+  "formalAppOrPgStopped": false,
+  "tagCommitOrPublish": false,
+  "nativeOrProviderFullMatrixRerun": false,
+  "postInstallAcceptancePendingRoot": true
+}

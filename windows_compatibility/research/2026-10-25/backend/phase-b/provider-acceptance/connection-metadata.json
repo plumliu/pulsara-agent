@@ -1,0 +1,14 @@
+{
+  "saved_home": "/home/plumwsl/.pulsara",
+  "connections": [
+    {
+      "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy",
+      "model": "deepseek-flash",
+      "wire_api": "openai_chat_completions",
+      "route_id": "deepseek",
+      "reasoning_wire_profile": "catalog_standard",
+      "credential_available": true,
+      "runner_default_reasoning_selection": "resolve from original runtime/catalog"
+    }
+  ]
+}

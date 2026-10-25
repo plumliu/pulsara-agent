@@ -1,0 +1,84 @@
+{
+  "passed": true,
+  "snapshot": {
+    "start": "2026-10-25T11:15:05.768899+00:00",
+    "finish": "2026-10-25T11:15:12.288851+00:00",
+    "source": "/mnt/c/python_workspace/pulsara-agent"
+  },
+  "versions": {
+    "runtime": "0.1.0a9",
+    "distribution": "0.1.0a9",
+    "python": "3.12.15"
+  },
+  "resourceVersions": {
+    "postgresql": "17.9",
+    "pg_search": "0.26.1",
+    "vector": "0.8.1",
+    "platform": "linux",
+    "architecture": "x86_64",
+    "python": "3.12.15",
+    "minimum_os": "Ubuntu"
+  },
+  "rootFix": {
+    "wheelSource": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py",
+    "sameTextAsCopiedFrozenSource": true,
+    "cancelBeforeReprepareGuard": "            while True:\n                current_task = asyncio.current_task()\n                if intent.cause is not None or (\n                    current_task is not None and current_task.cancelling()\n                ):\n                    raise asyncio.CancelledError\n                prospective_candidate = await self._io.run(\n                    self._repository.prepare_root_provider_input_candidate,\n                    self._writer_lease.guard,\n                    intent=candidate,\n                    model_resolution_snapshot=frozen_model_resolution,\n                    deadline_monotonic=self._canonical_deadline(),\n                )\n    ",
+    "typedHeadStaleClass": true
+  },
+  "staticCtrl": [
+    {
+      "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python/lib/python3.12/site-packages/pulsara_agent/desktop_app/static/assets/index-45cyhD6N.js",
+      "fragment": "tory:m,onNotify:h,canCreateSession:g,onOpenSearch:_}){let v=x()?.platform===`darwin`?`⌘`:`Ctrl`,b=(0,y.useRef)(null),[S,C]=(0,y.useState)(!1),[w,T]=(0,y.useState)(()=>new Set),[E,D]=(0,y.useState)(null),[O,A]=(0,y.u"
+    }
+  ],
+  "shortcutFix": [
+    {
+      "source": "frontend/components/session-search-dialog.tsx",
+      "sameTextAsFrozenFrontend": true,
+      "compositionAndAltGraphGuard": true
+    },
+    {
+      "source": "frontend/app/pulsara-app.tsx",
+      "sameTextAsFrozenFrontend": true,
+      "compositionAndAltGraphGuard": true
+    }
+  ],
+  "writerRecovery": [
+    {
+      "file": "conversation_kernel/host.py",
+      "sameAsFrozenSnapshot": true
+    },
+    {
+      "file": "desktop_app/session_controller.py",
+      "sameAsFrozenSnapshot": true
+    },
+    {
+      "file": "desktop_app/renderer_bridge.py",
+      "sameAsFrozenSnapshot": true
+    },
+    {
+      "file": "desktop_app/http_server.py",
+      "sameAsFrozenSnapshot": true
+    }
+  ],
+  "shortcutFixEmittedJs": [
+    "Event.isComposing||w.current||e.keyCode===229)){if(e.key===`Escape`||(e.metaKey||e.ctrlKey)&&!e.altKey&&!e.getModifierState(`AltGraph`)&&e.key.toLowerCase()===`k`){e.preventDefault(),S.current||n();return}if(!h&&e.target===D.",
+    "ffect)(()=>{let e=e=>{if(e.isComposing||e.keyCode===229)return;let t=(e.metaKey||e.ctrlKey)&&!e.altKey&&!e.getModifierState(`AltGraph`);t&&e.key.toLowerCase()===`k`&&(e.preventDefault(),mn(e=>!e)),t&&e.key.toLowerCase()===`n`"
+  ],
+  "licenses": {
+    "requiredPresent": [
+      "PostgreSQL-COPYRIGHT",
+      "ParadeDB-AGPL-3.0",
+      "pgvector-LICENSE",
+      "Python-LICENSE.txt",
+      "database-sources.txt",
+      "paradedb-0.26.1-source.tar.gz",
+      "prepare_resources.py"
+    ],
+    "files": 78,
+    "pinnedUpstreamAgplAndCorrespondingSourceVerified": true
+  },
+  "recipe": "prepare_wsl_payload.package called existing prepare_resources.validate_resources before tar; native dependency resources reused, current application wheel rebuilt",
+  "databaseConnected": false,
+  "installedRuntimeModified": false
+}

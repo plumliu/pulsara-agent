@@ -1,0 +1,21 @@
+{
+  "originalFailure": "Both first fixture versions compared waiting.event (string) with event (object), so prepared never released; no HEAD or business request was submitted.",
+  "withdrawnHypothesis": "Native Session.fetch writability was guessed before the actual event comparison was found; it was not established and is not a product finding.",
+  "linuxControlAttempt": {
+    "pid": 302,
+    "operation": "open /proc/302/fd/0 for fixture stop",
+    "result": "PermissionError EACCES; no bypass or distro-global action"
+  },
+  "windowsCleanup": {
+    "boundary": "Exact opened HANDLE, full image path, recorded fixture command, GetProcessTimes creation at CIM microsecond precision",
+    "firstComparisonFailure": "CIM creation drops the last 100ns digit: native 134373907264310308 vs CIM 134373907264310300; no termination on failed assertion",
+    "finalAction": "terminate only own hidden fixture main, original stdin EOF lets finite Linux fixture finally clean owned home",
+    "raw": [
+      "readiness-first-process.json",
+      "readiness-first-cleanup.json",
+      "readiness-second-process.json",
+      "readiness-second-cleanup.json"
+    ]
+  },
+  "finalNativeSixCases": "readiness-smoke-results.json"
+}

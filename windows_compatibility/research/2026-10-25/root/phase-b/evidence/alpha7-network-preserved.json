@@ -1,0 +1,10 @@
+{
+  "interop": "enabled\ninterpreter /init\nflags: P\noffset 0\nmagic 4d5a",
+  "tun": [
+    {
+      "Name": "tun0",
+      "InterfaceDescription": "sing-tun Tunnel",
+      "Status": "Up"
+    }
+  ]
+}

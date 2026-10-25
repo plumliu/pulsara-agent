@@ -39,9 +39,7 @@ class PostgresMigrationDefinition:
         return self.identity.genesis_registry_prefix_fingerprint
 
     def resource_bytes(self) -> bytes:
-        payload = files("pulsara_agent.storage.migrations.sql").joinpath(
-            self.resource_name
-        ).read_bytes()
+        payload = _resource_bytes("pulsara_agent.storage.migrations.sql", self.resource_name)
         if sha256(payload).hexdigest() != self.identity.baseline_sql_sha256:
             raise ValueError("clean baseline SQL checksum mismatch")
         return payload
@@ -50,13 +48,12 @@ class PostgresMigrationDefinition:
         return self.resource_bytes().decode("utf-8")
 
     def verify_auxiliary_resources(self) -> None:
-        root = files("pulsara_agent.storage.migrations.resources")
         checks = (
             (self.catalog_resource_name, self.identity.catalog_sha256),
             (self.grant_resource_name, self.identity.grant_sha256),
         )
         for name, expected in checks:
-            if sha256(root.joinpath(name).read_bytes()).hexdigest() != expected:
+            if sha256(_resource_bytes("pulsara_agent.storage.migrations.resources", name)).hexdigest() != expected:
                 raise ValueError(f"clean migration resource checksum mismatch: {name}")
 
 
@@ -82,8 +79,15 @@ class PostgresMigrationRegistry:
         self.definitions[0].verify_auxiliary_resources()
 
 
+def _resource_bytes(package: str, resource: str) -> bytes:
+    # These repository text resources have one LF execution/identity form.
+    # Windows checkout or wheel line endings must not change PL/pgSQL bodies
+    # or the existing migration universe; observed database drift stays strict.
+    return files(package).joinpath(resource).read_bytes().replace(b"\r\n", b"\n")
+
+
 def _checksum(package: str, resource: str) -> str:
-    return sha256(files(package).joinpath(resource).read_bytes()).hexdigest()
+    return sha256(_resource_bytes(package, resource)).hexdigest()
 
 
 _IDENTITY = build_migration_universe_identity(

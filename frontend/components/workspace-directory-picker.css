@@ -1,0 +1,9 @@
+.linux-directory-picker{width:min(620px,calc(100vw - 48px));max-height:calc(100vh - 64px);overflow:auto;border:1px solid var(--border,#d4cfc5);border-radius:16px;background:var(--background,#fffcf5);color:inherit;padding:24px;box-shadow:0 16px 64px #0003}
+.linux-directory-picker::backdrop{background:#0005}
+.linux-directory-picker h2{margin-top:0}.linux-directory-picker p{line-height:1.6;font-size:13px}
+.linux-directory-picker button{padding:7px 12px;border:1px solid var(--border,#d4cfc5);border-radius:8px;background:transparent;cursor:pointer;font:inherit;color:inherit}
+.linux-directory-picker button:disabled{opacity:.5;cursor:default}.linux-directory-picker button:focus-visible,.linux-directory-picker input:focus-visible{outline:2px solid #a77832;outline-offset:2px}
+.linux-directory-picker nav,.linux-directory-actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.linux-directory-path{display:block;overflow-wrap:anywhere;font-size:12px}
+.linux-directory-picker ul{list-style:none;padding:0;max-height:35vh;overflow:auto}.linux-directory-picker li button{width:100%;text-align:left;border:0;margin:2px 0}.linux-directory-picker li button:hover{background:#a778321a}
+.linux-directory-picker form{display:flex;align-items:end;gap:8px;margin:16px 0}.linux-directory-picker label{display:grid;gap:6px;flex:1;font-size:13px}.linux-directory-picker input{min-width:0;padding:8px;border:1px solid var(--border,#d4cfc5);border-radius:8px;background:transparent;color:inherit}
+.linux-directory-picker footer{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.linux-directory-picker [role=alert]{color:#b44936}

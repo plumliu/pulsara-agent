@@ -1,0 +1,34 @@
+{
+  "identity": [
+    "7700523439330484737",
+    "/home/plumwsl/.pulsara/desktop/postgres",
+    "/home/plumwsl/.pulsara/desktop/socket",
+    "",
+    "2026-10-25 16:43:52.967046+08"
+  ],
+  "session": [
+    "session:r3d6okwuq2trl3ribxzct6rbuy",
+    "WSL中文工作目录smoke.txt写入读取验收",
+    "workspace:wiosodqkjdu7hp4r2d3vgho6lm"
+  ],
+  "turns": [
+    [
+      "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "COMPLETED"
+    ],
+    [
+      "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+      "COMPLETED"
+    ],
+    [
+      "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "COMPLETED"
+    ]
+  ],
+  "data_inode": 171484,
+  "settings_stat": {
+    "inode": 197520,
+    "size": 440,
+    "mtime_ns": 1792918064891832010
+  }
+}

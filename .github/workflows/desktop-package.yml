@@ -83,6 +83,7 @@ jobs:
           npm --prefix desktop test
           node --test desktop/scripts/linux-hooks.test.cjs
           .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py desktop/scripts/test_build_platform.py
+          PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_migration_resource_portability.py
       - name: Verify native Linux dependency collection
         if: runner.os == 'Linux'
         run: uv run --no-sync python desktop/scripts/test_linux_dependencies.py
@@ -112,9 +113,48 @@ jobs:
             desktop/release/*.deb
           if-no-files-found: error
 
+      - name: Build the fixed Linux payload for the Windows host
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: mise run desktop:wsl-payload
+      - uses: actions/upload-artifact@v7
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        with:
+          name: pulsara-linux-payload-x64
+          path: desktop/build/wsl-payload/*
+          if-no-files-found: error
+
+  windows:
+    needs: [frontend, package]
+    runs-on: windows-2025
+    env:
+      CI: 'true'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: jdx/mise-action@v5.2.1
+        with:
+          version: '2026.10.15'
+      - uses: actions/download-artifact@v8
+        with:
+          name: pulsara-linux-payload-x64
+          path: desktop/resources/wsl-payload
+      - name: Verify payload, build helper and type-check the Windows shell
+        run: |
+          mise run desktop:windows-resources
+          npm --prefix desktop run build
+          node --test desktop/dist/backend-paths.test.js desktop/dist/backend-session.test.js desktop/dist/host-wsl.test.js desktop/dist/wsl-setup.test.js desktop/dist/postgres-wsl.test.js desktop/dist/runtime.test.js desktop/dist/browser-policy.test.js desktop/dist/oauth-return.test.js desktop/dist/ui-preferences.test.js
+          node --test --test-name-pattern "^Windows " desktop/dist/main.test.js
+      - name: Package the per-user installer without publication
+        run: npm --prefix desktop run package -- --win --x64 --publish never
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pulsara-desktop-windows-x64
+          path: desktop/release/*.exe
+          if-no-files-found: error
+
   draft:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [frontend, backend, package]
+    needs: [frontend, backend, package, windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -1,0 +1,375 @@
+TAP version 13
+# Subtest: URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+ok 1 - URL identity uses full WHATWG href and rejects credentials, guessing and privileged schemes
+  ---
+  duration_ms: 1.07927
+  type: 'test'
+  ...
+# Subtest: partition network policy protects control port across aliases and all request types
+ok 2 - partition network policy protects control port across aliases and all request types
+  ---
+  duration_ms: 0.476095
+  type: 'test'
+  ...
+# Subtest: native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+ok 3 - native bounds use host zoom only, retain offscreen animation geometry, and reject invalid native coordinates
+  ---
+  duration_ms: 0.582918
+  type: 'test'
+  ...
+# node:internal/modules/cjs/loader:1433
+#   throw err;
+#   ^
+# Error: Cannot find module '../scripts/linux-cli-entry.cjs'
+# Require stack:
+# - /home/plumwsl/workspaces/pulsara_agent/output/pulsara-owner-fixes-brpc3cv7/dist/cli-install.test.js
+#     at Function._resolveFilename (node:internal/modules/cjs/loader:1430:15)
+#     at defaultResolveImpl (node:internal/modules/cjs/loader:1040:19)
+#     at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1045:22)
+#     at Function._load (node:internal/modules/cjs/loader:1216:25)
+#     at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+#     at Module.require (node:internal/modules/cjs/loader:1527:12)
+#     at require (node:internal/modules/helpers:147:16)
+#     at Object.<anonymous> (/home/plumwsl/workspaces/pulsara_agent/output/pulsara-owner-fixes-brpc3cv7/dist/cli-install.test.js:14:19)
+#     at Module._compile (node:internal/modules/cjs/loader:1781:14)
+#     at Object..js (node:internal/modules/cjs/loader:1913:10) {
+#   code: 'MODULE_NOT_FOUND',
+#   requireStack: [
+#     '/home/plumwsl/workspaces/pulsara_agent/output/pulsara-owner-fixes-brpc3cv7/dist/cli-install.test.js'
+#   ]
+# }
+# Node.js v22.23.3
+# Subtest: /home/plumwsl/workspaces/pulsara_agent/output/pulsara-owner-fixes-brpc3cv7/dist/cli-install.test.js
+not ok 2 - /home/plumwsl/workspaces/pulsara_agent/output/pulsara-owner-fixes-brpc3cv7/dist/cli-install.test.js
+  ---
+  duration_ms: 31.097183
+  type: 'test'
+  location: '/home/plumwsl/workspaces/pulsara_agent/output/pulsara-owner-fixes-brpc3cv7/dist/cli-install.test.js:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: home resolution remains synchronous and preserves resolver launch failures
+ok 5 - home resolution remains synchronous and preserves resolver launch failures
+  ---
+  duration_ms: 10.211283
+  type: 'test'
+  ...
+# Subtest: finite execution preserves literal argv, explicit environment, output and nonzero status
+ok 6 - finite execution preserves literal argv, explicit environment, output and nonzero status
+  ---
+  duration_ms: 40.64665
+  type: 'test'
+  ...
+# Subtest: stream execution keeps three byte pipes and the supplied working directory
+ok 7 - stream execution keeps three byte pipes and the supplied working directory
+  ---
+  duration_ms: 26.507766
+  type: 'test'
+  ...
+# Subtest: runtime storage creates private files, appends exact bytes and retains filesystem failures
+ok 8 - runtime storage creates private files, appends exact bytes and retains filesystem failures
+  ---
+  duration_ms: 3.753872
+  type: 'test'
+  ...
+# Subtest: main composes the darwin bundle once for home, runtime, PG and CLI
+ok 9 - main composes the darwin bundle once for home, runtime, PG and CLI
+  ---
+  duration_ms: 5.613315
+  type: 'test'
+  ...
+# Subtest: main composes the linux bundle once for home, runtime, PG and CLI
+ok 10 - main composes the linux bundle once for home, runtime, PG and CLI
+  ---
+  duration_ms: 1.765425
+  type: 'test'
+  ...
+# Subtest: main overlaps cover loading and kernel preparation but gates the start frame and navigation
+ok 11 - main overlaps cover loading and kernel preparation but gates the start frame and navigation
+  ---
+  duration_ms: 2.065294
+  type: 'test'
+  ...
+# Subtest: cover failure joins PostgreSQL preparation and child cleanup before showing its error
+ok 12 - cover failure joins PostgreSQL preparation and child cleanup before showing its error
+  ---
+  duration_ms: 0.940867
+  type: 'test'
+  ...
+# Subtest: database failure waits for the original cover before replacing it
+ok 13 - database failure waits for the original cover before replacing it
+  ---
+  duration_ms: 0.882147
+  type: 'test'
+  ...
+# Subtest: previous-owner failure joins the cover and child cleanup without preparing PostgreSQL
+ok 14 - previous-owner failure joins the cover and child cleanup without preparing PostgreSQL
+  ---
+  duration_ms: 0.654393
+  type: 'test'
+  ...
+# Subtest: quit during the old-owner wait settles the imported child without starting PostgreSQL
+ok 15 - quit during the old-owner wait settles the imported child without starting PostgreSQL
+  ---
+  duration_ms: 1.103767
+  type: 'test'
+  ...
+# Subtest: quit stops PostgreSQL after a clean runtime exit
+ok 16 - quit stops PostgreSQL after a clean runtime exit
+  ---
+  duration_ms: 1.319969
+  type: 'test'
+  ...
+# Subtest: quit keeps PostgreSQL and reports an unclean runtime exit
+ok 17 - quit keeps PostgreSQL and reports an unclean runtime exit
+  ---
+  duration_ms: 0.932391
+  type: 'test'
+  ...
+# Subtest: directory picker uses localized desktop without changing the selected path
+ok 18 - directory picker uses localized desktop without changing the selected path
+  ---
+  duration_ms: 1.343159
+  type: 'test'
+  ...
+# Subtest: directory picker uses configured desktop elsewhere without changing the selected path
+ok 19 - directory picker uses configured desktop elsewhere without changing the selected path
+  ---
+  duration_ms: 1.06857
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop lookup unavailable without changing the selected path
+ok 20 - directory picker uses desktop lookup unavailable without changing the selected path
+  ---
+  duration_ms: 0.764683
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop missing without changing the selected path
+ok 21 - directory picker uses desktop missing without changing the selected path
+  ---
+  duration_ms: 1.002144
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop path is a file without changing the selected path
+ok 22 - directory picker uses desktop path is a file without changing the selected path
+  ---
+  duration_ms: 0.730408
+  type: 'test'
+  ...
+# Subtest: directory picker uses desktop configured as home without changing the selected path
+ok 23 - directory picker uses desktop configured as home without changing the selected path
+  ---
+  duration_ms: 0.882236
+  type: 'test'
+  ...
+# Subtest: directory picker uses cancellation without changing the selected path
+ok 24 - directory picker uses cancellation without changing the selected path
+  ---
+  duration_ms: 0.702194
+  type: 'test'
+  ...
+# Subtest: OAuth return link is an exact focus-only entry point
+ok 25 - OAuth return link is an exact focus-only entry point
+  ---
+  duration_ms: 0.723304
+  type: 'test'
+  ...
+# Subtest: local commands distinguish no submission, a settled exit and incomplete output
+    # Subtest: missing executable never submitted
+    ok 1 - missing executable never submitted
+      ---
+      duration_ms: 3.633905
+      type: 'test'
+      ...
+    # Subtest: synchronous invalid argv never submitted
+    ok 2 - synchronous invalid argv never submitted
+      ---
+      duration_ms: 0.295191
+      type: 'test'
+      ...
+    # Subtest: real numeric nonzero preserves command output
+    ok 3 - real numeric nonzero preserves command output
+      ---
+      duration_ms: 23.53549
+      type: 'test'
+      ...
+    # Subtest: output overflow after a real side effect remains unknown
+    ok 4 - output overflow after a real side effect remains unknown
+      ---
+      duration_ms: 31.227202
+      type: 'test'
+      ...
+    1..4
+ok 26 - local commands distinguish no submission, a settled exit and incomplete output
+  ---
+  duration_ms: 139.186302
+  type: 'test'
+  ...
+# Subtest: failed readiness keeps a verified started server owned for explicit shutdown
+ok 27 - failed readiness keeps a verified started server owned for explicit shutdown
+  ---
+  duration_ms: 21.32618
+  type: 'test'
+  ...
+# Subtest: start accepts the resolved instance directory while reset requires its exact saved spelling
+ok 28 - start accepts the resolved instance directory while reset requires its exact saved spelling
+  ---
+  duration_ms: 0.914718
+  type: 'test'
+  ...
+# Subtest: only a settled numeric status code 3 permits a start and failed readiness preserves the original error
+ok 29 - only a settled numeric status code 3 permits a start and failed readiness preserves the original error
+  ---
+  duration_ms: 0.377427
+  type: 'test'
+  ...
+# Subtest: unsubmitted, unknown and unclassified start failures cannot adopt another running instance
+ok 30 - unsubmitted, unknown and unclassified start failures cannot adopt another running instance
+  ---
+  duration_ms: 0.787426
+  type: 'test'
+  ...
+# Subtest: status 3 without a confirmed process failure cannot authorize start or reset
+ok 31 - status 3 without a confirmed process failure cannot authorize start or reset
+  ---
+  duration_ms: 0.472137
+  type: 'test'
+  ...
+# Subtest: first initialization retains the original argv and only updates state after successful physical commands
+ok 32 - first initialization retains the original argv and only updates state after successful physical commands
+  ---
+  duration_ms: 0.243002
+  type: 'test'
+  ...
+# Subtest: reset never removes data after a stop failure and clears ownership only after removal succeeds
+ok 33 - reset never removes data after a stop failure and clears ownership only after removal succeeds
+  ---
+  duration_ms: 0.652429
+  type: 'test'
+  ...
+# Subtest: the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+ok 34 - the Unix socket byte boundary and DSN escaping remain lifecycle-owner behavior
+  ---
+  duration_ms: 0.191604
+  type: 'test'
+  ...
+# Subtest: POSIX reset refuses a linked data directory and preserves its actual target
+ok 35 - POSIX reset refuses a linked data directory and preserves its actual target
+  ---
+  duration_ms: 5.501984
+  type: 'test'
+  ...
+# Subtest: reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+ok 36 - reset keeps the raw PID-directory rejection when its caller working directory has been deleted
+  ---
+  duration_ms: 37.790785
+  type: 'test'
+  ...
+# Subtest: host uses one child, private startup frame and correlated quit inspection
+ok 37 - host uses one child, private startup frame and correlated quit inspection
+  ---
+  duration_ms: 55.737083
+  type: 'test'
+  ...
+# Subtest: stop waits for the child to finish settlement and permits concurrent stop callers
+ok 38 - stop waits for the child to finish settlement and permits concurrent stop callers
+  ---
+  duration_ms: 44.084292
+  type: 'test'
+  ...
+# Subtest: malformed status closes the control pipe and explicit stop does not write after end
+ok 39 - malformed status closes the control pipe and explicit stop does not write after end
+  ---
+  duration_ms: 25.087748
+  type: 'test'
+  ...
+# Subtest: quit during asynchronous launch preparation still stops the child once spawned
+ok 40 - quit during asynchronous launch preparation still stops the child once spawned
+  ---
+  duration_ms: 24.810862
+  type: 'test'
+  ...
+# Subtest: a ready child reporting close failure rejects shutdown completion
+ok 41 - a ready child reporting close failure rejects shutdown completion
+  ---
+  duration_ms: 22.541661
+  type: 'test'
+  ...
+# Subtest: stop before any launch is a no-op for concurrent callers
+ok 42 - stop before any launch is a no-op for concurrent callers
+  ---
+  duration_ms: 2.820229
+  type: 'test'
+  ...
+# Subtest: stop retains an already closed ready child nonzero result for every caller
+ok 43 - stop retains an already closed ready child nonzero result for every caller
+  ---
+  duration_ms: 26.191034
+  type: 'test'
+  ...
+# Subtest: stop accepts an already closed ready child with exit zero
+ok 44 - stop accepts an already closed ready child with exit zero
+  ---
+  duration_ms: 29.360246
+  type: 'test'
+  ...
+# Subtest: a fresh launch cannot erase the failed exit awaited by an older stop
+ok 45 - a fresh launch cannot erase the failed exit awaited by an older stop
+  ---
+  duration_ms: 44.041138
+  type: 'test'
+  ...
+# Subtest: a child reaching ready while stop is joining still reports its failed exit
+ok 46 - a child reaching ready while stop is joining still reports its failed exit
+  ---
+  duration_ms: 22.257736
+  type: 'test'
+  ...
+# Subtest: child starts before PostgreSQL finishes, but start and inspection frames stay gated
+ok 47 - child starts before PostgreSQL finishes, but start and inspection frames stay gated
+  ---
+  duration_ms: 23.020076
+  type: 'test'
+  ...
+# Subtest: PostgreSQL failure sends no start frame and joins the unused child before rejection
+ok 48 - PostgreSQL failure sends no start frame and joins the unused child before rejection
+  ---
+  duration_ms: 24.10793
+  type: 'test'
+  ...
+# Subtest: an early child exit is observed while PostgreSQL preparation is still settling
+ok 49 - an early child exit is observed while PostgreSQL preparation is still settling
+  ---
+  duration_ms: 17.922169
+  type: 'test'
+  ...
+# Subtest: runtime directory failure rejects before spawning or preparing PostgreSQL
+ok 50 - runtime directory failure rejects before spawning or preparing PostgreSQL
+  ---
+  duration_ms: 2.695444
+  type: 'test'
+  ...
+# Subtest: a log append failure remains a runtime event and does not replace shutdown ownership
+ok 51 - a log append failure remains a runtime event and does not replace shutdown ownership
+  ---
+  duration_ms: 22.577105
+  type: 'test'
+  ...
+# Subtest: desktop UI preferences survive a new owner independently of renderer ports
+ok 52 - desktop UI preferences survive a new owner independently of renderer ports
+  ---
+  duration_ms: 2.806292
+  type: 'test'
+  ...
+1..52
+# tests 56
+# suites 0
+# pass 55
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 435.84935

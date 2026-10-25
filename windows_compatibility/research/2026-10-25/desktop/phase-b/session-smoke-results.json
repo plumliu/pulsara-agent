@@ -1,0 +1,107 @@
+{
+  "records": [
+    {
+      "event": "ready",
+      "origin": "https://127.0.0.1:34215",
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUXg7+LRYrFB5vOx9tPZwJKtr+Yp4wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4MDA0MVoXDTI2MTAy\nNjA4MDA0MVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEA3Y3ZW4wZ5k2zjlzGZX8q8XqUEjmQQm9JT6rUN9TLNBdj\n0ePL3z61k4UiXIBNTA9LXs9ZNE/x5oK6DUVNNWyjUdyh5nvWpmiy0qLehXQAjtuF\nla9NzRaJrkKpgLAS1pwc5tugoKO7OroUCoNlAeywecHPOW7SV4kG8jx37sTK3kYz\n4hk4I/EXT6GldEcA7OaoflI9PIUqEkvrJTfjAcfkXL6i11hZP53M4z8cUrFRwjIl\nRgTiaFT8tn2H3NGD5mB5GMAuzonjV5ZgXzC4Nfh6pXvLF5Sg7/w99TIVU85kUJPo\n03HOFErm2rTdR0pUZVN4+l0YlB7GFoBcCzhNmk59dwIDAQABo1MwUTAdBgNVHQ4E\nFgQUfFCr6+/TnRLoO3mD3Da8gWqDViMwHwYDVR0jBBgwFoAUfFCr6+/TnRLoO3mD\n3Da8gWqDViMwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAMmHH\n6izHCgPFwKj7jTeTC46fDtUpBumKwO5CvyecSsO0D7P61lFz/ce3uDLX0C9JMOVa\nDey3KnJwAgCC70Pfx7k67dlr5Km24Hu2NX7ls2l0/aDibAsHriyDnYVIygOXbR5K\nKWMgc+pWpl3NdA3lx8wWfJ7Q4RpkXPSkuoIWgIyZJcQswI18Wvro78ZZE3ET2dV0\nbG2SctbsA4ixRdEv0IxpGftovqTsgAWZ/R6UuQCM4xPkCZ7zdq+symBY+4uCr81S\nIqYXY9M5j23it53JDwX2wS7FH1IaqUTqRDZUPHEqyv0MASRu8KPGneXIl2S8fey+\nOBi+9GDkQijQc1HtTw==\n-----END CERTIFICATE-----\n",
+      "pid": 833,
+      "starttime": "15350",
+      "home": "/home/plumwsl/.pulsara-session-smoke-hxv95lul"
+    },
+    {
+      "event": "handler-closed",
+      "path": "/"
+    },
+    {
+      "event": "handler-closed",
+      "path": "/"
+    },
+    {
+      "event": "inspect",
+      "active": []
+    },
+    {
+      "event": "inspect",
+      "active": [
+        "/download",
+        "/sse",
+        "/pending",
+        "/pending"
+      ]
+    },
+    {
+      "event": "inspect",
+      "active": [
+        "/download",
+        "/sse",
+        "/pending",
+        "/pending"
+      ]
+    },
+    {
+      "event": "handler-closed",
+      "path": "/pending"
+    },
+    {
+      "event": "handler-closed",
+      "path": "/pending"
+    },
+    {
+      "event": "inspect",
+      "active": [
+        "/download",
+        "/sse"
+      ]
+    },
+    {
+      "event": "inspect",
+      "active": [
+        "/download",
+        "/sse"
+      ]
+    },
+    {
+      "event": "handler-closed",
+      "path": "/download"
+    },
+    {
+      "event": "handler-closed",
+      "path": "/sse"
+    },
+    {
+      "event": "inspect",
+      "active": []
+    },
+    {
+      "event": "cleaned",
+      "exists": false
+    }
+  ],
+  "ready": {
+    "event": "ready",
+    "origin": "https://127.0.0.1:34215",
+    "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUXg7+LRYrFB5vOx9tPZwJKtr+Yp4wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAyNTA4MDA0MVoXDTI2MTAy\nNjA4MDA0MVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEA3Y3ZW4wZ5k2zjlzGZX8q8XqUEjmQQm9JT6rUN9TLNBdj\n0ePL3z61k4UiXIBNTA9LXs9ZNE/x5oK6DUVNNWyjUdyh5nvWpmiy0qLehXQAjtuF\nla9NzRaJrkKpgLAS1pwc5tugoKO7OroUCoNlAeywecHPOW7SV4kG8jx37sTK3kYz\n4hk4I/EXT6GldEcA7OaoflI9PIUqEkvrJTfjAcfkXL6i11hZP53M4z8cUrFRwjIl\nRgTiaFT8tn2H3NGD5mB5GMAuzonjV5ZgXzC4Nfh6pXvLF5Sg7/w99TIVU85kUJPo\n03HOFErm2rTdR0pUZVN4+l0YlB7GFoBcCzhNmk59dwIDAQABo1MwUTAdBgNVHQ4E\nFgQUfFCr6+/TnRLoO3mD3Da8gWqDViMwHwYDVR0jBBgwFoAUfFCr6+/TnRLoO3mD\n3Da8gWqDViMwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAMmHH\n6izHCgPFwKj7jTeTC46fDtUpBumKwO5CvyecSsO0D7P61lFz/ce3uDLX0C9JMOVa\nDey3KnJwAgCC70Pfx7k67dlr5Km24Hu2NX7ls2l0/aDibAsHriyDnYVIygOXbR5K\nKWMgc+pWpl3NdA3lx8wWfJ7Q4RpkXPSkuoIWgIyZJcQswI18Wvro78ZZE3ET2dV0\nbG2SctbsA4ixRdEv0IxpGftovqTsgAWZ/R6UuQCM4xPkCZ7zdq+symBY+4uCr81S\nIqYXY9M5j23it53JDwX2wS7FH1IaqUTqRDZUPHEqyv0MASRu8KPGneXIl2S8fey+\nOBi+9GDkQijQc1HtTw==\n-----END CERTIFICATE-----\n",
+    "pid": 833,
+    "starttime": "15350",
+    "home": "/home/plumwsl/.pulsara-session-smoke-hxv95lul"
+  },
+  "before": {
+    "event": "inspect",
+    "active": [
+      "/download",
+      "/sse",
+      "/pending",
+      "/pending"
+    ]
+  },
+  "downloadState": "cancelled",
+  "after": {
+    "event": "inspect",
+    "active": []
+  },
+  "passed": true,
+  "carrierExit": {
+    "code": 0,
+    "signal": null
+  }
+}

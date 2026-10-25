@@ -1,0 +1,9 @@
+# Runtime / PG 正式修复只读交叉审阅
+
+2026-10-25。只读稳定diff及实际main/HostOperations/PostgresOperations调用者，未修改他方文件，未运行他们正在修改的快照测试。结论：**本次窄修复没有新增阻断，可按各自实测结果归档。**
+
+Runtime的ready事实移入本次spawn闭包，并在同一exit结果结算；stop即使child已空也检查该结果，已等待的旧attempt不会因新start清空共享ready字段而漏错。start仍在旧child/preparing存在时拒绝另起；原main只有await stop成功后才PGstop，异常保留退出未完成。并发stop/已退出0或非零/旧stop接新start/stop期间才ready的测试覆盖了这次改动的具体边界。既有failed帧但最终exit0判据没有在本次改动中扩大，不能把其他未修行为混称已经修复。
+
+PG继续由Node维护execFile实现创建/收回和stdout/stderr，只给其原Error附typed执行类别；spawn前失败与已spawn后截断/信号分开，只有完整numeric非零且无signal/killed为已结算failed。TS owner的status3准入和start失败读回均要求该明确类别；not-submitted/unknown/未分类错误不认领当前同库其他实例，原已有startedHere不被清空。原Error/output保留，readVersion/readInstance等文件错误不会被numeric status3吞掉。当前生产唯一POSIX adapter和真实consumer已接合同，无未使用接口、第二startedHere、WSL helper或跨域scope混入。
+
+Runtime agent报告Windows15/15及隔离WSL15/15和独立typecheck0；PG agent报告Windows真实adapter5/5、owner相关4/4，隔离WSL PG/adapter15/15及真实SIGTERM→unknown。root另核全desktop tsc与diff-check。这里引用其已完成结果，不冒称我重跑过；我自己的额外实测仅note.zh.md中的两个terminal POSIX负例及现有28项terminal output回归。

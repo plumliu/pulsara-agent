@@ -1,0 +1,7 @@
+{
+  "appCount": 0,
+  "pgStatus": 3,
+  "pgOutput": "pg_ctl: no server running",
+  "observedAt": "2026-10-25T18:54:26.2310996+08:00",
+  "stage": "normal-quit-after-explicit-retry"
+}

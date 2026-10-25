@@ -1,0 +1,6 @@
+ImportError while loading conftest 'C:\python_workspace\pulsara-agent\tests\conftest.py'.
+/mnt/c/python_workspace/pulsara-agent/tests/conftest.py:10: in <module>
+    ???
+tests\support\postgres_database.py:11: in <module>
+    import psycopg
+E   ModuleNotFoundError: No module named 'psycopg'

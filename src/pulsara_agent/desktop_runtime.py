@@ -208,9 +208,38 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
     socket_path = diagnostics_path()
     loop = asyncio.get_running_loop()
     installed = []
+    oauth_pending: dict[str, asyncio.Future] = {}
+    oauth_request = 0
+
+    def close_oauth_requests():
+        for future in tuple(oauth_pending.values()):
+            if not future.done():
+                future.set_exception(ConnectionError("desktop host control channel closed"))
+
+    async def open_oauth_browser(url: str) -> None:
+        nonlocal oauth_request
+        if stop.is_set() or channel_closed:
+            raise ConnectionError("desktop host is closing")
+        oauth_request += 1
+        identifier = f"oauth-{oauth_request}"
+        future = loop.create_future()
+        oauth_pending[identifier] = future
+        try:
+            emit({"type": "open-oauth-browser", "requestId": identifier, "url": url})
+            if stop.is_set() or channel_closed:
+                raise ConnectionError("desktop host control channel closed")
+            if not await future:
+                raise RuntimeError("desktop host could not open the OAuth browser")
+        finally:
+            oauth_pending.pop(identifier, None)
+
+    def request_stop():
+        close_oauth_requests()
+        stop.set()
+
     for signum in (signal.SIGTERM, signal.SIGINT):
         try:
-            loop.add_signal_handler(signum, stop.set)
+            loop.add_signal_handler(signum, request_stop)
             installed.append(signum)
         except (NotImplementedError, RuntimeError):
             pass
@@ -226,11 +255,14 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
         while not stop.is_set():
             line = await reader.readline()
             if not line:
+                close_oauth_requests()
                 stop.set()
                 return
+            if not line.endswith(b"\n"):
+                raise ValueError("incomplete desktop host command")
             request = json.loads(line)
             if request == {"type": "shutdown"}:
-                stop.set()
+                request_stop()
             elif (set(request) == {"type", "requestId"}
                   and request["type"] == "inspect-quit" and isinstance(request["requestId"], str)):
                 try:
@@ -238,6 +270,12 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
                     emit({"type": "quit-state", "requestId": request["requestId"], **reply})
                 except Exception as exc:
                     emit({"type": "quit-state", "requestId": request["requestId"], "error": error_text(exc)})
+            elif (isinstance(request, dict) and set(request) == {"type", "requestId", "opened"}
+                  and request["type"] == "open-oauth-browser-result"
+                  and isinstance(request["requestId"], str) and type(request["opened"]) is bool):
+                pending = oauth_pending.get(request["requestId"])
+                if pending is not None and not pending.done():
+                    pending.set_result(request["opened"])
             else:
                 raise ValueError("unsupported desktop host command")
 
@@ -262,12 +300,23 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
         line = await reader.readline()
         if not line:
             return 0
+        if not line.endswith(b"\n"):
+            raise ValueError("incomplete desktop startup frame")
         request = json.loads(line)
-        if (not isinstance(request, dict) or set(request) != {"type", "postgres", "initialize"}
+        if (not isinstance(request, dict) or set(request) not in ({"type", "postgres", "initialize"}, {"type", "postgres", "initialize", "host"})
                 or request["type"] != "start" or type(request["initialize"]) is not bool
                 or not isinstance(request["postgres"], dict)
                 or set(request["postgres"]) != {"runtime_dsn", "admin_dsn"}):
             raise ValueError("invalid desktop startup frame")
+        host = request.get("host")
+        if host is not None:
+            if (not isinstance(host, dict) or set(host) != {"platform", "executionDomain", "distribution", "user", "interopHelper"}
+                    or host["platform"] != "win32" or host["executionDomain"] != "wsl"
+                    or not all(isinstance(value, str) and value and not any(ord(character) < 32 or ord(character) == 127 for character in value) for value in host.values())
+                    or not Path(host["interopHelper"]).is_absolute()):
+                raise ValueError("invalid WSL desktop host profile")
+            from pulsara_agent.windows_interop import configure_interop
+            configure_interop(helper_path=host["interopHelper"], distribution=host["distribution"], user=host["user"])
         kernel_lock = acquire_kernel_lock()
         postgres = LocalPostgresConfig(**request["postgres"])
         settings = LocalSettingsStore(postgres=postgres)
@@ -277,14 +326,20 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
         if stop.is_set():
             return 0
         commands_task = asyncio.create_task(commands(), name="desktop-host-control")
-        commands_task.add_done_callback(lambda _task: stop.set())
+        commands_task.add_done_callback(lambda _task: request_stop())
         await asyncio.to_thread(database_preparer, postgres, initialize=request["initialize"])
         if stop.is_set():
             if commands_task.done():
                 commands_task.result()
             return 0
         factory = application_factory or DesktopApplication
-        application = factory(settings=settings, permission_policy=preset_to_policy(DEFAULT_PERMISSION_MODE))
+        options = {}
+        tls_identity = None
+        if host is not None:
+            from pulsara_agent.desktop_app.tls_identity import create_desktop_tls_identity
+            tls_identity = create_desktop_tls_identity(require_pulsara_home() / "desktop")
+            options = {"open_browser": open_oauth_browser, "host": host, "tls_identity": tls_identity}
+        application = factory(settings=settings, permission_policy=preset_to_policy(DEFAULT_PERMISSION_MODE), **options)
         await application.start()
         if application.database_state != DatabaseDataPlaneState.READY:
             raise RuntimeError(f"managed database is not ready: {application.database_state}")
@@ -297,7 +352,10 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
         server = await asyncio.start_unix_server(diagnostic, path=socket_path)
         os.chmod(socket_path, 0o600)
         if not stop.is_set():
-            emit({"type": "ready", "origin": application.origin, "database_state": application.database_state.value})
+            reply = {"type": "ready", "origin": application.origin, "database_state": application.database_state.value}
+            if tls_identity is not None:
+                reply["certificatePem"] = tls_identity.certificate_pem
+            emit(reply)
         await stop.wait()
         if commands_task.done():
             commands_task.result()
@@ -314,6 +372,7 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
             commands_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await commands_task
+        close_oauth_requests()
         if application is not None:
             try:
                 await application.aclose()

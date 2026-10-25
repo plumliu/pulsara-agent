@@ -1,0 +1,8 @@
+{
+  "kind": "output-only audit pattern mismatch",
+  "observed_error": "AssertionError at audit-wheel.py:28, assert fragments",
+  "cause": "Audit searched double-quoted ternary text; actual Vite output uses backticks.",
+  "correction": "Read the real bundle fragment around Ctrl and require both darwin and Command symbol; leave product assets unchanged.",
+  "final_evidence": "wheel-audit.json",
+  "production_change_for_audit": false
+}

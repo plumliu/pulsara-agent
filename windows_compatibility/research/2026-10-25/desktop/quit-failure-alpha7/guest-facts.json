@@ -1,0 +1,32 @@
+{
+  "utc": "2026-10-25T10:49:50.200903+00:00",
+  "originalKernel": {
+    "pid": 468,
+    "exists": false
+  },
+  "originalPostgres": {
+    "pid": 498,
+    "exists": true,
+    "state": "S",
+    "starttime": "23109",
+    "namespace": "pid:[4026532223]",
+    "exe": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres"
+  },
+  "locks": [
+    {
+      "name": "kernel.lock",
+      "inode": 145305,
+      "busy": false
+    },
+    {
+      "name": "pg-lifetime.lock",
+      "inode": 171582,
+      "busy": true
+    }
+  ],
+  "formalKernelCandidates": [],
+  "diagnosticsSocketExists": false,
+  "settingsRead": false,
+  "pgConnected": false,
+  "productLifecycleAction": false
+}

@@ -1,0 +1,74 @@
+{
+  "home": "/home/plumwsl/.pulsara",
+  "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "admin_dsn": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 dbname=pulsara user=pulsara_admin",
+  "runtime_dsn": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 dbname=pulsara user=pulsara_runtime",
+  "system_identifier": "7700523439330484737",
+  "data": "/home/plumwsl/.pulsara/desktop/postgres",
+  "socket": "/home/plumwsl/.pulsara/desktop/socket",
+  "listen_addresses": "",
+  "server_version_num": "170009",
+  "database": "pulsara",
+  "admin_role": "pulsara_admin",
+  "postmaster_started": "2026-10-25 16:43:52.967046+08:00",
+  "roles": [
+    [
+      "pulsara_admin",
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      "pulsara_runtime",
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  ],
+  "extensions": [
+    [
+      "pg_search",
+      "0.26.1"
+    ],
+    [
+      "plpgsql",
+      "1.0"
+    ],
+    [
+      "vector",
+      "0.8.1"
+    ]
+  ],
+  "data_inode": 171484,
+  "runtime": [
+    "pulsara_runtime",
+    "pulsara",
+    null,
+    "2026-10-25 16:43:52.967046+08:00"
+  ],
+  "session_count": 0,
+  "deep_verification": {
+    "status": "verified",
+    "universe_fingerprint": "sha256:b99c9fda8ab32ecd94ea930748c71e49f86f770a91d3ddb38303f5369241c204",
+    "registry_prefix_fingerprint": "sha256:926ffd30b16f8c77d70dce4559eb6b0210bd3fb86a0326688f723cb2d40cc3a4",
+    "verified_catalog_fingerprint": "sha256:812aaf3157354f2ce2b0b2765ae07128c31a01579cadac3cf3ae4e3d08f80f42",
+    "runtime_grant_policy_fingerprint": "sha256:ce8ce2b013a39a32720a6de76b408a94f9bd0db305db0ca77c334234f0251120",
+    "result_fingerprint": "sha256:0d5bb6b4fca861465d228506bb4503d2a5e83b3468e29a67b536eccc90dcfbeb"
+  },
+  "pidfile": [
+    "535",
+    "/home/plumwsl/.pulsara/desktop/postgres",
+    "1792917832",
+    "5432",
+    "/home/plumwsl/.pulsara/desktop/socket",
+    "",
+    "   171484         4",
+    "ready   "
+  ]
+}

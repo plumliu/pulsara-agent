@@ -1,0 +1,56 @@
+{
+  "homes": [
+    {
+      "result": "baseline-result.json",
+      "directory": "/home/plumwsl/.hostlease-58q174am",
+      "exists": false,
+      "originalPgResetCompleted": true
+    },
+    {
+      "result": "candidate-1-result.json",
+      "directory": "/home/plumwsl/.hostlease-n7fopqt5",
+      "exists": false,
+      "originalPgResetCompleted": true
+    },
+    {
+      "result": "candidate-2-result.json",
+      "directory": "/home/plumwsl/.hostlease-enw5j_tb",
+      "exists": false,
+      "originalPgResetCompleted": true
+    },
+    {
+      "result": "candidate-controller-final-result.json",
+      "directory": "/home/plumwsl/.hostlease-_hgka8qh",
+      "exists": false,
+      "originalPgResetCompleted": true
+    },
+    {
+      "result": "candidate-controller-result.json",
+      "directory": "/home/plumwsl/.hostlease-vwyfgn1w",
+      "exists": false,
+      "originalPgResetCompleted": true
+    },
+    {
+      "result": "idle-baseline-result.json",
+      "directory": "/home/plumwsl/.hostlease-6wzv8z86",
+      "exists": false,
+      "originalPgResetCompleted": true
+    },
+    {
+      "result": "regression-pg-1-result.json",
+      "directory": "/home/plumwsl/.hostlease-1kim_7z7",
+      "exists": false,
+      "originalPgResetCompleted": true
+    },
+    {
+      "result": "regression-pg-2-result.json",
+      "directory": "/home/plumwsl/.hostlease-6iqcbjtq",
+      "exists": false,
+      "originalPgResetCompleted": true
+    }
+  ],
+  "remainingExactOwned": [],
+  "snapshot": "/home/plumwsl/.hostlease-source-vccncr0j",
+  "snapshotRemoved": true,
+  "formalClusterOperation": "none"
+}

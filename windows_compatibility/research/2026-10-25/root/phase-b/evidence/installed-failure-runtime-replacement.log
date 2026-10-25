@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/mnt/c/python_workspace/pulsara-agent/output/phase-b/root/remove_failed_candidate_runtime.py", line 16, in <module>
+    assert not Path('/home/plumwsl/.pulsara/desktop/postgres').exists()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

@@ -1,0 +1,116 @@
+{
+  "stage": "before",
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/bin/python3",
+  "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+  "package_version": "0.1.0a6",
+  "identity": {
+    "system_identifier": "7700523439330484737",
+    "data": "/home/plumwsl/.pulsara/desktop/postgres",
+    "socket": "/home/plumwsl/.pulsara/desktop/socket",
+    "listen_addresses": "",
+    "postmaster_start": "2026-10-25 17:32:00.940553+08"
+  },
+  "data_inode": 171484,
+  "settings_stat": {
+    "inode": 197520,
+    "size": 440,
+    "mtime_ns": 1792918064891832010,
+    "uid": 1000,
+    "mode": 384
+  },
+  "connections": [
+    {
+      "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy",
+      "model_id": "deepseek-flash",
+      "wire_api": "openai_chat_completions",
+      "reasoning_wire_profile": "catalog_standard",
+      "credential_present": true
+    }
+  ],
+  "session": {
+    "id": "session:r3d6okwuq2trl3ribxzct6rbuy",
+    "title": "WSL中文工作目录smoke.txt写入读取验收",
+    "workspace_id": "workspace:wiosodqkjdu7hp4r2d3vgho6lm",
+    "model_call_binding": {
+      "reasoning": {
+        "kind": "effort",
+        "value": "high"
+      },
+      "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+    },
+    "lifecycle": "OPEN"
+  },
+  "turns": [
+    {
+      "id": "turn:pjcrgvrzl5tvm5m6krjob6pkju",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:yvln7qusryfu5rrcvc6zvfkrsm",
+      "final_entry_id": "entry:chzxwu7f2kcrvn3xkk4tw4k7sm"
+    },
+    {
+      "id": "turn:vczsjj7nr7u6edzg5n2lcxgvwi",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:mst4nqhkyau443rh2pheezhypu",
+      "final_entry_id": "entry:4scnuqh4gret2okmk6ogrguznq"
+    },
+    {
+      "id": "turn:z56osfvtrgeyyhbifxuct7y3ru",
+      "status": "COMPLETED",
+      "conversation_scope_kind": "ROOT",
+      "scope_subagent_task_id": null,
+      "model_call_binding": {
+        "reasoning": {
+          "kind": "effort",
+          "value": "high"
+        },
+        "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy"
+      },
+      "initial_entry_id": "entry:bqi6edyvxhht2jlbcnuoxjl5hi",
+      "final_entry_id": "entry:mpl5cpni43c7lbmg4ytlx4xobu"
+    }
+  ],
+  "transcript_entry_counts": [
+    {
+      "entry_kind": "ASSISTANT_MESSAGE",
+      "total": 3
+    },
+    {
+      "entry_kind": "ASSISTANT_TOOL_REQUEST",
+      "total": 9
+    },
+    {
+      "entry_kind": "TOOL_RESULT",
+      "total": 13
+    },
+    {
+      "entry_kind": "USER_MESSAGE",
+      "total": 3
+    }
+  ],
+  "deep_verification": {
+    "status": "verified",
+    "universe_fingerprint": "sha256:b99c9fda8ab32ecd94ea930748c71e49f86f770a91d3ddb38303f5369241c204",
+    "registry_prefix_fingerprint": "sha256:926ffd30b16f8c77d70dce4559eb6b0210bd3fb86a0326688f723cb2d40cc3a4",
+    "verified_catalog_fingerprint": "sha256:812aaf3157354f2ce2b0b2765ae07128c31a01579cadac3cf3ae4e3d08f80f42",
+    "runtime_grant_policy_fingerprint": "sha256:ce8ce2b013a39a32720a6de76b408a94f9bd0db305db0ca77c334234f0251120",
+    "result_fingerprint": "sha256:0d5bb6b4fca861465d228506bb4503d2a5e83b3468e29a67b536eccc90dcfbeb"
+  }
+}

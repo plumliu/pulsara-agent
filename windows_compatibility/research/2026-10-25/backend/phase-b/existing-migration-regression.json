@@ -1,0 +1,42 @@
+{
+  "directory": "/home/plumwsl/.pg-reg-fjhn8n_i",
+  "admin_dsn": "host=/home/plumwsl/.pg-reg-fjhn8n_i/home/desktop/socket port=5432 dbname=pulsara user=pulsara_admin",
+  "runtime_dsn": "host=/home/plumwsl/.pg-reg-fjhn8n_i/home/desktop/socket port=5432 dbname=pulsara user=pulsara_runtime",
+  "initdb": {
+    "exit": 0,
+    "stdout": "The files belonging to this database system will be owned by user \"plumwsl\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /home/plumwsl/.pg-reg-fjhn8n_i/home/desktop/postgres ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Singapore\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    /home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/pg_ctl -D /home/plumwsl/.pg-reg-fjhn8n_i/home/desktop/postgres -l logfile start\n\n",
+    "stderr": ""
+  },
+  "start": {
+    "exit": 0,
+    "stdout": "waiting for server to start.... done\nserver started\n",
+    "stderr": ""
+  },
+  "prepare": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "pytest": {
+    "exit": 1,
+    "stdout": "...........F...                                                          [100%]\n=================================== FAILURES ===================================\n____ test_compatible_vector_and_unrelated_pgcrypto_are_adopted_not_removed _____\n\n    def test_compatible_vector_and_unrelated_pgcrypto_are_adopted_not_removed() -> None:\n        with _empty_database() as database:\n            with psycopg.connect(database.admin_dsn) as connection:\n                connection.execute(\"CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public\")\n>               connection.execute(\"CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public\")\n\n/mnt/c/python_workspace/pulsara-agent/tests/test_stage5_clean_migration.py:446: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <psycopg.Connection [BAD] at 0x718537d436e0>\nquery = 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public'\nparams = None\n\n    def execute(\n        self,\n        query: Query,\n        params: Params | None = None,\n        *,\n        prepare: bool | None = None,\n        binary: bool = False,\n    ) -> Cursor[Row]:\n        \"\"\"Execute a query and return a cursor to read its results.\"\"\"\n        try:\n            cur = self.cursor()\n            if binary:\n                cur.format = BINARY\n    \n            if isinstance(query, Template):\n                if params is not None:\n                    raise TypeError(\n                        \"'execute()' with string template query doesn't support parameters\"\n                    )\n                return cur.execute(query, prepare=prepare)\n            else:\n                return cur.execute(query, params, prepare=prepare)\n        except e._NO_TRACEBACK as ex:\n>           raise ex.with_traceback(None)\nE           psycopg.errors.FeatureNotSupported: extension \"pgcrypto\" is not available\nE           DETAIL:  Could not open extension control file \"/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/share/extension/pgcrypto.control\": No such file or directory.\nE           HINT:  The extension must first be installed on the system where PostgreSQL is running.\n\n../workspaces/pulsara_agent/.venv/lib/python3.12/site-packages/psycopg/connection.py:300: FeatureNotSupported\n=========================== short test summary info ============================\nFAILED ../../../mnt/c/python_workspace/pulsara-agent/tests/test_stage5_clean_migration.py::test_compatible_vector_and_unrelated_pgcrypto_are_adopted_not_removed\n1 failed, 14 passed in 6.75s\n",
+    "stderr": ""
+  },
+  "status_before_cleanup": {
+    "exit": 0,
+    "stdout": "pg_ctl: server is running (PID: 956)\n/home/plumwsl/workspaces/pulsara_agent/desktop/resources/postgres/bin/postgres \"-D\" \"/home/plumwsl/.pg-reg-fjhn8n_i/home/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/home/plumwsl/.pg-reg-fjhn8n_i/home/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"shared_preload_libraries=pg_search\"\n",
+    "stderr": ""
+  },
+  "stop": {
+    "exit": 0,
+    "stdout": "waiting for server to shut down.... done\nserver stopped\n",
+    "stderr": ""
+  },
+  "final_status": {
+    "exit": 3,
+    "stdout": "pg_ctl: no server running\n",
+    "stderr": ""
+  },
+  "both_locks_available": true,
+  "removed": true
+}

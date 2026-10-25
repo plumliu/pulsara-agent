@@ -1,0 +1,32 @@
+[
+  {
+    "Id": 10848,
+    "StartTime": "2026-10-25T16:43:35.1161599+08:00",
+    "Path": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe"
+  },
+  {
+    "Id": 15224,
+    "StartTime": "2026-10-25T17:14:52.1518064+08:00",
+    "Path": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe"
+  },
+  {
+    "Id": 20056,
+    "StartTime": "2026-10-25T16:43:53.7570991+08:00",
+    "Path": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe"
+  },
+  {
+    "Id": 39588,
+    "StartTime": "2026-10-25T16:43:35.2691187+08:00",
+    "Path": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe"
+  },
+  {
+    "Id": 42032,
+    "StartTime": "2026-10-25T17:14:52.2809198+08:00",
+    "Path": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe"
+  },
+  {
+    "Id": 42408,
+    "StartTime": "2026-10-25T16:43:35.2731219+08:00",
+    "Path": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe"
+  }
+]

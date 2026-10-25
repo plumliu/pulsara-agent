@@ -1,0 +1,218 @@
+{
+  "stage": "before",
+  "utc": "2026-10-25T11:29:52.751507+00:00",
+  "target": {
+    "port": 32915,
+    "sessionId": "session:36omh67maz3ezaef3amghzb6ka",
+    "mainPid": 18816,
+    "kernelPid": 494,
+    "kernelStart": "1448",
+    "pgPid": 523,
+    "pgStart": "2029"
+  },
+  "linux": {
+    "readOnly": true,
+    "utc": "2026-10-25T11:29:46.775570+00:00",
+    "version": "0.1.0a9",
+    "package": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.9/python/lib/python3.12/site-packages/pulsara_agent/__init__.py",
+    "bootId": "2b6100d5-6f81-41ee-976d-98b823c404a4",
+    "kernel": {
+      "pid": 494,
+      "starttime": "1448",
+      "pidNamespace": "pid:[4026532221]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.9/python/bin/python3.12"
+    },
+    "postgres": {
+      "pid": 523,
+      "starttime": "2029",
+      "pidNamespace": "pid:[4026532221]",
+      "executable": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.9/postgres/bin/postgres"
+    },
+    "pidfdsOpenedAndClosedForObservation": true,
+    "pgFacts": {
+      "systemid": "7700523439330484737",
+      "data": "/home/plumwsl/.pulsara/desktop/postgres",
+      "socket": "/home/plumwsl/.pulsara/desktop/socket",
+      "listen": "",
+      "inetAddress": null,
+      "postmasterStarted": "2026-10-25 19:23:28.015074+08",
+      "dataInode": 171484
+    },
+    "locks": [
+      {
+        "path": "/home/plumwsl/.pulsara/desktop/kernel.lock",
+        "inode": 145305,
+        "device": 2096,
+        "uid": 1000,
+        "mode": "0o600",
+        "busy": true
+      },
+      {
+        "path": "/home/plumwsl/.pulsara/desktop/pg-lifetime.lock",
+        "inode": 171582,
+        "device": 2096,
+        "uid": 1000,
+        "mode": "0o600",
+        "busy": true
+      }
+    ],
+    "diagnosticsSocketInode": 219924,
+    "http": {
+      "origin": "https://127.0.0.1:32915",
+      "listenInode": "8749",
+      "ownedByKernel": true,
+      "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIBiTCCAS+gAwIBAgIUScIhZHPoeR1m453fZdpLe0H5XkAwCgYIKoZIzj0EAwIw\nIjEgMB4GA1UEAwwXUHVsc2FyYSBwcml2YXRlIGRlc2t0b3AwIBcNNzAwMTAxMDAw\nMDAwWhgPOTk5OTEyMzEyMzU5NTlaMCIxIDAeBgNVBAMMF1B1bHNhcmEgcHJpdmF0\nZSBkZXNrdG9wMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQzFA9+pnWH55oU1M\nryRAHDOo5K2Xz9OzBCZZ9+Z4AvTetU0rKqRFSjnhffl94e3ji18KcSUphMPsLrD0\nekVQMKNBMD8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAwGA1UdEwEB/wQC\nMAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCgYIKoZIzj0EAwIDSAAwRQIgEqhchUSE\n7pwavFnTJs6EBq3zogV79xAnT8AMRIgF8CMCIQDVVdbCfYTPevyOuZF+jP+ih9KI\ndb4M5mnRThyuU2TCpw==\n-----END CERTIFICATE-----\n"
+    },
+    "session": [
+      "session:36omh67maz3ezaef3amghzb6ka",
+      "alpha.9 睡眠自动恢复验收测试会话",
+      "workspace:zlmsxoedty2ev4f2r5m7mrsjxm",
+      2
+    ],
+    "turns": [
+      [
+        "turn:ayj2dbwvk6jtfchjr7nl3dorwu",
+        "COMPLETED"
+      ]
+    ],
+    "writer": {
+      "generation": 1,
+      "owner": "host:vluuyqd74zjwtk5ysfxro6zkfu",
+      "leaseExpires": "2026-10-25 19:30:13.037238+08",
+      "leaseValid": true,
+      "databaseObservedAt": "2026-10-25 19:29:46.770973+08"
+    },
+    "settingsRead": false,
+    "kernelSpawned": false,
+    "pgLifecycleCommands": false
+  },
+  "windows": {
+    "loopback": [
+      {
+        "OwningProcess": 33048,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 64405,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 32915,
+        "State": 5
+      },
+      {
+        "OwningProcess": 33048,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 63014,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 32915,
+        "State": 5
+      },
+      {
+        "OwningProcess": 33048,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 60846,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 32915,
+        "State": 5
+      },
+      {
+        "OwningProcess": 33048,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 60645,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 32915,
+        "State": 5
+      },
+      {
+        "OwningProcess": 33048,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 52880,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 32915,
+        "State": 5
+      },
+      {
+        "OwningProcess": 33048,
+        "LocalAddress": "127.0.0.1",
+        "LocalPort": 52084,
+        "RemoteAddress": "127.0.0.1",
+        "RemotePort": 32915,
+        "State": 5
+      }
+    ],
+    "eventBookmark": 1521,
+    "powerEvents": [],
+    "main": {
+      "pid": 18816,
+      "creationFileTime": 134374009866424052,
+      "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+      "alive": true,
+      "parent": 23492,
+      "auxiliary": false,
+      "maintenance": false
+    },
+    "processes": [
+      {
+        "pid": 18816,
+        "creationFileTime": 134374009866424052,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 23492,
+        "auxiliary": false,
+        "maintenance": false
+      },
+      {
+        "pid": 8624,
+        "creationFileTime": 134374009867958354,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 18816,
+        "auxiliary": true,
+        "maintenance": false
+      },
+      {
+        "pid": 33048,
+        "creationFileTime": 134374009868013255,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 18816,
+        "auxiliary": true,
+        "maintenance": false
+      },
+      {
+        "pid": 7036,
+        "creationFileTime": 134374010093278100,
+        "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+        "alive": true,
+        "parent": 18816,
+        "auxiliary": true,
+        "maintenance": false
+      }
+    ]
+  },
+  "http": {
+    "origin": "https://127.0.0.1:32915",
+    "at": 1792927786845,
+    "method": "GET",
+    "path": "/healthz",
+    "fullCertificateSame": true,
+    "authorized": true,
+    "localPort": 52700,
+    "remotePort": 32915,
+    "httpStatus": 200,
+    "health": {
+      "status": "ready"
+    }
+  },
+  "httpExit": 0,
+  "tun": [
+    {
+      "Name": "tun0",
+      "InterfaceDescription": "sing-tun Tunnel",
+      "ifIndex": 47,
+      "Status": "Up"
+    }
+  ],
+  "readOnly": true,
+  "settingsRead": false,
+  "sleepInvoked": false,
+  "businessOperationReplayed": false,
+  "beforeReady": true
+}

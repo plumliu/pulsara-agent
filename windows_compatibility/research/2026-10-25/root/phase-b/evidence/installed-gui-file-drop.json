@@ -1,0 +1,16 @@
+[
+  {
+    "path": "/home/plumwsl/.pulsara/imports/eb9a0e3ec1504ee78e7a6be77118e53d/Windows 中文附件.bin",
+    "bytes": 285,
+    "same_bytes": true,
+    "file_mode": "0o400",
+    "directory_mode": "0o500"
+  },
+  {
+    "path": "/home/plumwsl/.pulsara/imports/a3c79954e08d441a8f0828d1c70efc8e/Windows 中文附件.bin",
+    "bytes": 285,
+    "same_bytes": true,
+    "file_mode": "0o400",
+    "directory_mode": "0o500"
+  }
+]

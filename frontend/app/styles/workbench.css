@@ -45,6 +45,9 @@
 .runtime-banner--offline, .runtime-banner--failed { border-color: color-mix(in srgb, var(--red) 24%, var(--line)); color: var(--red); }
 .runtime-banner > button { flex: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-solid); color: var(--ink-soft); font-size: var(--type-caption); }
 .runtime-banner > button:hover { border-color: var(--line-strong); background: var(--paper-deep); }
+.runtime-error-details { flex-basis: 100%; color: var(--muted); }
+.runtime-error-details summary { cursor: pointer; }
+.runtime-error-details pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; user-select: text; }
 .observer-badge { display: inline-flex; align-items: center; gap: 5px; min-height: 27px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--blue-soft) 62%, transparent); color: var(--blue); font-size: var(--type-label); font-weight: 650; white-space: nowrap; }
 .popover-anchor { position: relative; }
 .menu-popover { position: absolute; z-index: 60; top: calc(100% + 7px); right: 0; min-width: 260px; padding: 7px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--paper-solid); box-shadow: var(--shadow-lg); animation: pop-in .14s ease-out; }

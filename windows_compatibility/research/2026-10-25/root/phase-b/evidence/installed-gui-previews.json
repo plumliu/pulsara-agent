@@ -1,0 +1,37 @@
+{
+  "workspace": "/home/plumwsl/workspaces/Windows 中文 验收 20261025",
+  "files": [
+    {
+      "name": "preview.html",
+      "bytes": 3018
+    },
+    {
+      "name": "preview.pdf",
+      "bytes": 592
+    },
+    {
+      "name": "preview.png",
+      "bytes": 17701
+    }
+  ],
+  "evaluates_require": true,
+  "evaluates_bridge": true,
+  "observed_ui": {
+    "html": {
+      "require": "undefined",
+      "pulsaraDesktop": "undefined",
+      "protocol": "https",
+      "javascript": "executed"
+    },
+    "image": {
+      "width": 480,
+      "height": 320,
+      "lightbox": "visible"
+    },
+    "pdf": {
+      "pages": 1,
+      "text": "Windows WSL PDF OK",
+      "viewer": "PDF 已加载完毕"
+    }
+  }
+}

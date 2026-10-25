@@ -1,0 +1,43 @@
+{
+  "selectedMatrixPassed": true,
+  "scope": "idle sleep -> automatic session cold recovery within same kernel -> actual new model turn -> normal Quit",
+  "writerGeneration": [
+    1,
+    2
+  ],
+  "draftPreserved": true,
+  "exactPostWakeReply": "自动恢复后模型调用正常",
+  "twoCompletedRootTurns": true,
+  "fourCanonicalEntries": true,
+  "twoDistinctHumanPromptCommandsConsumedIntoExactInitialEntries": true,
+  "toolEntries": 0,
+  "originalSessionThreeTurns28EntriesPreserved": true,
+  "quitConfirmationStage": {
+    "observedAt": "2026-10-25T19:40:50.2072592+08:00",
+    "isProductFailure": false,
+    "meaning": "original normal exit confirmation awaiting explicit user exit, not a failed cleanup result"
+  },
+  "confirmedNormalQuit": {
+    "appCount": 0,
+    "pgStatus": 3,
+    "pgOutput": "pg_ctl: no server running",
+    "originalKernelPid": 494,
+    "kernelProcExistsExitCode": 1,
+    "observedAt": "2026-10-25T19:42:12.3329672+08:00",
+    "exitMethod": "Pulsara Ctrl+Q followed by its exit confirmation",
+    "externalKillUsed": false
+  },
+  "maintenanceAfterQuit": {
+    "exitCode": 0,
+    "appCount": 0,
+    "observedAt": "2026-10-25T19:42:26.0925862+08:00"
+  },
+  "evidenceOwners": {
+    "beforeAfter": "this observer",
+    "actualGuiAndQuit": "root Computer Use and native process observations",
+    "canonicalRowsAndConsumption": "pg_admission_r3 independent read-only verification"
+  },
+  "observerStartedAppOrPg": false,
+  "activeTaskSleepMatrixClaimed": false,
+  "B5ActivationClaimed": false
+}

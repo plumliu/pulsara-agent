@@ -1,0 +1,9 @@
+
+ RUN  v4.1.11 C:/python_workspace/pulsara-agent/frontend
+
+
+ Test Files  7 passed (7)
+      Tests  325 passed (325)
+   Start at  15:52:20
+   Duration  12.52s (transform 3.37s, setup 446ms, import 8.05s, tests 12.16s, environment 10.10s)
+

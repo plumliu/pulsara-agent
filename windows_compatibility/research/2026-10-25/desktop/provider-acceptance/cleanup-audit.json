@@ -1,0 +1,85 @@
+{
+  "passed": true,
+  "testRows": [
+    {
+      "kind": "artifact",
+      "database": "pulsara_wsl_dogfood_02bf917144e747c0aac3dabcd8607d52",
+      "dropRecorded": [
+        "pulsara_wsl_dogfood_02bf917144e747c0aac3dabcd8607d52"
+      ],
+      "scratch": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara \u4e2d\u6587 \u9a8c\u6536 x90asay3",
+      "scratchExists": false,
+      "home": "/home/plumwsl/.pa-4cgwa6n7",
+      "homeExists": false,
+      "carrier": 0
+    },
+    {
+      "kind": "memory",
+      "database": "pulsara_wsl_dogfood_0b7ac57b365f48ae80d8b6eaa2cf60e9",
+      "dropRecorded": [
+        "pulsara_wsl_dogfood_0b7ac57b365f48ae80d8b6eaa2cf60e9"
+      ],
+      "scratch": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara \u4e2d\u6587 \u9a8c\u6536 f2h9vjnm",
+      "scratchExists": false,
+      "home": "/home/plumwsl/.pa-dsgt23a2",
+      "homeExists": false,
+      "carrier": 0
+    },
+    {
+      "kind": "history",
+      "database": "pulsara_wsl_dogfood_511a2c4786f4469492bd6eeecf5168a7",
+      "dropRecorded": [
+        "pulsara_wsl_dogfood_511a2c4786f4469492bd6eeecf5168a7"
+      ],
+      "scratch": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara \u4e2d\u6587 \u9a8c\u6536 bvao1em0",
+      "scratchExists": false,
+      "home": "/home/plumwsl/.pa-4ucyfwff",
+      "homeExists": false,
+      "carrier": 0
+    },
+    {
+      "kind": "interruption",
+      "database": "pulsara_wsl_dogfood_2b9fbee1102e4a39b22bfdeee1e79de8",
+      "dropRecorded": [
+        "pulsara_wsl_dogfood_2b9fbee1102e4a39b22bfdeee1e79de8"
+      ],
+      "scratch": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara \u4e2d\u6587 \u9a8c\u6536 3_k6i6t5",
+      "scratchExists": false,
+      "home": "/home/plumwsl/.pa-wxyk_y6d",
+      "homeExists": false,
+      "carrier": 0
+    },
+    {
+      "kind": "crash",
+      "database": "pulsara_wsl_dogfood_81a0b2af76554bcc9d3acbb07714d3ee",
+      "dropRecorded": [
+        "pulsara_wsl_dogfood_81a0b2af76554bcc9d3acbb07714d3ee"
+      ],
+      "scratch": "/home/plumwsl/.provider-files-623ld4rm/scratch/Pulsara \u4e2d\u6587 \u9a8c\u6536 yojuupz1",
+      "scratchExists": false,
+      "home": "/home/plumwsl/.pa-wvx4j967",
+      "homeExists": false,
+      "carrier": 0
+    }
+  ],
+  "remainingOwnedDatabases": [],
+  "formalPostmasterUnchanged": true,
+  "formalPostmasterStarted": "2026-10-25T16:43:52.967046+08:00",
+  "systemid": "7700523439330484737",
+  "formalGuiSessionPreserved": true,
+  "rootDatabase": "pulsara",
+  "clusterStopResetCalls": 0,
+  "killedOwnChild": {
+    "pid": 101232,
+    "starttime": "199318",
+    "pidfd": true,
+    "signal": "SIGKILL",
+    "exit": -9,
+    "terminal_processes": 0,
+    "linux_children": [],
+    "ordinary_windows_tasks_submitted": false
+  },
+  "sameChildAlive": false,
+  "privateHarnessDirectory": "/home/plumwsl/.provider-files-623ld4rm",
+  "privateHarnessRemoved": true
+}

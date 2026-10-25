@@ -1,0 +1,244 @@
+/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/storage/postgres_connection_provider.py:112
+    def verify_deep(
+        self,
+        *,
+        deadline_monotonic: float,
+        operation_control: PostgresPhysicalOperationControl | None = None,
+    ) -> PostgresDeepVerificationBundle:
+        del operation_control
+        with self.connect(deadline_monotonic=deadline_monotonic, autocommit=True) as connection:
+            return PostgresSchemaVerifier().verify_deep_connection(
+                connection,
+                database_target_fingerprint=self.database_target_fingerprint,
+                deadline_monotonic=deadline_monotonic,
+            )
+
+
+/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/verifier.py:101
+    def _verify(
+        self,
+        connection: Connection,
+        *,
+        database_target_fingerprint: str,
+        deadline_monotonic: float,
+    ) -> PostgresFastVerificationBundle:
+        if deadline_monotonic <= monotonic():
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.DEADLINE_EXCEEDED,
+                "PostgreSQL verification deadline expired",
+                retryable=True,
+            )
+        identity = _read_identity_from_connection(connection)
+        rows = read_migration_ledger(connection)
+        if rows is None:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.UNMANAGED_DATABASE,
+                "clean migration ledger is absent",
+            )
+        definition = POSTGRES_MIGRATION_REGISTRY.definition(0)
+        _validate_clean_ledger(rows, definition)
+        _verify_vector_capability(connection)
+        from pulsara_agent.storage.migrations.runner import _verify_search_capability
+        _verify_search_capability(connection)
+        _verify_product_relations(connection)
+        _verify_runtime_grants(connection, identity.runtime_role)
+
+        extension = connection.execute(
+            """
+            SELECT e.extversion FROM pg_catalog.pg_extension e
+            JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+            WHERE e.extname = 'vector' AND n.nspname = 'public'
+            """
+        ).fetchone()
+        if extension is None:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.EXTENSION_MISSING,
+                "public.vector extension is absent",
+            )
+        catalog_fingerprint = _observed_catalog_fingerprint(connection)
+        if (
+            catalog_fingerprint
+            != build_postgres_schema_manifest().observed_catalog_fingerprint
+        ):
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.CATALOG_DRIFT,
+                "observed conversation-kernel catalog differs from clean baseline",
+            )
+        grant_policy = build_postgres_runtime_grant_policy()
+        verification_contract = postgres_schema_fingerprint(
+            "pulsara:clean-schema-verification-contract:v1",
+            {
+                "universe_fingerprint": definition.identity.universe_fingerprint,
+                "relations": CONVERSATION_KERNEL_RELATIONS,
+                "required_extension": ("public", "vector", ">=0.5.0"),
+                "grant_policy_fingerprint": grant_policy.policy_fingerprint,
+            },
+        )
+        binding = build_verified_postgres_schema_binding(
+            database_target_fingerprint=database_target_fingerprint,
+            database_name=identity.database_name,
+            database_oid=identity.database_oid,
+            normalized_search_path=identity.normalized_search_path,
+            runtime_role=identity.runtime_role,
+            server_version_num=identity.server_version_num,
+            pgvector_extension_version=str(extension[0]),
+            migration_universe_id="pulsara.conversation-kernel.v1",
+            migration_universe_generation=1,
+            migration_universe_fingerprint=definition.identity.universe_fingerprint,
+            migration_head_version=0,
+            durable_registry_prefix_fingerprint=definition.registry_prefix_fingerprint,
+            verified_catalog_fingerprint=catalog_fingerprint,
+            runtime_grant_policy_fingerprint=grant_policy.policy_fingerprint,
+            verification_contract_fingerprint=verification_contract,
+        )
+        result_payload = {
+            "binding_fingerprint": binding.binding_fingerprint,
+            "universe_fingerprint": definition.identity.universe_fingerprint,
+            "registry_prefix_fingerprint": definition.registry_prefix_fingerprint,
+            "verified_catalog_fingerprint": catalog_fingerprint,
+            "runtime_grant_policy_fingerprint": grant_policy.policy_fingerprint,
+        }
+        result = CleanVerificationResult(
+            status="verified",
+            universe_fingerprint=definition.identity.universe_fingerprint,
+            registry_prefix_fingerprint=definition.registry_prefix_fingerprint,
+            verified_catalog_fingerprint=catalog_fingerprint,
+            runtime_grant_policy_fingerprint=grant_policy.policy_fingerprint,
+            result_fingerprint=postgres_schema_fingerprint(
+                "pulsara:clean-schema-verification-result:v1", result_payload
+            ),
+        )
+        return PostgresFastVerificationBundle(binding=binding, result=result)
+
+
+/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/runner.py:443
+def _verify_vector_capability(connection: Connection) -> None:
+    _require_compatible_vector_if_present(connection)
+    row = connection.execute(
+        "SELECT pg_catalog.to_regtype('public.vector')::text AS vector_type"
+    ).fetchone()
+    if row is None or _cell(row, 0, "vector_type") is None:
+        raise PostgresSchemaError(
+            PostgresSchemaFailureCode.EXTENSION_MISSING,
+            "public.vector type is unavailable",
+        )
+    operator = connection.execute(
+        """
+        SELECT 1 FROM pg_catalog.pg_operator o
+        JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+        WHERE n.nspname = 'public' AND o.oprname = '<=>'
+        LIMIT 1
+        """
+    ).fetchone()
+    if operator is None:
+        raise PostgresSchemaError(
+            PostgresSchemaFailureCode.CATALOG_DRIFT,
+            "public.vector cosine-distance operator is unavailable",
+        )
+
+
+/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/runner.py:666
+def _verify_search_capability(connection):
+    row=connection.execute("SELECT extversion FROM pg_catalog.pg_extension WHERE extname='pg_search'").fetchone()
+    if row is None or _cell(row,0,'extversion')!='0.26.1':
+        raise PostgresSchemaError(PostgresSchemaFailureCode.EXTENSION_MISSING,
+            'pg_search 0.26.1 must be installed and preloaded on this PostgreSQL server')
+
+
+/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/runner.py:468
+def _verify_product_relations(connection: Connection) -> None:
+    observed = tuple(
+        _cell(row, 0, "relname")
+        for row in connection.execute(
+            """
+            SELECT c.relname FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'pulsara_v3' AND c.relkind IN ('r','p')
+            ORDER BY c.relname
+            """
+        ).fetchall()
+    )
+    if observed != tuple(sorted(CONVERSATION_KERNEL_RELATIONS)):
+        raise PostgresSchemaError(
+            PostgresSchemaFailureCode.CATALOG_DRIFT,
+            "pulsara_v3 product relation catalog is not exact",
+        )
+
+
+/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/python/lib/python3.12/site-packages/pulsara_agent/storage/migrations/runner.py:487
+def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
+    from pulsara_agent.storage.migrations.manifest import (
+        CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
+    )
+
+    schema_expectations = (
+        ("pulsara_v3", "USAGE", True),
+        ("pulsara_v3", "CREATE", False),
+        ("public", "CREATE", False),
+    )
+    for schema_name, privilege, expected in schema_expectations:
+        row = connection.execute(
+            "SELECT pg_catalog.has_schema_privilege(%s, %s, %s) AS allowed",
+            (runtime_role, schema_name, privilege),
+        ).fetchone()
+        if bool(_cell(row, 0, "allowed")) is not expected:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+                "clean runtime schema grants are not exact",
+            )
+
+    for relation, required in CONVERSATION_KERNEL_RUNTIME_PRIVILEGES.items():
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+            allowed_row = connection.execute(
+                "SELECT pg_catalog.has_table_privilege(%s, %s, %s) AS allowed",
+                (runtime_role, f"pulsara_v3.{relation}", privilege),
+            ).fetchone()
+            allowed = _cell(allowed_row, 0, "allowed")
+            if bool(allowed) != (privilege in required):
+                raise PostgresSchemaError(
+                    PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+                    "clean runtime relation grants are not exact",
+                )
+    for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+        allowed_row = connection.execute(
+            "SELECT pg_catalog.has_table_privilege(%s, "
+            "'public.pulsara_schema_migrations', %s) AS allowed",
+            (runtime_role, privilege),
+        ).fetchone()
+        allowed = _cell(allowed_row, 0, "allowed")
+        if bool(allowed) != (privilege == "SELECT"):
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+                "clean runtime migration-ledger grants are not exact",
+            )
+
+    function_policy = build_postgres_runtime_grant_policy().function_privileges
+    for function_signature, required in function_policy.items():
+        function_identity = f"pulsara_v3.{function_signature}"
+        function_execute = connection.execute(
+            "SELECT pg_catalog.has_function_privilege(%s, %s, 'EXECUTE') AS allowed",
+            (runtime_role, function_identity),
+        ).fetchone()
+        function_name, arguments = function_signature[:-1].split("(", 1)
+        public_execute = connection.execute(
+            """
+            SELECT COALESCE(bool_or(
+                a.grantee = 0 AND a.privilege_type = 'EXECUTE'
+            ), false)
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            LEFT JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
+            ) a ON true
+            WHERE n.nspname = 'pulsara_v3' AND p.proname = %s
+              AND pg_catalog.pg_get_function_identity_arguments(p.oid) = %s
+            """,
+            (function_name, arguments),
+        ).fetchone()
+        if required != ("EXECUTE",) or not bool(
+            _cell(function_execute, 0, "allowed")
+        ) or bool(_cell(public_execute, 0, "allowed")):
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+                "clean runtime invariant-function grants are not exact",
+            )

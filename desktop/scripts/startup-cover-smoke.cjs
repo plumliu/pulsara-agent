@@ -112,7 +112,8 @@ app.whenReady().then(async () => {
     assert.equal(host.contentView.children.includes(pendingView), false);
     if (replacement) {
       assert.equal(coverView(), replacement, 'old fade must not remove its replacement');
-      assert.equal(await replacement.webContents.executeJavaScript('document.getElementById("status").textContent'), 'replacement error');
+      assert.equal(await replacement.webContents.executeJavaScript('document.getElementById("status").textContent'), '工作台连接未完成');
+      assert.equal(await replacement.webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), 'replacement error');
       host.hide();
       await cover.finish();
     }
@@ -128,11 +129,28 @@ app.whenReady().then(async () => {
   await earlyClosed;
   assert.equal(earlyDestroyed.webContents, undefined);
   await cover.finish();
+  // Competing show/retire requests can overlap native contents destruction.
+  await Promise.all([cover.show('superseded status'), cover.show('current status')]);
+  assert.equal(host.contentView.children.filter(child => child.webContents !== host.webContents).length, 1);
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), 'current status');
+  const superseded = cover.show('must not survive retirement');
+  await cover.retire();
+  await superseded;
+  assert.equal(host.contentView.children.filter(child => child.webContents !== host.webContents).length, 0);
+  await cover.show('退出尚未完成：StaleHostWriter: host writer generation is stale');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("status").textContent'), '退出尚未完成');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), '退出尚未完成：StaleHostWriter: host writer generation is stale');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-details").open'), false);
+  await cover.show('PostgreSQL instance identity mismatch');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("status").textContent'), '工作台连接未完成');
+  assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), 'PostgreSQL instance identity mismatch');
+  assert.equal(await coverView().webContents.executeJavaScript('document.querySelector(".hint").textContent'), '重试不会自动清除数据。可展开技术详情或查看日志。');
   await cover.show('fixture startup failure');
   const failure = host.contentView.children.find(child => child.webContents !== host.webContents);
   const failureContents = failure.webContents;
   assert.equal(await failureContents.executeJavaScript('document.getElementById("actions").hidden'), false);
-  assert.equal(await failureContents.executeJavaScript('document.getElementById("status").textContent'), 'fixture startup failure');
+  assert.equal(await failureContents.executeJavaScript('document.getElementById("status").textContent'), '工作台连接未完成');
+  assert.deepEqual(await failureContents.executeJavaScript(`({text:document.getElementById('error-detail-text').textContent,open:document.getElementById('error-details').open,hidden:document.getElementById('error-details').hidden})`), {text:'fixture startup failure',open:false,hidden:false});
   const failureDestroyed = once(failureContents, 'destroyed');
   host.showInactive();
   const { started: closingStarted } = await fadeStarted(failureContents);

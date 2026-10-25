@@ -329,6 +329,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const [userServiceStatus, setUserServiceStatus] = useState<RuntimeStatus>('starting');
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('starting');
   const [runtimeError, setRuntimeError] = useState<string>();
+  const [runtimeFailure, setRuntimeFailure] = useState<{details: string; requiresRestart: boolean}>();
   const [runtimeReopenBusy, setRuntimeReopenBusy] = useState(false);
   const runtimeReopenOwner = useRef<RuntimeConnection | undefined>(undefined);
   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
@@ -1087,6 +1088,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setCapabilityLoading(Boolean(sessionId));
     setRuntimeStatus(reconnecting ? 'reconnecting' : 'starting');
     setRuntimeError(undefined);
+    setRuntimeFailure(undefined);
     const previous = connectionRef.current;
     const previousHistory = historyRef.current;
     const retainedHistory = previousHistory?.sessionId === sessionId ? previousHistory : undefined;
@@ -1155,6 +1157,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       const message = productMessage(error instanceof Error ? error.message : undefined, '无法连接本地服务。');
       setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
       setRuntimeError(message);
+      setRuntimeFailure(error instanceof Error ? {
+        details: error instanceof RuntimeApiError ? `${error.code}: ${error.message}` : `${error.name}: ${error.message}`,
+        requiresRestart: error instanceof RuntimeApiError && error.code === 'SESSION_RECOVERY_CLOSE_FAILED',
+      } : undefined);
       if (retainedHistory) {
         setWorkspaceRecoveryError(message);
         void adapter.workspaceAvailability(sessionId).then(value => {
@@ -1435,6 +1441,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             || runtimeReopenOwner.current === connection) return;
           setRuntimeStatus('reconnecting');
           setRuntimeError(productMessage(error instanceof Error ? error.message : undefined, '连接已中断。'));
+          setRuntimeFailure(error instanceof Error ? {
+            details: error instanceof RuntimeApiError ? `${error.code}: ${error.message}` : `${error.name}: ${error.message}`,
+            requiresRestart: error instanceof RuntimeApiError && error.code === 'SESSION_RECOVERY_CLOSE_FAILED',
+          } : undefined);
           window.setTimeout(() => {
             if (active && ownsConnection(connection) && runtimeReopenOwner.current !== connection) {
               void openRuntimeSession(connection.sessionId, true);
@@ -1732,11 +1742,13 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      if (event.isComposing || event.keyCode === 229) return;
+      const shortcut = (event.metaKey || event.ctrlKey) && !event.altKey && !event.getModifierState('AltGraph');
+      if (shortcut && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setSearchOpen((value) => !value);
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
+      if (shortcut && event.key.toLowerCase() === 'n') {
         event.preventDefault();
         if (canCreateSession) {
           setNewSessionOpen(true);
@@ -3137,6 +3149,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           ))}
           runtimeStatus={runtimeStatus}
           runtimeError={runtimeError}
+          runtimeErrorDetails={runtimeFailure?.details}
+          runtimeRecoveryBlocked={runtimeFailure?.requiresRestart}
           modelConfigurations={bootstrap?.model_configurations ?? []}
           modelCatalogLoading={bootstrap?.model_catalog_loading}
           modelCallBinding={activeSession.modelCallBinding}

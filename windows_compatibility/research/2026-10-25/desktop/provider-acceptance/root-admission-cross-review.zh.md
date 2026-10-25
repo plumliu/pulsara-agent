@@ -1,0 +1,11 @@
+# ROOT head stale修复只读交叉审
+
+审阅当前4生产文件diff及其实际调用者：repository_errors.py、_repository/conversation.py、turn_admission.py、runner.py；另外读取 PreparedProspectiveRootDispatch.close 与 HostProviderInputContinuityOwner.abort_planning，以及新增的原PG聚焦回归。未编辑这些文件，没有重复运行另一agent的测试。
+
+没有发现新增P0/P1或provider prefix重建边界：新typed异常仅针对canonical latest_entry_sequence mismatch，workspace/Plan handoff/target仍走原冲突；settle仍先确认同一immutable intent的FULL/CONFLICT/ABSENT，只有ABSENT且有已知typed stale才返回runner重prepare。FULL继续原已接受结果，不因丢ack重造command；CONFLICT继续失败。
+
+runner保留同一intent对象、command及frozen model resolution，只关闭未消费的dry prospective resources后再次读取canonical head。close退surface borrow、pending hook reservation和planning；abort_planning对installed planning为no-op，只归还确切Empty reservation，没有清epoch或重新构造已安装SYSTEM/tools的新入口。hook_context_reservation.commit仍在循环外，不随head竞争重跑。
+
+新增测试保留同intent/command、前准备已释放、SYSTEM/tools与messages前缀断言；另一agent报告5项实际独立PG矩阵通过。本审阅不把该报告冒称为自己执行，也不把它等同于修后正式installed package的真实capacity通过。真实capacity必须待新候选安装后重跑，原失败保留；本分支先前88次provider证据仅代表其实际已安装be6af材料。
+
+范围保持：本次只收敛已确认ROOT head stale的旧candidate无限重发，不宣称所有未知DB错误或其他既存Conflict都被新算法消除。没有建议总retry/任务寿命cap、durable receipt或新registry。

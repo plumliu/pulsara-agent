@@ -1,0 +1,13 @@
+{
+  "directory": "/home/plumwsl/.pg-lf-axbhvys_",
+  "build": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "/home/plumwsl/.pg-lf-axbhvys_/wheel/pulsara_agent-0.1.0a6-py3-none-linux_x86_64.whl\n"
+  },
+  "installation": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "Using CPython 3.12.15 interpreter at: /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/bin/python3\nResolved 1 package in 1ms\nPrepared 1 package in 54ms\nInstalled 1 package in 27ms\n + pulsara-agent==0.1.0a6 (from file:///home/plumwsl/.pg-lf-axbhvys_/wheel/pulsara_agent-0.1.0a6-py3-none-linux_x86_64.whl)\n"
+  }
+}

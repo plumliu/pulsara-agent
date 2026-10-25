@@ -317,6 +317,7 @@ def test_storage_failure_does_not_remove_live_anchor_and_is_diagnosed():
         permit = owner.install(candidate=candidate, execution=execution)
         captured = []
         host = object.__new__(KernelHostSession)
+        host._writer_renewal_failure = None
         host._input_continuity = owner
         host._canonical_deadline = lambda: 100
         host.repository = SimpleNamespace(record_provider_call_usage=lambda *_args: None)

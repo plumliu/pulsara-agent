@@ -1,0 +1,5 @@
+desktop\native\windows-interop-helper\Program.cs(16,58): warning CS0649: ��δ���ֶΡ�Frame.operation����ֵ���ֶν�һֱ������Ĭ��ֵ null
+desktop\native\windows-interop-helper\Program.cs(18,58): warning CS0649: ��δ���ֶΡ�Frame.distribution����ֵ���ֶν�һֱ������Ĭ��ֵ null
+desktop\native\windows-interop-helper\Program.cs(19,58): warning CS0649: ��δ���ֶΡ�Frame.user����ֵ���ֶν�һֱ������Ĭ��ֵ null
+desktop\native\windows-interop-helper\Program.cs(20,58): warning CS0649: ��δ���ֶΡ�Frame.python����ֵ���ֶν�һֱ������Ĭ��ֵ null
+desktop\native\windows-interop-helper\Program.cs(21,58): warning CS0649: ��δ���ֶΡ�Frame.control����ֵ���ֶν�һֱ������Ĭ��ֵ null

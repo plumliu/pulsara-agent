@@ -1413,6 +1413,7 @@ class McpHostSupervisor:
         self._host_operation_lane = asyncio.Semaphore(MAXIMUM_MCP_HOST_IN_FLIGHT)
         self._periodic_tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._capability_owner_authenticity = object()
 
     @property
@@ -1804,6 +1805,8 @@ class McpHostSupervisor:
                 )
                 attempt_anchor = None
                 box["slot"] = slot
+                with self._lock:
+                    self._all_slots.add(slot)
                 async with asyncio.timeout(self._connect_attempt_timeout_seconds):
                     await client.open()
                     with self._lock:
@@ -1867,7 +1870,6 @@ class McpHostSupervisor:
                             )
                         superseded_pending = self._pending.get(server_id)
                         self._slots[server_id] = slot
-                        self._all_slots.add(slot)
                         self._pending[server_id] = candidate
                         self._set_catalog_state_locked(
                             server_id, McpServerState.READY
@@ -1904,6 +1906,8 @@ class McpHostSupervisor:
                 close.result()
             if slot is not None:
                 slot.close_physical_lifetime()
+                with self._lock:
+                    self._all_slots.discard(slot)
             with self._lock:
                 if (
                     not self._closed
@@ -2835,8 +2839,24 @@ class McpHostSupervisor:
 
     async def aclose(self) -> None:
         with self._lock:
-            if self._closed:
-                return
+            if self._close_task is None:
+                self._closed = True
+                self._close_task = asyncio.create_task(
+                    self._close(), name="mcp-supervisor-physical-close"
+                )
+            task = self._close_task
+        cancelled = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancelled = cancelled or error
+        task.result()
+        if cancelled is not None:
+            raise cancelled
+
+    async def _close(self) -> None:
+        with self._lock:
             self._closed = True
             tasks = tuple(self._connection_tasks) + tuple(self._refresh_tasks.values())
             tasks += tuple(self._periodic_tasks.values())
@@ -2850,8 +2870,6 @@ class McpHostSupervisor:
                 for item in self.configs
                 if item.physical_lifetime_anchor is not None
             )
-            self.configs = ()
-            self._config_by_id.clear()
             self._pending.clear()
             self._installed.clear()
             for slot in slots:
@@ -2863,11 +2881,11 @@ class McpHostSupervisor:
         for task in tasks:
             if not task.done() and not task.cancelling():
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        task_results = await asyncio.gather(*tasks, return_exceptions=True)
         # Terminate exact physical transports first.  Product-operation tasks
         # then leave their lane permits; runtime generations still retain only
         # opaque leases and are released by DirectKernelToolPort.
-        await asyncio.gather(
+        close_results = await asyncio.gather(
             *(slot.client.aclose() for slot in slots), return_exceptions=True
         )
         while any(
@@ -2877,14 +2895,31 @@ class McpHostSupervisor:
             for slot in slots
         ):
             await asyncio.sleep(0.01)
-        for slot in slots:
+        failures = [value for value in task_results
+                    if isinstance(value, BaseException)
+                    and not isinstance(value, asyncio.CancelledError)]
+        for slot, result in zip(slots, close_results, strict=True):
+            if isinstance(result, BaseException):
+                failures.append(result)
+                continue
             slot.close_physical_lifetime()
-        for anchor in config_anchors:
-            _close_physical_lifetime_anchor(anchor)
+            with self._lock:
+                self._all_slots.discard(slot)
         # Retiring-slot close tasks are physical owners, not retry timers.  They
         # must be joined rather than cancelled, even when Host close races them.
         if slot_close_tasks:
-            await asyncio.gather(*slot_close_tasks, return_exceptions=True)
+            retired_results = await asyncio.gather(
+                *slot_close_tasks, return_exceptions=True
+            )
+            failures.extend(value for value in retired_results
+                            if isinstance(value, BaseException))
+        if failures:
+            raise failures[0]
+        for anchor in config_anchors:
+            _close_physical_lifetime_anchor(anchor)
+        with self._lock:
+            self.configs = ()
+            self._config_by_id.clear()
 
 
 def _duplicate_physical_lifetime_anchor(anchor: object | None) -> object | None:

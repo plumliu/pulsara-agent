@@ -17,6 +17,8 @@ def installed_launch_command(executable: Path | None = None) -> list[str]:
         if not manifest.is_file():
             continue
         value = json.loads(manifest.read_text(encoding="utf-8"))
+        if value == {"execution_domain": "wsl"}:
+            raise RuntimeError("请从 Windows Pulsara 图标启动/聚焦桌面应用。")
         if (not isinstance(value, dict) or set(value) - {"executable", "args"}
                 or not isinstance(value.get("executable"), str)
                 or not isinstance(value.get("args", []), list)

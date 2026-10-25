@@ -1,0 +1,108 @@
+{
+  "readOnlyAfterPassed": true,
+  "comparisonCount": 16,
+  "comparisons": {
+    "sameWindowsMain": true,
+    "sameKernel": true,
+    "samePostgres": true,
+    "sameBoot": true,
+    "sameBusyLockInodes": true,
+    "sameControlSocket": true,
+    "sameHttpListenerAndCertificate": true,
+    "sameSessionAndWorkspace": true,
+    "savedTurnsRemain": true,
+    "writerGenerationNondecreasing": true,
+    "currentWriterLeaseValid": true,
+    "sameGenerationRetainsOwner": true,
+    "advancedGenerationChangesOwner": true,
+    "originalCertificateAndHealthValid": true,
+    "tunStillUp": true,
+    "sleepEventsRecorded": true
+  },
+  "writerBefore": {
+    "generation": 1,
+    "owner": "host:vluuyqd74zjwtk5ysfxro6zkfu",
+    "leaseExpires": "2026-10-25 19:30:13.037238+08",
+    "leaseValid": true,
+    "databaseObservedAt": "2026-10-25 19:29:46.770973+08"
+  },
+  "writerAfter": {
+    "generation": 2,
+    "owner": "host:piazsjena2nerxdwumqfkkxtzm",
+    "leaseExpires": "2026-10-25 19:35:32.011864+08",
+    "leaseValid": true,
+    "databaseObservedAt": "2026-10-25 19:35:09.296938+08"
+  },
+  "beforeObservedLeaseExpiryIsNotTheLastRenewedExpiryAtActualSleep": true,
+  "powerEvents": [
+    {
+      "id": 506,
+      "recordId": 1523,
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "utc": "2026-10-25T11:30:35.4317565Z"
+    },
+    {
+      "id": 507,
+      "recordId": 1527,
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "utc": "2026-10-25T11:32:23.9228576Z"
+    }
+  ],
+  "eventIntervalSecondsExact": "108.4911011",
+  "snapshotIntervalSeconds": 321.345674,
+  "connections": {
+    "sameNetworkOwner": {
+      "pid": 33048,
+      "creationFileTime": 134374009868013255,
+      "image": "C:\\Users\\plumlocal\\AppData\\Local\\Programs\\pulsara\\pulsara.exe",
+      "alive": true,
+      "parent": 18816,
+      "auxiliary": true,
+      "maintenance": false
+    },
+    "beforePorts": [
+      52084,
+      52880,
+      60645,
+      60846,
+      63014,
+      64405
+    ],
+    "afterPorts": [
+      59370,
+      63795
+    ],
+    "oldPortsStillPresent": [],
+    "notUninterruptedTcpProof": true
+  },
+  "tunBefore": [
+    {
+      "Name": "tun0",
+      "InterfaceDescription": "sing-tun Tunnel",
+      "ifIndex": 47,
+      "Status": "Up"
+    }
+  ],
+  "tunAfter": [
+    {
+      "Name": "tun0",
+      "InterfaceDescription": "sing-tun Tunnel",
+      "ifIndex": 34,
+      "Status": "Up"
+    }
+  ],
+  "sameOriginalCompletedTurnAndNoNewTurnYet": true,
+  "rootActualPostWakeTurnAndQuit": {
+    "passed": true,
+    "closureEvidence": "closure-results.json"
+  },
+  "observerSentMessage": false,
+  "observerClickedRetry": false,
+  "observerTriggeredSleep": false,
+  "settingsOrTokenRead": false,
+  "productProcessesRestartedByObserver": false,
+  "selectedMatrixPassed": true,
+  "activeTaskSleepMatrixClaimed": false,
+  "B5ActivationClaimed": false,
+  "readonlyObservationStage": "after snapshot at 19:35:14, before root submitted second turn; final follow-up is in closure-results.json"
+}

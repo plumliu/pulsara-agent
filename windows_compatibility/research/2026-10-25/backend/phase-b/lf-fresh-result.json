@@ -1,0 +1,177 @@
+{
+  "passed": true,
+  "config": {
+    "directory": "/home/plumwsl/.pg-lf-axbhvys_",
+    "package": "/home/plumwsl/.pg-lf-axbhvys_/installed",
+    "home": "/home/plumwsl/.pg-lf-axbhvys_/home",
+    "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/bin/python3",
+    "uid": 1000,
+    "wheel": "/home/plumwsl/.pg-lf-axbhvys_/wheel/pulsara_agent-0.1.0a6-py3-none-linux_x86_64.whl"
+  },
+  "rounds": [
+    {
+      "attempt": 0,
+      "initialized": true,
+      "url": "https://127.0.0.1:36375",
+      "readyAt": 1792916768396,
+      "networkReadiness": [
+        {
+          "at": 1792916768396,
+          "completedAt": 1792916768401,
+          "code": "ECONNREFUSED",
+          "message": "connect ECONNREFUSED 127.0.0.1:36375"
+        },
+        {
+          "at": 1792916768657,
+          "completedAt": 1792916768658,
+          "code": "ECONNREFUSED",
+          "message": "connect ECONNREFUSED 127.0.0.1:36375"
+        },
+        {
+          "at": 1792916768920,
+          "completedAt": 1792916768927,
+          "status": 200
+        }
+      ],
+      "bootstrap": true,
+      "sql": {
+        "package": "/home/plumwsl/.pg-lf-axbhvys_/installed/pulsara_agent/__init__.py",
+        "sessions": 0,
+        "functions": [
+          [
+            "enforce_conversation_kernel_invariants",
+            0
+          ],
+          [
+            "enforce_imported_history_invariants",
+            0
+          ],
+          [
+            "enforce_memory_relation_endpoints",
+            0
+          ],
+          [
+            "seal_memory_fact",
+            0
+          ],
+          [
+            "seal_memory_relation",
+            0
+          ]
+        ],
+        "deep_verified": true,
+        "execution_crlf": 0
+      }
+    },
+    {
+      "attempt": 1,
+      "initialized": false,
+      "url": "https://127.0.0.1:44147",
+      "readyAt": 1792916778043,
+      "networkReadiness": [
+        {
+          "at": 1792916778043,
+          "completedAt": 1792916778045,
+          "code": "ECONNREFUSED",
+          "message": "connect ECONNREFUSED 127.0.0.1:44147"
+        },
+        {
+          "at": 1792916778299,
+          "completedAt": 1792916778300,
+          "code": "ECONNREFUSED",
+          "message": "connect ECONNREFUSED 127.0.0.1:44147"
+        },
+        {
+          "at": 1792916778563,
+          "completedAt": 1792916778564,
+          "code": "ECONNREFUSED",
+          "message": "connect ECONNREFUSED 127.0.0.1:44147"
+        },
+        {
+          "at": 1792916778826,
+          "completedAt": 1792916778828,
+          "code": "ECONNREFUSED",
+          "message": "connect ECONNREFUSED 127.0.0.1:44147"
+        },
+        {
+          "at": 1792916779088,
+          "completedAt": 1792916779094,
+          "status": 200
+        }
+      ],
+      "bootstrap": true,
+      "sql": {
+        "package": "/home/plumwsl/.pg-lf-axbhvys_/installed/pulsara_agent/__init__.py",
+        "sessions": 0,
+        "functions": [
+          [
+            "enforce_conversation_kernel_invariants",
+            0
+          ],
+          [
+            "enforce_imported_history_invariants",
+            0
+          ],
+          [
+            "enforce_memory_relation_endpoints",
+            0
+          ],
+          [
+            "seal_memory_fact",
+            0
+          ],
+          [
+            "seal_memory_relation",
+            0
+          ]
+        ],
+        "deep_verified": true,
+        "execution_crlf": 0
+      }
+    }
+  ],
+  "events": [
+    {
+      "at": 1792916767983,
+      "type": "starting"
+    },
+    {
+      "at": 1792916768395,
+      "type": "ready"
+    },
+    {
+      "at": 1792916769192,
+      "type": "stopping"
+    },
+    {
+      "at": 1792916769481,
+      "type": "stopped"
+    },
+    {
+      "at": 1792916769871,
+      "type": "exited",
+      "error": "内核进程已退出 (0)。"
+    },
+    {
+      "at": 1792916777857,
+      "type": "starting"
+    },
+    {
+      "at": 1792916778043,
+      "type": "ready"
+    },
+    {
+      "at": 1792916779339,
+      "type": "stopping"
+    },
+    {
+      "at": 1792916779340,
+      "type": "stopped"
+    },
+    {
+      "at": 1792916779767,
+      "type": "exited",
+      "error": "内核进程已退出 (0)。"
+    }
+  ]
+}

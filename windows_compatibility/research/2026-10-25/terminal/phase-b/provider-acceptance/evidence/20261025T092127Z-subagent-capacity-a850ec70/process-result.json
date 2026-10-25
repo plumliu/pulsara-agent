@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "Installed package: /home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/lib/python3.12/site-packages/pulsara_agent/__init__.py\n{\"status\": \"failed\", \"output\": \"/mnt/c/python_workspace/pulsara-agent/output/phase-b/terminal/provider-acceptance/20261025T092127Z-subagent-capacity-a850ec70/result.json\", \"undropped_databases\": []}\n",
+  "stderr": "hook code=HOOK_SOURCE_STATE event=None source=USER detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\nhook code=HOOK_SOURCE_STATE event=None source=WORKSPACE detail=cold: scan=COMPLETE trust=UNTRUSTED enabled=True\n"
+}

@@ -1,0 +1,68 @@
+{
+  "cases": [
+    {
+      "invalidInput": "not JSON",
+      "result": {
+        "distros": [
+          {
+            "name": "Ubuntu",
+            "version": 2,
+            "default": true
+          }
+        ],
+        "savedError": "已保存的 WSL 目标无法读取或无效，请重新明确选择。"
+      },
+      "unchangedUntilExplicitSelection": true
+    },
+    {
+      "invalidInput": "{\"distro\":\"Ubuntu\",\"user\":\"root\",\"extra\":true}",
+      "result": {
+        "distros": [
+          {
+            "name": "Ubuntu",
+            "version": 2,
+            "default": true
+          }
+        ],
+        "savedError": "已保存的 WSL 目标无法读取或无效，请重新明确选择。"
+      },
+      "unchangedUntilExplicitSelection": true
+    },
+    {
+      "invalidInput": "{\"distro\":\"Ubuntu\",\"user\":\"-bad\"}",
+      "result": {
+        "distros": [
+          {
+            "name": "Ubuntu",
+            "version": 2,
+            "default": true
+          }
+        ],
+        "savedError": "已保存的 WSL 目标无法读取或无效，请重新明确选择。"
+      },
+      "unchangedUntilExplicitSelection": true
+    }
+  ],
+  "explicitSelection": {
+    "selected": {
+      "distro": "Ubuntu",
+      "user": "plumwsl",
+      "uid": 1000,
+      "home": "/home/plumwsl"
+    },
+    "reopened": {
+      "distros": [
+        {
+          "name": "Ubuntu",
+          "version": 2,
+          "default": true
+        }
+      ],
+      "saved": {
+        "distro": "Ubuntu",
+        "user": "plumwsl"
+      }
+    }
+  },
+  "passed": true
+}

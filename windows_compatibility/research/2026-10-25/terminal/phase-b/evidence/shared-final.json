@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "phase": "candidate",
+      "exit": 0,
+      "origin": "/home/plumwsl/.pulsara-terminal-fix-gg1xs8h7/candidate/src/pulsara_agent/terminal_process/manager.py\n",
+      "stdout": "........................................................................ [ 54%]\n...........................................................              [100%]\n131 passed in 14.14s\n",
+      "stderr": ""
+    }
+  ],
+  "snapshotRemoved": true
+}

@@ -30,10 +30,10 @@ export function CliSettings() {
     <span className="setting-row__icon"><TerminalSquare size={15}/></span>
     <div className="setting-row__copy">
       <div className="settings-cli-heading">
-        <strong>命令行入口</strong>
+        <strong>{host.platform === 'win32' ? 'WSL 内命令行入口' : '命令行入口'}</strong>
         {status?.state === 'conflict' && <button className="settings-cli-conflict" aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded(value => !value)}><CircleAlert size={12} /><span>已有同名命令</span><ChevronRight size={12} /></button>}
       </div>
-      {status?.state !== 'conflict' && <small role="status">{status ? labels[status.state] : error ? '检查失败' : '正在检查…'}</small>}
+      {status?.state !== 'conflict' && <small role="status">{host.platform === 'win32' ? '在所选 WSL 发行版中管理和诊断应用；桌面窗口请从 Windows 图标打开。' : status ? labels[status.state] : error ? '检查失败' : '正在检查…'}</small>}
     </div>
     <div className="setting-row__control settings-service-actions">
       <button disabled={busy} onClick={() => void run()}><RefreshCw size={13} />重新检查</button>

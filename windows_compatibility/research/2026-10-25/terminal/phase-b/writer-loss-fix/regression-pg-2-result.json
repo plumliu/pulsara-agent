@@ -1,0 +1,14 @@
+{
+  "config": {
+    "directory": "/home/plumwsl/.hostlease-6iqcbjtq",
+    "home": "/home/plumwsl/.hostlease-6iqcbjtq/home",
+    "workspace": "/home/plumwsl/.hostlease-6iqcbjtq/workspace"
+  },
+  "formalClusterTouched": false,
+  "probe": {
+    "stdout": ".........                                                                [100%]\n9 passed in 3.34s\n",
+    "stderr": ""
+  },
+  "pgResetCompleted": true,
+  "cleanup": "{\"removed\": \"/home/plumwsl/.hostlease-6iqcbjtq\"}\n"
+}

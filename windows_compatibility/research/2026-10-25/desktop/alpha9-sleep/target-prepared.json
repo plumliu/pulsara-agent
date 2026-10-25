@@ -1,0 +1,11 @@
+{
+  "sessionId": "session:36omh67maz3ezaef3amghzb6ka",
+  "port": 32915,
+  "mainPid": 18816,
+  "kernelPid": 494,
+  "kernelStart": "1448",
+  "pgPid": 523,
+  "pgStart": "2029",
+  "source": "provided by root, not probed yet",
+  "samplingState": "await explicit BEFORE; initial echo not confirmed settled"
+}

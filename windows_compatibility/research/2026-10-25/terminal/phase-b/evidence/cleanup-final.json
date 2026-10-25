@@ -1,0 +1,16 @@
+{
+  "scopeRecords": 38,
+  "allPhysicalJoined": true,
+  "allRetired": true,
+  "allWorkersStopped": true,
+  "relayTasksAndWritersZero": true,
+  "windowsProof": "original scope's held Job/process HANDLE join frames, not current-PID guesses",
+  "linuxFinalAudit": {
+    "privateDirectories": [],
+    "matchingOwnProcesses": [],
+    "namespace": "pid:[4026532223]"
+  },
+  "stoppedSharedDistribution": false,
+  "settingsOrInteropOrTUNChanged": false,
+  "startedProvider": false
+}

@@ -1,0 +1,35 @@
+{
+  "phase": "candidate-wsl",
+  "model": "deepseek-flash",
+  "connection_id": "connection:oeeiipbn63ytbexaxw74nv5tgy",
+  "started_at": "2026-10-25T08:58:19.143082+00:00",
+  "status": "failed",
+  "cases": [],
+  "trace": [],
+  "provider_calls": [],
+  "scope": "original owner runner; not installed Electron GUI qualification",
+  "prefix_checks": [],
+  "runner": "subagent",
+  "postgres": {
+    "system_identifier": "7700523439330484737",
+    "data": "/home/plumwsl/.pulsara/desktop/postgres",
+    "socket": "/home/plumwsl/.pulsara/desktop/socket",
+    "version_num": 170009,
+    "admin_root": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 user=pulsara_admin dbname=pulsara",
+    "runtime_root": "host=/home/plumwsl/.pulsara/desktop/socket port=5432 user=pulsara_runtime dbname=pulsara"
+  },
+  "created_database": "pulsara_wsl_dogfood_b0463bc03ebd4c63be12699dd2b3479b",
+  "scratch": "/home/plumwsl/.pvt-1vw1i3vp/Pulsara 中文 验收 2kc__04v",
+  "test_home": "/home/plumwsl/.pa-hz7g_tqk",
+  "workspace_utf8_bytes": 68,
+  "pg_socket_utf8_bytes": 55,
+  "interop_control_utf8_bytes": 47,
+  "scratch_retained": true,
+  "test_home_retained": true,
+  "dropped_databases": [
+    "pulsara_wsl_dogfood_b0463bc03ebd4c63be12699dd2b3479b"
+  ],
+  "failure_type": "TypeError",
+  "failure_message": "_ConversationOperations.accept_root_turn_intent() missing 1 required keyword-only argument: 'provider_input_admission'",
+  "undropped_databases": []
+}

@@ -1,0 +1,13 @@
+{
+  "pythonAst": [
+    "observe.py",
+    "guest_observe.py"
+  ],
+  "nodeCheck": "https_observe.cjs exit0",
+  "powerShellParser": "windows-query.syntax-only.ps1 no syntax errors",
+  "passed": true,
+  "scriptsExecuted": false,
+  "beforeCollected": false,
+  "systemQueried": false,
+  "formalAppOrPgLifecycleChanged": false
+}

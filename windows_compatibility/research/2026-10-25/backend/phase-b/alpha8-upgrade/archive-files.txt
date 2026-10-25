@@ -1,0 +1,11 @@
+report.zh.md
+archive-files.txt
+prepare_observer.py
+observe_upgrade.py
+alpha8-upgrade-before.json
+observe_quit_failure.py
+quit-failure-observation.json
+audit_installed_verifier.py
+installed-verifier-call-sites.txt
+alpha7-retry-recovery.json
+alpha7-retry-recovery-verified.json

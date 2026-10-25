@@ -26,6 +26,21 @@ function observedOperations() {
   return {operations, calls};
 }
 
+test('initialization permission belongs only to the current confirmed initdb attempt', async () => {
+  const {operations} = observedOperations();
+  let created = false;
+  operations.readVersion = async () => { if (!created) throw Object.assign(new Error('absent'), {code:'ENOENT'}); return '17'; };
+  operations.run = async binary => { if (binary === 'initdb') created = true; return {stdout:'',stderr:''}; };
+  const pg = new BundledPostgres(operations);
+  await pg.start();
+  assert.equal(pg.initialized, true);
+  await pg.start();
+  assert.equal(pg.initialized, false);
+  operations.prepareLayout = async () => { throw new Error('layout unavailable'); };
+  await assert.rejects(pg.start(), /layout unavailable/);
+  assert.equal(pg.initialized, false);
+});
+
 test('failed readiness keeps a verified started server owned for explicit shutdown', async () => {
   // Keep the fixture inside PostgreSQL's Unix-socket pathname limit on macOS.
   const root = await mkdtemp('/tmp/pg-owner-');
@@ -69,7 +84,7 @@ test('start accepts the resolved instance directory while reset requires its exa
   assert.deepEqual(calls, ['reset-paths', 'data-info', 'version', 'pg_ctl:status', 'instance']);
 });
 
-test('only a numeric status code 3 permits a start and failed readiness preserves the original error', async () => {
+test('only a settled numeric status code 3 permits a start and failed readiness preserves the original error', async () => {
   const {operations, calls} = observedOperations();
   const unavailable = Object.assign(new Error('launch failed'), {code: 'ENOENT'});
   operations.run = async () => { throw unavailable; };
@@ -79,11 +94,11 @@ test('only a numeric status code 3 permits a start and failed readiness preserve
   assert.deepEqual(calls, ['prepare', 'version']);
 
   calls.length = 0;
-  const readiness = Object.assign(new Error('readiness failed'), {code: 1});
+  const readiness = Object.assign(new Error('readiness failed'), {code: 1, postgresExecution: 'failed'});
   let statuses = 0;
   operations.run = async (binary, args) => {
     calls.push(`${binary}:${args[0]}`);
-    if (args[0] === 'status' && statuses++ === 0) throw Object.assign(new Error('stopped'), {code: 3});
+    if (args[0] === 'status' && statuses++ === 0) throw Object.assign(new Error('stopped'), {code: 3, postgresExecution: 'failed'});
     if (args[0] === 'start') throw readiness;
     return {stdout: '', stderr: ''};
   };
@@ -93,13 +108,61 @@ test('only a numeric status code 3 permits a start and failed readiness preserve
   assert.deepEqual(calls, ['prepare', 'version', 'pg_ctl:status', 'socket-mode', 'pg_ctl:start', 'pg_ctl:status', 'instance']);
 });
 
+test('unsubmitted, unknown and unclassified start failures cannot adopt another running instance', async () => {
+  for (const details of [
+    {code: 'ENOENT', postgresExecution: 'not-submitted'},
+    {code: 3, postgresExecution: 'unknown'},
+    {code: 1},
+  ]) {
+    for (const alreadyOwned of [false, true]) {
+      const {operations, calls} = observedOperations();
+      const failure = Object.assign(new Error('this start has no confirmed outcome'), details);
+      let statuses = 0;
+      operations.run = async (binary, args) => {
+        calls.push(`${binary}:${args[0]}`);
+        if (args[0] === 'status' && statuses++ === 0) throw Object.assign(new Error('stopped'), {code: 3, postgresExecution: 'failed'});
+        if (args[0] === 'start') throw failure;
+        // A different caller has started this exact layout after our attempt failed.
+        return {stdout: '', stderr: ''};
+      };
+      const pg = new BundledPostgres(operations);
+      pg.startedHere = alreadyOwned;
+      await assert.rejects(pg.start(), error => error === failure);
+      assert.equal(pg.startedHere, alreadyOwned);
+      assert.deepEqual(calls, ['prepare', 'version', 'pg_ctl:status', 'socket-mode', 'pg_ctl:start']);
+    }
+  }
+});
+
+test('status 3 without a confirmed process failure cannot authorize start or reset', async () => {
+  for (const details of [
+    {code: 3, postgresExecution: 'unknown'},
+    {code: 3, postgresExecution: 'not-submitted'},
+    {code: 3},
+    {code: '3', postgresExecution: 'failed'},
+  ]) {
+    const {operations, calls} = observedOperations();
+    const failure = Object.assign(new Error('status result is not confirmed'), details);
+    operations.run = async (binary, args) => { calls.push(`${binary}:${args[0]}`); throw failure; };
+    const pg = new BundledPostgres(operations);
+    await assert.rejects(pg.start(), error => error === failure);
+    assert.equal(pg.startedHere, false);
+    assert.deepEqual(calls, ['prepare', 'version', 'pg_ctl:status']);
+    calls.length = 0;
+    pg.startedHere = true;
+    await assert.rejects(pg.resetConfirmed(), error => error === failure);
+    assert.equal(pg.startedHere, true);
+    assert.deepEqual(calls, ['reset-paths', 'data-info', 'version', 'pg_ctl:status']);
+  }
+});
+
 test('first initialization retains the original argv and only updates state after successful physical commands', async () => {
   const {operations, calls} = observedOperations();
   operations.readVersion = async () => { throw Object.assign(new Error('no version'), {code: 'ENOENT'}); };
   const commands: Array<{binary: string; args: readonly string[]}> = [];
   operations.run = async (binary, args) => {
     commands.push({binary, args});
-    if (args[0] === 'status') throw Object.assign(new Error('stopped'), {code: 3});
+    if (args[0] === 'status') throw Object.assign(new Error('stopped'), {code: 3, postgresExecution: 'failed'});
     return {stdout: '', stderr: ''};
   };
   const pg = new BundledPostgres(operations);

@@ -6,13 +6,13 @@ export interface CliStatus {
   path: string;
   existingTarget?: string;
   message?: string;
-  managedBy: 'application' | 'package';
+  managedBy: 'application' | 'package' | 'wsl';
   shadowedBy?: string;
 }
 /** Narrow preload contract. Browser-based component tests deliberately have no host. */
 export interface PulsaraDesktop {
   browser: DesktopBrowser;
-  platform: 'darwin' | 'linux';
+  platform: 'darwin' | 'linux' | 'win32';
   startupSettled(): Promise<void>;
   focus(): Promise<void>;
   readUiPreferences(): Promise<Record<string, string>>;

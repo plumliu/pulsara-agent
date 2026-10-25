@@ -1,0 +1,12 @@
+{
+  "message": "connect ECONNREFUSED 127.0.0.1:37353",
+  "stack": "Error: connect ECONNREFUSED 127.0.0.1:37353\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1638:16)",
+  "events": [
+    {
+      "type": "starting"
+    },
+    {
+      "type": "ready"
+    }
+  ]
+}

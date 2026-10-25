@@ -1,0 +1,34 @@
+{
+  "backendOriginalFileTests": 29,
+  "frontendTwoFileSuite": 363,
+  "frontendApiFlagFollowup": 2,
+  "frontendTypecheck": 0,
+  "frontendLint": 0,
+  "pythonRuff": 0,
+  "realElectronStartupCover": {
+    "exitCode": 0,
+    "passed": true,
+    "originalSmoke": true,
+    "formalAppStarted": false
+  },
+  "firstFrontendSuite": {
+    "passed": 361,
+    "failed": 2,
+    "raw": "first-frontend-all.log",
+    "originalDurableTaskAssertionUnchanged": true
+  },
+  "physicalFailureCauseRetained": true,
+  "publicDetailsCredentialScrubOrFixedFallback": true,
+  "permanentQuarantineRetryable": false,
+  "newDurableStateOrReplayLoop": false,
+  "newKernelSpawnedByRecovery": false,
+  "privateSnapshotCleanup": {
+    "privateTestSnapshot": "/home/plumwsl/.desktop-recovery-1zumcomm",
+    "removed": true,
+    "liveSnapshotUsers": [],
+    "formalAppOrPgLifecycleChanged": false,
+    "linuxMainCloneModified": false
+  },
+  "installedSleepFollowupPassed": false,
+  "followupScope": "root will test alpha9 real sleep then actual new turn and normal Quit"
+}

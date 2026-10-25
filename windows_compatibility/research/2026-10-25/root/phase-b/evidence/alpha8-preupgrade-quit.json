@@ -1,0 +1,6 @@
+{
+  "appCount": 4,
+  "pgStatus": 0,
+  "pgOutput": "pg_ctl: server is running (PID: 498)\n/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.7/postgres/bin/postgres \"-D\" \"/home/plumwsl/.pulsara/desktop/postgres\" \"-c\" \"listen_addresses=\" \"-k\" \"/home/plumwsl/.pulsara/desktop/socket\" \"-c\" \"unix_socket_permissions=0700\" \"-c\" \"port=5432\" \"-c\" \"shared_preload_libraries=pg_search\"",
+  "observedAt": "2026-10-25T18:47:41.9779060+08:00"
+}

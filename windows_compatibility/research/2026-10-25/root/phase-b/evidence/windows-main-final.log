@@ -1,0 +1,71 @@
+TAP version 13
+# WSL maintenance admission refused: kernel busy
+# Subtest: Windows requires environment confirmation before creating a kernel or preparing PostgreSQL
+ok 1 - Windows requires environment confirmation before creating a kernel or preparing PostgreSQL
+  ---
+  duration_ms: 5.0969
+  type: 'test'
+  ...
+# Subtest: Windows installer check is finite and never starts the product: idle
+ok 2 - Windows installer check is finite and never starts the product: idle
+  ---
+  duration_ms: 1.8042
+  type: 'test'
+  ...
+# Subtest: Windows installer check is finite and never starts the product: busy
+ok 3 - Windows installer check is finite and never starts the product: busy
+  ---
+  duration_ms: 1.2531
+  type: 'test'
+  ...
+# Subtest: Windows revalidates its saved target and pins a fresh window before workbench navigation
+ok 4 - Windows revalidates its saved target and pins a fresh window before workbench navigation
+  ---
+  duration_ms: 2.2008
+  type: 'test'
+  ...
+# Subtest: Windows derives initialization permission after the PG attempt: false
+ok 5 - Windows derives initialization permission after the PG attempt: false
+  ---
+  duration_ms: 1.8811
+  type: 'test'
+  ...
+# Subtest: Windows derives initialization permission after the PG attempt: true
+ok 6 - Windows derives initialization permission after the PG attempt: true
+  ---
+  duration_ms: 1.3561
+  type: 'test'
+  ...
+# Subtest: Windows quit during native window replacement joins retirement and never navigates the retiring session
+ok 7 - Windows quit during native window replacement joins retirement and never navigates the retiring session
+  ---
+  duration_ms: 1.5869
+  type: 'test'
+  ...
+# Subtest: Windows repeated Quit retains failed Session retirement and cannot stop PostgreSQL or exit cleanly
+ok 8 - Windows repeated Quit retains failed Session retirement and cannot stop PostgreSQL or exit cleanly
+  ---
+  duration_ms: 2.1074
+  type: 'test'
+  ...
+# Subtest: Windows waits for its pinned host connection before navigation: reachable
+ok 9 - Windows waits for its pinned host connection before navigation: reachable
+  ---
+  duration_ms: 6.3015
+  type: 'test'
+  ...
+# Subtest: Windows waits for its pinned host connection before navigation: cancel
+ok 10 - Windows waits for its pinned host connection before navigation: cancel
+  ---
+  duration_ms: 2.155
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 91.3982

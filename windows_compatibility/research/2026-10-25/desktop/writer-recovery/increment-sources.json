@@ -1,0 +1,18 @@
+{
+  "pythonBase": "read-only installed alpha7",
+  "frontendTsxBase": "actual alpha8 emitted source map",
+  "frontendCssBase": "current file minus only the three newly added runtime-error-details rules",
+  "startupBase": "read-only installed alpha7 app.asar",
+  "files": [
+    "src/pulsara_agent/desktop_app/session_controller.py",
+    "src/pulsara_agent/desktop_app/renderer_bridge.py",
+    "src/pulsara_agent/desktop_app/http_server.py",
+    "frontend/components/workbench-view.tsx",
+    "frontend/app/pulsara-app.tsx",
+    "frontend/app/styles/workbench.css",
+    "desktop/assets/startup.html",
+    "desktop/assets/startup.js",
+    "desktop/assets/startup.css"
+  ],
+  "codeHashesRecorded": false
+}

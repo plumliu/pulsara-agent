@@ -1,0 +1,21 @@
+{
+  "status": "completed-harness-retired",
+  "saved_home": "/home/plumwsl/.pulsara",
+  "distribution": "Ubuntu",
+  "user": "plumwsl",
+  "expected_uid": 1000,
+  "interop_helper": "/mnt/c/Users/plumlocal/AppData/Local/Programs/pulsara/resources/windows-interop/pulsara-interop.exe",
+  "socket": "/home/plumwsl/.pulsara/desktop/socket",
+  "port": 5432,
+  "admin_role": "pulsara_admin",
+  "runtime_role": "pulsara_runtime",
+  "root_database": "pulsara",
+  "expected_data": "/home/plumwsl/.pulsara/desktop/postgres",
+  "expected_system_id": "7700523439330484737",
+  "python": "/home/plumwsl/.local/share/pulsara/runtime/0.1.0-alpha.6/python/bin/python3",
+  "harness": "/home/plumwsl/workspaces/.provider-accept-xqgw_1ur/run_terminal_wsl.py",
+  "scratch_root": "/home/plumwsl/workspaces/.provider-accept-xqgw_1ur/scratch",
+  "pending_arguments": ["connection-id", "model", "new-output-path"],
+  "settings_read": true,
+  "provider_called": true
+}

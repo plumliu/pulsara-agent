@@ -1,0 +1,1357 @@
+{
+  "tests": [
+    {
+      "name": "create returns blank hidden instance; sandbox and no bridge",
+      "pass": true,
+      "detail": {
+        "node": "undefined",
+        "bridge": "undefined",
+        "process": "undefined"
+      }
+    },
+    {
+      "name": "hide and stale layout preserve same document state",
+      "pass": true,
+      "detail": {
+        "nonce": "e30eed00-a2b5-4dfd-88de-9cb83d6017db",
+        "value": "draft",
+        "y": 600
+      }
+    },
+    {
+      "name": "same session storage shares; other session isolated; closing all retains partition",
+      "pass": true
+    },
+    {
+      "name": "native redirect, SPA, POST and history observed",
+      "pass": true,
+      "detail": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "name": "slow navigation returns immediately and stop is scoped; genuine failure retry works",
+      "pass": true
+    },
+    {
+      "name": "permission denied; popup forwarded original owner without native child",
+      "pass": true,
+      "detail": {
+        "kind": "popup",
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "url": "http://127.0.0.1:62427/popup",
+        "disposition": "foreground-tab"
+      }
+    },
+    {
+      "name": "control port blocked for explicit navigation fetch websocket and worker",
+      "pass": true,
+      "detail": {
+        "fetch": false,
+        "ws": false,
+        "worker": "blocked"
+      }
+    },
+    {
+      "name": "forget joins an earlier tab close until the actual destroyed event",
+      "pass": false,
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\ntrue !== false\n\n    at C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:40:32\n    at async test (C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:12:47)\n    at async main (C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:29:2)"
+    },
+    {
+      "name": "host retirement joins already running forget and other live partitions",
+      "pass": false,
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\ntrue !== false\n\n    at C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:55:79\n    at async test (C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:12:47)\n    at async main (C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:47:2)"
+    },
+    {
+      "name": "retire tabless partition rejects pending worker then new same-session partition is fresh",
+      "pass": true
+    },
+    {
+      "name": "crash destroys native resource and sends retained error state",
+      "pass": true
+    },
+    {
+      "name": "host reload retires every partition including tabless owners",
+      "pass": true
+    },
+    {
+      "name": "destroying host window closes its separately owned WebContents",
+      "pass": false,
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:63:409\n    at async test (C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:12:47)\n    at async main (C:\\python_workspace\\pulsara-agent\\output\\windows-b\\host-setup\\browser-baseline\\smoke.cjs:63:2)"
+    }
+  ],
+  "events": [
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "c0ded64e-82f6-4eaf-b0f0-627e63c91cb2",
+        "sessionId": "A",
+        "tabId": "two",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "c0ded64e-82f6-4eaf-b0f0-627e63c91cb2",
+        "sessionId": "A",
+        "tabId": "two",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "c0ded64e-82f6-4eaf-b0f0-627e63c91cb2",
+        "sessionId": "A",
+        "tabId": "two",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "c0ded64e-82f6-4eaf-b0f0-627e63c91cb2",
+        "sessionId": "A",
+        "tabId": "two",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "c0ded64e-82f6-4eaf-b0f0-627e63c91cb2",
+        "sessionId": "A",
+        "tabId": "two",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "c0ded64e-82f6-4eaf-b0f0-627e63c91cb2",
+        "sessionId": "A",
+        "tabId": "two",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "70556051-d710-4696-abc3-5d3c0abfa67f",
+        "sessionId": "B",
+        "tabId": "one",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "70556051-d710-4696-abc3-5d3c0abfa67f",
+        "sessionId": "B",
+        "tabId": "one",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "70556051-d710-4696-abc3-5d3c0abfa67f",
+        "sessionId": "B",
+        "tabId": "one",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "70556051-d710-4696-abc3-5d3c0abfa67f",
+        "sessionId": "B",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "70556051-d710-4696-abc3-5d3c0abfa67f",
+        "sessionId": "B",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "70556051-d710-4696-abc3-5d3c0abfa67f",
+        "sessionId": "B",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": "http://127.0.0.1:62427/redirect",
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": "http://127.0.0.1:62427/redirect",
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": "http://127.0.0.1:62427/redirect",
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": "http://127.0.0.1:62427/next",
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/spa#one",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/spa#one",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/spa#one",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": true,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": true,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": true,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": true,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": true,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/next",
+        "pendingUrl": "http://127.0.0.1:62427/post",
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": true,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": null,
+        "title": "Fixture /next",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": null,
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": null,
+        "title": "Fixture /post",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:62427/hang",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:62427/hang",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:62427/hang",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": null,
+        "title": "Fixture /post",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": null,
+        "title": "Fixture /post",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:1/fail",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:1/fail",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:1/fail",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": null,
+        "title": "Fixture /post",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": {
+          "url": "http://127.0.0.1:1/fail",
+          "message": "ERR_UNSAFE_PORT (-312) loading 'http://127.0.0.1:1/fail'"
+        },
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": null,
+        "title": "Fixture /post",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": {
+          "url": "http://127.0.0.1:1/fail",
+          "message": "ERR_UNSAFE_PORT (-312) loading 'http://127.0.0.1:1/fail'"
+        },
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/post",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /post",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+        "sessionId": "A",
+        "tabId": "one",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": true,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "popup",
+      "instanceId": "d04b8f0f-3df6-4ff2-8803-f2bc11c02a66",
+      "sessionId": "A",
+      "url": "http://127.0.0.1:62427/popup",
+      "disposition": "foreground-tab"
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "96b099de-0ccf-439a-9945-774683ea9241",
+        "sessionId": "join",
+        "tabId": "close",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "96b099de-0ccf-439a-9945-774683ea9241",
+        "sessionId": "join",
+        "tabId": "close",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "96b099de-0ccf-439a-9945-774683ea9241",
+        "sessionId": "join",
+        "tabId": "close",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "96b099de-0ccf-439a-9945-774683ea9241",
+        "sessionId": "join",
+        "tabId": "close",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "96b099de-0ccf-439a-9945-774683ea9241",
+        "sessionId": "join",
+        "tabId": "close",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "96b099de-0ccf-439a-9945-774683ea9241",
+        "sessionId": "join",
+        "tabId": "close",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "2688a6e7-de4b-4075-8877-80a56f57248b",
+        "sessionId": "A",
+        "tabId": "fresh",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "2688a6e7-de4b-4075-8877-80a56f57248b",
+        "sessionId": "A",
+        "tabId": "fresh",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "2688a6e7-de4b-4075-8877-80a56f57248b",
+        "sessionId": "A",
+        "tabId": "fresh",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "2688a6e7-de4b-4075-8877-80a56f57248b",
+        "sessionId": "A",
+        "tabId": "fresh",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "2688a6e7-de4b-4075-8877-80a56f57248b",
+        "sessionId": "A",
+        "tabId": "fresh",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "2688a6e7-de4b-4075-8877-80a56f57248b",
+        "sessionId": "A",
+        "tabId": "fresh",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "888ffcf5-d71b-4a08-a770-2938ee67094c",
+        "sessionId": "crash",
+        "tabId": "crash",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "888ffcf5-d71b-4a08-a770-2938ee67094c",
+        "sessionId": "crash",
+        "tabId": "crash",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "888ffcf5-d71b-4a08-a770-2938ee67094c",
+        "sessionId": "crash",
+        "tabId": "crash",
+        "url": "",
+        "pendingUrl": "http://127.0.0.1:62427/",
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "888ffcf5-d71b-4a08-a770-2938ee67094c",
+        "sessionId": "crash",
+        "tabId": "crash",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "888ffcf5-d71b-4a08-a770-2938ee67094c",
+        "sessionId": "crash",
+        "tabId": "crash",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": true,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "888ffcf5-d71b-4a08-a770-2938ee67094c",
+        "sessionId": "crash",
+        "tabId": "crash",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": null,
+        "crashed": false
+      }
+    },
+    {
+      "kind": "state",
+      "state": {
+        "instanceId": "888ffcf5-d71b-4a08-a770-2938ee67094c",
+        "sessionId": "crash",
+        "tabId": "crash",
+        "url": "http://127.0.0.1:62427/",
+        "pendingUrl": null,
+        "title": "Fixture /",
+        "loading": false,
+        "canGoBack": false,
+        "canGoForward": false,
+        "error": {
+          "url": "http://127.0.0.1:62427/",
+          "message": "网页进程已退出：crashed"
+        },
+        "crashed": true
+      }
+    }
+  ],
+  "requests": [
+    {
+      "url": "/",
+      "method": "GET"
+    },
+    {
+      "url": "/",
+      "method": "GET"
+    },
+    {
+      "url": "/",
+      "method": "GET"
+    },
+    {
+      "url": "/redirect",
+      "method": "GET"
+    },
+    {
+      "url": "/next",
+      "method": "GET"
+    },
+    {
+      "url": "/post",
+      "method": "POST"
+    },
+    {
+      "url": "/hang",
+      "method": "GET"
+    },
+    {
+      "url": "/",
+      "method": "GET"
+    },
+    {
+      "url": "/worker.js",
+      "method": "GET"
+    },
+    {
+      "url": "/",
+      "method": "GET"
+    },
+    {
+      "url": "/sw.js",
+      "method": "GET"
+    },
+    {
+      "url": "/",
+      "method": "GET"
+    },
+    {
+      "url": "/",
+      "method": "GET"
+    }
+  ],
+  "profile": "C:\\Users\\PLUMLO~1\\AppData\\Local\\Temp\\pulsara-owner-test-0MDlvF",
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  },
+  "profileCleanup": "Idle profile retained after Electron exit; removing an in-use native profile is not resource join.",
+  "summary": {
+    "passed": 10,
+    "failed": 3
+  }
+}

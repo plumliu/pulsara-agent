@@ -221,6 +221,23 @@ def test_installed_launcher_resolves_relative_product_manifest(tmp_path):
         installed_launch_command(interpreter)
 
 
+def test_installed_launcher_wsl_manifest_gives_windows_instruction_without_launch(tmp_path):
+    resources = tmp_path / "resources"
+    interpreter = resources / "python" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    manifest = resources / "desktop-launch.json"
+    manifest.write_text(json.dumps({"execution_domain": "wsl"}))
+    with pytest.raises(RuntimeError, match="Windows Pulsara 图标启动/聚焦"):
+        installed_launch_command(interpreter)
+    for invalid in (
+        {"execution_domain": "other"},
+        {"execution_domain": "wsl", "executable": "arbitrary"},
+    ):
+        manifest.write_text(json.dumps(invalid))
+        with pytest.raises(ValueError, match="manifest is invalid"):
+            installed_launch_command(interpreter)
+
+
 def test_lost_status_pipe_still_closes_application(desktop_home):
     async def exercise():
         reader = asyncio.StreamReader()

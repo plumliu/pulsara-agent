@@ -1,23 +1,29 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import type { HostOperations } from './host-operations';
 import type { DesktopResourcePaths } from './resource-paths';
 
-export type RuntimeEvent = {type: string; origin?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string};
+export type RuntimeEvent = {type: string; origin?: string; certificatePem?: string; url?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string};
+export interface WslRuntimeOptions {
+  distribution: string;
+  user: string;
+  interopHelper: string;
+  openOAuthBrowser(url: string): Promise<void>;
+}
 type RuntimePostgres = {runtime_dsn: string; admin_dsn: string};
 export class PythonRuntime {
   private child?: ChildProcessWithoutNullStreams;
   private preparing = false;
   private preparation?: Promise<void>;
-  private exit?: Promise<{code: number | null; signal: NodeJS.Signals | null}>;
-  private reachedReady = false;
+  private exit?: Promise<{code: number | null; signal: NodeJS.Signals | null; startSent: boolean; stopped: boolean; failure?: string}>;
   private request = 0;
   private inspections = new Map<string, (value: RuntimeEvent) => void>();
-  constructor(readonly resources: DesktopResourcePaths, readonly home: string, readonly onEvent: (event: RuntimeEvent) => void, private readonly host: HostOperations) {}
+  private certificate?: string;
+  constructor(readonly resources: DesktopResourcePaths, readonly home: string, readonly onEvent: (event: RuntimeEvent) => void, private readonly host: HostOperations, private readonly wsl?: WslRuntimeOptions) {}
+  get certificatePem(): string | undefined { return this.certificate; }
   async waitForPreviousOwner(): Promise<void> {
     await this.host.execFile(this.resources.pythonExecutable, ['-m', 'pulsara_agent.desktop_runtime', '--wait-owner'], {env:{...process.env,PULSARA_HOME:this.home}});
   }
-  async start(preparePostgres: () => Promise<RuntimePostgres>, initialize: boolean): Promise<string> {
+  async start(preparePostgres: () => Promise<RuntimePostgres>, initialize: () => boolean): Promise<string> {
     if (this.child || this.preparing) throw new Error('内核进程尚未退出，不能启动第二个内核。');
     this.preparing = true;
     let prepared!: () => void;
@@ -29,8 +35,12 @@ export class PythonRuntime {
         cwd: this.home,
       });
       this.child = child;
-      this.reachedReady = false;
-      this.exit = new Promise(resolve => child.once('close', (code, signal) => { this.child = undefined; resolve({code, signal}); }));
+      this.certificate = undefined;
+      let announced = false;
+      let startSent = false;
+      let stopped = false;
+      let failure: string | undefined;
+      this.exit = new Promise(resolve => child.once('close', (code, signal) => { this.child = undefined; resolve({code, signal, startSent, stopped, failure}); }));
       child.stdin.on('error', (error: NodeJS.ErrnoException) => {
         // A child closing its inherited pipe is an ordinary exit race. Shutdown
         // still waits for 'close'; a pipe failure never authorizes force-killing.
@@ -43,7 +53,6 @@ export class PythonRuntime {
           .catch(error => this.onEvent({type:'failed', error:`无法写入内核日志：${String(error)}`}));
       });
       const ready = new Promise<string>((resolve, reject) => {
-        let announced = false;
         child.once('error', reject);
         child.once('close', (code, signal) => {
           for (const done of this.inspections.values()) done({type: 'failed', error: '内核进程已退出。'});
@@ -51,22 +60,72 @@ export class PythonRuntime {
           if (!announced) reject(new Error(`内核在就绪前退出 (${code ?? signal})。请查看内核日志。`));
           else this.onEvent({type: 'exited', error: `内核进程已退出 (${code ?? signal})。`});
         });
-        const lines = createInterface({input: child.stdout});
-        lines.on('line', line => {
+        let pending = '';
+        let invalid = false;
+        const decoder = new TextDecoder('utf-8', {fatal:true});
+        const invalidFrame = () => {
+          invalid = true;
+          failure = '内核返回了无效的宿主消息';
+          this.send(child, {type:'shutdown'}, true);
+          reject(new Error('内核返回了无效的宿主消息，正在关闭该进程。'));
+        };
+        const accept = (line: string) => {
           let event: RuntimeEvent;
           try {
             event = JSON.parse(line);
-            if (!event || typeof event !== 'object' || typeof event.type !== 'string' || !['starting','ready','failed','stopping','stopped','quit-state'].includes(event.type)) throw new Error('Invalid frame');
+            if (!event || typeof event !== 'object' || typeof event.type !== 'string' || !['starting','ready','failed','stopping','stopped','quit-state','open-oauth-browser'].includes(event.type)) throw new Error('Invalid frame');
           } catch {
-            this.send(child, {type:'shutdown'}, true);
-            reject(new Error('内核返回了无效的宿主消息，正在关闭该进程。'));
+            invalidFrame();
+            return;
+          }
+          if (event.type === 'open-oauth-browser') {
+            void (async () => {
+              let opened = false;
+              try {
+                if (!this.wsl || this.child !== child || child.stdin.writableEnded || child.stdin.destroyed
+                  || typeof event.requestId !== 'string' || !event.requestId || typeof event.url !== 'string') throw new Error('Invalid OAuth request');
+                const url = new URL(event.url);
+                if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid OAuth URL');
+                await this.wsl.openOAuthBrowser(url.href);
+                opened = true;
+              } catch { /* The SDK owner receives a failed open, never a fabricated authorization. */ }
+              if (this.child === child && typeof event.requestId === 'string') this.send(child, {type:'open-oauth-browser-result', requestId:event.requestId, opened});
+            })();
             return;
           }
           if (event.requestId !== undefined) { this.inspections.get(event.requestId)?.(event); this.inspections.delete(event.requestId); }
-          if (event.type === 'ready' && typeof event.origin === 'string') { announced = true; this.reachedReady = true; resolve(event.origin); }
-          if (event.type === 'failed') reject(new Error(event.error ?? '内核启动失败。'));
+          if (event.type === 'ready' && typeof event.origin === 'string') {
+            if (this.wsl && (typeof event.certificatePem !== 'string' || !event.certificatePem.includes('-----BEGIN CERTIFICATE-----'))) {
+              failure = 'WSL 内核没有提供本次连接证书。';
+              this.send(child, {type:'shutdown'}, true);
+              reject(new Error(failure));
+              return;
+            }
+            this.certificate = event.certificatePem;
+            announced = true;
+            resolve(event.origin);
+          }
+          if (event.type === 'stopped') stopped = true;
+          if (event.type === 'failed') { failure = event.error ?? '内核报告失败。'; reject(new Error(failure)); }
           this.onEvent(event);
+        };
+        child.stdout.on('data', (chunk: Buffer) => {
+          if (invalid) return;
+          try {
+            pending += decoder.decode(chunk, {stream:true});
+            let newline: number;
+            while (!invalid && (newline = pending.indexOf('\n')) >= 0) {
+              const line = pending.slice(0, newline);
+              pending = pending.slice(newline + 1);
+              accept(line);
+            }
+          } catch { invalidFrame(); }
         });
+        child.stdout.on('end', () => {
+          try { pending += decoder.decode(); if (pending) invalidFrame(); }
+          catch { invalidFrame(); }
+        });
+        child.stdout.on('error', invalidFrame);
       });
       // The child can import the kernel while PostgreSQL starts. Its original
       // stdin start frame still gates every database operation. Observe early
@@ -82,7 +141,9 @@ export class PythonRuntime {
         await this.exit;
         throw error;
       }
-      this.send(child, {type: 'start', postgres, initialize});
+      startSent = this.send(child, {type: 'start', postgres, initialize:initialize(),
+        ...(this.wsl ? {host: {platform:'win32', executionDomain:'wsl', distribution:this.wsl.distribution, user:this.wsl.user, interopHelper:this.wsl.interopHelper}} : {}),
+      });
       return ready;
     } finally {
       this.preparing = false;
@@ -90,7 +151,7 @@ export class PythonRuntime {
     }
   }
   private send(child: ChildProcessWithoutNullStreams, value: object, end = false): boolean {
-    if (child.stdin.destroyed || child.stdin.writableEnded) return false;
+    if (child.exitCode !== null || child.signalCode !== null || child.stdin.destroyed || child.stdin.writableEnded) return false;
     const line = JSON.stringify(value) + '\n';
     if (end) child.stdin.end(line);
     else child.stdin.write(line);
@@ -116,9 +177,10 @@ export class PythonRuntime {
   async stop(): Promise<void> {
     await this.preparation;
     const child = this.child;
-    if (!child) return;
-    this.send(child, {type:'shutdown'}, true);
+    if (child) this.send(child, {type:'shutdown'}, true);
     const result = await this.exit;
-    if (this.reachedReady && result?.code !== 0) throw new Error(`内核退出时报告收尾失败 (${result?.code ?? result?.signal})；数据库尚未停止，请检查日志。`);
+    if (result?.startSent && (result.code !== 0 || result.failure || (this.wsl && !result.stopped))) {
+      throw new Error(`内核退出时报告收尾失败 (${result.failure ?? (this.wsl && !result.stopped ? '没有收到完整收尾消息' : result.code ?? result.signal)})；数据库尚未停止，请检查日志。`);
+    }
   }
 }

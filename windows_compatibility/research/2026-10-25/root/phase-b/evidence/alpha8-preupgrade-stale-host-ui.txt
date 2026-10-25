@@ -1,0 +1,35 @@
+Window: "Pulsara", App: pulsara.exe.
+	0 窗口 Pulsara Secondary Actions: Raise
+		1 窗格 (disabled)
+		2 区域 Pulsara
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 区域
+								8 区域
+									9 文档
+								10 区域
+									20 区域
+										21 文档 Pulsara Value: file:///C:/Users/plumlocal/AppData/Local/Programs/pulsara/resources/app.asar/assets/startup.html?error=%E9%80%80%E5%87%BA%E5%B0%9A%E6%9C%AA%E5%AE%8C%E6%88%90%EF%BC%9A%E5%86%85%E6%A0%B8%E9%80%80%E5%87%BA%E6%97%B6%E6%8A%A5%E5%91%8A%E6%94%B6%E5%B0%BE%E5%A4%B1%E8%B4%A5%20(StaleHostWriter%3A%20host%20writer%20generation%20is%20stale)%EF%BC%9B%E6%95%B0%E6%8D%AE%E5%BA%93%E5%B0%9A%E6%9C%AA%E5%81%9C%E6%AD%A2%EF%BC%8C%E8%AF%B7%E6%A3%80%E6%9F%A5%E6%97%A5%E5%BF%97%E3%80%82&phase=failed ID: RootWebArea
+											22 导航 窗口控制 ID: window-controls
+												23 按钮 最小化 ID: window-minimize
+												24 按钮 最大化或还原 ID: window-maximize
+												25 按钮 关闭窗口 ID: window-close
+											26 主要
+												27 标题 Pulsara
+												28 文本 退出尚未完成：内核退出时报告收尾失败 (StaleHostWriter: host writer generation is stale)；数据库尚未停止，请检查日志。
+												29 文本 请查看具体原因。重试不会自动清除数据。
+												30 按钮 重试 ID: retry
+												31 按钮 查看日志 ID: logs
+												32 按钮 退出 ID: quit
+
+Document text: ```
+—
+□
+×
+Pulsara
+退出尚未完成：内核退出时报告收尾失败 (StaleHostWriter: host writer generation is stale)；数据库尚未停止，请检查日志。
+请查看具体原因。重试不会自动清除数据。
+重试查看日志退出
+```

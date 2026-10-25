@@ -1,0 +1,191 @@
+Window: "Pulsara — 本地智能工作台", App: pulsara.exe.
+	0 窗口 (disabled) Pulsara — 本地智能工作台 Secondary Actions: Raise
+		135 对话框 Pulsara Secondary Actions: Raise
+			136 图像 MainInstructionIcon ID: MainIcon
+			137 文本 退出 Pulsara？ ID: MainInstruction
+			138 文本 退出会停止当前工作及后台调度。关闭窗口可以继续在后台运行。 ID: ContentText
+			139 按钮 继续后台运行 ID: CommandLink_100
+			140 按钮 退出 Pulsara ID: CommandLink_101
+			141 标题栏 (settable, string) Value: Pulsara
+				142 按钮 关闭
+		1 窗格 (disabled)
+		2 区域 Pulsara — 本地智能工作台
+			3 区域
+				4 区域
+					5 区域
+						6 区域
+							7 区域
+								8 区域
+									9 文档 Pulsara — 本地智能工作台 Value: https://127.0.0.1:32915/ ID: RootWebArea
+										10 组
+											11 组 ID: root
+												12 主要
+													13 章节标题
+														14 按钮 切换会话侧栏
+													15 导航 主要功能
+														16 按钮 返回 Pulsara 总览
+														17 按钮 总览
+														18 按钮 会话
+														19 按钮 能力
+														20 按钮 记忆
+														21 按钮 定时任务
+														22 按钮 设置
+														23 按钮 用户设置
+															24 图形 用户头像
+													25 补充
+														26 章节标题
+															27 文本 本地智能工作台
+															28 标题 Pulsara
+															29 组 Description: 已连接本地服务
+														30 按钮 搜索会话 Ctrl K
+														31 按钮 新建会话 Ctrl N
+														32 区域 会话目录
+															33 区域 从目录中打开
+																34 按钮 从目录中打开
+																35 按钮 选择目录并创建会话 Description: 选择目录并创建会话
+																36 区域 Windows 中文 验收 20261025 会话
+																	37 按钮 Windows 中文 验收 20261025 Description: /home/plumwsl/workspaces/Windows 中文 验收 20261025
+																	38 按钮 在 Windows 中文 验收 20261025 中创建会话 Description: 在 Windows 中文 验收 20261025 中创建会话
+																	39 按钮 WSL中文工作目录smoke.txt写入读取验收 已载入
+																	40 详细信息
+																		41 开合三角标记 WSL中文工作目录smoke.txt写入读取验收 更多操作
+															42 区域 快速开始
+																43 按钮 快速开始
+																44 按钮 创建快速开始会话 Description: 创建快速开始会话
+																45 按钮 alpha.9 睡眠自动恢复验收测试会话 当前会话
+																46 详细信息
+																	47 开合三角标记 alpha.9 睡眠自动恢复验收测试会话 更多操作
+														48 文本 已连接本地服务
+													49 区域 会话工作台
+														50 章节标题
+															51 文本 已完成
+															52 标题 alpha.9 睡眠自动恢复验收测试会话
+															53 按钮 更多会话操作
+															54 按钮 压缩上下文
+															55 按钮 切换检查器
+														56 文章
+															57 章节标题
+																58 文本 你
+																59 图形 用户头像
+															60 文本 这是 alpha.9 睡眠自动恢复验收的独立测试会话。请只回复“睡眠前连接正常”，不要调用任何工具，不要读写文件。
+															61 按钮 复制消息 Description: 复制消息
+															62 time
+																63 文本 19:28
+														64 章节标题
+															65 文本 Pulsara
+														66 按钮 展开处理过程
+														67 文章
+															68 组
+																69 文本 睡眠前连接正常
+															70 按钮 复制回复
+															71 按钮 从此处分叉 Description: 从此处分叉
+															72 time
+																73 文本 19:28
+														107 文章
+															108 章节标题
+																109 文本 你
+																110 图形 用户头像
+															111 文本 这是睡醒后的第二条验收消息。请只回复“自动恢复后模型调用正常”，不要调用工具，不要读写文件。
+															112 按钮 复制消息 Description: 复制消息
+															115 time
+																116 文本 19:38
+														126 文章
+															127 章节标题
+																128 文本 Pulsara
+															129 组
+																130 文本 自动恢复后模型调用正常
+															131 按钮 复制回复
+															132 按钮 从此处分叉 Description: 从此处分叉
+															133 time
+																134 文本 19:38
+														102 编辑 (settable, string) 发送给 Pulsara Value: 
+															103 文本 
+														76 按钮 添加文件、技能或规划
+														77 按钮 完全访问
+														78 按钮 上下文占用 3%
+														79 按钮 DeepSeek V4.1 Flash 1017 Description: DeepSeek · DeepSeek V4.1 Flash 1017 · Chat
+														80 按钮 推理 high Description: 推理 high
+														81 按钮 (disabled) 发送
+													82 组 窗口控制
+														83 按钮 最小化
+														84 按钮 最大化或还原
+														85 按钮 关闭窗口
+											86 组
+								87 区域
+		135 对话框 Pulsara Secondary Actions: Raise
+			136 图像 MainInstructionIcon ID: MainIcon
+			137 文本 退出 Pulsara？ ID: MainInstruction
+			138 文本 退出会停止当前工作及后台调度。关闭窗口可以继续在后台运行。 ID: ContentText
+			139 按钮 继续后台运行 ID: CommandLink_100
+			140 按钮 退出 Pulsara ID: CommandLink_101
+			141 标题栏 (settable, string) Value: Pulsara
+				142 按钮 关闭
+
+Document text: ```
+切换会话侧栏
+返回 Pulsara 总览
+总览
+会话
+能力
+记忆
+定时任务
+设置
+￼
+用户设置
+本地智能工作台
+Pulsara
+￼
+搜索会话
+Ctrl K
+新建会话
+Ctrl N
+从目录中打开
+选择目录并创建会话
+Windows 中文 验收 20261025Windows 中文 验收 …
+在 Windows 中文 验收 20261025 中创建会话
+WSL中文工作目录smoke.txt写入读取验收WSL中文工作目录smoke.…
+已载入
+WSL中文工作目录smoke.txt写入读取验收 更多操作
+快速开始
+创建快速开始会话
+alpha.9 睡眠自动恢复验收测试会话alpha.9 睡眠自动恢复验收…
+当前会话
+alpha.9 睡眠自动恢复验收测试会话 更多操作
+已连接本地服务
+已完成
+alpha.9 睡眠自动恢复验收测试会话
+更多会话操作
+压缩上下文
+切换检查器
+你
+￼
+这是 alpha.9 睡眠自动恢复验收的独立测试会话。请只回复“睡眠前连接正常”，不要调用任何工具，不要读写文件。
+复制消息
+19:28
+Pulsara
+处理过程
+睡眠前连接正常
+复制回复
+从此处分叉
+19:28
+你
+￼
+这是睡醒后的第二条验收消息。请只回复“自动恢复后模型调用正常”，不要调用工具，不要读写文件。
+复制消息
+19:38
+Pulsara
+自动恢复后模型调用正常
+复制回复
+从此处分叉
+19:38
+添加文件、技能或规划
+完全访问
+上下文占用 3%
+DeepSeek V4.1 Flash 1017
+推理 high
+发送
+最小化
+最大化或还原
+关闭窗口
+￼
+```

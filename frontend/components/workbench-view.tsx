@@ -158,6 +158,8 @@ interface WorkbenchViewProps {
   onQueueActionHandled: (commandId: string) => void;
   runtimeStatus: RuntimeStatus;
   runtimeError?: string;
+  runtimeErrorDetails?: string;
+  runtimeRecoveryBlocked?: boolean;
   modelConfigurations: ModelConfigurationSummary[];
   modelCatalogLoading?: boolean;
   modelCallBinding?: ModelCallBindingPayload | null;
@@ -1895,6 +1897,8 @@ export function WorkbenchView({
   onQueueActionHandled,
   runtimeStatus,
   runtimeError,
+  runtimeErrorDetails,
+  runtimeRecoveryBlocked = false,
   modelConfigurations,
   modelCatalogLoading = false,
   modelCallBinding,
@@ -2607,12 +2611,19 @@ export function WorkbenchView({
     blocked: () => fileEntryBlocked || queueClicks.current.has('composer-edit'), notify: onNotify });
   const pickerCurrent = useRef({ sessionId: session.id, blocked: fileEntryBlocked });
   pickerCurrent.current = { sessionId: session.id, blocked: fileEntryBlocked };
+  const windowsFileInput = useRef<HTMLInputElement>(null);
+  const windowsFileSession = useRef<string | null>(null);
   const openFilePicker = (directory: boolean) => {
     if (fileEntryBlocked || queueClicks.current.has('composer-edit')) return;
     const selectedSession = session.id;
     setAddOpen(false);
     const host = desktopHost();
     if (!host) { onNotify('文件未加入草稿', '请从 Pulsara 桌面应用选择本机文件。', 'warning'); return; }
+    if (host.platform === 'win32' && !directory) {
+      windowsFileSession.current = selectedSession;
+      windowsFileInput.current?.click();
+      return;
+    }
     void (directory ? host.chooseDirectory().then(path => path ? [path] : []) : host.chooseFiles()).then(paths => {
       if (!paths.length) return;
       if (pickerCurrent.current.sessionId !== selectedSession || pickerCurrent.current.blocked || queueClicks.current.has('composer-edit')) {
@@ -2932,8 +2943,10 @@ export function WorkbenchView({
         <div className="thread-column conversation-transcript">
           {runtimeStatus !== 'online' && (
             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
-              <span>{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在重新连接…' : runtimeError ?? '本地服务未连接。'}</span>
-              {(runtimeStatus === 'offline' || runtimeStatus === 'failed') && <button onClick={onReconnect}>重新连接</button>}
+              <span role="status">{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在恢复会话…' : '连接恢复未完成'}</span>
+              {(runtimeStatus === 'offline' || runtimeStatus === 'failed') && !runtimeRecoveryBlocked && <button onClick={onReconnect}>重新连接</button>}
+              {runtimeRecoveryBlocked && <span>旧会话关闭失败，请查看技术详情与日志，并重新打开 Pulsara。</span>}
+              {(runtimeErrorDetails || runtimeError) && <details className="runtime-error-details"><summary>技术详情</summary><pre>{runtimeErrorDetails || runtimeError}</pre></details>}
             </div>
           )}
           {!welcome && !session.id && messages.length === 0 && conversationSubmissions.length === 0 && runtimeStatus === 'online' && (
@@ -3070,6 +3083,18 @@ export function WorkbenchView({
                   disabled={fileEntryBlocked}
                   onClick={() => { setAddOpen(value => !value); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); }}
                   onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); setAddOpen(true); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); requestAnimationFrame(() => addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()); } }}><Plus size={18} /></button>
+                  <input ref={windowsFileInput} type="file" multiple hidden aria-label="从 Windows 添加文件" onChange={event => {
+                    const files = Array.from(event.currentTarget.files ?? []);
+                    event.currentTarget.value = '';
+                    const selectedSession = windowsFileSession.current;
+                    windowsFileSession.current = null;
+                    if (!files.length || !selectedSession) return;
+                    if (pickerCurrent.current.sessionId !== selectedSession || pickerCurrent.current.blocked || queueClicks.current.has('composer-edit')) {
+                      onNotify('文件未加入草稿', '会话已切换或输入框暂不可编辑，请重新选择。', 'warning'); return;
+                    }
+                    try { draftStore.insertFiles(selectedSession, files, 'end'); }
+                    catch (error) { onNotify('文件未加入草稿', error instanceof Error ? error.message : '请重新选择文件。', 'warning'); }
+                  }} />
                 {addOpen && <div ref={addMenu} className={`menu-popover composer-add-menu${skillOpen ? ' is-skills' : ''}`} role="dialog" aria-label="添加内容与模式" onKeyDown={event => {
                   if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
                   const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
@@ -3082,7 +3107,8 @@ export function WorkbenchView({
                     <DraftSkillOptions store={draftStore} sessionId={session.id} skills={skills}
                       disabled={editingQueue} onSelect={insertSkill} />
                   </> : <>
-                  <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(false)}><FileText size={12} /> 添加文件</button>
+
+                  <button type="button" className="mode-chip" disabled={fileEntryBlocked} title={desktopHost()?.platform === 'win32' ? 'Windows 本地文件导入为副本；所选 WSL 文件保留 Linux 引用。' : undefined} onClick={() => openFilePicker(false)}><FileText size={12} /> 添加文件</button>
                   <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(true)}><FolderPlus size={12} /> 添加文件夹</button>
                     <button
                       className={`mode-chip${skillOpen ? ' is-active' : ''}`}

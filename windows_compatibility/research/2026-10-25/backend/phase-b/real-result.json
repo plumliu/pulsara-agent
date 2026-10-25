@@ -1,0 +1,57 @@
+{
+  "passed": true,
+  "config": {
+    "directory": "/home/plumwsl/.g0bpg-zilcj8zz",
+    "source": "/home/plumwsl/.g0bpg-zilcj8zz/source",
+    "home": "/home/plumwsl/.g0bpg-zilcj8zz/home",
+    "uid": 1000
+  },
+  "query": [
+    "PostgreSQL 17.9 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, 64-bit",
+    "/home/plumwsl/.g0bpg-zilcj8zz/home/desktop/postgres",
+    "/home/plumwsl/.g0bpg-zilcj8zz/home/desktop/socket",
+    ""
+  ],
+  "running": {
+    "kernel.lock": {
+      "busy": false,
+      "inode": 146462
+    },
+    "pg-lifetime.lock": {
+      "busy": true,
+      "inode": 146463
+    },
+    "dataExists": true,
+    "outside": "preserved"
+  },
+  "removed": {
+    "kernel.lock": {
+      "busy": false,
+      "inode": 146462
+    },
+    "pg-lifetime.lock": {
+      "busy": false,
+      "inode": 146463
+    },
+    "dataExists": false,
+    "outside": "preserved"
+  },
+  "stopped": {
+    "kernel.lock": {
+      "busy": false,
+      "inode": 146462
+    },
+    "pg-lifetime.lock": {
+      "busy": false,
+      "inode": 146463
+    },
+    "dataExists": true,
+    "outside": "preserved"
+  },
+  "maintenanceEmpty": true,
+  "maintenanceRunningRefused": true,
+  "maintenanceStopped": true,
+  "realOwner": true,
+  "productionClient": true,
+  "productionWslHost": true
+}

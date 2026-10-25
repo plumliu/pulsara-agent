@@ -1,4 +1,4 @@
-import type {PostgresOperations} from './postgres-operations';
+import {isSettledPostgresFailure, type PostgresOperations} from './postgres-operations';
 
 export const PG_MAJOR = '17';
 
@@ -17,6 +17,7 @@ export class BundledPostgres {
     if (instance.directory !== this.directory || instance.socket !== this.socket) throw new Error('已有数据库进程的目录或 socket 与应用专用实例不一致。');
   }
   async start(): Promise<void> {
+    this.initialized = false;
     await this.operations.prepareLayout();
     // Unix socket path length is a platform protocol boundary, not a task lifetime cap.
     if (this.operations.socketAddressBytes >= 104) throw new Error('PULSARA_HOME 路径过长，无法创建 PostgreSQL Unix socket。请选择较短的应用数据目录。');
@@ -34,7 +35,7 @@ export class BundledPostgres {
       await this.verifyRunningInstance();
       return;
     } catch (error) {
-      if ((error as {code?: unknown}).code !== 3) throw error;
+      if (!isSettledPostgresFailure(error) || error.code !== 3) throw error;
     }
     const socketMode = await this.operations.socketMode();
     if ((socketMode & 0o077) !== 0) throw new Error('数据库 socket 目录必须仅当前用户可访问。');
@@ -43,6 +44,7 @@ export class BundledPostgres {
     try {
       await this.operations.run('pg_ctl', ['start', '-w', '-D', this.directory, '-l', this.operations.logPath, '-o', options]);
     } catch (error) {
+      if (!isSettledPostgresFailure(error)) throw error;
       // pg_ctl's readiness wait may expire while the server it launched is alive.
       // Retain ownership only after PostgreSQL confirms this exact private instance.
       try {
@@ -74,13 +76,14 @@ export class BundledPostgres {
     if (!/^\d+$/.test(version)) throw new Error('无法验证专用 PostgreSQL 数据目录。');
     let running = false;
     try { await this.operations.run('pg_ctl',['status','-D',this.directory]); running = true; }
-    catch (error) { if ((error as {code?:unknown}).code !== 3) throw error; }
+    catch (error) { if (!isSettledPostgresFailure(error) || error.code !== 3) throw error; }
     if (running) {
       const instance = await this.operations.readInstance('raw');
       if (instance.directory !== this.directory || instance.socket !== this.socket) throw new Error('运行实例与专用目录不匹配，拒绝重置。');
       await this.stop();
     }
     await this.operations.removeDataDirectory();
+    this.initialized = false;
     this.startedHere = false;
   }
 }

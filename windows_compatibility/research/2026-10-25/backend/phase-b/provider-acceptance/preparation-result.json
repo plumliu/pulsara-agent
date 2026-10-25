@@ -1,0 +1,17 @@
+{
+  "help": {
+    "exit": 0,
+    "stdout": "usage: run_terminal_wsl.py [-h] (--check-imports | --execute)\n                           [--saved-home SAVED_HOME]\n                           [--connection-id CONNECTION_ID] [--model MODEL]\n                           [--distribution DISTRIBUTION] [--user USER]\n                           [--expected-uid EXPECTED_UID]\n                           [--interop-helper INTEROP_HELPER] [--socket SOCKET]\n                           [--port PORT] [--admin-role ADMIN_ROLE]\n                           [--runtime-role RUNTIME_ROLE]\n                           [--root-database ROOT_DATABASE]\n                           [--expected-data EXPECTED_DATA]\n                           [--expected-system-id EXPECTED_SYSTEM_ID]\n                           [--scratch-root SCRATCH_ROOT] [--cases CASES]\n                           [--output OUTPUT]\n\nOutput-only adapter for the existing terminal dogfood; no provider on\nhelp/imports. Run with the installed Linux Python and current repository tests\non sys.path. The caller supplies a previously approved disposable Unix-socket\nPostgreSQL. This adapter never starts/stops/resets that cluster or writes\nsaved settings.\n\noptions:\n  -h, --help            show this help message and exit\n  --check-imports\n  --execute             Actually call the saved provider\n  --saved-home SAVED_HOME\n  --connection-id CONNECTION_ID\n  --model MODEL\n  --distribution DISTRIBUTION\n  --user USER\n  --expected-uid EXPECTED_UID\n  --interop-helper INTEROP_HELPER\n  --socket SOCKET\n  --port PORT\n  --admin-role ADMIN_ROLE\n  --runtime-role RUNTIME_ROLE\n  --root-database ROOT_DATABASE\n  --expected-data EXPECTED_DATA\n  --expected-system-id EXPECTED_SYSTEM_ID\n  --scratch-root SCRATCH_ROOT\n  --cases CASES\n  --output OUTPUT\n",
+    "stderr": ""
+  },
+  "lint": {
+    "exit": 0,
+    "stdout": "All checks passed!\n",
+    "stderr": ""
+  },
+  "imports": {
+    "exit": 0,
+    "stdout": "Imports resolved; no settings read, database connection, scope creation, or provider call.\n",
+    "stderr": ""
+  }
+}

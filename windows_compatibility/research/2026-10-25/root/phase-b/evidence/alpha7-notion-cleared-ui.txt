@@ -1,0 +1,5 @@
+													93 文本 管理这台设备上的插件、MCP 与技能。
+													94 按钮 导入 MCP 配置
+													99 选项卡项目 (selectable) MCP 0
+												102 编辑 (settable, string) 搜索 MCP Description: 搜索 MCP
+												235 文本 还没有 MCP 服务。配置文件位于

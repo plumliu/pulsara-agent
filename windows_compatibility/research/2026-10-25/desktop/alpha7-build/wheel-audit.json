@@ -1,0 +1,50 @@
+{
+  "passed": true,
+  "snapshot": {
+    "start": "2026-10-25T09:49:35.304710+00:00",
+    "finish": "2026-10-25T09:49:42.970976+00:00",
+    "source": "/mnt/c/python_workspace/pulsara-agent"
+  },
+  "versions": {
+    "runtime": "0.1.0a7",
+    "distribution": "0.1.0a7",
+    "python": "3.12.15"
+  },
+  "resourceVersions": {
+    "postgresql": "17.9",
+    "pg_search": "0.26.1",
+    "vector": "0.8.1",
+    "platform": "linux",
+    "architecture": "x86_64",
+    "python": "3.12.15",
+    "minimum_os": "Ubuntu"
+  },
+  "rootFix": {
+    "wheelSource": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python/lib/python3.12/site-packages/pulsara_agent/conversation_kernel/runner.py",
+    "sameTextAsCopiedFrozenSource": true,
+    "cancelBeforeReprepareGuard": "            while True:\n                current_task = asyncio.current_task()\n                if intent.cause is not None or (\n                    current_task is not None and current_task.cancelling()\n                ):\n                    raise asyncio.CancelledError\n                prospective_candidate = await self._io.run(\n                    self._repository.prepare_root_provider_input_candidate,\n                    self._writer_lease.guard,\n                    intent=candidate,\n                    model_resolution_snapshot=frozen_model_resolution,\n                    deadline_monotonic=self._canonical_deadline(),\n                )\n    ",
+    "typedHeadStaleClass": true
+  },
+  "staticCtrl": [
+    {
+      "path": "/home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources/python/lib/python3.12/site-packages/pulsara_agent/desktop_app/static/assets/index-svXf_T8B.js",
+      "fragment": "tory:m,onNotify:h,canCreateSession:g,onOpenSearch:_}){let v=x()?.platform===`darwin`?`⌘`:`Ctrl`,b=(0,y.useRef)(null),[S,C]=(0,y.useState)(!1),[w,T]=(0,y.useState)(()=>new Set),[E,D]=(0,y.useState)(null),[O,A]=(0,y.u"
+    }
+  ],
+  "licenses": {
+    "requiredPresent": [
+      "PostgreSQL-COPYRIGHT",
+      "ParadeDB-AGPL-3.0",
+      "pgvector-LICENSE",
+      "Python-LICENSE.txt",
+      "database-sources.txt",
+      "paradedb-0.26.1-source.tar.gz",
+      "prepare_resources.py"
+    ],
+    "files": 78,
+    "pinnedUpstreamAgplAndCorrespondingSourceVerified": true
+  },
+  "recipe": "prepare_wsl_payload.package called existing prepare_resources.validate_resources before tar; native dependency resources reused, current application wheel rebuilt",
+  "databaseConnected": false,
+  "installedRuntimeModified": false
+}

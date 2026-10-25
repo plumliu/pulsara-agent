@@ -1,0 +1,13 @@
+Executed from C:/python_workspace/pulsara-agent. This file documents the existing build flow, not an installer command.
+1. Exact seven-owned-file alpha7 -> alpha8 bump (version-sync.json; JSON/TOML dependency values compared unchanged).
+2. .venv/Scripts/python.exe desktop/scripts/release_artifacts.py check
+3. uv lock --check --offline --python .venv/Scripts/python.exe
+4. .venv/Scripts/python.exe -m pytest --noconftest tests/test_desktop_release.py -q
+5. Node22 PATH; npm --prefix frontend run build:desktop
+6. wsl.exe -d Ubuntu -u plumwsl --cd /home/plumwsl --exec /home/plumwsl/workspaces/pulsara_agent/.venv/bin/python /mnt/c/python_workspace/pulsara-agent/output/windows-b/host-setup/build-final-payload.py --record /mnt/c/python_workspace/pulsara-agent/output/phase-b/desktop/alpha8-build/build-stage.json --reason "user-approved local alpha.8 successor with composing and AltGraph shortcut fix; alpha.7 installer and evidence retained; no live overwrite"
+7. Move this record directory's payload-manifest-awaiting-final-scope.json to desktop/resources/wsl-payload/manifest.json after successful payload build.
+8. wsl.exe ... /home/plumwsl/workspaces/pulsara_agent/.venv/bin/python /mnt/c/python_workspace/pulsara-agent/output/phase-b/desktop/alpha8-build/audit-wheel.py
+9. wsl.exe ... /home/plumwsl/workspaces/pulsara_agent/.venv/bin/python /mnt/c/python_workspace/pulsara-agent/desktop/scripts/release_artifacts.py check --resources /home/plumwsl/.pulsara-wsl-build-hvvgvqbb/resources
+10. Node22 PATH; CSC_IDENTITY_AUTO_DISCOVERY=false; npm --prefix desktop run package -- --win --x64 --publish never
+11. .venv/Scripts/python.exe output/windows-b/host-setup/record-windows-package.py --output output/phase-b/desktop/alpha8-build
+No installed app/PG lifecycle command, Git tag, commit, or publish executed by this build owner.

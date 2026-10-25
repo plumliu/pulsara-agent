@@ -1,0 +1,16 @@
+{
+  "configuration": {
+    "directory": "/home/plumwsl/.g0bpg-zilcj8zz",
+    "source": "/home/plumwsl/.g0bpg-zilcj8zz/source",
+    "home": "/home/plumwsl/.g0bpg-zilcj8zz/home",
+    "uid": 1000
+  },
+  "exit": 0,
+  "stdout": "",
+  "stderr": "",
+  "cleanup": {
+    "exit": 0,
+    "stdout": "{\"passed\": true, \"status\": 3, \"both_locks_available\": true, \"directory_removed\": true}\n",
+    "stderr": ""
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-25",
+  "node": "22.23.3",
+  "baseline": {"tests": 8, "passed": 3, "failed": 5},
+  "focused": {"files": 2, "passed": 22, "failed": 0},
+  "regression": {"files": 5, "passed": 254, "failed": 0},
+  "frontendTypecheckExit": 0,
+  "productionLintExit": 0,
+  "testFileLinted": false,
+  "diffCheckExit": 0,
+  "physicalAltGrLayoutTested": false,
+  "physicalKeyboardImeFailureClaimed": false,
+  "productionFilesChanged": ["frontend/app/pulsara-app.tsx", "frontend/components/session-search-dialog.tsx"],
+  "deployed": false,
+  "versionChanged": false
+}

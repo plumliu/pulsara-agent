@@ -1,0 +1,160 @@
+TAP version 13
+# Subtest: WSL startup sends the fixed host identity and requires the current certificate
+ok 1 - WSL startup sends the fixed host identity and requires the current certificate
+  ---
+  duration_ms: 126.2381
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: failed-zero
+ok 2 - shutdown rejects incomplete settlement even with exit zero: failed-zero
+  ---
+  duration_ms: 54.0033
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: invalid-zero
+ok 3 - shutdown rejects incomplete settlement even with exit zero: invalid-zero
+  ---
+  duration_ms: 54.509
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+ok 4 - shutdown rejects incomplete settlement even with exit zero: wsl-no-stopped
+  ---
+  duration_ms: 55.562
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+ok 5 - shutdown rejects incomplete settlement even with exit zero: wsl-partial-stopped
+  ---
+  duration_ms: 51.7036
+  type: 'test'
+  ...
+# Subtest: shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+ok 6 - shutdown rejects incomplete settlement even with exit zero: wsl-invalid-utf8
+  ---
+  duration_ms: 56.1178
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-failure
+ok 7 - a submitted startup cannot be treated as an unused child: pre-ready-failure
+  ---
+  duration_ms: 55.7035
+  type: 'test'
+  ...
+# Subtest: a submitted startup cannot be treated as an unused child: pre-ready-exit
+ok 8 - a submitted startup cannot be treated as an unused child: pre-ready-exit
+  ---
+  duration_ms: 54.0817
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-oauth
+ok 9 - OAuth bridge reports the real browser-open outcome: wsl-oauth
+  ---
+  duration_ms: 63.1286
+  type: 'test'
+  ...
+# Subtest: OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+ok 10 - OAuth bridge reports the real browser-open outcome: wsl-bad-oauth
+  ---
+  duration_ms: 61.3052
+  type: 'test'
+  ...
+# Subtest: host uses one child, private startup frame and correlated quit inspection
+ok 11 - host uses one child, private startup frame and correlated quit inspection
+  ---
+  duration_ms: 92.7433
+  type: 'test'
+  ...
+# Subtest: stop waits for the child to finish settlement and permits concurrent stop callers
+ok 12 - stop waits for the child to finish settlement and permits concurrent stop callers
+  ---
+  duration_ms: 59.9946
+  type: 'test'
+  ...
+# Subtest: malformed status closes the control pipe and explicit stop does not write after end
+ok 13 - malformed status closes the control pipe and explicit stop does not write after end
+  ---
+  duration_ms: 51.2751
+  type: 'test'
+  ...
+# Subtest: quit during asynchronous launch preparation still stops the child once spawned
+ok 14 - quit during asynchronous launch preparation still stops the child once spawned
+  ---
+  duration_ms: 51.4946
+  type: 'test'
+  ...
+# Subtest: a ready child reporting close failure rejects shutdown completion
+ok 15 - a ready child reporting close failure rejects shutdown completion
+  ---
+  duration_ms: 52.6796
+  type: 'test'
+  ...
+# Subtest: stop before any launch is a no-op for concurrent callers
+ok 16 - stop before any launch is a no-op for concurrent callers
+  ---
+  duration_ms: 5.0073
+  type: 'test'
+  ...
+# Subtest: stop retains an already closed ready child nonzero result for every caller
+ok 17 - stop retains an already closed ready child nonzero result for every caller
+  ---
+  duration_ms: 53.0581
+  type: 'test'
+  ...
+# Subtest: stop accepts an already closed ready child with exit zero
+ok 18 - stop accepts an already closed ready child with exit zero
+  ---
+  duration_ms: 52.4861
+  type: 'test'
+  ...
+# Subtest: a fresh launch cannot erase the failed exit awaited by an older stop
+ok 19 - a fresh launch cannot erase the failed exit awaited by an older stop
+  ---
+  duration_ms: 92.1102
+  type: 'test'
+  ...
+# Subtest: a child reaching ready while stop is joining still reports its failed exit
+ok 20 - a child reaching ready while stop is joining still reports its failed exit
+  ---
+  duration_ms: 49.707
+  type: 'test'
+  ...
+# Subtest: child starts before PostgreSQL finishes, but start and inspection frames stay gated
+ok 21 - child starts before PostgreSQL finishes, but start and inspection frames stay gated
+  ---
+  duration_ms: 51.4506
+  type: 'test'
+  ...
+# Subtest: PostgreSQL failure sends no start frame and joins the unused child before rejection
+ok 22 - PostgreSQL failure sends no start frame and joins the unused child before rejection
+  ---
+  duration_ms: 52.6086
+  type: 'test'
+  ...
+# Subtest: an early child exit is observed while PostgreSQL preparation is still settling
+ok 23 - an early child exit is observed while PostgreSQL preparation is still settling
+  ---
+  duration_ms: 47.5108
+  type: 'test'
+  ...
+# Subtest: runtime directory failure rejects before spawning or preparing PostgreSQL
+ok 24 - runtime directory failure rejects before spawning or preparing PostgreSQL
+  ---
+  duration_ms: 5.7961
+  type: 'test'
+  ...
+# Subtest: a log append failure remains a runtime event and does not replace shutdown ownership
+ok 25 - a log append failure remains a runtime event and does not replace shutdown ownership
+  ---
+  duration_ms: 54.3141
+  type: 'test'
+  ...
+1..25
+# tests 25
+# suites 0
+# pass 25
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1470.9077

@@ -6,7 +6,15 @@ macOS 用户可下载 alpha.6 [桌面安装包](https://github.com/plumliu/pulsa
 
 ## English
 
-GitHub Actions run manually for now; pushes (including tags) and pull requests do not trigger them. Start a workflow from the Actions page when needed. The current alpha.6 release was built and published locally with only a macOS DMG. The retained Native Desktop Packages draft workflow and assembly script expect one DMG and two Ubuntu deb installers.
+### Windows + WSL2 candidate builds
+
+The Windows desktop is in Phase B acceptance; see [current status](windows_compatibility/README.md). Build Linux resources in an ext4 checkout inside the selected WSL2 Ubuntu, and the Electron shell in a separate Windows checkout of the same source. Do not share `.venv` or `node_modules` across the two operating systems. Ubuntu has no release-number admission gate; the actual native dependencies and resources still need validation.
+
+In the Linux checkout, run `mise run --jobs 1 desktop:verify`, then `mise run --jobs 1 desktop:wsl-payload`. Copy its `desktop/build/wsl-payload/payload.tar` and `manifest.json` into `desktop/resources/wsl-payload/` in the Windows checkout, then run `mise run --jobs 1 desktop:windows-package` from Windows. The installer is written to `desktop/release/Pulsara-<version>-windows-x64.exe`; this task does not publish it. Windows packaging compiles the finite interop helper with the system .NET Framework compiler and checks the payload identity. Installed users do not need Windows Python, a compiler, or a second Linux environment.
+
+Windows 开发候选须使用同一源码的两份 checkout：WSL ext4 内构建 Linux 资源，Windows 内构建 Electron/NSIS；不要跨系统共用虚拟环境或依赖目录。Linux 先运行 `desktop:verify`，再运行 `desktop:wsl-payload`，将产出的两个文件复制到 Windows 的 `desktop/resources/wsl-payload/`，再运行 `desktop:windows-package`。首次安装和数据保留规则见 [INSTALL.md](INSTALL.md)。本地构建成功不代表完整 GUI、真实模型或发布资格已验收。
+
+GitHub Actions run manually for now; pushes (including tags) and pull requests do not trigger them. Start a workflow from the Actions page when needed. The current alpha.6 release was built and published locally with only a macOS DMG. The Native Desktop Packages workflow and assembly script now also include the Windows NSIS candidate alongside one DMG and two Ubuntu deb installers; this does not publish or activate Windows support.
 
 Build on the target platform. `mise.toml` pins Node.js 22.23.3 and uv 0.13.4, retains protoc 34.0, and `.python-version` pins uv-managed Python 3.12.15. The repository `.venv` remains uv-owned. Native builds need a C compiler, `make`, `pkg-config`, Bison, and Flex. macOS builds need Xcode command-line tools and `dylibbundler`; Ubuntu builds need `binutils`, `patchelf`, `xz-utils`, and `libopenblas0`. These are build-machine requirements.
 
@@ -95,7 +103,7 @@ Database integration fixtures and Ubuntu package checks are described in [tests/
 
 ## 中文
 
-GitHub Actions 暂时仅手动运行，推送（包括标签）和 Pull Request 均不自动触发。需要时在 Actions 页面手动启动。当前 alpha.6 在本地构建并发布，仅上传 macOS DMG；保留的 Native Desktop Packages 草稿工作流和汇总脚本仍要求一个 DMG 与两个 Ubuntu deb。
+GitHub Actions 暂时仅手动运行，推送（包括标签）和 Pull Request 均不自动触发。需要时在 Actions 页面手动启动。当前 alpha.6 在本地构建并发布，仅上传 macOS DMG；当前 Native Desktop Packages 工作流和汇总脚本已在一个 DMG、两个 Ubuntu deb 之外加入 Windows NSIS 候选；这不代表已经发布或激活 Windows 支持。
 
 请在目标平台构建。`mise.toml` 固定 Node.js 22.23.3、uv 0.13.4，并保留 protoc 34.0；`.python-version` 固定由 uv 管理的 Python 3.12.15。仓库 `.venv` 仍由 uv 管理。原生构建还需要 C 编译器、`make`、`pkg-config`、Bison 和 Flex。macOS 还需要 Xcode command-line tools 与 `dylibbundler`；Ubuntu 需要 `binutils`、`patchelf`、`xz-utils` 和 `libopenblas0`。这些依赖用于构建机。
 
