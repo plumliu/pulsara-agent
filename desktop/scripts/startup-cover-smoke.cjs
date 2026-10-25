@@ -64,6 +64,7 @@ app.whenReady().then(async () => {
   const view = host.contentView.children.find(child => child.webContents !== host.webContents);
   assert.ok(view);
   const contents = view.webContents;
+  assert.equal(await contents.executeJavaScript('document.getElementById("window-controls").hidden'), process.platform !== 'linux');
   await contents.executeJavaScript('window.startupIdentity = "original-startup-page"');
   for (const stage of ['loading workbench', 'reading preferences', 'connecting session']) {
     await host.loadURL(`data:text/html,<h1>${stage}</h1>`);
@@ -190,7 +191,7 @@ app.whenReady().then(async () => {
   await cover.show('PostgreSQL instance identity mismatch');
   assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("status").textContent'), '工作台连接未完成');
   assert.equal(await coverView().webContents.executeJavaScript('document.getElementById("error-detail-text").textContent'), 'PostgreSQL instance identity mismatch');
-  assert.equal(await coverView().webContents.executeJavaScript('document.querySelector(".hint").textContent'), '重试不会自动清除数据。可展开技术详情或查看日志。');
+  assert.equal(await coverView().webContents.executeJavaScript('document.querySelector(".hint")'), null);
   await cover.show('fixture startup failure');
   const failure = host.contentView.children.find(child => child.webContents !== host.webContents);
   const failureContents = failure.webContents;

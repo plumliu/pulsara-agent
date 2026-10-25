@@ -2,24 +2,22 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { pickLinuxWorkspaceDirectory, WorkspaceDirectoryPicker, type WorkspaceDirectoryApi, type WorkspaceDirectoryPage } from '../../frontend/components/workspace-directory-picker';
 
-const root = '/home/user/workspaces';
+const root = '/home/user';
 const page = (extra: Partial<WorkspaceDirectoryPage> = {}): WorkspaceDirectoryPage => ({root, path:root, parent:null, entries:[], next_cursor:null, ...extra});
 function api(): WorkspaceDirectoryApi {
-  return {list:vi.fn(async () => page()), initialize:vi.fn(async () => ({path:root})), create:vi.fn(async (parent, name) => ({path:`${parent}/${name}`})), select:vi.fn(async path => ({path}))};
+  return {list:vi.fn(async () => page()), create:vi.fn(async (parent, name) => ({path:`${parent}/${name}`})), select:vi.fn(async path => ({path}))};
 }
 beforeEach(() => { HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) { this.open = true; }); });
 afterEach(cleanup);
 
-test('a missing root is created only by the explicit action, then selection is revalidated', async () => {
+test('the picker opens the existing home and selection is revalidated without creating a directory', async () => {
   const operations = api();
-  vi.mocked(operations.list).mockRejectedValueOnce(Object.assign(new Error('工程根目录尚不存在'), {code:'WORKSPACE_ROOT_MISSING'}));
   const finish = vi.fn();
   render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={finish} />);
-  fireEvent.click(await screen.findByRole('button', {name:'创建工程根目录'}));
-  await screen.findByText(root);
-  expect(operations.initialize).toHaveBeenCalledTimes(1);
+  await screen.findByRole('status', {name:'所选文件夹'});
+  expect(operations.create).not.toHaveBeenCalled();
   expect(operations.select).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', {name:'选择此目录'}));
+  fireEvent.click(screen.getByRole('button', {name:'选择文件夹'}));
   await waitFor(() => expect(finish).toHaveBeenCalledWith(root));
   expect(operations.select).toHaveBeenCalledWith(root, expect.any(AbortSignal));
 });
@@ -35,22 +33,186 @@ test('paging retains existing entries and a rejected selection keeps the picker 
   await screen.findByRole('button', {name:'two'});
   expect(screen.getByRole('button', {name:'one'})).toBeTruthy();
   expect(operations.list).toHaveBeenLastCalledWith(root, 'next', expect.any(AbortSignal));
-  fireEvent.click(screen.getByRole('button', {name:'选择此目录'}));
+  fireEvent.click(screen.getByRole('button', {name:'选择文件夹'}));
   await screen.findByRole('alert');
   expect(finish).not.toHaveBeenCalled();
 });
 
-test('cancel retires the mounted picker and aborts its in-flight user-level request', async () => {
+test('a read failure exposes its cause and can be retried without creating a directory', async () => {
+  const operations = api();
+  vi.mocked(operations.list).mockRejectedValueOnce(new Error('目录读取失败'));
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={vi.fn()} />);
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', '目录读取失败');
+  expect(screen.queryByRole('button', {name:'取消', exact:true})).toBeNull();
+  expect(screen.getByRole('button', {name:'关闭目录选择'})).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', {name:'重新读取'}));
+  await screen.findByRole('status', {name:'所选文件夹'});
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(operations.create).not.toHaveBeenCalled();
+});
+
+test('a home read failure during browsing is shown without creating or replacing the home', async () => {
+  const operations = api();
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={vi.fn()} />);
+  await screen.findByRole('status', {name:'所选文件夹'});
+  vi.mocked(operations.list).mockRejectedValueOnce(new Error('主目录暂时不可用'));
+  fireEvent.click(screen.getByRole('button', {name:'刷新'}));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', '主目录暂时不可用');
+  expect(operations.create).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', {name:'刷新'}));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  await screen.findByRole('status', {name:'所选文件夹'});
+});
+
+test('single click selects a child and confirmation revalidates that child', async () => {
+  const operations = api();
+  vi.mocked(operations.list).mockResolvedValue(page({entries:[{name:'one',path:`${root}/one`}]}));
+  const finish = vi.fn();
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={finish} />);
+  fireEvent.click(await screen.findByRole('button', {name:'one'}));
+  expect(operations.list).toHaveBeenCalledOnce();
+  expect(operations.select).not.toHaveBeenCalled();
+  expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value', `${root}/one`);
+  fireEvent.click(screen.getByRole('button', {name:'选择文件夹'}));
+  await waitFor(() => expect(finish).toHaveBeenCalledWith(`${root}/one`));
+  expect(operations.select).toHaveBeenCalledWith(`${root}/one`, expect.any(AbortSignal));
+});
+
+test('double click enters a directory; back and forward restore the location without selecting it', async () => {
+  const operations = api();
+  vi.mocked(operations.list).mockImplementation(async path => path && path !== root ? page({path, parent:root}) : page({entries:[{name:'one',path:`${root}/one`}]}));
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={vi.fn()} />);
+  const child = await screen.findByRole('button', {name:'one'});
+  fireEvent.click(child); fireEvent.doubleClick(child);
+  await waitFor(() => expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value', `${root}/one`));
+  await waitFor(() => expect((screen.getByRole('button', {name:'后退'}) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole('button', {name:'后退'}));
+  await screen.findByRole('button', {name:'one'});
+  expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value', root);
+  fireEvent.click(screen.getByRole('button', {name:'前进'}));
+  await waitFor(() => expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value', `${root}/one`));
+  expect(operations.select).not.toHaveBeenCalled();
+});
+
+test('new folder opens an editor and only creates after confirmation', async () => {
+  const operations = api();
+  vi.mocked(operations.list).mockImplementation(async path => page(path ? {path,parent:root} : {}));
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', {name:'新建文件夹'}));
+  fireEvent.change(screen.getByRole('textbox', {name:'新文件夹名称'}), {target:{value:'中文 项目'}});
+  expect(operations.create).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', {name:'创建', exact:true}));
+  await waitFor(() => expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value', `${root}/中文 项目`));
+  expect(operations.create).toHaveBeenCalledWith(root,'中文 项目',expect.any(AbortSignal));
+  expect(operations.select).not.toHaveBeenCalled();
+});
+
+test('native browse locates a validated Linux directory and final confirmation revalidates it', async () => {
+  const operations = api();
+  const path = `${root}/中文 项目`;
+  operations.chooseNative = vi.fn(async () => ({path:'\\\\wsl.localhost\\Ubuntu\\home\\user\\中文 项目', linuxPath:path}));
+  vi.mocked(operations.list).mockImplementation(async value => page(value ? {path:value,parent:root} : {}));
+  const finish = vi.fn();
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={finish} />);
+  fireEvent.click(await screen.findByRole('button', {name:'浏览…'}));
+  await waitFor(() => expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value', path));
+  expect(operations.list).toHaveBeenLastCalledWith(path, null, expect.any(AbortSignal));
+  expect(operations.select).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', {name:'选择文件夹'}));
+  await waitFor(() => expect(finish).toHaveBeenCalledWith(path));
+  expect(operations.select).toHaveBeenCalledWith(path, expect.any(AbortSignal));
+});
+
+test('foreign native selections cover the toolbar and list; refresh clears the cover', async () => {
+  const operations = api();
+  const path = 'C:\\Users\\user\\Documents';
+  operations.chooseNative = vi.fn(async () => ({path,linuxPath:null}));
+  vi.mocked(operations.list).mockResolvedValue(page({entries:[{name:'one',path:`${root}/one`}]}));
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', {name:'浏览…'}));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', `该目录无效，请选择 ${root} 下的文件夹。`);
+  expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value',path);
+  expect(screen.getByRole('button', {name:'选择文件夹'})).toHaveProperty('disabled',true);
+  fireEvent.click(screen.getByRole('button', {name:'选择文件夹'}));
+  expect(operations.list).toHaveBeenCalledOnce();
+  expect(operations.select).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', {name:'one'})).toBeNull();
+  expect(screen.getByText('无法选择此目录')).toBeTruthy();
+  expect(screen.queryByRole('button', {name:'新建文件夹'})).toBeNull();
+  expect(screen.queryByRole('navigation', {name:'目录位置'})).toBeNull();
+  expect(screen.getByRole('alert').parentElement).toBe(screen.getByRole('button', {name:'取消',exact:true}).parentElement);
+  fireEvent.click(screen.getByRole('button', {name:'刷新'}));
+  await screen.findByRole('button', {name:'one'});
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.queryByText('无法选择此目录')).toBeNull();
+  expect(screen.getByRole('button', {name:'选择文件夹'})).toHaveProperty('disabled',false);
+  expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value',root);
+});
+
+test('Linux rejects an out-of-home native candidate; cancellation preserves the rejection and a valid browse clears it', async () => {
+  const operations = api();
+  operations.chooseNative = vi.fn().mockResolvedValueOnce({path:'\\\\wsl.localhost\\Ubuntu\\tmp',linuxPath:'/tmp'})
+    .mockResolvedValueOnce(null).mockResolvedValueOnce({path:root,linuxPath:root});
+  vi.mocked(operations.list).mockImplementation(async path => {
+    if (path === '/tmp') throw new Error(`该目录无效，请选择 ${root} 下的文件夹。`);
+    return page({entries:[{name:'one',path:`${root}/one`}]});
+  });
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', {name:'浏览…'}));
+  await screen.findByRole('alert');
+  expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value','/tmp');
+  expect(screen.getByRole('button', {name:'选择文件夹'})).toHaveProperty('disabled',true);
+  expect(screen.queryByRole('button', {name:'one'})).toBeNull();
+  expect(screen.getByText('无法选择此目录')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', {name:'浏览…'}));
+  await waitFor(() => expect(screen.getByRole('button', {name:'浏览…'})).toHaveProperty('disabled',false));
+  expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value','/tmp');
+  expect(screen.getByRole('alert')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', {name:'浏览…'}));
+  await waitFor(() => expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value',root));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('button', {name:'选择文件夹'})).toHaveProperty('disabled',false);
+});
+
+test('cancelling native browse preserves the highlighted folder', async () => {
+  const operations = api();
+  operations.chooseNative = vi.fn(async () => null);
+  vi.mocked(operations.list).mockResolvedValue(page({entries:[{name:'one',path:`${root}/one`}]}));
+  render(<WorkspaceDirectoryPicker api={operations} signal={new AbortController().signal} finish={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', {name:'one'}));
+  fireEvent.click(screen.getByRole('button', {name:'浏览…'}));
+  await waitFor(() => expect(screen.getByRole('button', {name:'浏览…'})).toHaveProperty('disabled',false));
+  expect(screen.getByRole('status', {name:'所选文件夹'})).toHaveProperty('value',`${root}/one`);
+  expect(operations.list).toHaveBeenCalledOnce();
+});
+
+test('closing the picker discards a late native result without another Linux read or selection', async () => {
+  const operations = api();
+  let complete!: (value: {path:string;linuxPath:string}) => void;
+  operations.chooseNative = vi.fn(() => new Promise(resolve => {complete = resolve;}));
+  let picked!: Promise<string | null>;
+  await act(async () => {picked = pickLinuxWorkspaceDirectory(operations);});
+  fireEvent.click(screen.getByRole('button', {name:'浏览…'}));
+  fireEvent.click(screen.getByRole('button', {name:'关闭目录选择'}));
+  expect(await picked).toBeNull();
+  await act(async () => {complete({path:root,linuxPath:root});});
+  expect(operations.list).toHaveBeenCalledOnce();
+  expect(operations.select).not.toHaveBeenCalled();
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test.each(['取消', '关闭目录选择'])('%s retires the mounted picker and aborts its user-level requests', async label => {
   const operations = api();
   let requestSignal: AbortSignal | undefined;
   vi.mocked(operations.list).mockImplementation((_path, _cursor, signal) => {
     requestSignal = signal;
+    if (label === '取消') return Promise.resolve(page());
     return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), {once:true}));
   });
   let picked!: Promise<string | null>;
   await act(async () => { picked = pickLinuxWorkspaceDirectory(operations); });
   expect(requestSignal?.aborted).toBe(false);
-  await act(async () => { fireEvent.click(screen.getByRole('button', {name:'取消'})); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', {name:label})); });
   expect(await picked).toBeNull();
   expect(requestSignal?.aborted).toBe(true);
   expect(screen.queryByRole('dialog')).toBeNull();

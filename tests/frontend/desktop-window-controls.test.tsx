@@ -33,3 +33,13 @@ it('retains macOS native controls without rendering Linux replacements', async (
   expect(view.container.querySelector('.desktop-titlebar.is-macos')).toBeTruthy();
   expect(screen.queryByRole('group', { name: '窗口控制' })).toBeNull();
 });
+
+it('uses Windows native controls on both overview and conversation pages', async () => {
+  window.pulsaraDesktop = { platform: 'win32' } as PulsaraDesktop;
+  const view = render(<PulsaraApp adapter={new FakeAdapter()} />);
+  expect(screen.queryByRole('group', { name: '窗口控制' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+  await screen.findByLabelText('发送给 Pulsara');
+  expect(screen.queryByRole('group', { name: '窗口控制' })).toBeNull();
+  expect(view.container.querySelector('.desktop-titlebar.is-macos')).toBeNull();
+});

@@ -2235,13 +2235,13 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     if (host.platform === 'win32') {
       const {pickLinuxWorkspaceDirectory} = await import('../components/workspace-directory-picker');
       return pickLinuxWorkspaceDirectory({
+        chooseNative: () => host.chooseWorkspaceDirectory(),
         list: (path, cursor, requestSignal) => {
           const query = new URLSearchParams();
           if (path !== undefined) query.set('path', path);
           if (cursor !== null) query.set('cursor', cursor);
           return apiRequest(`/api/workspace-directories?${query}`, {signal: requestSignal});
         },
-        initialize: requestSignal => apiRequest('/api/workspace-directories/initialize', {method:'POST', body:'{}', signal:requestSignal}),
         create: (path, name, requestSignal) => apiRequest('/api/workspace-directories', {method:'POST', body:JSON.stringify({path, name}), signal:requestSignal}),
         select: (path, requestSignal) => apiRequest('/api/workspace-directories/select', {method:'POST', body:JSON.stringify({path}), signal:requestSignal}),
       }, signal);

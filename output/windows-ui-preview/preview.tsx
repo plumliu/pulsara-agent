@@ -8,20 +8,36 @@ import '../../frontend/app/styles/overlays.css';
 import '../../frontend/app/styles/settings.css';
 
 const mode = (window as any).__previewMode;
-const rootPath = '/home/plumwsl/workspaces';
+const rootPath = '/home/plumwsl';
 const folders = new Map([
-  [rootPath, ['Windows 中文验收', '我的项目', '资料整理']],
+  [rootPath, ['Documents', '我的项目', 'workspaces']],
   [rootPath + '/我的项目', ['设计稿', '文档']],
 ]);
-let missing = mode === 'directory-missing';
+const deepParts = ['workspaces','资料归档','2026年','季度项目','课题研究','数据分析','原始数据','实验记录','第一批次','处理结果','图表与报告','包含中文与英文的很长文件夹名称 Long directory name','附件','最终版本'];
+let deepPath = rootPath;
+for (const part of deepParts) {
+  const children = folders.get(deepPath) || [];
+  if (!children.includes(part)) folders.set(deepPath,[...children,part]);
+  deepPath += '/'+part;
+}
+folders.set(deepPath,['导出结果','说明文档']);
 let failed = mode === 'directory-error';
 const api = {
-  async list(path = rootPath) {
-    if (missing) throw Object.assign(new Error('工程根目录尚不存在，请先创建。'), {code:'WORKSPACE_ROOT_MISSING'});
-    if (failed) { failed = false; throw new Error('无法读取目录，请刷新后重试。'); }
-    return {root:rootPath, path, parent:path === rootPath ? null : path.slice(0,path.lastIndexOf('/')), entries:(folders.get(path) || []).map(name => ({name,path:path+'/'+name})),next_cursor:null};
+  async chooseNative() {
+    notify('预览模拟原生选择结果；正式应用会打开 Windows 目录窗口。');
+    const selected = (parent.document.getElementById('native-candidate') as HTMLSelectElement)?.value || 'valid';
+    if (selected === 'cancel') return null;
+    if (selected === 'deep') return {path:'\\\\wsl.localhost\\Ubuntu'+deepPath.replaceAll('/','\\'),linuxPath:deepPath};
+    if (selected === 'windows') return {path:'C:\\Users\\plumlocal\\Documents',linuxPath:null};
+    if (selected === 'other') return {path:'\\\\wsl.localhost\\OtherUbuntu\\home\\plumwsl',linuxPath:null};
+    if (selected === 'outside') return {path:'\\\\wsl.localhost\\Ubuntu\\tmp',linuxPath:'/tmp'};
+    return {path:'\\\\wsl.localhost\\Ubuntu\\home\\plumwsl\\我的项目',linuxPath:rootPath+'/我的项目'};
   },
-  async initialize() { missing = false; return {path:rootPath}; },
+  async list(path = rootPath) {
+    if (failed) { failed = false; throw new Error('无法读取目录，请刷新后重试。'); }
+    if (path !== rootPath && !path.startsWith(rootPath+'/')) throw new Error('该目录无效，请选择 '+rootPath+' 下的文件夹。');
+    return {root:rootPath, path, parent:path === rootPath ? null : path.slice(0,path.lastIndexOf('/')), entries:(mode === 'directory-empty' ? [] : folders.get(path) || []).map(name => ({name,path:path+'/'+name})),next_cursor:null};
+  },
   async create(path:string,name:string) {
     if (!name.trim() || /[\\/]/.test(name) || name === '.' || name === '..') throw new Error('请输入单个文件夹名称。');
     const children = folders.get(path) || [];

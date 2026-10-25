@@ -1,4 +1,5 @@
 import type { DesktopBrowser } from '../../desktop/src/browser-contract';
+import type { WorkspaceDirectoryCandidate } from '../../desktop/src/backend-paths';
 export type { BrowserState, BrowserEvent, BrowserCommand, BrowserPresentation, BrowserLayout, BrowserHide, DesktopBrowser } from '../../desktop/src/browser-contract';
 
 export interface CliStatus {
@@ -25,6 +26,7 @@ export interface PulsaraDesktop {
   repairCli(replaceConflict: boolean): Promise<CliStatus>;
   chooseFiles(): Promise<string[]>;
   chooseDirectory(): Promise<string | null>;
+  chooseWorkspaceDirectory(): Promise<WorkspaceDirectoryCandidate | null>;
   pathForFile(file: File): string;
   openPath(input: { path: string; reveal: boolean }): Promise<void>;
   openExternal(url: string): Promise<void>;

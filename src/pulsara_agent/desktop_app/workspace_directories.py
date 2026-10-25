@@ -29,16 +29,16 @@ def _leaf(name: str) -> None:
 class WorkspaceDirectories:
     def __init__(self):
         self.home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-        self.root = self.home / "workspaces"
+        self.root = self.home
 
     def _path(self, value: str | None) -> Path:
         if value is not None and not isinstance(value, str):
             raise WorkspaceDirectoryError("WORKSPACE_PATH_INVALID", "目录路径必须是文字。")
         path = self.root if value is None else Path(value)
         if ((value is not None and str(path) != value)
-                or not path.is_absolute() or not path.is_relative_to(self.root)
+                or not path.is_absolute() or not path.is_relative_to(self.root) or ".." in path.parts
                 or any(ord(character) < 32 or ord(character) == 127 for character in str(path))):
-            raise WorkspaceDirectoryError("WORKSPACE_PATH_INVALID", "请选择 Linux workspaces 根目录中的目录。")
+            raise WorkspaceDirectoryError("WORKSPACE_PATH_INVALID", f"该目录无效，请选择 {self.root} 下的文件夹。")
         return path
 
     @staticmethod
@@ -53,12 +53,12 @@ class WorkspaceDirectories:
         path = self._path(value)
         descriptors = []
         try:
-            if not self.root.exists():
-                raise WorkspaceDirectoryError("WORKSPACE_ROOT_MISSING", "尚未创建 Linux workspaces 目录。", 404)
             if self.home.resolve() != self.home:
                 raise WorkspaceDirectoryError("WORKSPACE_PATH_INVALID", "Linux 用户目录身份无效。")
             parent = os.open(self.home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             descriptors.append(parent)
+            if os.fstat(parent).st_uid != os.getuid():
+                raise WorkspaceDirectoryError("WORKSPACE_OWNER_INVALID", "Linux 主目录不属于当前用户。")
             for component in path.relative_to(self.home).parts:
                 parent = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                 descriptors.append(parent)
@@ -94,25 +94,6 @@ class WorkspaceDirectories:
             page = page[:PATH_CANDIDATE_PAGE_SIZE]
             return {"root": str(self.root), "path": str(path), "parent": None if path == self.root else str(path.parent),
                     "entries": [{"name": name, "path": str(path / name)} for name in page], "next_cursor": page[-1] if more else None}
-
-    def initialize(self) -> dict:
-        if self.home.resolve() != self.home or self.home.stat().st_uid != os.getuid():
-            raise WorkspaceDirectoryError("WORKSPACE_OWNER_INVALID", "Linux 用户目录身份无效。")
-        require_native_ext4(self.home)
-        descriptor = os.open(self.home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            self._same_path(self.home, descriptor)
-            try:
-                os.mkdir("workspaces", mode=0o755, dir_fd=descriptor)
-            except FileExistsError:
-                pass
-            try:
-                self._same_path(self.home, descriptor)
-                return self.select(str(self.root))
-            except (OSError, ValueError) as error:
-                raise WorkspaceDirectoryError("WORKSPACE_WRITE_UNKNOWN", "创建结果需要重新检查，请刷新目录。", 409) from error
-        finally:
-            os.close(descriptor)
 
     def create(self, value: str, name: str) -> dict:
         _leaf(name)

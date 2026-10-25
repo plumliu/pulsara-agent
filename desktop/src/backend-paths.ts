@@ -1,3 +1,8 @@
+export interface WorkspaceDirectoryCandidate {
+  path: string;
+  linuxPath: string | null;
+}
+
 function distributionName(value: string): string {
   if (!value || /[\\/\x00-\x1f\x7f]/.test(value)) throw new Error('无效的 WSL 发行版名称。');
   return value;

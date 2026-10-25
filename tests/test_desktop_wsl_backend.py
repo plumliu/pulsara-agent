@@ -5,6 +5,7 @@ import json
 import os
 import ssl
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 from aiohttp import ClientSession, ClientConnectorCertificateError, TCPConnector
 import pytest
@@ -23,18 +24,19 @@ def directories(tmp_path, monkeypatch):
     from pulsara_agent.desktop_app import workspace_directories as module
     home = tmp_path / "user"
     home.mkdir()
+    monkeypatch.setattr(module.pwd, "getpwuid", lambda _uid: SimpleNamespace(pw_dir=str(home)))
     service = WorkspaceDirectories()
-    service.home, service.root = home, home / "workspaces"
     monkeypatch.setattr(module, "require_native_ext4", lambda *a, **k: None)
     return service
 
 
-def test_project_root_is_read_only_until_explicit_initialization(directories):
-    with pytest.raises(WorkspaceDirectoryError) as failure:
-        directories.list(None, None)
-    assert failure.value.code == "WORKSPACE_ROOT_MISSING"
-    assert not directories.root.exists()
-    assert directories.initialize() == {"path": str(directories.root)}
+def test_picker_starts_at_the_existing_user_home_without_creating_workspaces(directories):
+    assert directories.root == directories.home
+    listing = directories.list(None, None)
+    assert listing["path"] == str(directories.home)
+    assert listing["parent"] is None and listing["entries"] == []
+    assert not (directories.home / "workspaces").exists()
+    assert directories.select(str(directories.home)) == {"path": str(directories.home)}
     first = directories.create(str(directories.root), "中文 Case")
     assert first == {"path": str(directories.root / "中文 Case")}
     with pytest.raises(FileExistsError):
@@ -45,8 +47,19 @@ def test_project_root_is_read_only_until_explicit_initialization(directories):
             directories.create(str(directories.root), invalid)
 
 
+def test_home_projects_can_live_outside_workspaces_but_cannot_escape_home(directories):
+    projects = directories.home / "Projects"
+    projects.mkdir()
+    nested = directories.create(str(projects), "项目 中文")
+    assert directories.select(nested["path"]) == nested
+    assert directories.list(str(projects), None)["parent"] == str(directories.home)
+    for path in (str(directories.home.parent), str(directories.home / ".." / "outside"), "relative", str(directories.home) + "/./Projects"):
+        with pytest.raises(WorkspaceDirectoryError) as failure:
+            directories.select(path)
+        assert failure.value.code == "WORKSPACE_PATH_INVALID"
+
+
 def test_directory_pagination_has_no_total_cap_and_selection_rechecks_links(directories):
-    directories.initialize()
     for number in range(103):
         (directories.root / f"project-{number:03}").mkdir()
     first = directories.list(None, None)
@@ -62,7 +75,6 @@ def test_directory_pagination_has_no_total_cap_and_selection_rechecks_links(dire
 
 
 def test_mkdir_parent_replacement_reports_written_unknown_without_rollback(directories, monkeypatch):
-    directories.initialize()
     parent = directories.root / "parent"
     parent.mkdir()
     moved = directories.root / "moved"
@@ -85,10 +97,9 @@ def test_mkdir_parent_replacement_reports_written_unknown_without_rollback(direc
 def test_wsl_canonical_admission_rejects_swap_after_picker_check(directories, monkeypatch):
     from pulsara_agent.conversation_kernel import host as host_module
     from pulsara_agent.workspace_identity import HostWorkspaceInput
-    directories.initialize()
     selected = directories.root / "selected"
     selected.mkdir()
-    outside = directories.home / "outside"
+    outside = directories.home.parent / "outside"
     outside.mkdir()
     assert directories.select(str(selected)) == {"path": str(selected)}
     original = host_module.resolve_workspace
@@ -141,10 +152,11 @@ def test_tls_http_and_user_directory_routes_keep_security_and_create_admission(t
             headers = {"X-Pulsara-Connection-Id": "connection-1", "X-Pulsara-Connection-Generation": "1", "Origin": server.origin, "Sec-Fetch-Site": "same-origin"}
             async with ClientSession(connector=TCPConnector(ssl=trusted), headers=headers) as client:
                 async with client.get(server.origin + "/api/workspace-directories") as response:
-                    assert response.status == 404
-                    assert (await response.json())["error"]["code"] == "WORKSPACE_ROOT_MISSING"
-                async with client.post(server.origin + "/api/workspace-directories/initialize", json={}) as response:
                     assert response.status == 200
+                    assert (await response.json())["path"] == str(directories.home)
+                assert not (directories.home / "workspaces").exists()
+                async with client.post(server.origin + "/api/workspace-directories/initialize", json={}) as response:
+                    assert response.status in {404, 405}
                 async with client.post(server.origin + "/api/workspace-directories", json={"path": str(directories.root), "name": "selected"}) as response:
                     assert response.status == 200
                 selected = directories.root / "selected"
@@ -153,8 +165,9 @@ def test_tls_http_and_user_directory_routes_keep_security_and_create_admission(t
                 async with client.post(server.origin + "/api/sessions", json={"workspace_kind": "project", "workspace_path": str(selected)}) as response:
                     assert response.status in {400, 409}
                 assert sessions.create_model_bindings == []
-                async with client.post(server.origin + "/api/workspace-directories/initialize", json={}, headers={"Origin": "https://wrong.invalid"}) as response:
+                async with client.post(server.origin + "/api/workspace-directories", json={"path": str(directories.root), "name": "blocked"}, headers={"Origin": "https://wrong.invalid"}) as response:
                     assert response.status == 403
+                assert not (directories.root / "blocked").exists()
             wrong = create_desktop_tls_identity(tmp_path)
             async with ClientSession(connector=TCPConnector(ssl=ssl.create_default_context(cadata=wrong.certificate_pem))) as client:
                 with pytest.raises(ClientConnectorCertificateError):

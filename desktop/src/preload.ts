@@ -33,6 +33,7 @@ if (process.isMainFrame) contextBridge.exposeInMainWorld('pulsaraDesktop', {
   repairCli: (replaceConflict: boolean) => ipcRenderer.invoke('desktop:repair-cli', replaceConflict),
   chooseFiles: () => ipcRenderer.invoke('desktop:choose-files'),
   chooseDirectory: () => ipcRenderer.invoke('desktop:choose-directory'),
+  chooseWorkspaceDirectory: () => ipcRenderer.invoke('desktop:choose-workspace-directory'),
   pathForFile: (file: File) => {
     const path = webUtils.getPathForFile(file);
     return process.platform === 'win32' && path ? ipcRenderer.sendSync('desktop:backend-path', path) : path;

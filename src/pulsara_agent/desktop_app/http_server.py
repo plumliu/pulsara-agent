@@ -584,7 +584,6 @@ class LocalHttpServer:
         self._app.router.add_get("/api/workspace-directories", self._list_workspace_directories)
         self._app.router.add_post("/api/workspace-directories", self._create_workspace_directory)
         self._app.router.add_post("/api/workspace-directories/select", self._select_workspace_directory)
-        self._app.router.add_post("/api/workspace-directories/initialize", self._initialize_workspace_directories)
         self._app.router.add_get("/api/sessions/archived", self._list_archived_sessions)
         self._app.router.add_get("/api/sessions/{session_id}", self._read_session)
         self._app.router.add_get("/api/sessions/{session_id}/workspace-availability", self._workspace_availability)
@@ -2379,11 +2378,6 @@ class LocalHttpServer:
         if set(request.query) - {"path", "cursor"}:
             raise ValueError("invalid directory query")
         return web.json_response(await self._directory_call(self._directories().list, request.query.get("path"), request.query.get("cursor")))
-
-    async def _initialize_workspace_directories(self, request: web.Request) -> web.Response:
-        if await self._json_body(request) != {}:
-            raise ValueError("directory initialization takes no paths")
-        return web.json_response(await self._directory_call(self._directories().initialize))
 
     async def _select_workspace_directory(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

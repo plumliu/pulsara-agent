@@ -149,7 +149,7 @@ async function destroyWindow() {
 function createWindow(session?: Electron.Session) {
   window = new BrowserWindow({width:1440, height:920, minWidth:760, minHeight:520, backgroundColor:'#f3f0e7', title:'Pulsara',
     ...(process.platform !== 'darwin' ? {icon:desktopIcon} : {}),
-    titleBarStyle:process.platform === 'darwin' ? 'hiddenInset' : 'hidden', trafficLightPosition:{x:16,y:16},
+    titleBarStyle:process.platform === 'darwin' ? 'hiddenInset' : process.platform === 'win32' ? 'default' : 'hidden', trafficLightPosition:{x:16,y:16},
     webPreferences:{preload:path.join(__dirname,'preload.js'), sandbox:true, contextIsolation:true, nodeIntegration:false,
       webviewTag:false, navigateOnDragDrop:false, ...(session ? {session} : {})}});
   browser = new BrowserOwner(window, () => origin);
@@ -370,12 +370,25 @@ else {
       return clipboard.writeText(value);
     });
     handle('choose-files',async()=>{const result=await dialog.showOpenDialog(window!,{properties:['openFile','multiSelections']});return result.canceled?[]:result.filePaths.map(value => windowsHost ? toBackendPath(value, wslTarget!.distro) : value);});
+    handle('choose-workspace-directory', async () => {
+      if (!windowsHost || !wslTarget) throw new Error('请先连接 WSL 环境。');
+      const result = await dialog.showOpenDialog(window!, {
+        defaultPath: toWindowsPath(wslTarget.home, wslTarget.distro), properties: ['openDirectory'],
+      });
+      if (result.canceled) return null;
+      const selected = result.filePaths[0];
+      // A foreign selection is display-only; Linux remains the admission owner.
+      let linuxPath: string | null;
+      try { linuxPath = toBackendPath(selected, wslTarget.distro); }
+      catch { linuxPath = null; }
+      return {path: selected, linuxPath};
+    });
     handle('choose-directory', async () => {
       // Electron owns platform-specific desktop lookup (including Linux XDG).
       // A desktop folder is optional; never create one just to open the picker.
       let defaultPath = app.getPath('home');
       if (windowsHost) {
-        const selected = await dialog.showOpenDialog(window!, {defaultPath:toWindowsPath(path.posix.join(wslTarget!.home,'workspaces'),wslTarget!.distro), properties:['openDirectory']});
+        const selected = await dialog.showOpenDialog(window!, {defaultPath:toWindowsPath(wslTarget!.home,wslTarget!.distro), properties:['openDirectory']});
         return selected.canceled ? null : toBackendPath(selected.filePaths[0],wslTarget!.distro);
       }
       try {

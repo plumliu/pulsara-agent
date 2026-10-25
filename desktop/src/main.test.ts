@@ -19,6 +19,7 @@ function fixture(options: {
   desktop?: string | Error;
   desktopState?: 'directory' | 'missing' | 'file';
   canceled?: boolean;
+  chosenDirectory?: string;
   platform?: 'darwin' | 'linux' | 'win32';
   packagedResources?: string;
   stopFailure?: Error;
@@ -43,6 +44,7 @@ function fixture(options: {
   const handlers = new Map<string, (event: unknown) => Promise<unknown>>();
   const dialogOptions: { defaultPath: string; properties: string[] }[] = [];
   const composition: {
+    titleBarStyle?: string;
     python?: string;
     runtime?: { resources: DesktopResourcePaths; home: string; host: unknown };
     postgres?: { bin: string; home: string };
@@ -65,7 +67,7 @@ function fixture(options: {
   let ready: Promise<void>;
   class Window extends EventEmitter {
     static current: Window;
-    constructor() { super(); Window.current = this; }
+    constructor(options: {titleBarStyle?: string}) { super(); Window.current = this; composition.titleBarStyle = options.titleBarStyle; }
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: workbenchUrl },
       isDestroyed() { return false; },
@@ -145,7 +147,7 @@ function fixture(options: {
     dialog: { showErrorBox(_title: string, message: string) { failures.push(message); }, async showOpenDialog(parent: Window, input: typeof dialogOptions[number]) {
       assert.equal(parent, Window.current);
       dialogOptions.push(input);
-      return { canceled: options.canceled ?? false, filePaths: options.canceled ? [] : ['/tmp/chosen/项目 '] };
+      return { canceled: options.canceled ?? false, filePaths: options.canceled ? [] : [options.chosenDirectory ?? '/tmp/chosen/项目 '] };
     } },
     ipcMain: { handle(name: string, action: (event: unknown) => Promise<unknown>) { handlers.set(name, action); }, on() {} },
     Menu: { buildFromTemplate() {}, setApplicationMenu() {} },
@@ -230,6 +232,7 @@ for (const scenario of [
 test('Windows requires environment confirmation before creating a kernel or preparing PostgreSQL', async () => {
   const value = fixture({platform:'win32'});
   await value.ready;
+  assert.equal(value.composition.titleBarStyle, 'default');
   assert.ok(value.calls.includes('setup-cover'));
   assert.equal(value.calls.includes('child-spawned'), false);
   assert.equal(value.calls.includes('database-preparing'), false);
@@ -262,6 +265,31 @@ test('Windows revalidates its saved target and pins a fresh window before workbe
   assert.ok(value.calls.indexOf('tls-sealed') < value.calls.indexOf('tls-retired'));
   assert.ok(value.calls.indexOf('tls-retired') < value.calls.indexOf('database-stopped'));
   assert.equal(value.calls.at(-1), 'exit:0');
+});
+
+for (const candidate of [
+  {path: '\\\\wsl.localhost\\Ubuntu\\home\\default-user\\中文 项目', linuxPath: '/home/default-user/中文 项目'},
+  {path: '\\\\wsl$\\Ubuntu\\tmp', linuxPath: '/tmp'},
+  {path: 'C:\\Users\\user\\Documents', linuxPath: null},
+  {path: '\\\\wsl.localhost\\OtherUbuntu\\home\\default-user', linuxPath: null},
+  {path: '\\\\wsl.localhost\\Ubuntu\\home\\default-user\\..\\other', linuxPath: null},
+]) {
+  test(`Windows native workspace browse returns a candidate, never admission: ${candidate.path}`, async () => {
+    const value = fixture({platform:'win32', wslSelected:true, chosenDirectory:candidate.path});
+    value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+    await value.ready;
+    const result = await value.handlers.get('desktop:choose-workspace-directory')!(value.trustedEvent());
+    assert.equal(JSON.stringify(result), JSON.stringify(candidate));
+    assert.equal(value.dialogOptions[0].defaultPath, '\\\\wsl.localhost\\Ubuntu\\home\\default-user');
+    assert.deepEqual(Array.from(value.dialogOptions[0].properties), ['openDirectory']);
+  });
+}
+
+test('Windows native workspace browse cancellation returns no candidate', async () => {
+  const value = fixture({platform:'win32', wslSelected:true, canceled:true});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  assert.equal(await value.handlers.get('desktop:choose-workspace-directory')!(value.trustedEvent()), null);
 });
 
 for (const initialized of [false, true]) {

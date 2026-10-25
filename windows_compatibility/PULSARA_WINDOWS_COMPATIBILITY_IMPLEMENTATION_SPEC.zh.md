@@ -169,7 +169,9 @@ Windows launcher仍用系统实际`wsl.exe`绝对位置、`shell:false`、明确
 
 ### 6.1 唯一主流程与数据范围
 
-首版选择 **Linux-backed工作区picker**，不是同时维护Windows原生目录dialog和Linux目录picker两套默认流程。入口“新建工作区”“打开工作区”在Windows窗口内展示同一Linux目录服务；默认根为已解析用户home下的`workspaces`，仅该应用目录按用户动作建立，所有首版project workspace位于该根内的实际Linux ext4目录。quick/transient workspace继续原Linux临时目录owner，不强制改成project，也不改变既有清理语义。
+首版选择 **Linux-backed工作区picker** 作为唯一接纳流程；picker底部的“浏览…”可调用Windows原生目录窗口作为候选路径入口，不形成第二个接纳owner。2026-10-26用户修订：入口“新建工作区”“打开工作区”在Windows窗口内展示同一Linux目录服务，直接从所选Linux用户的实际home（`~`）开始，允许选择该home及其中符合原权限/canonical/native-ext4检查的目录，不再要求工程位于`~/workspaces`。GET不创建目录，删除专用workspaces根初始化接口；home缺失或不可访问按实际错误展示，不由应用重建Linux用户home。quick继续由原owner在有效PULSARA_HOME下的`workspaces/quick-*`创建并保留，不强制改成project，也不改变既有清理语义。
+
+原生窗口由Electron `dialog.showOpenDialog(openDirectory)`拥有，默认位置动态映射所选发行版与真实home的UNC地址。可信host仅将同发行版UNC转换为Linux候选路径；Windows磁盘/其他发行版/歧义路径保留原显示值但不交给Linux读取。同发行版候选继续由原用户级目录服务执行home范围、canonical、权限、native-ext4验证：有效时在picker定位该目录；无效时用遮罩覆盖路径工具栏及目录列表，底部显示候选路径与简短原因，禁用“选择文件夹”。标题栏刷新可返回上次有效位置，再次浏览并选择有效目录也可恢复；原生取消保留原选择，弹窗关闭/owner取消后的迟到结果不得接纳。最终确认及create-session仍重新验证实际Linux对象，不因原生窗口选择而信任路径或增加持久状态。
 
 picker及服务是用户级，未创建/选择session也能使用。现有session `path-candidates`继续服务会话中的@补全，不借某个active session运行全局浏览/建目录。existing `workspace_identity.py`仍唯一canonical/availability/稳定key owner；WSL profile检查作为目录接纳边界，不给数据库新增Windows路径副本或发行版字段。当前NEW resolver会resolve链接，不能假称现已实现严格接纳；list/选择后在原create-session入场前再次执行同一WSL验证，不能仅前端检查，也不改其他平台resolver语义。首版固定一个执行域，未来多发行版必须另修身份合同。
 
@@ -183,7 +185,7 @@ picker及服务是用户级，未创建/选择session也能使用。现有sessio
 
 新增最小用户级HTTP操作：目录分页、目录接纳、在绑定父目录创建单个子目录；如采用`/api/workspaces/directories`，方法/DTO同一切片连前后端一起定，不新增通用文件管理RPC。现有权限/安全middleware覆盖这些写操作。复用已有100项分页边界的理由与cursor机制，不加目录总量/深度/任务寿命cap；目录读取只传所需名称/类型/路径/availability，不读文件内容。
 
-Linux检查实际挂载/filesystem与canonical包含关系，防止不是`/mnt/c`字面路径却通过symlink/bind mount落到DrvFs；不靠字符串前缀判断存储语义。目录服务只在workspace根内操作，阻止`..`、NUL、分隔符、越界根/特殊项；沿原POSIX no-follow/身份检查，不为此全面重写文件binding。UI新建名称选择能被Windows资源管理器表示的明确规则，冲突/不合法不静默改名。Linux工具生成的其他合法Linux文件名不整体禁用；对应文件仍可经Pulsara preview使用，host reveal有具体不支持结果。
+Linux检查实际挂载/filesystem与canonical包含关系，防止不是`/mnt/c`字面路径却通过symlink/bind mount落到DrvFs；不靠字符串前缀判断存储语义。目录服务以所选Linux用户home为浏览和接纳边界，阻止`..`、NUL、分隔符、越界根/特殊项；沿原POSIX no-follow/身份检查，不为此全面重写文件binding。没有新增针对应用自身目录的隐藏或禁选规则；目录接纳继续依赖原对象身份、所有权、权限与文件系统检查。UI新建名称选择能被Windows资源管理器表示的明确规则，冲突/不合法不静默改名。Linux工具生成的其他合法Linux文件名不整体禁用；对应文件仍可经Pulsara preview使用，host reveal有具体不支持结果。
 
 ### 6.2 资源管理器仍可直接管理
 
@@ -232,7 +234,7 @@ Windows Chromium不能把`file:///home/<user>/...`当作Linux文件。继续使�
 | --- | --- | --- |
 | Windows标准每用户应用数据根 | Electron UI prefs、已选发行版/用户名、Windows安装/宿主日志 | 原Electron owner管理，不存provider配置/第二数据库或canonical workspace，不管理用户WSL磁盘 |
 | Linux实际home下的 `.pulsara` | 唯一LocalSettingsStore、PG data/socket、历史/记忆、原应用持久数据 | 原Linux resolver/权限；不放DrvFs，不从Windows raw settings复制secret |
-| Linux实际home下的 `workspaces` | 用户工程 | 与runtime安装根、PG数据根分离，应用更新不覆盖 |
+| 用户选择的Linux home及其子目录（如`~/Projects`、`~/workspaces`） | 用户工程 | 由原目录接纳检查，应用更新不覆盖 |
 | Linux用户私有版本资源根（如`~/.local/share/pulsara/runtime/<app-version>`） | 私有Python/PG/extensions/rg/Chromium与应用wheel | 已选用户安装/验证，不覆盖系统或其他应用资源；准确绝对路径由recipe/locator共同定义，不运行时下载latest |
 
 Windows host home与Linux有效`PULSARA_HOME`是两个不同typed值；Windows用户环境里的`C:\...`不能直接当Linux home。现有Linux resolver仍唯一，实际home不写死为`/home/<username>`；显式Linux home override须验证ext4/私有权限/Unix socket长度并全链一致，不默默取Windows环境同名变量。首版一次只接一个已确认目标，不提供运行中跨发行版/用户切换；修改选择前须原owner正常结算，并明确新目标有独立数据，不自动搬迁或合并历史。用户默认发行版/用户改变不静默改变已保存目标；用户WSL磁盘始终由用户/WSL管理。
@@ -320,6 +322,10 @@ TLS证明server身份，不把本机同用户进程当远程攻击沙箱；现�
 ### 10.3 Windows原生界面与OAuth
 
 win32加入真实host类型，frontend同时知道host平台与Linux执行域，不能`platform!=='darwin'`就把路径当Windows或把所有非macOS当Linux控件。验证Windows窗口控制/拖动/snap/DPI、tray失败可恢复入口、Ctrl/AltGr/中文IME、文件选择/拖放、PDF/image/HTML与正常后台退出。图形用户不会因选择Linux执行域被要求开terminal窗口。
+
+2026-10-25 用户界面修订：Windows使用系统原生完整标题栏（`titleBarStyle: 'default'`），由系统提供最小化、最大化/还原、关闭与标题栏拖动；首次设置/启动遮罩和工作台不再绘制Windows窗口控制按钮，也不为它们保留页面内占位。关闭按钮仍沿原宿主close事件处理托盘隐藏/退出，不改变生命周期合同。macOS原生traffic lights和Linux现有自绘控件保持原方式。浏览器HTML预览只展示内容区，不模拟系统标题栏。
+
+2026-10-26 目录选择器界面修订：列表单击选中文件夹，双击或Enter进入，支持后退/前进/上一级；底部明确显示待选路径，最终确认仍由原选择API重新验证。通过“浏览…”显式选到无效目录时，以Pulsara标识、品牌字样和简短状态的浅色遮罩覆盖路径工具栏和整个目录列表区域，导航、新建及列表项均不再可点击或聚焦；标题栏刷新/关闭与底部浏览/取消仍可用。底部保留无效路径，具体原因靠右与取消/确认按钮组成一组并垂直居中，确认按钮置灰；重新定位有效目录后撤下遮罩。工程根目录、允许的Linux文件系统范围、分页、显式创建及取消的原owner保持；新建文件夹从工具栏打开编辑行。导航记录与高亮仅是本次弹窗的内存状态，不增加持久状态。
 
 OAuth授权仍原Linux loopback owner和已锁SDK拥有PKCE/state/issuer及token。实际`LocalMcpManagementService`已有async `open_browser`注入点；即使interop开启，guest默认`webbrowser.open`也不作为Windows系统浏览器成功打开的证明。仍经`DesktopApplication`→`KernelHostCore.production`/构造→management贯穿注入唯一OAuth-only host callback，明确由可信Electron打开并回实际结果。
 
@@ -593,7 +599,7 @@ PDF正证需要Electron内置固定extension及其自身frame发起的chrome://r
 - 每次WSL内核启动经私有控制pipe交付完整临时TLS证书；Windows创建独立内存Session并绑定精确origin/证书。退出或重启先封住旧请求，再等待旧窗口、BrowserOwner、启动cover、下载与连接实际退休。OAuth仅将原SDK的浏览器打开请求交给Windows系统浏览器并返回打开结果；PKCE/state/token仍由原SDK拥有。
 - 正式首启实测中，Linux ready后Windows localhost转发仍有约半秒不可达窗口。导航前由同一BackendSession使用Electron SDK、同一完整证书pin执行只读`HEAD /`；只有明确`ERR_CONNECTION_REFUSED`继续等待，其他传输/证书/HTTP错误原样失败。250ms仅为转发可达性的采样间隔，不是总等待时限；不设重试总次数，不重发业务操作。Quit/Session退休取消原请求与等待并join后再退出，Linux ready不冒充Windows已可达。
 - Windows首次安装暴露迁移资源的checkout换行差异：CRLF进入PL/pgSQL函数正文，使新库不符合原LF catalog。仓库迁移SQL/JSON统一为LF输入，现有registry在校验、身份计算和执行前使用同一规范文本；原baseline身份保持，observed catalog仍严格检查。不得修改失败库函数/ledger或放宽verifier来伪装首启成功；本轮未配置的空测试库经精确身份核验后按开发重置合同重建。
-- 工程目录服务属于用户级API，初始根为Linux系统用户home下`workspaces`，不是PULSARA_HOME下的目录。GET不隐式创建，显式初始化/单层新建/选择及createSession分别重验Linux对象；前端选择器不依赖活动会话。Windows本地File走原上传副本协议，同发行版UNC只做固定目标路径转换；不增加Windows读文件IPC。
+- 此实施阶段的工程目录服务属于用户级API，初始根当时为Linux系统用户home下`workspaces`，不是PULSARA_HOME下的目录。该范围及根初始化流程已由2026-10-26的§6.1修订取代：现从用户home开始，GET不隐式创建；单层新建/选择及createSession继续分别重验Linux对象，前端选择器不依赖活动会话。Windows本地File走原上传副本协议，同发行版UNC只做固定目标路径转换；不增加Windows读文件IPC。
 - Runtime除§23退出结果修正外，以本attempt是否实际发送start帧划分未使用child与已提交启动；已提交后即使尚未ready，failed/异常退出也不能当作空进程回收。控制消息必须完整LF及合法UTF8，拒绝ready后failed/无效帧却exit0，以及WSL未收到完整stopped的“成功退出”；数字0不能替代原应用收尾事实。PG的`initialized`只表示本次start内已确认成功的initdb，宿主在PG准备完成后读取该事实；既有cluster缺库/角色明确报错，不借后续启动自动补建。相应反例纳入正式回归。
 
 - 真实provider长程验收发现共享ROOT准入会无限重发head已过期的prospective输入。仅同workspace下的head过期使用明确typed冲突；原confirm先裁定同一immutable command的FULL/ABSENT，只有确定尚无ROOT提交时才关闭旧prospective并重新prepare。已有epoch、SYSTEM/tools与已安装provider前缀保持；workspace变化及其他冲突不改为这个重准备路径，ACK unknown仍走原确认，取消后不得重新准入。不新增持久状态、命令身份、重放或重试总次数限制。此修复须由新候选重跑原真实长程场景，不能仅据源码定向测试宣称已安装产品通过。
