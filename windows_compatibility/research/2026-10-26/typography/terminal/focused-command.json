@@ -1,0 +1,18 @@
+{
+  "cwd": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/frontend",
+  "command": [
+    "./node_modules/.bin/vitest",
+    "run",
+    "../tests/frontend/markdown-body.test.tsx",
+    "../tests/frontend/background-terminal-panel.test.tsx",
+    "../tests/frontend/workspace-directory-picker.test.tsx",
+    "--maxWorkers=2"
+  ],
+  "exitCode": 0,
+  "testFilesPassed": 3,
+  "testsPassed": 37,
+  "skipOrTodo": 0,
+  "durationSeconds": 2.77,
+  "changes": "4 assigned files; family substitutions plus scoped mono liga/calt off; no layout/font-size changes",
+  "scope": "jsdom regression, not actual glyph/font loading proof"
+}

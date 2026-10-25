@@ -948,7 +948,8 @@ class LocalHttpServer:
         target = (self.static_root / relative).resolve()
         if self.static_root not in target.parents or not target.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(target)
+        headers = {"Content-Type": "font/woff2"} if target.suffix == ".woff2" else None
+        return web.FileResponse(target, headers=headers)
 
     async def _bootstrap(self, _request: web.Request) -> web.Response:
         catalog_loading = self._model_catalog_loading()

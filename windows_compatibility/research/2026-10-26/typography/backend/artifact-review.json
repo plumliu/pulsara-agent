@@ -1,0 +1,214 @@
+{
+  "static_fonts": {
+    "gelasio-roman.woff2": {
+      "emitted": "gelasio-roman-BUMHT7S7.woff2",
+      "complete_bytes_equal": true
+    },
+    "inter-italic.woff2": {
+      "emitted": "inter-italic-6A8g_VyW.woff2",
+      "complete_bytes_equal": true
+    },
+    "inter-roman.woff2": {
+      "emitted": "inter-roman-s-sz45ev.woff2",
+      "complete_bytes_equal": true
+    },
+    "jetbrains-mono-italic.woff2": {
+      "emitted": "jetbrains-mono-italic-g1Trft9P.woff2",
+      "complete_bytes_equal": true
+    },
+    "jetbrains-mono-roman.woff2": {
+      "emitted": "jetbrains-mono-roman-CXCoGy-3.woff2",
+      "complete_bytes_equal": true
+    },
+    "noto-sans-sc.woff2": {
+      "emitted": "noto-sans-sc-DKKZoNvi.woff2",
+      "complete_bytes_equal": true
+    },
+    "noto-serif-sc.woff2": {
+      "emitted": "noto-serif-sc-D-WuSO2o.woff2",
+      "complete_bytes_equal": true
+    },
+    "source-serif-italic.woff2": {
+      "emitted": "source-serif-italic-C4-ak67-.woff2",
+      "complete_bytes_equal": true
+    },
+    "source-serif-roman.woff2": {
+      "emitted": "source-serif-roman-ByWzhmpz.woff2",
+      "complete_bytes_equal": true
+    }
+  },
+  "static_notices_complete_bytes_equal": 7,
+  "wheel": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/root/wheels-final/pulsara_agent-0.1.0a11-py3-none-macosx_11_0_arm64.whl",
+  "wheel_fonts_complete_bytes_equal": 9,
+  "wheel_notices_complete_bytes_equal": 7,
+  "wheel_http_source_exact": true,
+  "cdp": {
+    "open-measurement": {
+      "actual_platform": "darwin",
+      "markers_only": [
+        "darwin",
+        "win32",
+        "linux"
+      ],
+      "contexts": {
+        "darwin": {
+          "samples": 80,
+          "all_nonzero_glyph_fonts_custom": true,
+          "postscript_names": [
+            "Gelasio-Regular_Bold",
+            "Inter-Italic_opsz100000_wght",
+            "Inter-Italic_opsz100000_wght2BC0000",
+            "Inter-Regular_opsz100000_wght",
+            "Inter-Regular_opsz100000_wght2BC0000",
+            "JetBrainsMono-Italic",
+            "JetBrainsMono-Regular",
+            "JetBrainsMonoItalic-Bold",
+            "JetBrainsMonoRoman-Bold",
+            "KaTeX_AMS-Regular",
+            "KaTeX_Caligraphic-Regular",
+            "KaTeX_Main-Regular",
+            "KaTeX_Math-Italic",
+            "KaTeX_Size2-Regular",
+            "NotoSansSC-Thin_Bold",
+            "NotoSansSC-Thin_Regular",
+            "NotoSerifSC-Bold",
+            "NotoSerifSC-Regular",
+            "SourceSerif4Italic-Italic_wght2BC0000_opsz100000",
+            "SourceSerif4Italic-Italic_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght2BC0000_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz100000"
+          ]
+        },
+        "win32": {
+          "samples": 80,
+          "all_nonzero_glyph_fonts_custom": true,
+          "postscript_names": [
+            "Gelasio-Regular_Bold",
+            "Inter-Italic_opsz100000_wght",
+            "Inter-Italic_opsz100000_wght2BC0000",
+            "Inter-Regular_opsz100000_wght",
+            "Inter-Regular_opsz100000_wght2BC0000",
+            "JetBrainsMono-Italic",
+            "JetBrainsMono-Regular",
+            "JetBrainsMonoItalic-Bold",
+            "JetBrainsMonoRoman-Bold",
+            "KaTeX_AMS-Regular",
+            "KaTeX_Caligraphic-Regular",
+            "KaTeX_Main-Regular",
+            "KaTeX_Math-Italic",
+            "KaTeX_Size2-Regular",
+            "NotoSansSC-Thin_Bold",
+            "NotoSansSC-Thin_Regular",
+            "NotoSerifSC-Bold",
+            "NotoSerifSC-Regular",
+            "SourceSerif4Italic-Italic_wght2BC0000_opsz100000",
+            "SourceSerif4Italic-Italic_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght2BC0000_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz100000"
+          ]
+        },
+        "linux": {
+          "samples": 80,
+          "all_nonzero_glyph_fonts_custom": true,
+          "postscript_names": [
+            "Gelasio-Regular_Bold",
+            "Inter-Italic_opsz100000_wght",
+            "Inter-Italic_opsz100000_wght2BC0000",
+            "Inter-Regular_opsz100000_wght",
+            "Inter-Regular_opsz100000_wght2BC0000",
+            "JetBrainsMono-Italic",
+            "JetBrainsMono-Regular",
+            "JetBrainsMonoItalic-Bold",
+            "JetBrainsMonoRoman-Bold",
+            "KaTeX_AMS-Regular",
+            "KaTeX_Caligraphic-Regular",
+            "KaTeX_Main-Regular",
+            "KaTeX_Math-Italic",
+            "KaTeX_Size2-Regular",
+            "NotoSansSC-Thin_Bold",
+            "NotoSansSC-Thin_Regular",
+            "NotoSerifSC-Bold",
+            "NotoSerifSC-Regular",
+            "SourceSerif4Italic-Italic_wght2BC0000_opsz100000",
+            "SourceSerif4Italic-Italic_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght2BC0000_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz100000"
+          ]
+        }
+      }
+    },
+    "open-reading": {
+      "actual_platform": "darwin",
+      "markers_only": [
+        "darwin",
+        "win32",
+        "linux"
+      ],
+      "contexts": {
+        "darwin": {
+          "samples": 43,
+          "all_nonzero_glyph_fonts_custom": true,
+          "postscript_names": [
+            "JetBrainsMono-Regular",
+            "KaTeX_AMS-Regular",
+            "KaTeX_Caligraphic-Regular",
+            "KaTeX_Main-Regular",
+            "KaTeX_Math-Italic",
+            "KaTeX_Size2-Regular",
+            "NotoSansSC-Thin_Regular",
+            "NotoSerifSC-Bold",
+            "NotoSerifSC-Regular",
+            "SourceSerif4Italic-Italic_wght2BC0000_opsz100000",
+            "SourceSerif4Italic-Italic_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght2BC0000_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz130000",
+            "SourceSerif4Roman-Regular_wght_opsz160000"
+          ]
+        },
+        "win32": {
+          "samples": 43,
+          "all_nonzero_glyph_fonts_custom": true,
+          "postscript_names": [
+            "JetBrainsMono-Regular",
+            "KaTeX_AMS-Regular",
+            "KaTeX_Caligraphic-Regular",
+            "KaTeX_Main-Regular",
+            "KaTeX_Math-Italic",
+            "KaTeX_Size2-Regular",
+            "NotoSansSC-Thin_Regular",
+            "NotoSerifSC-Bold",
+            "NotoSerifSC-Regular",
+            "SourceSerif4Italic-Italic_wght2BC0000_opsz100000",
+            "SourceSerif4Italic-Italic_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght2BC0000_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz130000",
+            "SourceSerif4Roman-Regular_wght_opsz160000"
+          ]
+        },
+        "linux": {
+          "samples": 43,
+          "all_nonzero_glyph_fonts_custom": true,
+          "postscript_names": [
+            "JetBrainsMono-Regular",
+            "KaTeX_AMS-Regular",
+            "KaTeX_Caligraphic-Regular",
+            "KaTeX_Main-Regular",
+            "KaTeX_Math-Italic",
+            "KaTeX_Size2-Regular",
+            "NotoSansSC-Thin_Regular",
+            "NotoSerifSC-Bold",
+            "NotoSerifSC-Regular",
+            "SourceSerif4Italic-Italic_wght2BC0000_opsz100000",
+            "SourceSerif4Italic-Italic_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght2BC0000_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz100000",
+            "SourceSerif4Roman-Regular_wght_opsz130000",
+            "SourceSerif4Roman-Regular_wght_opsz160000"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "probeProcessAlreadyExited": true,
+  "removed": [
+    {
+      "name": "startup-font-profile",
+      "absent": true
+    },
+    {
+      "name": "startup-asar-font-profile",
+      "absent": true
+    }
+  ]
+}

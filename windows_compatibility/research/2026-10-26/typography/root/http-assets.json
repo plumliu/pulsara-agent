@@ -1,0 +1,75 @@
+{
+  "gelasio-roman.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 72812
+  },
+  "inter-italic.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 386344
+  },
+  "inter-roman.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 350460
+  },
+  "jetbrains-mono-italic.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 76452
+  },
+  "jetbrains-mono-roman.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 71736
+  },
+  "noto-sans-sc.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 7782072
+  },
+  "noto-serif-sc.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 11032420
+  },
+  "source-serif-italic.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 346088
+  },
+  "source-serif-roman.woff2": {
+    "status": 200,
+    "contentType": "font/woff2",
+    "bytes": 427556
+  },
+  "notice/SOURCES.md": {
+    "status": 200,
+    "completeBytesMatch": true
+  },
+  "notice/gelasio-OFL.txt": {
+    "status": 200,
+    "completeBytesMatch": true
+  },
+  "notice/inter-OFL.txt": {
+    "status": 200,
+    "completeBytesMatch": true
+  },
+  "notice/jetbrainsmono-OFL.txt": {
+    "status": 200,
+    "completeBytesMatch": true
+  },
+  "notice/notosanssc-OFL.txt": {
+    "status": 200,
+    "completeBytesMatch": true
+  },
+  "notice/notoserifsc-OFL.txt": {
+    "status": 200,
+    "completeBytesMatch": true
+  },
+  "notice/sourceserif4-OFL.txt": {
+    "status": 200,
+    "completeBytesMatch": true
+  }
+}

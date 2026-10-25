@@ -1,0 +1,202 @@
+{
+  "startupFile": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/root/font-app.asar/assets/startup.html",
+  "platform": "darwin",
+  "arch": "arm64",
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  },
+  "url": "file:///Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/root/font-app.asar/assets/startup.html?error=&phase=starting",
+  "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'",
+  "loaded": [
+    {
+      "family": "Pulsara UI",
+      "weight": 400,
+      "text": "Startup",
+      "faces": [
+        {
+          "family": "Pulsara UI",
+          "status": "loaded",
+          "weight": "100 900",
+          "style": "normal"
+        }
+      ]
+    },
+    {
+      "family": "Pulsara UI CJK",
+      "weight": 400,
+      "text": "中文",
+      "faces": [
+        {
+          "family": "Pulsara UI CJK",
+          "status": "loaded",
+          "weight": "100 900",
+          "style": "normal"
+        }
+      ]
+    },
+    {
+      "family": "Pulsara UI",
+      "weight": 500,
+      "text": "Ubuntu",
+      "faces": [
+        {
+          "family": "Pulsara UI",
+          "status": "loaded",
+          "weight": "100 900",
+          "style": "normal"
+        }
+      ]
+    },
+    {
+      "family": "Pulsara UI CJK",
+      "weight": 500,
+      "text": "环境",
+      "faces": [
+        {
+          "family": "Pulsara UI CJK",
+          "status": "loaded",
+          "weight": "100 900",
+          "style": "normal"
+        }
+      ]
+    },
+    {
+      "family": "Pulsara Brand",
+      "weight": 700,
+      "text": "Pulsara",
+      "faces": [
+        {
+          "family": "Pulsara Brand",
+          "status": "loaded",
+          "weight": "400 700",
+          "style": "normal"
+        }
+      ]
+    }
+  ],
+  "styles": {
+    "#status": {
+      "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+      "size": "16px",
+      "weight": "400",
+      "lineHeight": "27.2px",
+      "synthesis": "none"
+    },
+    "h1": {
+      "family": "\"Pulsara Brand\", serif",
+      "size": "32px",
+      "weight": "700",
+      "lineHeight": "normal",
+      "synthesis": "none"
+    },
+    "#wsl-distribution": {
+      "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+      "size": "15px",
+      "weight": "500",
+      "lineHeight": "normal",
+      "synthesis": "none"
+    }
+  },
+  "resources": [],
+  "stylesheets": [
+    {
+      "href": "file:///Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/root/font-app.asar/assets/fonts.css",
+      "faces": [
+        {
+          "family": "\"Pulsara UI\"",
+          "source": "url(\"./fonts/inter-roman.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara UI\"",
+          "source": "url(\"./fonts/inter-italic.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara UI CJK\"",
+          "source": "url(\"./fonts/noto-sans-sc.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara Body\"",
+          "source": "url(\"./fonts/source-serif-roman.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara Body\"",
+          "source": "url(\"./fonts/source-serif-italic.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara Body CJK\"",
+          "source": "url(\"./fonts/noto-serif-sc.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara Mono\"",
+          "source": "url(\"./fonts/jetbrains-mono-roman.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara Mono\"",
+          "source": "url(\"./fonts/jetbrains-mono-italic.woff2\") format(\"woff2\")"
+        },
+        {
+          "family": "\"Pulsara Brand\"",
+          "source": "url(\"./fonts/gelasio-roman.woff2\") format(\"woff2\")"
+        }
+      ]
+    },
+    {
+      "href": "file:///Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/root/font-app.asar/assets/startup.css",
+      "faces": []
+    }
+  ],
+  "platformFonts": {
+    "#status": [
+      {
+        "familyName": "Inter",
+        "glyphCount": 28,
+        "isCustomFont": true,
+        "postScriptName": "Inter-Regular_opsz100000_wght"
+      },
+      {
+        "familyName": "Noto Sans SC Thin",
+        "glyphCount": 5,
+        "isCustomFont": true,
+        "postScriptName": "NotoSansSC-Thin_Regular"
+      }
+    ],
+    "h1": [
+      {
+        "familyName": "Gelasio",
+        "glyphCount": 7,
+        "isCustomFont": true,
+        "postScriptName": "Gelasio-Regular_Bold"
+      }
+    ]
+  }
+}

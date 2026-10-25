@@ -1,0 +1,15 @@
+{
+  "realOS": "darwin",
+  "samplesPerMarker": {
+    "matrix": 80,
+    "reading": 43
+  },
+  "markers": [
+    "darwin",
+    "win32",
+    "linux"
+  ],
+  "systemFallbackSamples": 0,
+  "actualWindowsLinuxQualification": false,
+  "sameTypefaceTokensForAllMarkers": true
+}

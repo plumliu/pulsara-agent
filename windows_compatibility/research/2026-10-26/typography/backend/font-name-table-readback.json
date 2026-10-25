@@ -1,0 +1,78 @@
+{
+  "status": "passed",
+  "scope": "read-only fixed upstream TTF versus delivered WOFF2 metadata; no conversion/build",
+  "fonts": [
+    {
+      "file": "inter-roman.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "inter-italic.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "source-serif-roman.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "© 2014 - 2021 Adobe Systems Incorporated (http://www.adobe.com/), with Reserved Font Name ‘Source’.",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "source-serif-italic.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "© 2014 - 2021 Adobe Systems Incorporated (http://www.adobe.com/), with Reserved Font Name ‘Source’.",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "noto-sans-sc.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "(c) 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "noto-serif-sc.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "(c) 2017-2024 Adobe (http://www.adobe.com/).",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "jetbrains-mono-roman.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "jetbrains-mono-italic.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)",
+      "source_license_reference_present": true
+    },
+    {
+      "file": "gelasio-roman.woff2",
+      "complete_name_records_exact": true,
+      "raw_name_table_exact": true,
+      "woff_specific_metadata_omitted": true,
+      "source_copyright_rfn": "Copyright 2022 The Gelasio Project Authors (https://github.com/SorkinType/Gelasio)",
+      "source_license_reference_present": true
+    }
+  ]
+}

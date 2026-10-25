@@ -1144,6 +1144,43 @@ def _model_server_dependencies_for_runtime(runtime: ModelRuntime) -> dict[str, o
     }
 
 
+def test_public_woff2_uses_font_mime_and_original_file_transfer(tmp_path: Path) -> None:
+    async def exercise():
+        static = tmp_path / "static"
+        assets = static / "assets"
+        assets.mkdir(parents=True)
+        (static / "index.html").write_text("Pulsara", encoding="utf-8")
+        payload = b"wOF2 transport fixture"
+        (assets / "ui.woff2").write_bytes(payload)
+        outside = tmp_path / "outside.woff2"
+        outside.write_bytes(b"outside static root")
+        (assets / "escape.woff2").symlink_to(outside)
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(RendererBridge, _Bridge()), static_root=static,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+                async with client.get(f"{server.origin}/assets/ui.woff2") as response:
+                    assert response.status == 200
+                    assert response.headers["Content-Type"] == "font/woff2"
+                    assert await response.read() == payload
+                async with client.get(
+                    f"{server.origin}/assets/ui.woff2", headers={"Range": "bytes=0-3"}
+                ) as response:
+                    assert response.status == 206
+                    assert response.headers["Content-Type"] == "font/woff2"
+                    assert await response.read() == b"wOF2"
+                async with client.get(f"{server.origin}/assets/escape.woff2") as response:
+                    assert response.status == 404
+        finally:
+            await server.aclose()
+    asyncio.run(exercise())
+
+
 def test_bare_loopback_origin_serves_app_and_api_without_authentication(
     tmp_path: Path,
 ) -> None:

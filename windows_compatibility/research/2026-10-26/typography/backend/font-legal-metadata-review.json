@@ -1,0 +1,261 @@
+{
+  "fonttools": "4.60.1",
+  "tool_environment": "existing root conversion uv script environment; read only, no sync/install",
+  "revision": "e7db6ca603fd4862010383ff17ffd6cc4ffac1c0",
+  "notices": [
+    {
+      "family": "gelasio",
+      "exact_pinned_upstream_bytes": true,
+      "header": "Copyright 2022 The Gelasio Project Authors (https://github.com/SorkinType/Gelasio)",
+      "bytes": 4387,
+      "full_license_present": true
+    },
+    {
+      "family": "inter",
+      "exact_pinned_upstream_bytes": true,
+      "header": "Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter)",
+      "bytes": 4377,
+      "full_license_present": true
+    },
+    {
+      "family": "jetbrainsmono",
+      "exact_pinned_upstream_bytes": true,
+      "header": "Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)",
+      "bytes": 4399,
+      "full_license_present": true
+    },
+    {
+      "family": "notosanssc",
+      "exact_pinned_upstream_bytes": true,
+      "header": "Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'",
+      "bytes": 4388,
+      "full_license_present": true
+    },
+    {
+      "family": "notoserifsc",
+      "exact_pinned_upstream_bytes": true,
+      "header": "Copyright 2012 Google Inc. All Rights Reserved.",
+      "bytes": 4350,
+      "full_license_present": true
+    },
+    {
+      "family": "sourceserif4",
+      "exact_pinned_upstream_bytes": true,
+      "header": "Copyright 2014 The Source Serif 4 Project Authors (https://github.com/adobe-fonts/source-serif)",
+      "bytes": 4400,
+      "full_license_present": true
+    }
+  ],
+  "fonts": [
+    {
+      "file": "gelasio-roman.woff2",
+      "bytes": 72812,
+      "flavor": "woff2",
+      "family": "Gelasio",
+      "typographic_family": null,
+      "postscript_name": "Gelasio-Regular",
+      "version": "Version 1.008",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "https://openfontlicense.org",
+      "unicode_codepoints": 918,
+      "glyphs": 1070,
+      "axes": {
+        "wght": [
+          400.0,
+          400.0,
+          700.0
+        ]
+      }
+    },
+    {
+      "file": "inter-italic.woff2",
+      "bytes": 386344,
+      "flavor": "woff2",
+      "family": "Inter",
+      "typographic_family": null,
+      "postscript_name": "Inter-Italic",
+      "version": "Version 4.001;git-66647c0bb",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "https://openfontlicense.org",
+      "unicode_codepoints": 2813,
+      "glyphs": 2897,
+      "axes": {
+        "opsz": [
+          14.0,
+          14.0,
+          32.0
+        ],
+        "wght": [
+          100.0,
+          400.0,
+          900.0
+        ]
+      }
+    },
+    {
+      "file": "inter-roman.woff2",
+      "bytes": 350460,
+      "flavor": "woff2",
+      "family": "Inter",
+      "typographic_family": null,
+      "postscript_name": "Inter-Regular",
+      "version": "Version 4.001;git-66647c0bb",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "https://openfontlicense.org",
+      "unicode_codepoints": 2849,
+      "glyphs": 2933,
+      "axes": {
+        "opsz": [
+          14.0,
+          14.0,
+          32.0
+        ],
+        "wght": [
+          100.0,
+          400.0,
+          900.0
+        ]
+      }
+    },
+    {
+      "file": "jetbrains-mono-italic.woff2",
+      "bytes": 76452,
+      "flavor": "woff2",
+      "family": "JetBrains Mono",
+      "typographic_family": null,
+      "postscript_name": "JetBrainsMono-Italic",
+      "version": "Version 2.211",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "https://scripts.sil.org/OFL",
+      "unicode_codepoints": 976,
+      "glyphs": 1179,
+      "axes": {
+        "wght": [
+          100.0,
+          400.0,
+          800.0
+        ]
+      }
+    },
+    {
+      "file": "jetbrains-mono-roman.woff2",
+      "bytes": 71736,
+      "flavor": "woff2",
+      "family": "JetBrains Mono",
+      "typographic_family": null,
+      "postscript_name": "JetBrainsMono-Regular",
+      "version": "Version 2.211",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "https://scripts.sil.org/OFL",
+      "unicode_codepoints": 976,
+      "glyphs": 1179,
+      "axes": {
+        "wght": [
+          100.0,
+          400.0,
+          800.0
+        ]
+      }
+    },
+    {
+      "file": "noto-sans-sc.woff2",
+      "bytes": 7782072,
+      "flavor": "woff2",
+      "family": "Noto Sans SC Thin",
+      "typographic_family": "Noto Sans SC",
+      "postscript_name": "NotoSansSC-Thin",
+      "version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "http://scripts.sil.org/OFL",
+      "unicode_codepoints": 30890,
+      "glyphs": 31036,
+      "axes": {
+        "wght": [
+          100.0,
+          100.0,
+          900.0
+        ]
+      }
+    },
+    {
+      "file": "noto-serif-sc.woff2",
+      "bytes": 11032420,
+      "flavor": "woff2",
+      "family": "Noto Serif SC ExtraLight",
+      "typographic_family": "Noto Serif SC",
+      "postscript_name": "NotoSerifSC-ExtraLight",
+      "version": "Version 2.003-H1;hotconv 1.1.1;makeotfexe 2.6.0",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "https://openfontlicense.org",
+      "unicode_codepoints": 30928,
+      "glyphs": 31058,
+      "axes": {
+        "wght": [
+          200.0,
+          200.0,
+          900.0
+        ]
+      }
+    },
+    {
+      "file": "source-serif-italic.woff2",
+      "bytes": 346088,
+      "flavor": "woff2",
+      "family": "Source Serif 4",
+      "typographic_family": null,
+      "postscript_name": "SourceSerif4Italic-Italic",
+      "version": "Version 4.004;hotconv 1.0.116;makeotfexe 2.5.65601",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "http://scripts.sil.org/OFL",
+      "unicode_codepoints": 918,
+      "glyphs": 1093,
+      "axes": {
+        "wght": [
+          200.0,
+          400.0,
+          900.0
+        ],
+        "opsz": [
+          8.0,
+          20.0,
+          60.0
+        ]
+      }
+    },
+    {
+      "file": "source-serif-roman.woff2",
+      "bytes": 427556,
+      "flavor": "woff2",
+      "family": "Source Serif 4",
+      "typographic_family": null,
+      "postscript_name": "SourceSerif4Roman-Regular",
+      "version": "Version 4.004;hotconv 1.0.116;makeotfexe 2.5.65601",
+      "copyright_present": true,
+      "license_name_table_present": true,
+      "license_url": "http://scripts.sil.org/OFL",
+      "unicode_codepoints": 918,
+      "glyphs": 1463,
+      "axes": {
+        "wght": [
+          200.0,
+          400.0,
+          900.0
+        ],
+        "opsz": [
+          8.0,
+          20.0,
+          60.0
+        ]
+      }
+    }
+  ],
+  "font_bytes": 20545940
+}

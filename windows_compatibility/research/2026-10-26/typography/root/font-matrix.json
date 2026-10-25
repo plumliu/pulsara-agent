@@ -1,0 +1,5829 @@
+{
+  "source": "output/macos-font-lock-20261026/root/open-static",
+  "view": "matrix",
+  "staticRoot": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/root/open-static",
+  "stylesheets": [
+    "index-TdppnGsf.css",
+    "workspace-directory-picker-C04KrJb3.css"
+  ],
+  "versions": {
+    "node": "24.22.0",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.8",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "149",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026d",
+    "undici": "7.29.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.2.124.43-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "44.9.0",
+    "chrome": "152.0.7977.167"
+  },
+  "platform": "darwin",
+  "architecture": "arm64",
+  "displays": [
+    {
+      "size": {
+        "width": 1920,
+        "height": 1080
+      },
+      "workAreaSize": {
+        "width": 1920,
+        "height": 958
+      },
+      "scaleFactor": 1,
+      "rotation": 0
+    }
+  ],
+  "contexts": {
+    "darwin": {
+      "dpr": 1,
+      "zoom": 1,
+      "samples": [
+        {
+          "id": "sans-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 420.09375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 282.484375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 428.28125,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 435.171875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 294.703125,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 438.234375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 422.140625,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 282.34375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 430.71875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 437.6875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 294.65625,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 440.734375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            },
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 416.25,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 253.46875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 395.1875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 429.21875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 270.421875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 408.203125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 387.40625,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 256.28125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 385.328125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 417.515625,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 272.921875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 404.828125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            },
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            },
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "brand",
+          "text": "Pulsara",
+          "family": "\"Pulsara Brand\", serif",
+          "size": "32px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "48px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 48,
+          "textWidth": 126.28125,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "Gelasio",
+              "glyphCount": 7,
+              "isCustomFont": true,
+              "postScriptName": "Gelasio-Regular_Bold"
+            }
+          ]
+        },
+        {
+          "id": "math-49",
+          "text": "i",
+          "family": "KaTeX_Math",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 4.390625,
+          "height": 12,
+          "textWidth": 4.390625,
+          "textHeight": 12,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-50",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.890625,
+          "height": 14,
+          "textWidth": 9.890625,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-51",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-52",
+          "text": "∑",
+          "family": "KaTeX_Size2",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 26.21875,
+          "height": 41,
+          "textWidth": 26.21875,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Size2",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Size2-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-53",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.625,
+          "height": 12,
+          "textWidth": 7.625,
+          "textHeight": 12,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-54",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 29.96875,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-55",
+          "text": "i",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.265625,
+          "height": 17,
+          "textWidth": 6.265625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-56",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-57",
+          "text": "2",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-58",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.890625,
+          "height": 17,
+          "textWidth": 10.890625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-59",
+          "text": "(",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.0625,
+          "height": 21,
+          "textWidth": 7.0625,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-60",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.890625,
+          "height": 17,
+          "textWidth": 10.890625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-61",
+          "text": "+",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-62",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-63",
+          "text": ")",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.0625,
+          "height": 21,
+          "textWidth": 7.0625,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-64",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 25.890625,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-65",
+          "text": "∫",
+          "family": "KaTeX_Size2",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.09375,
+          "height": 41,
+          "textWidth": 10.09375,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Size2",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Size2-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-66",
+          "text": "0",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-67",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-68",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 28.375,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-69",
+          "text": "x",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.390625,
+          "height": 17,
+          "textWidth": 10.390625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-70",
+          "text": "2",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-71",
+          "text": "d",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.453125,
+          "height": 17,
+          "textWidth": 9.453125,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-72",
+          "text": "x",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.390625,
+          "height": 17,
+          "textWidth": 10.390625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-73",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-74",
+          "text": "3",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-75",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-76",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 23.96875,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-77",
+          "text": "R",
+          "family": "KaTeX_AMS",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 13.109375,
+          "height": 26,
+          "textWidth": 13.109375,
+          "textHeight": 26,
+          "fonts": [
+            {
+              "familyName": "KaTeX_AMS",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_AMS-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-78",
+          "text": "L",
+          "family": "KaTeX_Caligraphic",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 12.53125,
+          "height": 17,
+          "textWidth": 12.53125,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Caligraphic",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Caligraphic-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-79",
+          "text": "中文面积",
+          "family": "\"Pulsara Body CJK\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 72.609375,
+          "height": 26,
+          "textWidth": 72.609375,
+          "textHeight": 26,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 4,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        }
+      ],
+      "tokens": {
+        "sans": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+        "serif": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+        "mono": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace"
+      }
+    },
+    "win32": {
+      "dpr": 1,
+      "zoom": 1,
+      "samples": [
+        {
+          "id": "sans-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 420.09375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 282.484375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 428.28125,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 435.171875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 294.703125,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 438.234375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 422.140625,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 282.34375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 430.71875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 437.6875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 294.65625,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 440.734375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            },
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 416.25,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 253.46875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 395.1875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 429.21875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 270.421875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 408.203125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 387.40625,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 256.28125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 385.328125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 417.515625,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 272.921875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 404.828125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            },
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            },
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "brand",
+          "text": "Pulsara",
+          "family": "\"Pulsara Brand\", serif",
+          "size": "32px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "48px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 48,
+          "textWidth": 126.28125,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "Gelasio",
+              "glyphCount": 7,
+              "isCustomFont": true,
+              "postScriptName": "Gelasio-Regular_Bold"
+            }
+          ]
+        },
+        {
+          "id": "math-49",
+          "text": "i",
+          "family": "KaTeX_Math",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 4.390625,
+          "height": 12,
+          "textWidth": 4.390625,
+          "textHeight": 12,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-50",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.890625,
+          "height": 14,
+          "textWidth": 9.890625,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-51",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-52",
+          "text": "∑",
+          "family": "KaTeX_Size2",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 26.21875,
+          "height": 41,
+          "textWidth": 26.21875,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Size2",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Size2-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-53",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.625,
+          "height": 12,
+          "textWidth": 7.625,
+          "textHeight": 12,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-54",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 29.96875,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-55",
+          "text": "i",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.265625,
+          "height": 17,
+          "textWidth": 6.265625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-56",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-57",
+          "text": "2",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-58",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.890625,
+          "height": 17,
+          "textWidth": 10.890625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-59",
+          "text": "(",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.0625,
+          "height": 21,
+          "textWidth": 7.0625,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-60",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.890625,
+          "height": 17,
+          "textWidth": 10.890625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-61",
+          "text": "+",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-62",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-63",
+          "text": ")",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.0625,
+          "height": 21,
+          "textWidth": 7.0625,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-64",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 25.890625,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-65",
+          "text": "∫",
+          "family": "KaTeX_Size2",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.09375,
+          "height": 41,
+          "textWidth": 10.09375,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Size2",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Size2-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-66",
+          "text": "0",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-67",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-68",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 28.375,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-69",
+          "text": "x",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.390625,
+          "height": 17,
+          "textWidth": 10.390625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-70",
+          "text": "2",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-71",
+          "text": "d",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.453125,
+          "height": 17,
+          "textWidth": 9.453125,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-72",
+          "text": "x",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.390625,
+          "height": 17,
+          "textWidth": 10.390625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-73",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-74",
+          "text": "3",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-75",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-76",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 23.96875,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-77",
+          "text": "R",
+          "family": "KaTeX_AMS",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 13.109375,
+          "height": 26,
+          "textWidth": 13.109375,
+          "textHeight": 26,
+          "fonts": [
+            {
+              "familyName": "KaTeX_AMS",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_AMS-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-78",
+          "text": "L",
+          "family": "KaTeX_Caligraphic",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 12.53125,
+          "height": 17,
+          "textWidth": 12.53125,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Caligraphic",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Caligraphic-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-79",
+          "text": "中文面积",
+          "family": "\"Pulsara Body CJK\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 72.609375,
+          "height": 26,
+          "textWidth": 72.609375,
+          "textHeight": 26,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 4,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        }
+      ],
+      "tokens": {
+        "sans": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+        "serif": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+        "mono": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace"
+      }
+    },
+    "linux": {
+      "dpr": 1,
+      "zoom": 1,
+      "samples": [
+        {
+          "id": "sans-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 420.09375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 282.484375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 428.28125,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 435.171875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 294.703125,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 438.234375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Regular_opsz100000_wght2BC0000"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 422.140625,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 282.34375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            }
+          ]
+        },
+        {
+          "id": "sans-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 430.71875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 437.6875,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 336,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 294.65625,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Inter",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "sans-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "26.4px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 26.390625,
+          "textWidth": 440.734375,
+          "textHeight": 20,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            },
+            {
+              "familyName": "Inter",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "Inter-Italic_opsz100000_wght2BC0000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 416.25,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 253.46875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 395.1875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 429.21875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 270.421875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 408.203125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Roman-Regular_wght2BC0000_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 387.40625,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 256.28125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 385.328125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght_opsz100000"
+            },
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 417.515625,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 57,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 336,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 272.921875,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "serif-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+          "size": "16px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "24.32px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 24.3125,
+          "textWidth": 404.828125,
+          "textHeight": 22,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Bold"
+            },
+            {
+              "familyName": "Source Serif 4",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "SourceSerif4Italic-Italic_wght2BC0000_opsz100000"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-regular-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Regular"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            },
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoRoman-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            }
+          ]
+        },
+        {
+          "id": "mono-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMono-Italic"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Regular"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-latin",
+          "text": "Pulsara reads quietly. The quick brown fox: ffi, fi, AV, To.",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 468,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 60,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-chinese",
+          "text": "中文正文与界面：苹方、宋体，保持原有排版。",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 273,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 21,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-digits",
+          "text": "0123456789 19.5% 2026-10-26 16:08",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 257.40625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 33,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            }
+          ]
+        },
+        {
+          "id": "mono-bold-italic-mixed",
+          "text": "Pulsara 中文 mixed 0123456789 — “quotes” ￥ $ ≤ ≥ → ∑",
+          "family": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace",
+          "size": "13px",
+          "weight": "700",
+          "style": "italic",
+          "lineHeight": "21.45px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 21.4375,
+          "textWidth": 405.609375,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "JetBrains Mono",
+              "glyphCount": 47,
+              "isCustomFont": true,
+              "postScriptName": "JetBrainsMonoItalic-Bold"
+            },
+            {
+              "familyName": "Noto Sans SC Thin",
+              "glyphCount": 3,
+              "isCustomFont": true,
+              "postScriptName": "NotoSansSC-Thin_Bold"
+            }
+          ]
+        },
+        {
+          "id": "brand",
+          "text": "Pulsara",
+          "family": "\"Pulsara Brand\", serif",
+          "size": "32px",
+          "weight": "700",
+          "style": "normal",
+          "lineHeight": "48px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 890,
+          "height": 48,
+          "textWidth": 126.28125,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "Gelasio",
+              "glyphCount": 7,
+              "isCustomFont": true,
+              "postScriptName": "Gelasio-Regular_Bold"
+            }
+          ]
+        },
+        {
+          "id": "math-49",
+          "text": "i",
+          "family": "KaTeX_Math",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 4.390625,
+          "height": 12,
+          "textWidth": 4.390625,
+          "textHeight": 12,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-50",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.890625,
+          "height": 14,
+          "textWidth": 9.890625,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-51",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-52",
+          "text": "∑",
+          "family": "KaTeX_Size2",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 26.21875,
+          "height": 41,
+          "textWidth": 26.21875,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Size2",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Size2-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-53",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.625,
+          "height": 12,
+          "textWidth": 7.625,
+          "textHeight": 12,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-54",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 29.96875,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-55",
+          "text": "i",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.265625,
+          "height": 17,
+          "textWidth": 6.265625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-56",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-57",
+          "text": "2",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-58",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.890625,
+          "height": 17,
+          "textWidth": 10.890625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-59",
+          "text": "(",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.0625,
+          "height": 21,
+          "textWidth": 7.0625,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-60",
+          "text": "n",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.890625,
+          "height": 17,
+          "textWidth": 10.890625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-61",
+          "text": "+",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-62",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-63",
+          "text": ")",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 7.0625,
+          "height": 21,
+          "textWidth": 7.0625,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-64",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 25.890625,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-65",
+          "text": "∫",
+          "family": "KaTeX_Size2",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.09375,
+          "height": 41,
+          "textWidth": 10.09375,
+          "textHeight": 41,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Size2",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Size2-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-66",
+          "text": "0",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-67",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-68",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 28.375,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-69",
+          "text": "x",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.390625,
+          "height": 17,
+          "textWidth": 10.390625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-70",
+          "text": "2",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "12.705px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "15.246px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 6.359375,
+          "height": 14,
+          "textWidth": 6.359375,
+          "textHeight": 14,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-71",
+          "text": "d",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.453125,
+          "height": 17,
+          "textWidth": 9.453125,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-72",
+          "text": "x",
+          "family": "KaTeX_Math",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "italic",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 10.390625,
+          "height": 17,
+          "textWidth": 10.390625,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Math",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Math-Italic"
+            }
+          ]
+        },
+        {
+          "id": "math-73",
+          "text": "=",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 14.125,
+          "height": 21,
+          "textWidth": 14.125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-74",
+          "text": "3",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-75",
+          "text": "1",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 9.078125,
+          "height": 21,
+          "textWidth": 9.078125,
+          "textHeight": 21,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-76",
+          "text": "​",
+          "family": "KaTeX_Main, \"Times New Roman\", serif",
+          "size": "1px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "1.2px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 2,
+          "height": 23.96875,
+          "textWidth": 0,
+          "textHeight": 1,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Main",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Main-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-77",
+          "text": "R",
+          "family": "KaTeX_AMS",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 13.109375,
+          "height": 26,
+          "textWidth": 13.109375,
+          "textHeight": 26,
+          "fonts": [
+            {
+              "familyName": "KaTeX_AMS",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_AMS-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-78",
+          "text": "L",
+          "family": "KaTeX_Caligraphic",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 12.53125,
+          "height": 17,
+          "textWidth": 12.53125,
+          "textHeight": 17,
+          "fonts": [
+            {
+              "familyName": "KaTeX_Caligraphic",
+              "glyphCount": 1,
+              "isCustomFont": true,
+              "postScriptName": "KaTeX_Caligraphic-Regular"
+            }
+          ]
+        },
+        {
+          "id": "math-79",
+          "text": "中文面积",
+          "family": "\"Pulsara Body CJK\", serif",
+          "size": "18.15px",
+          "weight": "400",
+          "style": "normal",
+          "lineHeight": "21.78px",
+          "letterSpacing": "normal",
+          "fontSynthesis": "weight style small-caps",
+          "width": 72.609375,
+          "height": 26,
+          "textWidth": 72.609375,
+          "textHeight": 26,
+          "fonts": [
+            {
+              "familyName": "Noto Serif SC ExtraLight",
+              "glyphCount": 4,
+              "isCustomFont": true,
+              "postScriptName": "NotoSerifSC-Regular"
+            }
+          ]
+        }
+      ],
+      "tokens": {
+        "sans": "\"Pulsara UI\", \"Pulsara UI CJK\", sans-serif",
+        "serif": "\"Pulsara Body\", \"Pulsara Body CJK\", serif",
+        "mono": "\"Pulsara Mono\", \"Pulsara UI CJK\", monospace"
+      }
+    }
+  }
+}

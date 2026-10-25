@@ -1,0 +1,9 @@
+
+ RUN  v4.1.11 /Users/plumliu/Desktop/python_workspace/pulsara_agent/frontend
+
+
+ Test Files  3 passed (3)
+      Tests  37 passed (37)
+   Start at  02:25:06
+   Duration  3.17s (transform 390ms, setup 78ms, import 949ms, tests 2.88s, environment 1.40s)
+

@@ -28,7 +28,7 @@
 .linux-directory-picker :is(.linux-directory-location nav,.linux-directory-body,.linux-directory-file-scroll)::-webkit-scrollbar-button{display:none;width:0;height:0}
 .linux-directory-blocked{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:365px;padding:28px 24px;background:var(--paper,#f3f0e7);text-align:center}
 .linux-directory-blocked .brand-mark{display:block;width:64px;height:64px;object-fit:contain}
-.linux-directory-blocked strong{margin:8px 0 12px;color:#3c3933;font:700 32px Georgia,serif}
+.linux-directory-blocked strong{margin:8px 0 12px;color:#3c3933;font:700 32px "Pulsara Brand",serif}
 .linux-directory-blocked p{margin:0;color:var(--muted,#7d7b74);font-size:14px;line-height:1.7}
 .linux-directory-browser{display:grid;grid-template-columns:150px minmax(0,1fr);min-height:310px}
 .linux-directory-places{min-width:0;padding:0 9px 18px;border-right:1px solid var(--line,#d4cfc5);background:var(--paper-raised,#faf8f2)}

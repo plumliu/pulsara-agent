@@ -1,0 +1,12 @@
+AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+
+  assert.ok(observed.resources.some(url => url.endsWith('/fonts.css')))
+
+    at main (/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/desktop/startup-font-probe.cjs:56:12) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}

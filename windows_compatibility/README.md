@@ -19,6 +19,7 @@
 13. [本轮共享修复的Windows最小重验清单](PULSARA_WINDOWS_SHARED_FIX_MINIMAL_REVALIDATION.zh.md)：同步/新payload、98项WSL定向测试、10项真实PE集成、Windows宿主与最终包context/GUI核验；不重做整个G0，不替代发布矩阵。
 14. **[0ea98e63 / alpha.10 Windows新基线](research/2026-10-25/windows-shared-recheck/root/report.zh.md)**：R0–R5最小重验全部通过；新payload/实际安装来源、98项源码定向、10项真实PE、Windows宿主/startup、8次真实context调用、升级保数据及GUI/正常Quit/冷重开均有新证据。后续Phase B故障资格继续，用户无备用Windows环境，“WSL未安装／需重启”真实验收延期，不删除日常Ubuntu。
 15. **[Phase B后半段本机验收收口](research/2026-10-25/phase-b-final/root/report.zh.md)**：alpha.10补齐正式PG五项失联、interop取消与未知边界、installed main活动Quit/宿主强退、setup/TLS/ENOSPC处理、真实活动任务睡眠与Explorer刷新。所选本机矩阵通过；B1–B4核心实现已落地，B5仍未激活。用户出差仅内屏，混合DPI往返延期；未装WSL/需重启、原生Ubuntu及完整发布集合依原矩阵单列，不能把延期算通过。
+16. [全平台统一开源字体](PULSARA_CROSS_PLATFORM_TYPOGRAPHY_IMPLEMENTATION_SPEC.zh.md)：所有平台统一采用随包开源字体；alpha.11包含字体/许可和同一加载链。[字体与样张入口](typography/README.zh.md)，新Windows/Linux包的实际渲染按后续重建验收，不沿用alpha.10的旧制品资格。
 
 当前状态：**2026-10-25本机Windows WSL2所选矩阵的G0-W机制可行性验收通过；B1–B4核心生产接入已落地，alpha.10本轮所选本机验收已收口；Windows支持/B5尚未激活。** 原生Ubuntu x64/arm64与GUI按用户要求延期，不作为本轮Windows G0验收的前置，也未被WSL结果替代。已执行与延期的真实环境、硬件和发布资格分别见第15项及spec第27节；下面历史阶段的“未实施”描述保留为当时状态。
 

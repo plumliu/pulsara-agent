@@ -1,3 +1,5 @@
+@import '../../../desktop/assets/fonts.css';
+
 :root {
   --ink: #17191f;
   --ink-soft: #32343d;
@@ -44,10 +46,14 @@
   --type-display-brand: 32px;
   --type-display-page: 34px;
   --type-display-metric: 36px;
-  --sans: Inter, "SF Pro Text", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --sans: "Pulsara UI", "Pulsara UI CJK", sans-serif;
+  --serif: "Pulsara Body", "Pulsara Body CJK", serif;
+  --mono: "Pulsara Mono", "Pulsara UI CJK", monospace;
 }
+
+/* KaTeX retains its own mathematical faces; only its CJK extension needs the
+   same explicit document font as ordinary Chinese conversation text. */
+.katex .cjk_fallback { font-family: "Pulsara Body CJK", serif; }
 
 .person-avatar { display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; overflow: hidden; border-radius: 9px; background: var(--paper-deep); color: var(--blue); }
 .person-avatar > img { display: block; width: 100%; height: 100%; object-fit: cover; }

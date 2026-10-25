@@ -1,0 +1,25 @@
+{
+  "archive": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/output/macos-font-lock-20261026/root/font-app.asar",
+  "fontFiles": [
+    "gelasio-roman.woff2",
+    "inter-italic.woff2",
+    "inter-roman.woff2",
+    "jetbrains-mono-italic.woff2",
+    "jetbrains-mono-roman.woff2",
+    "noto-sans-sc.woff2",
+    "noto-serif-sc.woff2",
+    "source-serif-italic.woff2",
+    "source-serif-roman.woff2"
+  ],
+  "notices": [
+    "SOURCES.md",
+    "gelasio-OFL.txt",
+    "inter-OFL.txt",
+    "jetbrainsmono-OFL.txt",
+    "notosanssc-OFL.txt",
+    "notoserifsc-OFL.txt",
+    "sourceserif4-OFL.txt"
+  ],
+  "bytesEqual": true,
+  "scope": "font/startup asar fixture using Electron asar SDK; no full application installer claim"
+}

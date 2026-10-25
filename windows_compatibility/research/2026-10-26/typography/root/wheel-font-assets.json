@@ -1,0 +1,24 @@
+{
+  "wheel": "pulsara_agent-0.1.0a11-py3-none-macosx_11_0_arm64.whl",
+  "fontFiles": [
+    "gelasio-roman.woff2",
+    "inter-italic.woff2",
+    "inter-roman.woff2",
+    "jetbrains-mono-italic.woff2",
+    "jetbrains-mono-roman.woff2",
+    "noto-sans-sc.woff2",
+    "noto-serif-sc.woff2",
+    "source-serif-italic.woff2",
+    "source-serif-roman.woff2"
+  ],
+  "notices": [
+    "SOURCES.md",
+    "gelasio-OFL.txt",
+    "inter-OFL.txt",
+    "jetbrainsmono-OFL.txt",
+    "notosanssc-OFL.txt",
+    "notoserifsc-OFL.txt",
+    "sourceserif4-OFL.txt"
+  ],
+  "completeBytesMatch": true
+}

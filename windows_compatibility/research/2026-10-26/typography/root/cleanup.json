@@ -1,0 +1,10 @@
+{
+  "ownElectronFontProbes": [],
+  "dailyApplicationProcessesAlive": {
+    "20252": true,
+    "20270": true,
+    "20275": true
+  },
+  "fontHttpServer": "aclose completed in original http-assets probe",
+  "desktopTemporaryProfiles": "removed; desktop/profile-cleanup.json"
+}
