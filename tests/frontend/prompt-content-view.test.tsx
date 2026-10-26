@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -41,6 +41,51 @@ afterEach(() => {
 });
 
 describe('PromptContentView', () => {
+  it('animates queue expansion and reverses from the current height when collapsed mid-animation', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(40);
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(120);
+    const view = render(<PromptContentView content={{ parts: [{ type: 'text', text: '长文本' }] }} variant="queue" onReadImage={vi.fn()} />);
+    const content = view.container.querySelector('.queued-prompt-content') as HTMLElement;
+    let animatedHeight: number | undefined;
+    content.getBoundingClientRect = () => new DOMRect(0, 0, 400,
+      animatedHeight ?? (content.classList.contains('is-expanded') ? 120 : 40));
+    const cancel = vi.fn(() => { animatedHeight = undefined; });
+    const animate = vi.fn<(frames: Keyframe[], options: KeyframeAnimationOptions) => Animation>(() => ({ cancel }) as unknown as Animation);
+    content.animate = animate;
+    await userEvent.click(screen.getByRole('button', { name: '展开' }));
+    expect(animate.mock.calls[0]?.[0]).toEqual([
+      { height: '40px', overflow: 'hidden' }, { height: '120px', overflow: 'hidden' },
+    ]);
+    animatedHeight = 80;
+    await userEvent.click(screen.getByRole('button', { name: '收起' }));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(animate.mock.calls[1]?.[0]).toEqual([
+      { height: '80px', overflow: 'hidden' }, { height: '40px', overflow: 'hidden' },
+    ]);
+  });
+
+  it('offers queue expansion only on actual overflow and remeasures after width changes', async () => {
+    let overflowing = false;
+    let resize!: () => void;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {} disconnect() {}
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(40);
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(() => overflowing ? 80 : 40);
+    const content = { parts: [{ type: 'text' as const, text: '随容器宽度换行的排队消息' }] };
+    render(<PromptContentView content={content} variant="queue" onReadImage={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: '展开' })).toBeNull();
+    overflowing = true;
+    act(() => resize());
+    await userEvent.click(screen.getByRole('button', { name: '展开' }));
+    expect(screen.getByRole('button', { name: '收起' }).getAttribute('aria-expanded')).toBe('true');
+    overflowing = false;
+    await userEvent.click(screen.getByRole('button', { name: '收起' }));
+    expect(screen.queryByRole('button', { name: '展开' })).toBeNull();
+    expect(screen.getByText('随容器宽度换行的排队消息')).toBeTruthy();
+  });
+
   it('keeps sent annotations outside the bubble and opens frozen details without reading their source', async () => {
     const read = vi.fn();
     const quote = '<script>quoted text stays inert</script>\n完整引用';

@@ -2,6 +2,23 @@
 
 macOS、Windows Electron + WSL2 与 Linux 使用同一组可再分发开源字体。本文只描述资源与排版边界；字体重建来源及完整许可证位于 `desktop/assets/fonts/licenses/`。
 
+## 2026-10-26 用户确认的范围
+
+仅会话页的模型回复正文（主会话、任务会话、继承会话）改用英文 Inter + 中文 MiSans，
+固定 16px、400、0 字间距、1.70 行高；`base.css` 定义共用正文参数，
+`workbench.css` 通过 `.conversation-transcript` 内消息正文选择器使用。
+用户输入框、用户消息与 steer 恢复原字体和各自字号，额外字间距为 0。已发送用户消息及 steer 的正文使用 500 字重；输入框维持原字重。其他所有页面、品牌、发言人名称、Markdown 标题、过程信息保持原字体。共用 `.assistant-markdown` 不设置消息专用字体、字重或字距；思考气泡沿原宋体，工具名称和终端输出沿原等宽字体，新阅读参数仅由模型回复正文作用域施加。
+Noto Sans SC、Noto Serif SC、Source Serif 4 因仍被这些区域使用，恢复随包保留。
+该范围取代之前全局替换和删除旧字体的决定。
+
+MiSans 以独立 `Pulsara Conversation CJK` family 注册，不能替换 `Pulsara UI CJK`。
+官方原始 WOFF2 由 `desktop/scripts/prepare_fonts.py` 复制，不转换、不删减或修改字形；
+CSS 字重映射沿用画廊（Regular=400）。完整 MiSans 许可随包，设置页注明使用并提供许可链接。
+MiSans 自身许可不属于 OFL；其余原字体许可与资源边界仍遵循下文。
+正文中的加粗保留语义，字重固定为 600（半粗），避免默认 700 过重；不影响标题及嵌入控件。代码/公式不继承新增字间距；标题显式使用原 `--serif`。
+会话消息内 Markdown 标题保留原宋体，使用 600 半粗、1.45 行高，H1–H6 为 24/21/19/18/17/16px；上方留白 26px，下方 10px，首个标题不加顶部留白。此调整仅用于消息正文中的标题，不影响其他页面或发言人名称。
+本次不运行额外浏览器视觉自动化；完成必要构建与安装后由用户实测视觉效果。
+
 ## 字体与资源所有权
 
 | 用途 | 统一字体 / CSS family |

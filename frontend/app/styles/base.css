@@ -48,6 +48,12 @@
   --type-display-metric: 36px;
   --sans: "Pulsara UI", "Pulsara UI CJK", sans-serif;
   --serif: "Pulsara Body", "Pulsara Body CJK", serif;
+  --conversation-font-family: "Pulsara UI", "Pulsara Conversation CJK", sans-serif;
+  /* One reading contract for macOS, Linux and Windows Electron + WSL. */
+  --conversation-font-size: 16px;
+  --conversation-font-weight: 400;
+  --conversation-letter-spacing: 0;
+  --conversation-line-height: 1.7;
   --mono: "Pulsara Mono", "Pulsara UI CJK", monospace;
 }
 

@@ -1,6 +1,6 @@
 ---
 name: pulsara-plugin-installer
-description: Install or replace native/Claude/Codex/Cursor Plugins, configure their components for activation, and diagnose imports or Hook behavior. Use also for authoring local Hook definitions; known-target queries, toggles, removal and trust actions use the capability tools directly.
+description: Install, customize or replace native/Claude/Codex/Cursor Plugins, configure their components, and diagnose imports or Hooks. Use also for authoring local Hooks; known-target queries, toggles, removal and trust actions use the capability tools directly.
 ---
 
 # Pulsara Plugin Installer
@@ -18,7 +18,7 @@ Use the actual format: `native`, `claude`, `codex` or `cursor`. The official imp
 owns conversion to Agent Plugins 1.0 and native validation. Read the selected
 manifest to identify its format/components, preserve licenses and do not execute
 downloaded code. Never union neighboring manifests, audit every script as an
-installation prerequisite, or rewrite a supported distribution manually.
+installation prerequisite, or manually convert a supported distribution.
 Unsupported host features are reported and not activated; supported components
 must pass validation. Installation does not promise the original host behavior.
 
@@ -45,6 +45,17 @@ Do not assert acceptance or treat missing connection inputs as failed installati
 Plugin enablement and Hook trust are separate; a Hook source may also be disabled.
 Individual Skill/MCP declarations are managed through their Plugin owner.
 
+## Customize an installed Plugin
+
+Inspect the exact Plugin target and edit its source directory with file tools or
+terminal. If the original source is unavailable, make a writable source copy of
+`current.package_root` and use `source_format:"native"`. Keep the manifest name
+and installation scope to replace the same instance. Modify the requested Skills,
+scripts or other components there, then use `INSTALL_PLUGIN` with `replace:true`
+and follow the enablement flow above. The importer owns conversion and packaging;
+installed package files remain read-only. Editing the source alone does not update
+the installed instance.
+
 ## Verify or diagnose
 
 Capability-page actions may produce a brief Runtime result notice. Use its
@@ -62,7 +73,6 @@ install normally; INSTALL performs full validation. The two steps are not
 atomic. If instance identity is unavailable, report that limit rather than editing
 managed state or guessing credential ownership. Diagnosis alone does not
 authorize removal or reinstallation.
-
 
 For this package's capabilities, copy its target into `list_capabilities.parent`;
 Plugin is a source, not a list kind. Complete package inventory stays in the GUI.
@@ -89,7 +99,7 @@ Post-mutation enablement does not prove the prior state or another actor's actio
 
 For user-requested **local** Hook authoring, use the resolved `config_path` with
 file tools. Use `manage_capability` for user-requested trust or enablement; editing
-definitions alone does not authorize activation. Package Hook definitions remain
+definitions alone does not authorize activation. Installed package Hook definitions remain
 immutable. Read `references/hook-source-management.md` for authoring and
 source-control examples; it is sufficient for ordinary local Hook work.
 
@@ -99,6 +109,5 @@ Read other references only for the corresponding issue:
 - `references/codex-compatible.md`: Codex-specific incompatibilities.
 - `references/pulsara-hook-extension.md`: detailed Hook conversion, inputs and control semantics.
 
-Use terminal/file tools to prepare sources and the typed tool to install,
-configure or authorize them. Do not bypass managed owners or Hook review with
-private installers, direct state edits or terminal `--yes`.
+Do not bypass managed owners or Hook review with private installers, direct state
+edits or terminal `--yes`.

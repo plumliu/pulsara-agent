@@ -146,3 +146,16 @@ it('restores the bottom process control without confusing it with the top contro
   restoreHistoryAnchor(root,anchor);
   expect(root.scrollTop).toBe(80);
 });
+
+it('adopts the nearest reachable anchor after clamping instead of repaying old compensation later', () => {
+  const root=document.createElement('div');document.body.append(root);
+  root.innerHTML='<div data-source-entry="clamped"><article>正文</article></div>';
+  let top=500,limit=500,contentTop=700;
+  Object.defineProperty(root,'scrollTop',{get:()=>top,set:value=>{top=Math.max(0,Math.min(limit,value));}});
+  vi.spyOn(root,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,400));
+  vi.spyOn(root.querySelector('article')!,'getBoundingClientRect').mockImplementation(()=>new DOMRect(0,contentTop-top,600,40));
+  const anchor=captureHistoryAnchor(root)!;
+  contentTop=900;restoreHistoryAnchor(root,anchor);
+  expect(top).toBe(500);expect(anchor.top).toBe(400);
+  limit=1000;restoreHistoryAnchor(root,anchor);expect(top).toBe(500);
+});

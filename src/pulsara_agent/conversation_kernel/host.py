@@ -1594,6 +1594,9 @@ class KernelHostSession:
         self._ephemeral.invalidate()
         return result
 
+    def invalidate_input_suggestion(self) -> None:
+        self._ephemeral.invalidate(preserve_running=True)
+
     def read_ephemeral_results(self) -> dict[str, object]:
         return self._ephemeral.read()
 

@@ -255,6 +255,7 @@ export interface LocalSettingsSummary {
   state?: 'ready' | 'unavailable';
   pulsara_home?: string;
   memory_retrieval: MemoryRetrievalSettings;
+  input_suggestions_enabled: boolean;
 }
 
 export interface LocalSettingsReadModel {
@@ -597,6 +598,7 @@ export interface RuntimeAdapter {
   modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
   discoverModels(input: ModelDiscoveryInput, signal?: AbortSignal): Promise<{ model_ids: string[] }>;
   localSettings(): Promise<LocalSettingsReadModel>;
+  setInputSuggestionsEnabled(enabled: boolean): Promise<{ enabled: boolean }>;
   addModelConfiguration(input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
   modelConfiguration(connectionId: string): Promise<ModelConfigurationDetail>;
   updateModelConfiguration(connectionId: string, input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
@@ -1559,6 +1561,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   async localSettings(): Promise<LocalSettingsReadModel> {
     return apiRequest<LocalSettingsReadModel>('/api/local-settings');
+  }
+
+  async setInputSuggestionsEnabled(enabled: boolean): Promise<{ enabled: boolean }> {
+    return apiRequest('/api/local-settings/input-suggestions', {
+      method: 'PUT', body: JSON.stringify({ enabled }),
+    });
   }
 
   async discoverModels(input: ModelDiscoveryInput, signal?: AbortSignal) {

@@ -952,6 +952,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
 
   const { suggestion, observeTitle } = useSessionEphemeralResults({
     cache: suggestionCache, adapter, connection, projection,
+    suggestionsEnabled: bootstrap?.local_settings.input_suggestions_enabled ?? true,
     binding: sessionList.find(session => session.id === activeSessionId)?.modelCallBinding,
     visible: activeView === 'workbench' && connection?.sessionId === activeSessionId,
     refreshSessions: readSessionList,

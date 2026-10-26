@@ -7,7 +7,7 @@ Official destinations are:
 ${PULSARA_HOME}/skills/<skill-name>/SKILL.md
 ```
 
-The production Runtime discovers these roots together with workspace and user `.agents/skills` roots. Direct user copy, edit, rename, and deletion remain valid filesystem paths; no receipt or marker makes a Skill authoritative.
+The Runtime discovers these roots together with workspace and user `.agents/skills` roots. Loose Skills are ordinary files, with no receipt or ownership marker. Models may edit their installed contents in place under ordinary file permissions; see `pulsara-skill-creator`. Direct user copy, edit, rename and deletion remain supported.
 
 ## Skill Folder Rules
 
@@ -24,7 +24,7 @@ The official installer validates and copies one frozen source observation into a
 After installation, copy the returned `identity.skill_path` into
 `inspect_capability.target={kind:"SKILL",skill_path:<returned path>}` to inspect the copy, its selection,
 diagnostics and management eligibility. Read its instructions and resources
-through the ordinary Skill/read-file route. First-party changes notify affected
+through the ordinary Skill/read-file route. Management changes notify affected
 live sessions at their existing safe points; inspect adoption separately from
 the completed filesystem mutation. Current provider roots remain unchanged.
 
@@ -37,6 +37,6 @@ Installing one loose directory does not execute neighboring host plugins.
 
 Standalone `pulsara skills` commands are an explicitly out-of-band administration
 path; inspect their actual help. They do not supply live-Host review/adoption.
-Ordinary conversation management uses `manage_capability`, not CLI, raw copies
-or private state edits. User filesystem edits remain supported; adopt external
-changes through the GUI refresh or an allowed `reload_capabilities` call.
+Conversation installation, removal and enablement use `manage_capability`.
+Content edits are observed by subsequent Skill snapshots without reinstalling or
+routinely reloading; already prepared snapshots and provider prefixes stay unchanged.

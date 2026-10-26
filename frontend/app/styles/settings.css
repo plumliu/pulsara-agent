@@ -18,6 +18,9 @@
 .settings-group { overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: color-mix(in srgb,var(--paper-raised) 90%,transparent); box-shadow: var(--shadow-sm); }
 .settings-group > header { display: flex; align-items: center; gap: 10px; padding: 15px; border-bottom: 1px solid var(--line); }
 .settings-group > header > svg { display: grid; place-items: center; width: 32px; height: 32px; padding: 8px; border-radius: 9px; background: var(--blue-soft); color: var(--blue); }
+.input-suggestions-settings > header { border-bottom: 0; }
+.input-suggestions-settings > header > div { flex: 1; min-width: 0; }
+.input-suggestions-settings .settings-switch { flex-shrink: 0; margin-left: auto; }
 .settings-group h2 { margin: 0; font-family: var(--serif); font-size: var(--type-title-large); }
 .settings-group header p { margin: 3px 0 0; color: var(--faint); font-size: var(--type-caption); }
 .setting-row { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 9px; align-items: center; min-height: 61px; padding: 10px 15px; border-bottom: 1px solid var(--line); }
@@ -297,3 +300,5 @@
 .model-id-options [role="option"]:hover, .model-id-options .is-active { color: var(--blue); background: var(--blue-soft); }
 .model-id-empty, .model-id-field > small { color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
 .model-id-empty { padding: 10px; }
+
+.settings-font-notice { display: block; margin-top: 9px; color: var(--muted); font-size: var(--type-micro); line-height: 1.6; text-underline-offset: 2px; }

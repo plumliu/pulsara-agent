@@ -20,7 +20,7 @@ function modelConfiguration(index: number): ModelConfigurationSummary {
 
 function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelConfigurationDetail, catalog: ModelCatalogReadModel = { status: 'ready', routes: [] }) {
   let settings: LocalSettingsReadModel = {
-    local_settings: { pulsara_home: '/custom/pulsara-home', memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
+    local_settings: { input_suggestions_enabled: true, pulsara_home: '/custom/pulsara-home', memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
     database_state: 'database_reset_required', model_configurations: configurations,
   };
   const reset = vi.fn(async () => {
@@ -51,7 +51,12 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
   });
   const probeModel = vi.fn(async () => ({ status: 'ready' as const }));
   const discoverModels = vi.fn(async () => ({ model_ids: ['alpha-model', 'beta-model', 'org/alpha-large'] }));
+  const setInputSuggestions = vi.fn(async (enabled: boolean) => {
+    settings = { ...settings, local_settings: { ...settings.local_settings, input_suggestions_enabled: enabled } };
+    return { enabled };
+  });
   const adapter = {
+    setInputSuggestionsEnabled: setInputSuggestions,
     localSettings: async () => settings,
     modelCatalog: async () => catalog,
     resetPostgres: reset,
@@ -64,7 +69,7 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     discoverModels,
   } as unknown as RuntimeAdapter;
   render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={notify} sessionRevision={0} onSessionsChanged={refresh} onDeleteSession={() => {}} />);
-  return { reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel, discoverModels };
+  return { setInputSuggestions, reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel, discoverModels };
 }
 
 function customDetail(inputModalities: string[] | null = null): ModelConfigurationDetail {
@@ -422,4 +427,24 @@ it('queries an edited connection without reading the saved key into the renderer
   fireEvent.click(within(dialog).getByRole('button', { name: '获取模型' }));
   await waitFor(() => expect(discoverModels).toHaveBeenCalledWith(expect.objectContaining({ api_key: null, connection_id: 'connection-1' }), expect.any(AbortSignal)));
   expect(within(dialog).getByLabelText('API key')).toHaveProperty('value', '');
+});
+
+
+it('saves the user-level input suggestion toggle and retains the saved value on failure', async () => {
+  const { setInputSuggestions, notify, refresh } = setup();
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  const toggle = await screen.findByRole('switch', { name: '输入框建议' });
+  await waitFor(() => expect(toggle).toHaveProperty('disabled', false));
+  expect(toggle.getAttribute('aria-checked')).toBe('true');
+  expect(toggle.parentElement?.tagName).toBe('HEADER');
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+  expect(setInputSuggestions).toHaveBeenCalledExactlyOnceWith(false);
+  expect(refresh).toHaveBeenCalledTimes(1);
+  setInputSuggestions.mockRejectedValueOnce(new Error('保存失败'));
+  fireEvent.click(toggle);
+  await waitFor(() => expect(notify).toHaveBeenCalledWith('输入框建议设置未能完成', '保存失败', 'warning'));
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
 });

@@ -74,3 +74,5 @@ Outside the conversation page and its session-scoped controls, pages must use us
 - Prefer the repository-root `.venv/` managed by `uv` for Python commands and tests. Use system Python only when no usable repository environment exists.
 - Use focused tests while iterating and proportionate final verification. Run required real-provider or long-horizon dogfood when the active specification makes it part of activation.
 - Never weaken assertions, add skips/xfails, or rewrite evidence merely to obtain a green result.
+
+- For visual-only UI changes, prioritize the user’s visual review. Complete the requested edit and necessary build/install, then stop; do not run Playwright or broaden verification unless the user requests it or a concrete failure requires it.

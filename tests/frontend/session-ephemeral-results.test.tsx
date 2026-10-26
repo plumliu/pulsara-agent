@@ -258,3 +258,22 @@ describe('session ephemeral results', () => {
     expect(fetch.mock.calls[0][1]?.signal).toBe(abort.signal);
   });
 });
+
+
+it('clears all cached suggestions on disable and rejects an outstanding read after re-enable', async () => {
+  const { props, cache, read } = setup();
+  const other = cache.observe('session-2', projection(), binding);
+  cache.accept('session-2', other, result('session-2'));
+  const hook = renderHook(useSessionEphemeralResults, { initialProps: { ...props, suggestionsEnabled: true } });
+  await act(async () => {});
+  expect(hook.result.current.suggestion).toBe('如何验证这个假设？');
+  const old = deferred<SessionEphemeralResults>();
+  read.mockReturnValue(old.promise);
+  hook.rerender({ ...props, connection: { ...props.connection }, suggestionsEnabled: true });
+  hook.rerender({ ...props, suggestionsEnabled: false });
+  expect(hook.result.current.suggestion).toBeUndefined();
+  expect(cache.text('session-2', projection(), binding)).toBeUndefined();
+  hook.rerender({ ...props, suggestionsEnabled: true });
+  await act(async () => old.resolve(result()));
+  expect(hook.result.current.suggestion).toBeUndefined();
+});

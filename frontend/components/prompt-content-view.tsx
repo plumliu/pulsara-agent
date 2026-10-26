@@ -9,6 +9,7 @@ import { SkillReferenceChip } from './skill-reference-chip';
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -51,6 +52,37 @@ export function PromptContentView({
   );
   const annotations = content.parts.filter((part): part is PromptAnnotationPart => part.type === 'annotation');
   const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const queueContentRef = useRef<HTMLDivElement>(null);
+  const disclosureHeight = useRef<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    const node = bodyRef.current;
+    if (variant !== 'queue' || !node || expanded) return;
+    // Follow AnnotationQuote's actual-layout measurement rather than text
+    // length: line wrapping also depends on width, fonts, and inline chips.
+    const measure = () => setOverflowing(node.scrollHeight > node.clientHeight);
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    observer?.observe(node);
+    let current = true;
+    void document.fonts?.ready.then(() => { if (current) measure(); });
+    return () => { current = false; observer?.disconnect(); };
+  }, [content, variant, expanded]);
+  useLayoutEffect(() => {
+    const node = queueContentRef.current;
+    const previousHeight = disclosureHeight.current;
+    disclosureHeight.current = undefined;
+    if (!node || previousHeight === undefined || !node.animate
+      || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    const height = node.getBoundingClientRect().height;
+    if (height === previousHeight) return;
+    const animation = node.animate([
+      { height: `${previousHeight}px`, overflow: 'hidden' },
+      { height: `${height}px`, overflow: 'hidden' },
+    ], { duration: 240, easing: 'cubic-bezier(.2,.7,.2,1)' });
+    return () => animation.cancel();
+  }, [expanded]);
   const [lightboxIndex, setLightboxIndex] = useState<number>();
   const [states, setStates] = useState<Record<number, LoadState>>({});
   const statesRef = useRef(states);
@@ -112,7 +144,7 @@ export function PromptContentView({
   }, [load]);
 
   const body = variant === 'message' && content.parts.every(part => part.type === 'annotation' || (part.type === 'text' && !part.text)) ? null : (
-    <div className="prompt-content-body" onCopy={event => {
+    <div ref={bodyRef} className="prompt-content-body" onCopy={event => {
       const selection = window.getSelection();
       if (!selection?.rangeCount || !event.currentTarget.contains(selection.anchorNode)
         || !event.currentTarget.contains(selection.focusNode)) return;
@@ -146,14 +178,18 @@ export function PromptContentView({
           ))}
         </div>
       ) : variant === 'queue' ? (
-        <div className={`queued-prompt-content${expanded ? ' is-expanded' : ''}`}>
+        <div ref={queueContentRef} className={`queued-prompt-content${expanded ? ' is-expanded' : ''}`}>
           {body}
-          <div className="queued-prompt-content__meta">
+          {(images.length > 0 || overflowing || expanded) && <div className="queued-prompt-content__meta">
             {images.length > 0 && <span>{promptImageCount(content)} 张图片</span>}
-            <button type="button" onClick={() => setExpanded((value) => !value)}>
+            {(overflowing || expanded) && <button type="button" aria-expanded={expanded} onClick={() => {
+              // Read the in-flight height too, so rapid reversals stay smooth.
+              disclosureHeight.current = queueContentRef.current?.getBoundingClientRect().height;
+              setExpanded(value => !value);
+            }}>
               {expanded ? '收起' : '展开'}
-            </button>
-          </div>
+            </button>}
+          </div>}
         </div>
       ) : renderMessageBody ? renderMessageBody(body) : body}
       <Lightbox

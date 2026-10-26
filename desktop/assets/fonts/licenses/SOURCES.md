@@ -1,6 +1,6 @@
-# Bundled open fonts
+# Bundled fonts
 
-All fonts are from Google Fonts at this immutable revision:
+The OFL fonts are from Google Fonts at this immutable revision:
 
 https://github.com/google/fonts/tree/e7db6ca603fd4862010383ff17ffd6cc4ffac1c0
 
@@ -23,3 +23,24 @@ To rebuild from the repository root:
 - `jetbrains-mono-roman.woff2` — JetBrains Mono, Version 2.211; [source](https://raw.githubusercontent.com/google/fonts/e7db6ca603fd4862010383ff17ffd6cc4ffac1c0/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf).
 - `jetbrains-mono-italic.woff2` — JetBrains Mono, Version 2.211; [source](https://raw.githubusercontent.com/google/fonts/e7db6ca603fd4862010383ff17ffd6cc4ffac1c0/ofl/jetbrainsmono/JetBrainsMono-Italic%5Bwght%5D.ttf).
 - `gelasio-roman.woff2` — Gelasio, Version 1.008; [source](https://raw.githubusercontent.com/google/fonts/e7db6ca603fd4862010383ff17ffd6cc4ffac1c0/ofl/gelasio/Gelasio%5Bwght%5D.ttf).
+
+## MiSans
+
+Pulsara uses MiSans fonts. Copyright belongs to Xiaomi Inc.; the complete
+MiSans Font Intellectual Property License Agreement is in `MiSans-license.pdf`.
+The official WOFF2 files are copied unchanged, without conversion or subsetting,
+from https://hyperos.mi.com/font-download/MiSans.zip .
+Official license and download page: https://hyperos.mi.com/font/en/download/ .
+MiSans is distributed only as part of Pulsara, under its own license, not OFL.
+
+CSS weights match the approved gallery (Regular=400); original binary weight metadata is preserved.
+- `misans-thin.woff2` — CSS weight 100.
+- `misans-extralight.woff2` — CSS weight 200.
+- `misans-light.woff2` — CSS weight 300.
+- `misans-normal.woff2` — CSS weight 350.
+- `misans-regular.woff2` — CSS weight 400.
+- `misans-medium.woff2` — CSS weight 500.
+- `misans-demibold.woff2` — CSS weight 550.
+- `misans-semibold.woff2` — CSS weight 600.
+- `misans-bold.woff2` — CSS weight 700.
+- `misans-heavy.woff2` — CSS weight 900.

@@ -27,6 +27,9 @@ TITLE_PROMPT = (
     "explanation, or quotation marks. Do not answer or carry out the user's request."
 )
 SUGGESTION_PROMPT = (
+    "Imagine you are the user writing their next message to the assistant, not "
+    "the assistant replying to or interviewing the user. Use the user's voice and "
+    "point of view: I/my refer to the user; you refers to the assistant. "
     "Review the whole conversation for repeated constraints and unresolved tensions. "
     "Find the unasked question about how those constraints fit together or what "
     "should guide a tradeoff. Respect explicit decisions; do not invent problems, "
@@ -34,7 +37,20 @@ SUGGESTION_PROMPT = (
     "is already resolved or lacks such evidence, return empty text. Otherwise, write "
     "one concise question as the user asking the assistant, in the user's language. "
     "Output only that question on one line, without explanation or quotes. "
-    "Do not continue the task or call tools."
+    "Do not offer help, ask the user for their preferences, or begin with phrases "
+    "like 'Would you like me to'. Do not continue the task or call tools.\n\n"
+    "Examples of voice and format only; do not copy their topics:\n"
+    "Conversation: The user wants an agent to work independently, but also wants "
+    "to understand important tradeoffs without reading long logs.\n"
+    "Suggested user message: 我该怎么划定你可以自行决定、以及需要先问我的边界？\n\n"
+    "Conversation: The user wants to learn a subject thoroughly while having "
+    "only twenty minutes a day; the assistant has outlined several study methods.\n"
+    "Suggested user message: 我每天只有二十分钟，该怎么取舍学习进度和理解深度？\n\n"
+    "Now write the user's next question for the actual conversation above. "
+    "Never answer the user's previous question or repeat the assistant's answer. "
+    "If the assistant has already answered the question and there is no grounded "
+    "unresolved issue, return zero characters, not a placeholder such as 'none', "
+    "'（无）', or an explanation. Otherwise output only the user's question."
 )
 
 
@@ -196,13 +212,23 @@ class SessionEphemeralProducts:
         finally:
             self._title_state = "adopted" if adopted else "absent"
 
+    def _suggestions_enabled(self) -> bool:
+        from pulsara_agent.settings import LocalSettingsUnavailable
+
+        try:
+            return self._host._model_runtime.settings.read().input_suggestions_enabled
+        except (LocalSettingsUnavailable, OSError, ValueError):
+            # An unreadable preference must not fail a completed user turn.
+            return False
+
     def completed(self, origin_turn_id: str, result: KernelRunResult | None) -> None:
         slot = self._suggestion
         if self._closed or slot is None or slot.origin_turn_id != origin_turn_id:
             return
         source = None if result is None else getattr(result, "final_source", None)
         if (
-            result is None
+            not self._suggestions_enabled()
+            or result is None
             or result.pending_plan_interaction_id
             or source is None
             or slot.admission is None
@@ -262,6 +288,7 @@ class SessionEphemeralProducts:
         host = self._host
         if (
             self._closed
+            or not self._suggestions_enabled()
             or self._suggestion is not slot
             or host._closing
             or host._active_task is not None
@@ -281,6 +308,7 @@ class SessionEphemeralProducts:
         cohort = host._input_continuity.current_cohort(scope)
         return (
             not pending
+            and self._suggestions_enabled()
             and not self._closed
             and self._suggestion is slot
             and host._active_task is None
@@ -292,7 +320,10 @@ class SessionEphemeralProducts:
         )
 
     def read(self) -> dict[str, object]:
-        slot = self._suggestion
+        enabled = self._suggestions_enabled()
+        if not enabled:
+            self.invalidate(preserve_running=True)
+        slot = self._suggestion if enabled else None
         return {
             "session_id": self._host.session_id,
             "host_session_id": self._host.host_session_id,

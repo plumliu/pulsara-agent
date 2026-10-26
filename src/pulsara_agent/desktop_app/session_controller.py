@@ -2549,6 +2549,12 @@ class LocalSessionController:
                 return {"state": "updating", "connection_id": None}
         return value
 
+    async def invalidate_input_suggestions(self) -> None:
+        # User-level preference: retire suggestions in every existing Host.
+        async with self._lock:
+            for handle in self._by_session.values():
+                handle.session.invalidate_input_suggestion()
+
     async def read_ephemeral_results(self, session_id: str) -> dict[str, object]:
         # Permission checked against user-level data, without activating a Host.
         summary = await self.core.read_resumable_session(

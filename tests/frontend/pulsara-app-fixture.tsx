@@ -70,7 +70,7 @@ const bootstrap: RuntimeBootstrap = {
   runtime: { status: 'ready', origin: 'http://localhost', database_state: 'ready' },
   database_state: 'ready',
   model_catalog_loading: false,
-  local_settings: { pulsara_home: '/Users/test/custom-pulsara-home',
+  local_settings: { input_suggestions_enabled: true, pulsara_home: '/Users/test/custom-pulsara-home',
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
     memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
@@ -589,8 +589,15 @@ class FakeAdapter implements RuntimeAdapter {
     return created;
   });
 
+  inputSuggestionsEnabled = true;
+
+  async setInputSuggestionsEnabled(enabled: boolean) {
+    this.inputSuggestionsEnabled = enabled;
+    return { enabled };
+  }
+
   async bootstrap() {
-    return { ...bootstrap, model_configurations: this.modelConfigurations };
+    return { ...bootstrap, local_settings: { ...bootstrap.local_settings, input_suggestions_enabled: this.inputSuggestionsEnabled }, model_configurations: this.modelConfigurations };
   }
 
   async modelCatalog(): Promise<ModelCatalogReadModel> {
@@ -626,7 +633,7 @@ class FakeAdapter implements RuntimeAdapter {
 
   async localSettings() {
     return {
-      local_settings: bootstrap.local_settings,
+      local_settings: { ...bootstrap.local_settings, input_suggestions_enabled: this.inputSuggestionsEnabled },
       model_configurations: this.modelConfigurations,
       database_state: bootstrap.database_state,
     };

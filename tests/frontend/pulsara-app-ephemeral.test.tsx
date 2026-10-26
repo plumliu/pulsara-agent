@@ -87,3 +87,26 @@ describe('PulsaraApp ephemeral integration', () => {
     expect(screen.queryByText('如何验证刚才的结论？')).toBeNull();
   });
 });
+
+
+it('turns suggestions off from model settings and does not resurrect the cached result on re-enable', async () => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = finished();
+  vi.spyOn(adapter, 'ephemeralResults').mockImplementation(async () => ready());
+  const save = vi.spyOn(adapter, 'setInputSuggestionsEnabled');
+  renderWorkbench(<PulsaraApp adapter={adapter} />);
+  await screen.findByText('如何验证刚才的结论？');
+  fireEvent.click(screen.getByRole('button', { name: '设置' }));
+  fireEvent.click(await screen.findByRole('button', { name: '模型', exact: true }));
+  const toggle = await screen.findByRole('switch', { name: '输入框建议' });
+  await waitFor(() => expect(toggle).toHaveProperty('disabled', false));
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+  expect(save).toHaveBeenCalledExactlyOnceWith(false);
+  await waitFor(() => expect(toggle).toHaveProperty('disabled', false));
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
+  fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+  await screen.findByLabelText('发送给 Pulsara');
+  expect(screen.queryByText('如何验证刚才的结论？')).toBeNull();
+});

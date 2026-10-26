@@ -2,7 +2,7 @@ import { ModelIdInput } from './model-id-input';
 import { CliSettings } from './cli-settings';
 import {
   Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, House,
-  LoaderCircle, Moon, Palette, Pencil, Plus, RefreshCw,
+  LoaderCircle, MessageSquare, Moon, Palette, Pencil, Plus, RefreshCw,
   SlidersHorizontal, Sun, Trash2, X,
 } from 'lucide-react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
@@ -193,6 +193,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [settings, setSettings] = useState<LocalSettingsReadModel | undefined>(bootstrap);
   const [catalog, setCatalog] = useState<ModelCatalogReadModel>();
   const [loading, setLoading] = useState(true);
+  const [savingSuggestions, setSavingSuggestions] = useState(false);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [error, setError] = useState<string>();
   const [adding, setAdding] = useState(false);
@@ -224,6 +225,19 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [databaseBusy, setDatabaseBusy] = useState<'check' | 'reset'>();
   const [resetTarget, setResetTarget] = useState(false);
   const [resetError, setResetError] = useState<string>();
+
+  const setInputSuggestions = async (enabled: boolean) => {
+    setSavingSuggestions(true);
+    try {
+      const result = await adapter.setInputSuggestionsEnabled(enabled);
+      setSettings(current => current ? { ...current, local_settings: {
+        ...current.local_settings, input_suggestions_enabled: result.enabled,
+      } } : current);
+      await onConfigurationChanged();
+    } catch (saveError) {
+      onNotify('输入框建议设置未能完成', saveError instanceof Error ? saveError.message : '请重试。', 'warning');
+    } finally { setSavingSuggestions(false); }
+  };
 
   const load = async () => {
     setLoading(true); setError(undefined);
@@ -508,7 +522,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
       <aside className="settings-nav">
         <div className="settings-profile"><UserAvatar /><div><strong>用户</strong><small>偏好与设置</small></div></div>
         {navItems.map(({ id, label, icon: Icon }) => <button className={section === id ? 'is-active' : ''} key={id} onClick={() => setSection(id)}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
-        <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span></div>
+        <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span><a className="settings-font-notice" href="/assets/font-licenses/MiSans-license.pdf" target="_blank" rel="noreferrer">本软件使用 MiSans 字体 · 许可</a></div>
       </aside>
       <div className="settings-content">
         {section === 'archived' && <ArchivedSessions adapter={adapter} revision={sessionRevision} onRestored={onSessionsChanged} onDelete={onDeleteSession} onDeleteAll={onDeleteArchivedSessions} deletionBusy={sessionDeletionBusy} />}
@@ -552,6 +566,14 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
               </nav>}
             </>
               : <div className="settings-empty"><Bot size={18} /><strong>还没有模型配置</strong><span>添加后，在每个会话的输入框下方显式选择要使用的连接。</span></div>}
+          </section>
+          <section className="settings-group input-suggestions-settings" aria-labelledby="input-suggestions-title">
+            <header><MessageSquare size={16} /><div><h2 id="input-suggestions-title">输入框建议</h2><p id="input-suggestions-detail">回答结束后，使用当前模型生成下一条提问建议。</p></div>
+              <button type="button" role="switch" className="settings-switch" aria-labelledby="input-suggestions-title" aria-describedby="input-suggestions-detail"
+                aria-checked={settings?.local_settings.input_suggestions_enabled ?? true}
+                disabled={loading || !settings || settings.local_settings.state === 'unavailable' || savingSuggestions || runtimeStatus !== 'online'}
+                onClick={() => void setInputSuggestions(!settings?.local_settings.input_suggestions_enabled)}><span /></button>
+            </header>
           </section>
           {adding && <ModelFormContainer editing={Boolean(editingConfiguration)} busy={savingModel || testingModel} onClose={closeModelForm}><section className="settings-group model-add-panel"><header>{editingConfiguration ? <Pencil size={16} /> : <Plus size={16} />}<div><h2>{editingConfiguration ? '修改模型配置' : '添加模型配置'}</h2><p>保存与测试相互独立；只有测试会发送一次极短模型请求。</p></div>{configurationSource === 'models_dev' && <button className="settings-header-action" disabled={catalogRefreshing} onClick={() => void refreshCatalog()}><RefreshCw size={13} />刷新目录</button>}<button className="settings-header-action" aria-label={editingConfiguration ? '关闭修改模型配置' : '关闭添加模型配置'} onClick={closeModelForm}><X size={15} /></button></header>
             {editingConfiguration ? <div className="model-edit-notice"><strong>{configurationSource === 'models_dev' ? 'Models.dev 目录' : '自定义服务'}</strong><p>修改后会保留这条配置。更改模型、地址、协议、能力或推理请求形状后，请在相关会话空闲时重新载入运行时；已有会话不会自动切换，后续请求可能因配置不匹配而停止。</p></div> : <div className="model-source-picker" role="group" aria-label="模型配置来源"><button className={configurationSource === 'models_dev' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('models_dev'); }}>Models.dev 目录</button><button className={configurationSource === 'user_declared' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('user_declared'); }}>自定义服务</button></div>}

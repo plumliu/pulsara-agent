@@ -571,7 +571,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            "Manage user-requested capability changes. Every call requires action and scope; "
+            "Manage user-requested installation, removal, enablement, connections and trust. "
+            "Edit loose Skill content with file tools or terminal; see pulsara-skill-creator. "
+            "Every call requires action and scope; "
             "use only fields listed for the selected action. Query with list_capabilities/inspect_capability; "
             "copy scope and exact IDs or skill_path, not the query target object. "
             "Do not remove or replace an existing source unless authorized by the user's request, "

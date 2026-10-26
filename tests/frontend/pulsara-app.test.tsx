@@ -3279,6 +3279,14 @@ describe('PulsaraApp', () => {
   });
 
   it('shows exact duplicate queued bodies in queue order to an observer', async () => {
+    // Expansion is offered on measured overflow. Keep the observer's existing
+    // expansion assertion meaningful when jsdom has no layout engine.
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function () {
+      return this.classList.contains('prompt-content-body') ? 40 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function () {
+      return this.classList.contains('prompt-content-body') ? 120 : 0;
+    });
     const adapter = new FakeAdapter();
     adapter.connectionRole = 'observer';
     adapter.connectionValue = {

@@ -453,6 +453,9 @@ class LocalHttpServer:
             "/api/model-configurations/{connection_id}/test", self._test_model_configuration
         )
         self._app.router.add_get("/api/local-settings", self._local_settings)
+        self._app.router.add_put(
+            "/api/local-settings/input-suggestions", self._set_input_suggestions
+        )
         self._app.router.add_post(
             "/api/local-settings/postgres/check", self._check_postgres
         )
@@ -1317,6 +1320,17 @@ class LocalHttpServer:
             )
         return web.json_response(await self._reset_postgres_data(postgres))
 
+    async def _set_input_suggestions(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise HttpPublicError(
+                "INVALID_INPUT_SUGGESTIONS", "输入框建议开关值无效。", status=400
+            )
+        updated = await self.settings.set_input_suggestions_enabled(body["enabled"])
+        if not updated.input_suggestions_enabled:
+            await self.sessions.invalidate_input_suggestions()
+        return web.json_response({"enabled": updated.input_suggestions_enabled})
+
     async def _read_memory_retrieval(self, _request):
         return web.json_response(self.settings.read().memory_retrieval.public())
 
@@ -1441,6 +1455,7 @@ class LocalHttpServer:
                 "state": settings_state,
                 "pulsara_home": str(require_pulsara_home()),
                 "memory_retrieval": settings.memory_retrieval.public(),
+                "input_suggestions_enabled": settings.input_suggestions_enabled,
             },
             "model_configurations": await self._connection_summaries(settings),
             "database_state": self._database_state(),

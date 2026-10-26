@@ -188,6 +188,13 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # Desktop plan §5: one inherited host-control pipe pump; parent EOF
         # joins the existing app close path, with no durable recovery owner.
         "src/pulsara_agent/desktop_runtime.py",
+        # Windows compatibility spec §5.2: the per-execution scope owns helper
+        # control/stderr, anchor observation, cancellation and physical join.
+        # Its relay owns descriptor binding and byte-forwarding tasks; sealing
+        # drains admitted connections. Both close with the original scope,
+        # without durable jobs, reconnect or execution replay.
+        "src/pulsara_agent/windows_interop/scope.py",
+        "src/pulsara_agent/windows_interop/relay.py",
         # Capability hard-cut: join local publication/credential cleanup before
         # settling cancellation; OAuth owns disposable login/refresh tasks only.
         # These are physical owners, not durable jobs or execution recovery.

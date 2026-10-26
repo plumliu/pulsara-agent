@@ -32,19 +32,17 @@ issues and management eligibility. Plugin components belong to their whole
 Plugin, and bundled Skills are read-only. Discovery does not imply removability;
 workspace `.agents` copies are not removal targets.
 
-## Replace an existing copy
+## Replace from another source
 
-Installation never overwrites an existing destination. For an explicitly
-requested update:
+For content edits to an installed loose Skill, use `pulsara-skill-creator` to
+edit it in place. Installation never overwrites an existing destination.
 
-1. Prepare the replacement source before removing anything.
-2. Inspect the exact old copy and its removal eligibility; reuse its scope.
-3. Call `REMOVE_LOOSE_SKILL` with its installed `skill_path`, then install the
-   replacement with `INSTALL_LOOSE_SKILL`.
-
-The user's update request authorizes this sequence; do not ask again. Replacement
-is not atomic. If installation fails after deletion, report both outcomes and
-resolve the failure without replaying a completed removal.
+When the user requests replacement from another source, prepare it first, inspect
+the old copy's removal eligibility and reuse its scope. Call `REMOVE_LOOSE_SKILL`
+with the installed `skill_path`, then `INSTALL_LOOSE_SKILL` with the replacement
+source. That request authorizes the sequence; do not ask again. It is not atomic:
+if installation fails after deletion, report both outcomes and resolve the failure
+without replaying removal.
 
 ## Verify or diagnose
 
@@ -62,7 +60,6 @@ An absent directory can use ordinary installation from an available source.
 Keep other copies and source directories distinct; reinstalling does not promise
 enablement or remove all same-name Skills.
 
-
 Read mutation status and `adoption` separately. `APPLIED` means the source change
 settled, not that every consumer adopted it or that a user form appeared.
 First-party changes notify live sessions at their existing safe points; current
@@ -70,11 +67,11 @@ provider roots stay unchanged. Inspect reported adoption failures; explicit
 `reload_capabilities` is for out-of-band changes or partial adoption, not a routine
 second step. Retry observation/adoption rather than the completed install.
 
-Read the installed Skill body only when its use or instruction verification is
-requested; installation does not require reading every supporting resource.
+Installation does not require reading every supporting resource.
 A requested toggle uses `SET_LOOSE_SKILL_ENABLED` with the same `skill_path` and
 `enabled`. Mutations retain ordinary permissions and any required user forms.
-Do not bypass these owners with CLI, raw copies or managed-state edits.
+Use these owners for installation, removal and enablement; content editing uses
+ordinary file tools.
 
 Read `references/directory-contract.md` for directory admission, source-change
 errors, copying rules or explicitly out-of-band administration.

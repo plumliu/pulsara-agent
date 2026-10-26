@@ -291,3 +291,65 @@ def test_ephemeral_get_checks_user_scope_and_never_opens_host():
             await LocalSessionController.read_ephemeral_results(controller, "session:x")
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("disable_at", ["completion", "preparation", "in_flight", "ready"])
+def test_disabled_suggestions_preserve_titles_and_reject_late_results(monkeypatch, disable_at):
+    from dataclasses import replace
+
+    async def scenario():
+        host, binding = _host()
+        settings = host._model_runtime.settings.read()
+        current = settings
+        monkeypatch.setattr(type(host._model_runtime.settings), "read", lambda self: current)
+        owner = SessionEphemeralProducts(host)
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        monkeypatch.setattr(
+            "pulsara_agent.llm.ephemeral.prepare_text_ephemeral_request",
+            lambda **kw: "title",
+        )
+        monkeypatch.setattr(
+            "pulsara_agent.conversation_kernel.direct_model.prepare_suggestion_request",
+            lambda **kw: "suggestion",
+        )
+
+        async def execute(**kw):
+            calls.append(kw["prepared"])
+            if kw["prepared"] == "title":
+                return EphemeralResult(EphemeralResultStatus.COMPLETED, "自动标题")
+            started.set()
+            if disable_at == "in_flight":
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass  # A provider which races cancellation cannot revive its result.
+            return EphemeralResult(EphemeralResultStatus.COMPLETED, "我该怎么验证？")
+
+        monkeypatch.setattr("pulsara_agent.llm.ephemeral.execute_ephemeral_request", execute)
+        owner.activate("turn:origin")
+        owner.admitted("turn:origin")
+        if disable_at == "completion":
+            current = replace(settings, input_suggestions_enabled=False)
+        owner.completed("turn:origin", _result(binding))
+        if disable_at == "preparation":
+            current = replace(settings, input_suggestions_enabled=False)
+        if disable_at == "in_flight":
+            await started.wait()
+            current = replace(settings, input_suggestions_enabled=False)
+            owner.invalidate(preserve_running=True)
+            # Even immediately re-enabling cannot adopt the cancelled request.
+            current = settings
+            release.set()
+        await _drain(owner)
+        if disable_at == "ready":
+            assert owner.read()["suggestion"]["state"] == "ready"
+            current = replace(settings, input_suggestions_enabled=False)
+        assert owner.read()["suggestion"]["state"] == "absent"
+        assert owner.read()["title"]["state"] == "adopted"
+        assert sorted(calls) == (["title"] if disable_at in {"completion", "preparation"} else ["suggestion", "title"])
+        current = settings
+        assert owner.read()["suggestion"]["state"] == "absent"
+        await owner.aclose()
+
+    asyncio.run(scenario())

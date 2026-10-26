@@ -55,6 +55,8 @@ export class SessionSuggestionCache {
     this.changed();
   }
 
+  invalidateAll() { for (const sessionId of this.slots.keys()) this.invalidate(sessionId); }
+
   forget(sessionId: string) { this.slots.delete(sessionId); this.changed(); }
 
   accept(sessionId: string, owner: Slot, value: SessionEphemeralResults): boolean {
@@ -81,16 +83,18 @@ export class SessionSuggestionCache {
 }
 
 /** Reads only existing Host state. Neither opening a page nor polling generates work. */
-export function useSessionEphemeralResults({ cache, adapter, connection, projection, binding, visible, refreshSessions }: {
+export function useSessionEphemeralResults({ cache, adapter, connection, projection, binding, visible, suggestionsEnabled = true, refreshSessions }: {
   cache: SessionSuggestionCache;
   adapter: RuntimeAdapter;
   connection: RuntimeConnection | undefined;
   projection: RuntimeProjection;
   binding: ModelCallBindingPayload | null | undefined;
   visible: boolean;
+  suggestionsEnabled?: boolean;
   refreshSessions: () => Promise<unknown>;
 }) {
   useSyncExternalStore(cache.subscribe, cache.getVersion, cache.getVersion);
+  useEffect(() => { if (!suggestionsEnabled) cache.invalidateAll(); }, [cache, suggestionsEnabled]);
   const titleLifetime = useMemo(() => ({ adapter, active: true }), [adapter]);
   const titleReads = useRef(new Map<string, { host: string; abort: AbortController; timer?: ReturnType<typeof setTimeout> }>());
   const adoptedTitles = useRef(new Map<string, string>());
@@ -175,9 +179,9 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
         if (result.title.state === 'pending') observeTitle(sessionId, host);
         else if (result.title.state === 'adopted') void refreshTitle(sessionId, host);
         cache.observe(sessionId, connection.current(), stableBinding);
-        cache.accept(sessionId, owner, result);
-        if (result.suggestion.state === 'pending'
-          || (result.suggestion.state === 'awaiting_completion' && !connection.current().isRunning)) {
+        if (suggestionsEnabled) cache.accept(sessionId, owner, result);
+        if (suggestionsEnabled && (result.suggestion.state === 'pending'
+          || (result.suggestion.state === 'awaiting_completion' && !connection.current().isRunning))) {
           timer = setTimeout(() => void read(), 650);
         }
       } catch { /* A missing ephemeral result never blocks the composer. */ }
@@ -185,10 +189,10 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
     void read();
     return () => { abort.abort(); clearTimeout(timer); };
   }, [adapter, cache, connection, host, root, stableBinding, queued, compacting, projection.isRunning,
-    projection.eventSequence, visible, observeTitle, refreshTitle]);
+    projection.eventSequence, visible, suggestionsEnabled, observeTitle, refreshTitle]);
 
   return {
-    suggestion: connection ? cache.text(connection.sessionId, projection, binding) : undefined,
+    suggestion: suggestionsEnabled && connection ? cache.text(connection.sessionId, projection, binding) : undefined,
     observeTitle,
   };
 }

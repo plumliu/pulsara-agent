@@ -93,6 +93,7 @@ class LocalModelApiKey:
 @dataclass(frozen=True, slots=True)
 class LocalSettings:
     postgres: LocalPostgresConfig | None = None
+    input_suggestions_enabled: bool = True
     model_connections: tuple[ModelConnectionConfig, ...] = ()
     model_api_keys: tuple[LocalModelApiKey, ...] = field(default=(), repr=False)
     memory_retrieval: MemoryRetrievalSettings = field(
@@ -102,6 +103,8 @@ class LocalSettings:
     mcp_oauth: tuple[LocalMcpOAuthRecord, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
+        if type(self.input_suggestions_enabled) is not bool:
+            raise ValueError("input_suggestions_enabled must be a boolean")
         bindings = tuple(item.binding for item in self.mcp_credentials)
         owners = tuple(item.owner for item in self.mcp_oauth)
         if len(bindings) != len(set(bindings)) or len(owners) != len(set(owners)):
@@ -211,6 +214,7 @@ def default_local_settings_path() -> Path:
 def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
     return {
         "schema": LOCAL_SETTINGS_SCHEMA,
+        "input_suggestions_enabled": settings.input_suggestions_enabled,
         "model_connections": [
             {
                 **model_connection_to_dict(item),
@@ -255,7 +259,8 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         raise LocalSettingsSchemaUnsupported(
             "本机设置版本需显式转换，请勿以空配置覆盖。"
         )
-    if not isinstance(value, dict) or set(value) != {
+    # This optional preference defaults to enabled when the user has not set it.
+    if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled"} != {
         "schema",
         "model_connections",
         "memory_retrieval",
@@ -283,6 +288,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         if api_key is not None:
             model_api_keys.append(LocalModelApiKey(connection.id, api_key))
     return LocalSettings(
+        input_suggestions_enabled=value.get("input_suggestions_enabled", True),
         model_connections=tuple(connections),
         model_api_keys=tuple(model_api_keys),
         memory_retrieval=MemoryRetrievalSettings.from_dict(value["memory_retrieval"]),
@@ -457,6 +463,15 @@ class LocalSettingsStore:
     def credential_mutation_scrub(self) -> ProcessCredentialScrubSet | None:
         observation = _credential_mutation_scrub.get()
         return observation[1] if observation is not None and observation[0] is self else None
+
+    async def set_input_suggestions_enabled(self, enabled: bool) -> LocalSettings:
+        if type(enabled) is not bool:
+            raise ValueError("input_suggestions_enabled must be a boolean")
+        updated, _ = await self._run_mutation(
+            lambda current: (replace(current, input_suggestions_enabled=enabled), None),
+            name="publish-input-suggestions", repair=False,
+        )
+        return updated
 
     def resolve_mcp_secret(self, binding: McpCredentialBinding) -> str | None:
         return self.read().mcp_secret(binding)

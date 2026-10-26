@@ -456,6 +456,76 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
   };
 }
 
+it('reserves the open TODO above tall queues and follows editor growth and viewport changes', async () => {
+  let viewportHeight = 800;
+  let editorHeight = 86;
+  const observers: Array<{ elements: Element[]; resize: () => void }> = [];
+  vi.stubGlobal('ResizeObserver', class {
+    entry: { elements: Element[]; resize: () => void };
+    constructor(resize: () => void) { this.entry = { elements: [], resize }; observers.push(this.entry); }
+    observe(element: Element) { this.entry.elements.push(element); }
+    disconnect() { this.entry.elements = []; }
+    unobserve() {}
+  });
+  const queueHeight = () => {
+    const queue = document.querySelector<HTMLElement>('.composer-queue');
+    const maximum = queue?.style.getPropertyValue('--composer-queue-available-height');
+    return Math.min(700, maximum ? parseFloat(maximum) : 700);
+  };
+  const composerHeight = () => queueHeight() + editorHeight + 14 + 3 + 41;
+  const composerTop = () => viewportHeight - composerHeight();
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function(this: HTMLElement) {
+    return this.classList.contains('workbench') ? viewportHeight : 0;
+  });
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function(this: HTMLElement) {
+    if (this.classList.contains('composer-wrap')) return composerHeight();
+    if (this.classList.contains('composer-queue')) return queueHeight();
+    if (this.classList.contains('todo-dock__popover')) return Math.min(180, parseFloat(this.style.maxHeight) || 180);
+    return 0;
+  });
+  vi.spyOn(HTMLElement.prototype, 'offsetTop', 'get').mockImplementation(function(this: HTMLElement) {
+    return this.classList.contains('composer-wrap') ? composerTop() : 0;
+  });
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
+    if (this.classList.contains('composer-wrap')) return new DOMRect(0, composerTop(), 720, composerHeight());
+    if (this.classList.contains('todo-dock__trigger')) return new DOMRect(0, composerTop(), 200, 31);
+    if (this.classList.contains('todo-dock__popover')) return new DOMRect(0, composerTop() - 9 - this.offsetHeight, 520, this.offsetHeight);
+    return new DOMRect();
+  });
+  const view = render(<WorkbenchView {...props({
+    todo: { id: 'todo-queue', items: [{ id: 'step', label: '当前步骤', status: 'in-progress' }] },
+    queuedCount: 1, queuedPrompts: [{ queueItemId: 'queue', commandId: 'input', sequence: 1,
+      status: 'pending', deliveryMode: 'new-turn', permission: 'read-only', content: textPrompt('很长的输入') }],
+  })} />);
+  const thread = view.container.querySelector('.thread-scroll') as HTMLDivElement;
+  Object.defineProperties(thread, {
+    scrollHeight: { configurable: true, value: 1200 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 0 },
+  });
+  fireEvent.scroll(thread);
+  const queue = view.container.querySelector('.composer-queue') as HTMLElement;
+  const latest = await screen.findByRole('button', { name: '回到最新' });
+  // 800 - 105 top reserve - (86 + 14 + 3 + 41) composer - (180 + 9 + 12) TODO.
+  await waitFor(() => expect(queueHeight()).toBe(350));
+  expect(screen.getByRole('region', { name: 'TODO清单' }).style.maxHeight).toBe('180px');
+  expect(latest.style.bottom).toBe('695px');
+  editorHeight += 120;
+  act(() => observers.filter(observer => observer.elements.some(element => element.classList.contains('composer')))
+    .forEach(observer => observer.resize()));
+  await waitFor(() => expect(queueHeight()).toBe(230));
+  expect(screen.getByRole('region', { name: 'TODO清单' }).style.maxHeight).toBe('180px');
+  fireEvent.click(screen.getByRole('button', { name: '收起TODO清单' }));
+  await waitFor(() => expect(queueHeight()).toBe(431));
+  fireEvent.click(screen.getByRole('button', { name: '展开TODO清单' }));
+  await waitFor(() => expect(queueHeight()).toBe(230));
+  viewportHeight = 700;
+  fireEvent(window, new Event('resize'));
+  await waitFor(() => expect(queue.style.getPropertyValue('--composer-queue-available-height')).toBe('130px'));
+  expect(screen.getByRole('region', { name: 'TODO清单' }).style.maxHeight).toBe('180px');
+  expect(latest.style.bottom).toBe('595px');
+});
+
 describe('prompt delivery and preparation', () => {
   const submission = {
     sessionId: 'session-one', connectionGeneration: 1, commandId: 'command:start',
@@ -2303,7 +2373,7 @@ it('keeps repeated tool-call and live reasoning IDs isolated by their canonical 
  expect(screen.getByRole('button',{name:'展开思考'})).toBeTruthy();
 });
 
-it('keeps manual process and tool expansion at the clicked position, then resumes explicit tail-follow', () => {
+it('keeps tail process and tool expansion following, and protects them after upward reading', () => {
   let resizeColumn: () => void = () => {};
   vi.stubGlobal('ResizeObserver', class {
     constructor(private callback: () => void) {}
@@ -2326,16 +2396,18 @@ it('keeps manual process and tool expansion at the clicked position, then resume
   vi.spyOn(process,'getBoundingClientRect').mockImplementation(()=>new DOMRect(0,740-top,600,24));
   fireEvent.click(process);
   height=1500;act(()=>resizeColumn());
-  expect(top).toBe(600);
-  expect(process.getBoundingClientRect().top).toBe(140);
+  expect(top).toBe(1100);
+  expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
   const tool=screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'});
   vi.spyOn(tool,'getBoundingClientRect').mockImplementation(()=>new DOMRect(0,800-top,600,24));
   fireEvent.click(tool);
   height=1800;act(()=>resizeColumn());
-  expect(top).toBe(600);
+  expect(top).toBe(1400);
+  fireEvent.wheel(thread, {deltaY: -.25});
+  top = 1399.75; fireEvent.scroll(thread); fireEvent.pointerUp(thread);
   // A resize-induced scroll event must not silently re-enable following.
   fireEvent.scroll(thread);height=1900;act(()=>resizeColumn());
-  expect(top).toBe(600);
+  expect(top).toBe(1399.75);
   fireEvent.click(screen.getByRole('button',{name:'回到最新'}));
   expect(top).toBe(1500);
   height=2100;act(()=>resizeColumn());
@@ -2407,9 +2479,10 @@ it('resumes tail following on a downward gesture at the bottom even without a sc
     scrollHeight: { get: () => 1000 }, clientHeight: { get: () => 400 },
     scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(600, value)); } },
   });
-  // A real in-flow disclosure pauses following even if it adds no height.
-  fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-  expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+  // Tiny upward input changes intent; visible latest keeps the button hidden.
+  fireEvent.wheel(thread, {deltaY: -.25});
+  fireEvent.pointerUp(thread);
+  expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
   fireEvent.wheel(thread, { deltaY: 100 });
   await waitFor(() => expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull());
   expect(top).toBe(600);
@@ -2435,6 +2508,8 @@ it('keeps tail-follow while scrolling a contained plan document, including its e
   fireEvent.keyDown(screen.getByRole('textbox', {name: '你想调整哪里？'}), {key: 'ArrowUp'});
   expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
   fireEvent.wheel(thread, {deltaY: -100});
+  expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+  thread.scrollTop -= 100; fireEvent.scroll(thread);
   expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
 });
 
@@ -2680,7 +2755,7 @@ describe('long turn process reading', () => {
 });
 
 it.each(['wheel', 'scrollbar', 'native-scrollbar', 'shift-space'] as const)(
-  'releases tail-follow for a tiny upward %s movement and resumes in the downward 20px return zone', async gesture => {
+  'releases tail-follow for a tiny upward %s movement and resumes in the downward 48px return zone', async gesture => {
     const observations = new Map<Element, () => void>();
     vi.stubGlobal('ResizeObserver', class {
       constructor(private callback: () => void) {}
@@ -2705,12 +2780,12 @@ it.each(['wheel', 'scrollbar', 'native-scrollbar', 'shift-space'] as const)(
     top = 599.75;
     fireEvent.scroll(thread);
     fireEvent.pointerUp(thread);
-    expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
     await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
     view.rerender(<WorkbenchView {...base} />);
     expect(top).toBe(599.75);
     // New output/viewport layout must not recapture the reader near the tail.
-    height = 1060;
+    height = 1100;
     act(() => observations.get(thread)?.());
     expect(top).toBe(599.75);
     fireEvent.wheel(thread, { deltaY: 10 });
@@ -2720,13 +2795,13 @@ it.each(['wheel', 'scrollbar', 'native-scrollbar', 'shift-space'] as const)(
     expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
     expect(top).toBe(630);
     fireEvent.wheel(thread, { deltaY: 10 });
-    top = 640;
+    top = 660;
     fireEvent.scroll(thread);
     expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
-    expect(top).toBe(660);
-    height = 1080;
+    expect(top).toBe(700);
+    height = 1120;
     act(() => observations.get(thread)?.());
-    expect(top).toBe(680);
+    expect(top).toBe(720);
   },
 );
 
@@ -2784,8 +2859,11 @@ it('still releases tail-follow for native upward scrolling during a drawer resiz
   height = 1700;
   top = 1299.75;
   fireEvent.scroll(thread);
-  expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '回到最新' })).toBeNull();
   expect(top).toBe(1299.75);
+  height += 100; view.rerender(<WorkbenchView {...base} />);
+  expect(top).toBe(1299.75);
+  expect(screen.getByRole('button', { name: '回到最新' })).toBeTruthy();
 });
 
 describe('selection and empty-space reading intent', () => {
@@ -2835,14 +2913,14 @@ describe('selection and empty-space reading intent', () => {
     expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
     geometry.height += 15; resize();
     expect(geometry.top).toBe(600);
-    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+    expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
     geometry.height += 45; resize();
     expect(geometry.top).toBe(600);
     expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
     expect(document.getSelection()?.toString()).toBe('供选择的正文');
     clear(); resize();
-    expect(geometry.top).toBe(600);
-    expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
+    expect(geometry.top).toBe(660);
+    expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
   });
   it('resumes after clearing a selection while the reader is still near latest', () => {
     const {geometry, select, clear, resize} = setup();
@@ -2926,6 +3004,8 @@ it('holds the clicked process header through the final-window read and manual co
   const answer = view.container.querySelector('[data-source-entry="collapse-answer"]')!.firstElementChild!;
   vi.spyOn(answer, 'getBoundingClientRect').mockImplementation(() =>
     new DOMRect(0, headerTop + (toggle.getAttribute('aria-expanded') === 'true' ? 800 : 40) - top, 600, 80));
+  fireEvent.wheel(thread, {deltaY: -.25});
+  fireEvent.pointerUp(thread);
   let finish!: () => void;
   read.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
   fireEvent.click(toggle);
@@ -3108,4 +3188,111 @@ it('rechecks the older boundary after its deduplicated request settles when the 
   // further edge progress must not turn the settlement recheck into a loop.
   await act(async () => { releases[1](); });
   expect(load).toHaveBeenCalledTimes(2);
+});
+
+// PULSARA_LATEST_FOLLOW_REDESIGN_PLAN §4.3: long/streaming thought is the
+// primary contract; process/tool details share the same coordinator.
+it.each([false, true])('follows a long streaming thought through expansion and completion (reader takes over: %s)', takesOver => {
+  const observations = new Map<Element, () => void>();
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: () => void) {} observe(node: Element) { observations.set(node, this.callback); } disconnect() {}
+  });
+  const thought = (extra = '', active = true): ComponentProps<typeof WorkbenchView>['messages'][number] => ({
+    id: 'long-thinking', role: 'assistant', assistantKind: 'live', status: active ? 'running' : 'completed',
+    turnId: 'thinking-turn', time: '', body: '', reasoning: [{id: 'thinking-body', kind: 'full', active,
+      body: Array.from({length: 80}, (_, index) => `第 ${index + 1} 段推导：保留当前推理上下文，继续验证边界。`).join('\n\n') + extra}],
+  });
+  const base = props({activeTurnId: 'thinking-turn', messages: [thought()]});
+  const view = render(<WorkbenchView {...base} />);
+  const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  let height = 1200, top = 800;
+  Object.defineProperties(thread, {scrollHeight: {get: () => height}, clientHeight: {get: () => 400},
+    scrollTop: {get: () => top, set: value => {top = Math.max(0, Math.min(height - 400, value));}}});
+  view.rerender(<WorkbenchView {...base} />);
+  fireEvent.click(screen.getByRole('button', {name: '展开思考'}));
+  height = 6000; act(() => observations.get(thread)?.()); expect(top).toBe(5600);
+  expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+  if (takesOver) { fireEvent.wheel(thread, {deltaY: -.25}); top -= .25; fireEvent.scroll(thread); fireEvent.pointerUp(thread); }
+  height = 6400;
+  view.rerender(<WorkbenchView {...base} messages={[thought('\n\n新增推导')]} />);
+  expect(top).toBe(takesOver ? 5599.75 : 6000);
+  const final: ComponentProps<typeof WorkbenchView>['messages'][number] = {id:'thinking-final',role:'assistant',assistantKind:'terminal',turnId:'thinking-turn',rootFinal:true,time:'',body:'推导已完成。'};
+  view.rerender(<WorkbenchView {...base} isRunning={false} messages={[thought('\n\n新增推导', false), final]} />);
+  if (takesOver) {
+    expect(top).toBe(5599.75); expect(screen.getByRole('button', {name:'收起处理过程'})).toBeTruthy();
+    expect(screen.getByRole('button', {name:'收起思考'})).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name:'收起思考'}));
+    expect(top).toBe(5599.75);
+  } else expect(screen.getByRole('button', {name:'展开处理过程'})).toBeTruthy();
+});
+
+it('keeps an explicitly reopened tail process open on completion while still following', () => {
+  const progress: ComponentProps<typeof WorkbenchView>['messages'][number] = {id:'manual-process',role:'assistant',assistantKind:'progress',turnId:'manual-turn',time:'',body:'处理中的内容'};
+  const base = props({activeTurnId:'manual-turn',messages:[progress]});
+  const view=render(<WorkbenchView {...base}/>);
+  fireEvent.click(screen.getByRole('button',{name:'收起处理过程'}));
+  fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
+  view.rerender(<WorkbenchView {...base} isRunning={false} messages={[progress,{id:'manual-final',role:'assistant',assistantKind:'terminal',turnId:'manual-turn',rootFinal:true,time:'',body:'完成'}]}/>);
+  expect(screen.getByRole('button',{name:'收起处理过程'})).toBeTruthy();
+  expect(screen.queryByRole('button',{name:'回到最新'})).toBeNull();
+});
+
+it('does not turn a disclosure button activation or a touch press into main-thread reading', () => {
+  const base=props({activeTurnId:'turn-one',messages:[{id:'touch-thinking',role:'assistant',assistantKind:'live',turnId:'turn-one',time:'',body:'',reasoning:[{id:'touch-body',kind:'full',body:'长思考'.repeat(100)}]}]});
+  const view=render(<WorkbenchView {...base}/>);
+  const thread=view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  let height=1000,top=600;
+  Object.defineProperties(thread,{scrollHeight:{get:()=>height},clientHeight:{get:()=>400},scrollTop:{get:()=>top,set:value=>{top=Math.min(height-400,value);}}});
+  view.rerender(<WorkbenchView {...base}/>);
+  const button=screen.getByRole('button',{name:'展开思考'});
+  fireEvent.keyDown(button,{key:' ',shiftKey:true});
+  fireEvent.touchStart(thread,{touches:[{clientY:100}]});
+  height+=100;view.rerender(<WorkbenchView {...base}/>); expect(top).toBe(700);
+});
+
+it.each(['failure', 'cancel', 'switch', 'success'] as const)('settles latest only after installation and respects %s', async outcome => {
+  let resolve!:()=>void, reject!:(error:Error)=>void;
+  const latest=vi.fn(()=>new Promise<void>((done,fail)=>{resolve=done;reject=fail;}));
+  const notify=vi.fn();
+  const base=props({isRunning:false,history:{atLatest:false,hasOlder:false,loading:false,windows:[]},messages:[{id:'navigation-old',role:'user',time:'',body:'原阅读区间'}],onReadLatestHistory:latest,onNotify:notify});
+  const view=render(<WorkbenchView {...base}/>);
+  const thread=view.container.querySelector<HTMLElement>('.thread-scroll')!;
+  let top=100;
+  Object.defineProperties(thread,{scrollHeight:{value:1400},clientHeight:{value:400},scrollTop:{get:()=>top,set:value=>{top=Math.min(1000,value);}}});
+  fireEvent.click(screen.getByRole('button',{name:'回到最新'}));
+  if(outcome==='failure') await act(async()=>reject(Error('读取失败')));
+  else {
+    if(outcome==='cancel')fireEvent.wheel(thread,{deltaY:-.25});
+    if(outcome==='switch')view.rerender(<WorkbenchView {...base} session={{...base.session,id:'navigation-successor'}}/>);
+    await act(async()=>resolve());
+  }
+  if(outcome==='success'){
+    expect(top).toBe(100); expect(screen.getByRole('button',{name:'正在读取最新消息…'})).toBeTruthy();
+    view.rerender(<WorkbenchView {...base} history={{...base.history!,atLatest:true}}/>);
+    await waitFor(()=>expect(top).toBe(1000));
+    expect(screen.queryByRole('button',{name:'回到最新'})).toBeNull();
+  }else if(outcome!=='switch'){
+    expect(top).toBe(100);expect(screen.getByText('原阅读区间')).toBeTruthy();
+    if(outcome==='failure')expect(notify).toHaveBeenCalledWith('无法回到最新','读取失败','warning');
+  }
+});
+
+it('cancels an unfinished historical process open on a reverse click and ignores its late read', async () => {
+  let finish!:()=>void;
+  const read=vi.fn(()=>new Promise<void>(resolve=>{finish=resolve;}));
+  const base=props({isRunning:false,onReadProcessEnd:read,messages:[
+    {id:'reverse-old',role:'assistant',assistantKind:'tool-request',turnId:'reverse-old-turn',time:'',body:'旧过程'},
+    {id:'reverse-answer',role:'assistant',assistantKind:'terminal',turnId:'reverse-old-turn',rootFinal:true,time:'',body:'旧回答'},
+    {id:'reverse-new',role:'user',time:'',body:'后面的用户消息'},
+  ]});
+  const view=render(<WorkbenchView {...base}/>);
+  const button=screen.getByRole('button',{name:'展开处理过程'});
+  fireEvent.click(button);
+  const signal=read.mock.calls[0][1] as AbortSignal;
+  fireEvent.click(button);
+  expect(signal.aborted).toBe(true);
+  await act(async()=>finish());
+  expect(screen.getByRole('button',{name:'展开处理过程'})).toBe(button);
+  expect(screen.queryByText('旧过程')).toBeNull();
+  expect(view.container.querySelector('.conversation-run')?.getAttribute('data-process-expanded')).toBe('false');
 });

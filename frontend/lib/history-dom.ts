@@ -5,6 +5,7 @@ export interface HistoryReadingAnchor {
   sourceOffset?: number;
   header?: boolean;
   processEdge?: string;
+  disclosureKey?: string;
   top: number;
 }
 
@@ -109,7 +110,26 @@ export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAn
   let node = anchor.header ? headers.find(node => node.dataset.historyEntry === anchor.entryId)
     ?? headers.find(node => node.dataset.historyEntryAliases?.split(' ').includes(anchor.entryId))
     : findHistoryEntry(root, anchor.traceId ?? anchor.entryId);
-  if (!node) return;
+  if (anchor.disclosureKey) {
+    const controls = [...root.querySelectorAll<HTMLElement>('[data-disclosure-key]')]
+      .filter(candidate => candidate.dataset.disclosureKey === anchor.disclosureKey && !candidate.closest('[hidden], [inert]'));
+    node = controls.find(candidate => candidate.dataset.processEdge === anchor.processEdge)
+      ?? controls.find(candidate => candidate.dataset.processEdge === 'bottom') ?? controls[0];
+  }
+  // A collapsed body resolves to its corresponding visible entry point. A
+  // replaced node is always located by semantic identity, never object identity.
+  node ??= [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].find(candidate =>
+    !candidate.closest('[hidden], [inert]') && (candidate.dataset.historyEntry === anchor.entryId
+      || candidate.dataset.historyEntryAliases?.split(' ').includes(anchor.entryId)));
+  if (!node) {
+    const nearby = captureHistoryAnchor(root);
+    if (nearby) Object.assign(anchor, {
+      entryId: nearby.entryId, top: nearby.top, traceId: nearby.traceId,
+      sourceOffset: nearby.sourceOffset, header: nearby.header,
+      processEdge: nearby.processEdge, disclosureKey: nearby.disclosureKey,
+    });
+    return root.scrollTop;
+  }
   if (anchor.sourceOffset !== undefined) {
     const offset = anchor.sourceOffset;
     node = [...node.querySelectorAll<HTMLElement>('[data-source-text]')].find(candidate => {
@@ -118,6 +138,12 @@ export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAn
     }) ?? node;
   }
   const delta = node.getBoundingClientRect().top - root.getBoundingClientRect().top - anchor.top;
-  if (Math.abs(delta) > 0.5) root.scrollTop += delta;
+  if (Math.abs(delta) > 0.5) {
+    const before = root.scrollTop;
+    root.scrollTop += delta;
+    // Only adopt the unreachable remainder. This also works with deterministic
+    // rect mocks whose coordinates do not move when scrollTop changes.
+    anchor.top += delta - (root.scrollTop - before);
+  }
   return root.scrollTop;
 }

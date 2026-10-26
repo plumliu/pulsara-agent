@@ -1,8 +1,8 @@
 # Conservative Plugin Conversion Contract
 
-Conversion uses the official selected-format importer before native validation
-and installation, not model rewriting. It is not a runtime compatibility profile,
-fallback parser or permission boundary.
+These rules govern format conversion by the official importer before native
+validation and installation. User-requested content customization happens in the
+source beforehand; the model does not perform the importer's conversion.
 
 ## Selected Import Format
 
@@ -64,7 +64,7 @@ not activated. Invalid supported components, unsafe paths, source races and actu
 credential literals still block installation. The model cannot override them.
 
 For compatibility questions, explain the exact unsupported host dependency.
-Do not manually construct a reduced fork or repair a failed supported declaration.
+Do not silently drop behavior or rewrite declarations merely to force an import.
 
 ## User-only import and advanced administration
 

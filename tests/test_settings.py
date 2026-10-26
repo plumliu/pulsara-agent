@@ -580,3 +580,23 @@ def test_failed_embedding_confirmation_does_not_partially_save_or_enable(tmp_pat
         )
 
     asyncio.run(exercise())
+
+
+def test_input_suggestions_preference_defaults_and_round_trips(tmp_path):
+    payload = local_settings_to_dict(LocalSettings())
+    payload.pop("input_suggestions_enabled")
+    assert local_settings_from_dict(payload).input_suggestions_enabled is True
+    for invalid in (None, 0, 1, "false"):
+        with pytest.raises(ValueError, match="boolean"):
+            local_settings_from_dict({**payload, "input_suggestions_enabled": invalid})
+
+    async def scenario():
+        store = LocalSettingsStore(tmp_path / "home" / "local-settings.yaml")
+        before = store.read()
+        for enabled in (False, True):
+            await store.set_input_suggestions_enabled(enabled)
+            assert LocalSettingsStore(store.path).read() == replace(
+                before, input_suggestions_enabled=enabled
+            )
+
+    asyncio.run(scenario())

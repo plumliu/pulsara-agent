@@ -3,7 +3,8 @@ import { parsePresentationResult } from '../lib/presentation-targets';
 import { PresentationResult } from './presentation-result';
 import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 
-import { captureHistoryAnchor, collectHistoryResidence, findHistoryEntry, hasHistorySelection, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
+import { collectHistoryResidence, waitForHistoryEntry } from '../lib/history-dom';
+import { ThreadFollowController } from '../lib/thread-follow-controller';
 import { splitSkillReferences } from '../lib/skill-reference';
 
 import { createPortal } from 'react-dom';
@@ -105,6 +106,7 @@ import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { WelcomeTypewriter } from './welcome-typewriter';
 import { AnimatedDisclosure } from './animated-disclosure';
+import { AnimatedPromptQueue } from './animated-prompt-queue';
 import { builtinToolSummary } from '../lib/builtin-tool-summary';
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
@@ -573,7 +575,7 @@ function TraceCard({
       <article data-result-entry={trace.resultEntryId} className={`trace-card${expanded ? ' is-expanded' : ''}`}>
         {expandable ? (
           <button
-            data-thread-disclosure="" className="trace-card__summary"
+            data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary"
             onClick={() => {
               if (expanded) closeArtifactPage();
               else terminalFollowTailRef.current = true;
@@ -582,7 +584,7 @@ function TraceCard({
             aria-expanded={expanded}
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
-        ) : <div data-thread-disclosure="" className="trace-card__summary">{summary}</div>}
+        ) : <div data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary">{summary}</div>}
         {expandable && <AnimatedDisclosure unmountOnClose open={expanded} className="trace-card__disclosure">
           {presentation && <PresentationResult result={presentation} onOpen={showTargets} />}
           {trace.resultContent ? (
@@ -846,7 +848,7 @@ function ReasoningRow({ block, ownerId, onNotify }: { block: ReasoningBlock; own
   return (
     <section className={`reasoning-row${expanded ? ' is-expanded' : ''}`}>
       <button
-        data-thread-disclosure="" className="reasoning-row__summary"
+        data-thread-disclosure="" data-disclosure-key={JSON.stringify(['reasoning', ownerId, block.id])} className="reasoning-row__summary"
         onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded}
         aria-label={`${expanded ? '收起' : '展开'}${title}`}
@@ -1242,7 +1244,7 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
 type ProcessReadingControls = {
   revealEarlierProcess?: { key: string };
   canAutoCollapse?: () => boolean;
-  onReadProcessEnd?: (entryId: string, signal: AbortSignal, automatic: boolean) => Promise<void>;
+  onReadProcessEnd?: (entryId: string, signal: AbortSignal, automatic: boolean, disclosureKey?: string) => Promise<void>;
   onProcessLayout?: () => void;
 };
 
@@ -1254,13 +1256,14 @@ function processIdentity(message: Message): string {
 }
 
 function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId,
-  compactions = [], compactionInProgress = false, canAutoCollapse, onReadProcessEnd, onProcessLayout, onNotify, earlierProcess = false, revealEarlierProcess,
+  compactions = [], compactionInProgress = false, tail = false, canAutoCollapse, onReadProcessEnd, onProcessLayout, onNotify, earlierProcess = false, revealEarlierProcess,
 }: {
   messages: Message[];
   renderMessage: (message: Message, startsRun: boolean, visible?: boolean) => ReactNode;
   focusRequest?: object | number;
   taskFinalAnswerId?: string;
   completed: boolean;
+  tail?: boolean;
   active: boolean;
   assistantLabel: string;
   compactions?: NonNullable<WorkbenchHistory['compactions']>;
@@ -1280,6 +1283,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const [busy, setBusy] = useState(false);
   const runRef = useRef<HTMLElement>(null);
   const request = useRef<AbortController | undefined>(undefined);
+  const requestedExpansion = useRef<boolean | undefined>(undefined);
   const wasComplete = useRef(complete);
   const laidOutExpanded = useRef(disclosure.expanded);
   useLayoutEffect(() => {
@@ -1298,7 +1302,11 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   }
   useEffect(() => { if (revealRequest) choices?.set(choiceKey, true); }, [revealRequest, choices, choiceKey]);
   const changeDisclosure = (expanded: boolean, automatic = false, edge: 'top' | 'bottom' = 'bottom') => {
+    const cancelling = requestedExpansion.current !== undefined && expanded === disclosure.expanded;
     request.current?.abort();
+    request.current = undefined;
+    requestedExpansion.current = undefined;
+    if (cancelling) { setBusy(false); onProcessLayout?.(); return; }
     const finalId = answer?.id ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
     const commit = () => {
       choices?.set(choiceKey, expanded);
@@ -1309,18 +1317,19 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     };
     if (!onReadProcessEnd || !finalId) { commit(); return; }
     const operation = new AbortController(); request.current = operation;
+    requestedExpansion.current = expanded;
     setBusy(true);
-    void onReadProcessEnd(finalId, operation.signal, automatic).then(() => {
+    void onReadProcessEnd(finalId, operation.signal, automatic, choiceKey).then(() => {
       if (!operation.signal.aborted && request.current === operation) commit();
     }).catch(error => {
       const cancelled = typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
       if (!operation.signal.aborted && !cancelled) onNotify('无法读取处理过程', error instanceof Error ? error.message : '请重试。', 'warning');
-    }).finally(() => { if (request.current === operation) { request.current = undefined; setBusy(false); } });
+    }).finally(() => { if (request.current === operation) { request.current = undefined; requestedExpansion.current = undefined; setBusy(false); } });
   };
   useEffect(() => {
     const justCompleted = complete && !wasComplete.current;
     wasComplete.current = complete;
-    if (justCompleted && disclosure.expanded && (canAutoCollapse?.() ?? true)) changeDisclosure(false, true);
+    if (justCompleted && disclosure.expanded && choices?.get(choiceKey) !== true && (canAutoCollapse?.() ?? true)) changeDisclosure(false, true);
   });
   const process = messages.flatMap((message) => {
     if (message !== answer) return [message];
@@ -1353,13 +1362,13 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const toggle = (edge: 'top' | 'bottom') => (<button type="button" className={`conversation-run__toggle conversation-run__toggle--${edge}`} data-process-toggle="" data-process-key={choiceKey} data-process-edge={edge} data-process-earlier={earlierProcess || undefined}
       data-history-entry={edge === 'top' ? messages[0].id : answer?.id ?? messages[0].id}
       data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
-      data-thread-disclosure="" aria-expanded={disclosure.expanded} aria-busy={busy} disabled={busy}
+      data-thread-disclosure="" data-disclosure-key={choiceKey} aria-expanded={disclosure.expanded} aria-busy={busy}
       aria-label={edge === 'top' ? '从顶部收起处理过程' : disclosure.expanded ? '收起处理过程' : '展开处理过程'}
       onClick={event => {
         if (edge === 'top' && event.currentTarget === event.currentTarget.ownerDocument.activeElement) {
           event.currentTarget.closest('.conversation-run')?.querySelector<HTMLButtonElement>('[data-process-edge="bottom"]')?.focus({ preventScroll: true });
         }
-        changeDisclosure(!disclosure.expanded, false, edge);
+        changeDisclosure(!(requestedExpansion.current ?? disclosure.expanded), false, edge);
       }}>
       <span>{busy ? '正在读取…' : disclosure.expanded ? '收起处理过程' : '处理过程'}</span><ChevronRight size={13} />
     </button>);
@@ -1393,7 +1402,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   if (compactSlots.has(process.length)) folding.push(<Fragment key="last-compaction">{compactAt(process.length)}</Fragment>);
   if (compactionInProgress) folding.push(<ContextCompactionDivider key="compacting" inProgress />);
   flushDrawer();
-  return <section ref={runRef} className="conversation-run" data-process-expanded={disclosure.expanded} data-process-motion-edge={disclosure.motionEdge}>
+  return <section ref={runRef} className="conversation-run" data-thread-tail={tail} data-process-expanded={disclosure.expanded} data-process-motion-edge={disclosure.motionEdge}>
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
     {processRows}
     {toggle('bottom')}
@@ -1520,6 +1529,7 @@ export function ConversationMessages({
         : assistant(message)}
     </HistoryMessageHost>;
   };
+  const latestMessage = messages.filter(message => !isEmptyLiveAssistant(message)).at(-1);
   const completedTurns = new Set(messages.filter(message => isCompleteAnswer(message, taskFinalAnswerId)).map(message => message.turnId).filter(Boolean));
   const content: ReactNode[] = [];
   if (history?.error && !history.windows.some(window => window.error === history.error)) {
@@ -1546,6 +1556,7 @@ export function ConversationMessages({
     const runIds = new Set(run.map(message => message.id));
     content.push(<ConversationRun key={`${artifactOwnerKey}:${processIdentity(run[0])}:${interruptionBoundaries.get(run[0].turnId ?? '') ?? 'start'}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel} taskFinalAnswerId={taskFinalAnswerId}
+      tail={Boolean(latestMessage && run.includes(latestMessage))}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
       revealEarlierProcess={revealEarlierProcess} canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd} onProcessLayout={onProcessLayout} onNotify={onNotify}
       earlierProcess={Boolean(run.some(message => isCompleteAnswer(message, taskFinalAnswerId)
@@ -1848,10 +1859,6 @@ function reasoningSelectionLabel(
   return '无推理选项';
 }
 
-function AnimatedQueueItem({ children }: { children: ReactNode }) {
-  return <div className="composer-queue__item"><div className="composer-queue__item-content">{children}</div></div>;
-}
-
 function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
   store: PromptDraftStore;
   sessionId: string;
@@ -1869,10 +1876,6 @@ function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
     </button>;
   })}</div>;
 }
-
-// User-chosen comfort zone when scrolling downward to resume following.
-// Upward input always leaves following, including inside this zone.
-const LATEST_FOLLOW_DISTANCE = 20;
 
 export function WorkbenchView({
   history, onLoadHistory, onReadLatestHistory, onReadProcessEnd, onHydrateEntries, onRetainHistory,
@@ -2003,14 +2006,14 @@ export function WorkbenchView({
   }
   const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [preparingQueueEdit, setPreparingQueueEdit] = useState<string>();
-  const [atBottom, setAtBottom] = useState(true);
+  const [latestVisible, setLatestVisible] = useState(true);
   const [jumpBottom, setJumpBottom] = useState(126);
-  const followLatestRef = useRef(true);
   const locatingTaskRef = useRef(false);
   const workbenchRef = useRef<HTMLElement>(null);
   const sessionActionsRef = useRef<HTMLDivElement>(null);
   const sessionActionsTriggerRef = useRef<HTMLButtonElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
+  const touchPosition = useRef<number | undefined>(undefined);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerEditorRef = useRef<HTMLDivElement>(null);
   const [acceptedDraftLayout, setAcceptedDraftLayout] = useState<{ sessionId: string; height: number; restoreFocus: boolean } | null>(null);
@@ -2119,9 +2122,9 @@ export function WorkbenchView({
     ...localSubmissions.filter(item => !canonicalSubmission(item) && !conversationCommandIds.has(item.commandId) && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER')
       .map(local => ({ queued: undefined, local })),
   ];
-  const composerQueue = (queueCards.length > 0 || editRestoreConflict) && (
-    <section className="composer-queue" aria-label="等待处理的输入">
-      {editRestoreConflict && <AnimatedQueueItem key="edit-restore-conflict"><article data-command-id={pendingEditRestoration.commandId} className="is-local">
+  const composerQueue = (
+    <AnimatedPromptQueue key={session.id}>
+      {editRestoreConflict && <article key="edit-restore-conflict" data-command-id={pendingEditRestoration.commandId} className="is-local">
         <Pencil size={13} aria-hidden="true" />
         <PromptContentView
           content={pendingEditRestoration.restoredContent ?? pendingEditRestoration.source.content}
@@ -2129,7 +2132,7 @@ export function WorkbenchView({
           onReadImage={onReadPromptImage}
         />
         <small role="status">已取消排队，原文等待恢复；请先处理当前草稿。</small>
-      </article></AnimatedQueueItem>}
+      </article>}
       {queueCards.map(({ queued, local }) => {
         const item = queued ?? local!;
         const action = queued && activeQueueActions.find(action => action.source.queueItemId === queued.queueItemId
@@ -2141,13 +2144,15 @@ export function WorkbenchView({
               : local?.status === 'cancelled' ? '队列已取消'
                 : local?.status === 'consumed' && local.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断'
                   : undefined;
-        return <AnimatedQueueItem key={item.commandId}><article
+        return <article key={item.commandId}
           data-queue-item-id={queued?.queueItemId} data-command-id={item.commandId} aria-busy={busy}>
           <CornerDownRight size={13} aria-hidden="true" />
-          {queued?.inputOrigin === 'SCHEDULED_TASK' && <small>定时任务</small>}
-          {local?.contentUnavailable || !item.content
-            ? <p>正文未能在队列终止前完成读取。</p>
-            : <PromptContentView content={item.content} variant="queue" onReadImage={onReadPromptImage} />}
+          <div className="composer-queue__body">
+            {queued?.inputOrigin === 'SCHEDULED_TASK' && <small className="composer-queue__source">定时任务</small>}
+            {local?.contentUnavailable || !item.content
+              ? <p>正文未能在队列终止前完成读取。</p>
+              : <PromptContentView content={item.content} variant="queue" onReadImage={onReadPromptImage} />}
+          </div>
           {!isObserver && <div className="composer-queue__actions">
             <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || (!isRunning && interaction?.kind !== 'plan-draft')}
               onClick={() => { if (queued) void queueAction(queued, 'send'); }}><CornerDownRight size={13} />发送</button>
@@ -2157,9 +2162,9 @@ export function WorkbenchView({
               data-delete-queue={queued?.queueItemId} onClick={() => { if (queued) void queueAction(queued, 'delete'); }}><Trash2 size={13} />删除</button>
           </div>}
           {notice && <small className="composer-queue__notice" role="status"><span>{notice}</span>{local?.detail && <>：<span>{local.detail}</span></>}</small>}
-        </article></AnimatedQueueItem>;
+        </article>;
       })}
-    </section>
+    </AnimatedPromptQueue>
   );
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
   const modelBindingMissing = Boolean(modelCallBinding && !selectedModel);
@@ -2241,15 +2246,8 @@ export function WorkbenchView({
   const atLatestHistory = history?.atLatest !== false;
   const readingOwner = history?.readingOwner;
   const [jumpingToLatest, setJumpingToLatest] = useState(false);
-  const readingAnchor = useRef<HistoryReadingAnchor | undefined>(undefined);
-  // A manual disclosure owns its button's viewport position until the reader
-  // scrolls or explicitly navigates. Tail-follow must not move it during resize.
-  const disclosureAnchor = useRef<{ element: HTMLElement; top: number; processKey?: string; edge?: string; collapsing?: boolean } | undefined>(undefined);
-  const programmaticTop = useRef<number | undefined>(undefined);
-  const previousScrollTop = useRef<number | undefined>(undefined);
-  const selectionPausedFollow = useRef(false);
-  const userScrollPending = useRef(false);
-  const userScrollFrame = useRef<number | undefined>(undefined);
+  const latestInstallCheck = useRef<(() => void) | undefined>(undefined);
+  useLayoutEffect(() => { latestInstallCheck.current?.(); });
   const locateRequest = useRef<AbortController | undefined>(undefined);
   const automaticProcessRead = useRef<{ request: AbortController; turnId?: string } | undefined>(undefined);
   const loadRequests = useRef(new Map<string, Promise<void>>());
@@ -2257,63 +2255,34 @@ export function WorkbenchView({
   const olderReadIntent = useRef(false);
   const olderAutoRequest = useRef<{ owner?: object; windowId?: string; firstEntryId?: string } | undefined>(undefined);
   const checkOlderBoundary = useRef<() => void>(() => {});
-  const resetReading = useCallback(() => {
-    selectionPausedFollow.current = false;
-    disclosureAnchor.current = undefined;
-    followLatestRef.current = false;
-    setAtBottom(false);
-    readingAnchor.current = threadRef.current ? captureHistoryAnchor(threadRef.current) : undefined;
-    previousScrollTop.current = threadRef.current?.scrollTop;
-  }, []);
+  const follow = useMemo(() => new ThreadFollowController(
+    () => currentSessionRef.current === session.id ? threadRef.current : null,
+    () => currentHistory.current?.atLatest !== false && !(currentHistory.current?.loading && !currentHistory.current.windows.length),
+    setLatestVisible,
+    () => { locateRequest.current?.abort(); setJumpingToLatest(false); },
+    () => checkOlderBoundary.current(),
+  ), [session.id]);
+  const resetReading = useCallback(() => follow.read(), [follow]);
+  const restoreReadingPosition = useCallback(() => follow.coordinate(), [follow]);
   const beginUserScroll = useCallback((towardLatest = false) => {
-    locateRequest.current?.abort();
-    setJumpingToLatest(false);
-    userScrollPending.current = true;
     olderReadIntent.current = !towardLatest;
     olderAutoRequest.current = undefined;
-    // User input takes ownership before the browser moves the viewport. Even a
-    // subpixel move away from the bottom must not turn following back on.
-    resetReading();
-    programmaticTop.current = undefined;
-    if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
-    // A wheel/key gesture at the physical edge may produce no scroll event.
-    // End suppression at the browser's next layout opportunity in either case.
-    userScrollFrame.current = requestAnimationFrame(() => {
-      userScrollFrame.current = undefined;
-      userScrollPending.current = false;
-      const thread = threadRef.current;
-      if (towardLatest && currentHistory.current?.atLatest !== false && thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= LATEST_FOLLOW_DISTANCE) {
-        selectionPausedFollow.current = hasHistorySelection(thread);
-        followLatestRef.current = !selectionPausedFollow.current;
-        setAtBottom(true);
-        readingAnchor.current = selectionPausedFollow.current ? captureHistoryAnchor(thread) : undefined;
-        programmaticTop.current = undefined;
-      } else if (!followLatestRef.current && thread) readingAnchor.current = captureHistoryAnchor(thread);
-      checkOlderBoundary.current();
-    });
-  }, [resetReading]);
+    follow.input(towardLatest ? 'down' : 'up');
+  }, [follow]);
   useLayoutEffect(() => {
     currentSessionRef.current = session.id;
+    follow.activate();
     locatingEntry.current = undefined;
-    disclosureAnchor.current = undefined;
-    followLatestRef.current = true;
-    selectionPausedFollow.current = false;
-    setAtBottom(followLatestRef.current);
-    readingAnchor.current = undefined;
-    userScrollPending.current = false;
-    programmaticTop.current = undefined;
-    previousScrollTop.current = undefined;
     loadRequests.current.clear();
     olderReadIntent.current = false;
     olderAutoRequest.current = undefined;
     setRevealEarlierProcess(undefined);
-    return () => {
-      locateRequest.current?.abort();
-      if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
-    };
-  }, [session.id]);
+    return () => { locateRequest.current?.abort(); follow.dispose(); };
+  }, [session.id, follow]);
   const loadHistory = useCallback((windowId?: string, direction: 'older' | 'newer' = 'older'): Promise<void> => {
     if (!onLoadHistory) return Promise.resolve();
+    locateRequest.current?.abort();
+    setJumpingToLatest(false);
     // Reveal only the resident slice at the top, without navigating back to
     // its final. Then normal paging exposes earlier steps instead of silently
     // draining an arbitrarily long folded turn from the database.
@@ -2321,15 +2290,13 @@ export function WorkbenchView({
     if (direction === 'older' && closed?.dataset.processKey) {
       olderReadIntent.current = true;
       resetReading();
-      readingAnchor.current = undefined;
+      follow.anchor = undefined;
       setRevealEarlierProcess({ key: closed.dataset.processKey });
       return Promise.resolve();
     }
     const key = `${session.id}:${windowId ?? ''}:${direction}`;
     const existing = loadRequests.current.get(key);
     if (existing) return existing;
-    userScrollPending.current = false;
-    if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
     resetReading();
     const before = currentHistory.current?.windows[0]?.firstEntryId;
     const owner = currentHistory.current?.readingOwner;
@@ -2342,7 +2309,7 @@ export function WorkbenchView({
     });
     loadRequests.current.set(key, request);
     return request;
-  }, [onLoadHistory, resetReading, session.id]);
+  }, [onLoadHistory, resetReading, session.id, follow]);
   const locateAnnotation = useCallback(async (entryId: string, signal: AbortSignal) => {
     if (signal.aborted || currentSessionRef.current !== session.id) throw new DOMException('定位已取消', 'AbortError');
     locateRequest.current?.abort();
@@ -2359,74 +2326,33 @@ export function WorkbenchView({
     try {
       if (onLocateAnnotation) await onLocateAnnotation(entryId, request.signal);
       if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
-      readingAnchor.current = undefined;
+      follow.anchor = undefined;
       setLocatedFocus({ sessionId: owner, entryId });
       const thread = threadRef.current;
       if (!thread) return;
       const target = await waitForHistoryEntry(thread, entryId, request.signal);
       if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
       locatingTaskRef.current = true;
-      target.scrollIntoView({ block: 'center', behavior: 'instant' });
-      programmaticTop.current = thread.scrollTop;
-      readingAnchor.current = captureHistoryAnchor(thread);
+      follow.center(target);
       locatingTaskRef.current = false;
     } finally {
       if (locateRequest.current === request) locatingEntry.current = undefined;
       signal.removeEventListener('abort', abort);
     }
-  }, [onLocateAnnotation, resetReading, session.id]);
+  }, [onLocateAnnotation, resetReading, session.id, follow]);
 
-  const restoreReadingPosition = useCallback((): void => {
-    const thread = threadRef.current;
-    if (!thread || userScrollPending.current) return;
-    const clicked = disclosureAnchor.current;
-    // Rewindowing can replace the header's DOM node without changing the turn.
-    if (clicked?.processKey && !thread.contains(clicked.element)) {
-      const controls = [...thread.querySelectorAll<HTMLElement>('[data-process-key]')].filter(element => element.dataset.processKey === clicked.processKey);
-      const replacement = controls.find(element => element.dataset.processEdge === clicked.edge)
-        ?? (clicked.collapsing ? controls.find(element => element.dataset.processEdge === 'bottom' && element.getAttribute('aria-expanded') === 'false') : undefined);
-      if (replacement) clicked.element = replacement;
-    }
-    if (clicked && thread.contains(clicked.element) && (!clicked.element.closest('[inert]') || (clicked.collapsing && clicked.processKey))) {
-      const delta = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top - clicked.top;
-      if (Math.abs(delta) > .5) thread.scrollTop += delta;
-      programmaticTop.current = thread.scrollTop;
-      previousScrollTop.current = thread.scrollTop;
-      const actualTop = clicked.element.getBoundingClientRect().top - thread.getBoundingClientRect().top;
-      if (clicked.collapsing && clicked.element.getAttribute('aria-expanded') === 'false' && Math.abs(actualTop - clicked.top) > .5) {
-        // Height is already interpolated by the drawer. Browser clamping now
-        // moves the header continuously; a second column transform would fight
-        // that animation and feed transient geometry back into scroll anchoring.
-        clicked.top = actualTop;
-      }
-      return;
-    }
-    disclosureAnchor.current = undefined;
-    if (followLatestRef.current) {
-      const previous = thread.scrollTop;
-      thread.scrollTop = thread.scrollHeight;
-      if (thread.scrollTop !== previous) programmaticTop.current = thread.scrollTop;
-    } else if (readingAnchor.current) {
-      programmaticTop.current = restoreHistoryAnchor(thread, readingAnchor.current);
-    }
-    previousScrollTop.current = thread.scrollTop;
-    if (selectionPausedFollow.current) {
-      setAtBottom(currentHistory.current?.atLatest !== false
-        && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= LATEST_FOLLOW_DISTANCE);
-    }
-  }, []);
   useLayoutEffect(restoreReadingPosition);
   const loadOlderAtBoundary = useCallback(() => {
     const thread = threadRef.current, current = currentHistory.current;
     if (!olderReadIntent.current || !thread || thread.clientHeight <= 0 || thread.scrollTop >= 160
-      || followLatestRef.current || disclosureAnchor.current || locatingEntry.current || locatingTaskRef.current || loadRequests.current.size > 0
+      || follow.intent === 'follow' || follow.hasViewProtection || locatingEntry.current || locatingTaskRef.current || loadRequests.current.size > 0
       || !current?.hasOlder || current.loading || current.error || current.windows.some(window => window.contextState && window.contextState !== 'ready')) return;
     const edge = { owner: current.readingOwner, windowId: current.windows[0]?.id, firstEntryId: current.windows[0]?.firstEntryId };
     const previous = olderAutoRequest.current;
     if (previous && previous.owner === edge.owner && previous.windowId === edge.windowId && previous.firstEntryId === edge.firstEntryId) return;
     if (!thread.querySelector('[data-process-edge="bottom"][data-process-earlier="true"][aria-expanded="false"]')) olderAutoRequest.current = edge;
     void loadHistory(edge.windowId).catch(() => {});
-  }, [loadHistory]);
+  }, [loadHistory, follow]);
   useLayoutEffect(() => { checkOlderBoundary.current = loadOlderAtBoundary; loadOlderAtBoundary(); });
   useEffect(() => {
     const thread = threadRef.current;
@@ -2445,62 +2371,40 @@ export function WorkbenchView({
     const request = new AbortController(); locateRequest.current = request;
     const owner = session.id;
     setJumpingToLatest(true);
+    follow.beginNavigation();
     try {
       if (onReadLatestHistory) await onReadLatestHistory(request.signal);
       if (request.signal.aborted || currentSessionRef.current !== owner) return;
-      if (userScrollFrame.current !== undefined) cancelAnimationFrame(userScrollFrame.current);
-      if (residenceFrame.current !== undefined) { cancelAnimationFrame(residenceFrame.current); residenceFrame.current = undefined; }
-      followLatestRef.current = true;
-      selectionPausedFollow.current = false;
-      disclosureAnchor.current = undefined;
-      readingAnchor.current = undefined; userScrollPending.current = false;
-      setAtBottom(true);
-      restoreReadingPosition();
+      if (locateRequest.current !== request) return;
+      // Reader publication may be React-batched after its promise resolves.
+      // Success belongs to the installed continuous tail, not the read promise.
+      if (currentHistory.current?.atLatest === false) await new Promise<void>((resolve, reject) => {
+        const cleanup = () => { if (latestInstallCheck.current === check) latestInstallCheck.current = undefined; request.signal.removeEventListener('abort', abort); };
+        const abort = () => { cleanup(); reject(new DOMException('定位已取消', 'AbortError')); };
+        const check = () => { if (currentHistory.current?.atLatest !== false) { cleanup(); resolve(); } };
+        latestInstallCheck.current = check;
+        request.signal.addEventListener('abort', abort, { once: true });
+        if (request.signal.aborted) abort(); else check();
+      });
+      if (request.signal.aborted || currentSessionRef.current !== owner || locateRequest.current !== request) return;
+      follow.latest();
     } catch (error) {
       if (!request.signal.aborted) onNotify('无法回到最新', error instanceof Error ? error.message : '请重试。', 'warning');
-    } finally { if (locateRequest.current === request) setJumpingToLatest(false); }
-  }, [onReadLatestHistory, onNotify, restoreReadingPosition, session.id]);
+    } finally { if (locateRequest.current === request) { setJumpingToLatest(false); follow.endNavigation(); } }
+  }, [onReadLatestHistory, onNotify, follow, session.id]);
 
-  const canAutoCollapse = useCallback(() => {
-    const thread = threadRef.current;
-    const selecting = thread && hasHistorySelection(thread);
-    return followLatestRef.current && currentHistory.current?.atLatest !== false && !userScrollPending.current && !selecting;
-  }, []);
+  const canAutoCollapse = useCallback(() => follow.canFollow, [follow]);
   useLayoutEffect(() => {
     const pending = automaticProcessRead.current;
     const latestTurn = activeTurnId ?? messages.at(-1)?.turnId;
     if (pending && latestTurn && latestTurn !== pending.turnId) pending.request.abort();
   }, [activeTurnId, messages]);
   useEffect(() => {
-    const selected = () => {
-      const thread = threadRef.current;
-      if (!thread) return;
-      const nearLatest = currentHistory.current?.atLatest !== false
-        && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= LATEST_FOLLOW_DISTANCE;
-      if (hasHistorySelection(thread)) {
-        locateRequest.current?.abort();
-        if (!selectionPausedFollow.current) {
-          const following = followLatestRef.current;
-          resetReading();
-          selectionPausedFollow.current = following;
-        }
-        // Freeze the reader while selecting, without announcing unseen messages
-        // until output actually extends beyond the existing return zone.
-        if (selectionPausedFollow.current) setAtBottom(nearLatest);
-      } else if (selectionPausedFollow.current) {
-        selectionPausedFollow.current = false;
-        if (nearLatest && !userScrollPending.current) {
-          followLatestRef.current = true;
-          readingAnchor.current = undefined;
-          setAtBottom(true);
-          restoreReadingPosition();
-        } else setAtBottom(false);
-      }
-    };
+    const selected = () => follow.selectionChanged();
     document.addEventListener('selectionchange', selected);
     return () => document.removeEventListener('selectionchange', selected);
-  }, [resetReading, restoreReadingPosition]);
-  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean) => {
+  }, [follow]);
+  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean, disclosureKey?: string) => {
     if (!onReadProcessEnd) return;
     signal.throwIfAborted();
     if (automatic && !canAutoCollapse()) throw new DOMException('阅读位置已改变', 'AbortError');
@@ -2511,9 +2415,9 @@ export function WorkbenchView({
     signal.addEventListener('abort', abort, { once: true });
     const thread = threadRef.current;
     const owner = session.id;
-    const clickedAnchor = !automatic ? disclosureAnchor.current : undefined;
-    const answer = thread && findHistoryEntry(thread, entryId);
-    const top = answer && thread ? answer.getBoundingClientRect().top - thread.getBoundingClientRect().top : undefined;
+    const clickedKey = automatic ? undefined : disclosureKey;
+    const protection = follow.pendingDisclosure(clickedKey, true);
+    let succeeded = false;
     const cancelForSelection = () => {
       if (automatic && !canAutoCollapse()) request.abort();
     };
@@ -2524,25 +2428,19 @@ export function WorkbenchView({
       await onReadProcessEnd(entryId, request.signal);
       request.signal.throwIfAborted();
       if (currentSessionRef.current !== owner) throw new DOMException('会话已切换', 'AbortError');
-      disclosureAnchor.current = clickedAnchor;
-      if (!automatic) {
-        followLatestRef.current = false;
-        setAtBottom(false);
-      }
-      // The persistent bottom control stays under the pointer while its
-      // drawer grows upward; either collapse control keeps its own position.
-      readingAnchor.current = automatic || clickedAnchor ? undefined : { entryId, top: top ?? Math.max(0, (thread?.clientHeight ?? 0) * .65) };
-      if (thread) {
-        await waitForHistoryEntry(thread, entryId, request.signal);
-        restoreReadingPosition();
-      }
+      if (locateRequest.current !== request) throw new DOMException('读取已取消', 'AbortError');
+      if (thread) await waitForHistoryEntry(thread, entryId, request.signal);
+      request.signal.throwIfAborted();
+      succeeded = true;
+      restoreReadingPosition();
     } finally {
+      if (protection) follow.pendingDisclosure(clickedKey, false, !succeeded, protection);
       signal.removeEventListener('abort', abort);
       thread?.ownerDocument.removeEventListener('selectionchange', cancelForSelection);
       if (automaticProcessRead.current?.request === request) automaticProcessRead.current = undefined;
       if (locateRequest.current === request) { locatingEntry.current = undefined; locateRequest.current = undefined; }
     }
-  }, [onReadProcessEnd, canAutoCollapse, session.id, restoreReadingPosition, messages]);
+  }, [onReadProcessEnd, canAutoCollapse, session.id, restoreReadingPosition, messages, follow]);
 
   const disclosureChoices = useMemo(() => ({sessionId: session.id, choices: new Map<string, boolean>()}), [session.id]).choices;
   const locatingEntry = useRef<string | undefined>(undefined);
@@ -2555,7 +2453,7 @@ export function WorkbenchView({
       const thread = threadRef.current;
       const drawerAnimations = [...thread?.querySelectorAll<HTMLElement>('.conversation-run__drawer') ?? []]
         .flatMap(drawer => drawer.getAnimations?.() ?? []);
-      if (drawerAnimations.length) {
+      if (drawerAnimations.length && follow.canFollow) {
         // A moving clip must not retire the contents it is revealing. Retry
         // with the settled DOM and current reading owner after finish/cancel.
         void Promise.allSettled(drawerAnimations.map(animation => animation.finished)).then(reportResidence);
@@ -2566,14 +2464,13 @@ export function WorkbenchView({
       const interest: import('../lib/runtime-adapter').HistoryResidence = collectHistoryResidence(thread);
       if (currentHistory.current?.readingOwner !== readingOwner) return;
       interest.readingOwner = readingOwner;
-      interest.followLatest = followLatestRef.current;
-      if (!followLatestRef.current && !userScrollPending.current) readingAnchor.current = captureHistoryAnchor(thread) ?? readingAnchor.current;
-      interest.anchorEntryId = readingAnchor.current?.entryId;
-      if (readingAnchor.current) interest.pinnedEntryIds.push(readingAnchor.current.entryId);
+      interest.followLatest = follow.canFollow;
+      interest.anchorEntryId = follow.residenceAnchor?.entryId;
+      interest.pinnedEntryIds.push(...follow.protectedEntryIds);
       if (locatingEntry.current) interest.pinnedEntryIds.push(locatingEntry.current);
       onRetainHistory(interest);
     });
-  }, [onRetainHistory, readingOwner, session.id]);
+  }, [onRetainHistory, readingOwner, session.id, follow]);
   useLayoutEffect(reportResidence);
   useLayoutEffect(() => {
     const thread = threadRef.current;
@@ -2636,10 +2533,27 @@ export function WorkbenchView({
     const workbench = workbenchRef.current;
     const composer = composerWrapRef.current;
     if (!workbench || !composer) return;
-    const composerTop = composer.getBoundingClientRect().top;
     const maximum = Math.max(12, Math.floor(workbench.clientHeight - 105));
+    const queue = composer.querySelector<HTMLElement>('.composer-queue');
     const todoTrigger = composer.querySelector<HTMLElement>('.todo-dock__trigger');
     const todoPopover = composer.querySelector<HTMLElement>('.todo-dock__popover');
+    if (queue) {
+      // The queue grows into the conversation's available space. Only scroll
+      // once the editor, TODO dock, and the existing topbar/latest-button
+      // reserve would otherwise be pushed outside the workbench.
+      const otherComposerHeight = composer.offsetHeight - queue.offsetHeight;
+      // An open TODO list protrudes above the dock. Measure its natural
+      // CSS-bounded size first: reusing its previously clipped height would
+      // let a tall queue squeeze the list to zero and prevent its recovery.
+      let todoSpace = 0;
+      if (todoTrigger && todoPopover) {
+        todoPopover.style.maxHeight = 'none';
+        todoSpace = todoPopover.offsetHeight + 9 + 12;
+      }
+      const availableHeight = Math.max(0, maximum - otherComposerHeight - todoSpace);
+      queue.style.setProperty('--composer-queue-available-height', `${availableHeight}px`);
+    }
+    const composerTop = composer.getBoundingClientRect().top;
     if (todoTrigger && todoPopover) {
       // Keep the scrollable TODO list below the topbar and leave room for the
       // latest button (the same 105px ceiling used below), plus its 12px gap.
@@ -2710,7 +2624,7 @@ export function WorkbenchView({
       setSubmitting(false);
     }
     if (!accepted) return;
-    if (currentHistory.current?.atLatest === false) void jumpToLatest();
+    if (currentSessionRef.current === session.id && !isRunning && queuedCount === 0 && !interaction) void jumpToLatest();
     const editorHeight = composerEditorRef.current?.getBoundingClientRect().height;
     const layout = editorHeight === undefined ? null : {
       sessionId: session.id,
@@ -2724,7 +2638,7 @@ export function WorkbenchView({
     onPermissionChange('bypass-permissions');
   }, [canControl, activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
     modelBindingMissing, modelReady, onNotify, onPermissionChange, onSend,
-    permission, requestPlan, session.id, setRequestPlan, submitting, welcome, jumpToLatest]);
+    permission, requestPlan, session.id, setRequestPlan, submitting, welcome, jumpToLatest, queuedCount, interaction]);
 
   const changeBinding = async (binding: ModelCallBindingPayload) => {
     if (!canControl || modelBindingBusy) return;
@@ -2759,44 +2673,71 @@ export function WorkbenchView({
     const observer = new ResizeObserver(schedule);
     observer.observe(workbench);
     observer.observe(composer);
+    // At the viewport boundary the queue shrinks as the editor grows, so the
+    // outer composer can stay the same height. Observe the editor separately.
+    const editor = composer.querySelector<HTMLElement>('.composer');
+    if (editor) observer.observe(editor);
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', schedule);
       window.cancelAnimationFrame(frame);
     };
-  }, [atBottom, interaction?.id, isObserver, queuedCount, session.id, todo?.id, updateJumpPosition, welcome]);
+  }, [latestVisible, interaction?.id, isObserver, queuedCount, session.id, todo?.id, updateJumpPosition, welcome]);
 
   useEffect(() => {
     const thread = threadRef.current;
     const column = thread?.querySelector('.thread-column');
     if (!thread || !column || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(restoreReadingPosition);
+    const mutations = new MutationObserver(restoreReadingPosition);
+    mutations.observe(column, {childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'inert', 'hidden', 'data-source-entry']});
+    const release = () => { if (follow.userScrolling) follow.endInput(); };
+    document.addEventListener('pointerup', release);
+    document.addEventListener('pointercancel', release);
+    thread.addEventListener('transitionrun', restoreReadingPosition);
+    thread.addEventListener('transitionend', restoreReadingPosition);
+    thread.addEventListener('transitioncancel', restoreReadingPosition);
+    thread.addEventListener('load', restoreReadingPosition, true);
+    thread.addEventListener('focusin', follow.focusChanged);
+    thread.addEventListener('focusout', follow.focusChanged);
+    document.fonts?.addEventListener('loadingdone', restoreReadingPosition);
     observer.observe(column);
     // Queue/composer animations resize the viewport without resizing messages.
     // Settle the same reading intent before paint, rather than on the next delta.
     observer.observe(thread);
-    return () => observer.disconnect();
-  }, [session.id, restoreReadingPosition]);
+    return () => {
+      observer.disconnect();
+      mutations.disconnect();
+      document.removeEventListener('pointerup', release);
+      document.removeEventListener('pointercancel', release);
+      thread.removeEventListener('transitionrun', restoreReadingPosition);
+      thread.removeEventListener('transitionend', restoreReadingPosition);
+      thread.removeEventListener('transitioncancel', restoreReadingPosition);
+      thread.removeEventListener('load', restoreReadingPosition, true);
+      thread.removeEventListener('focusin', follow.focusChanged);
+      thread.removeEventListener('focusout', follow.focusChanged);
+      document.fonts?.removeEventListener('loadingdone', restoreReadingPosition);
+    };
+  }, [session.id, restoreReadingPosition, follow]);
 
   useEffect(() => {
     if (!focusTaskHighlighted || !focusTaskId || focusTaskRevision < 1) return;
     const thread = threadRef.current;
     if (!thread) return;
+    locateRequest.current?.abort();
     resetReading();
     const locate = () => {
       const target = [...thread.querySelectorAll<HTMLElement>('[data-task-id]')].find(element => element.dataset.taskId === focusTaskId);
       if (!target) return;
       target.querySelector<HTMLButtonElement>('.subagent-run__header')?.focus({ preventScroll: true });
-      target.scrollIntoView({ block: 'center', behavior: 'instant' });
-      programmaticTop.current = thread.scrollTop;
-      readingAnchor.current = captureHistoryAnchor(thread);
+      follow.center(target);
       observer.disconnect();
     };
     const observer = new MutationObserver(locate);
     observer.observe(thread, { childList: true, subtree: true });
     locate();
     return () => observer.disconnect();
-  }, [focusTaskHighlighted, focusTaskId, focusTaskRevision, session.id, resetReading]);
+  }, [focusTaskHighlighted, focusTaskId, focusTaskRevision, session.id, resetReading, follow]);
 
   return (
     <HistoryDisclosureContext.Provider value={disclosureChoices}>
@@ -2868,75 +2809,46 @@ export function WorkbenchView({
           // also describes floating file/annotation popovers that add no height.
           const button = (event.target as HTMLElement).closest<HTMLElement>('button[data-thread-disclosure]');
           if (!button || !event.currentTarget.contains(button)) return;
-          resetReading();
+          follow.disclose(button);
           olderReadIntent.current = false;
           setRevealEarlierProcess(undefined);
-          userScrollPending.current = false;
-          disclosureAnchor.current = { element: button, top: button.getBoundingClientRect().top - event.currentTarget.getBoundingClientRect().top,
-            processKey: button.dataset.processKey, edge: button.dataset.processEdge,
-            collapsing: button.hasAttribute('data-process-toggle') && button.getAttribute('aria-expanded') === 'true' };
         }}
         onWheel={event => {
           if (nestedScrollConsumes(event.target, event.currentTarget, event.deltaY)) return;
           if (!event.deltaY) return;
           beginUserScroll(event.deltaY > 0);
         }}
-        onTouchStart={event => { if (!nestedScrollConsumes(event.target, event.currentTarget, 0)) beginUserScroll(); }}
+        onTouchStart={event => { touchPosition.current = event.touches[0]?.clientY; }}
+        onTouchMove={event => {
+          const y = event.touches[0]?.clientY, previous = touchPosition.current;
+          touchPosition.current = y;
+          if (y === undefined || previous === undefined || y === previous) return;
+          const delta = previous - y;
+          if (!nestedScrollConsumes(event.target, event.currentTarget, delta)) beginUserScroll(delta > 0);
+        }}
         onPointerDown={event => {
           const thread = event.currentTarget;
           if (event.button !== 0 || event.target !== thread || thread.clientWidth <= 0 || thread.scrollHeight <= thread.clientHeight) return;
           const left = thread.getBoundingClientRect().left + thread.clientLeft;
           // A press on the native scrollbar takes ownership before it moves.
           // Empty margins inside the scrollport are ordinary clicks.
-          if (event.clientX < left || event.clientX >= left + thread.clientWidth) beginUserScroll();
+          if (event.clientX < left || event.clientX >= left + thread.clientWidth) follow.input('drag');
         }}
-        onPointerUp={() => { userScrollPending.current = false; }}
-        onTouchEnd={() => { userScrollPending.current = false; }}
+        onPointerUp={() => follow.endInput()}
+        onPointerCancel={() => follow.endInput()}
+        onTouchEnd={() => { touchPosition.current = undefined; follow.endInput(); }}
         onKeyDown={event => {
           const target = event.target;
-          if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+          if (target instanceof Element && target.closest('input, textarea, select, button, a, [role="button"], [contenteditable="true"]')) return;
           const upward = ['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey);
           if (nestedScrollConsumes(target, event.currentTarget, upward ? -1 : 1)) return;
           if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll(['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey));
         }}
         onScroll={(event) => {
           if (event.target !== event.currentTarget) return;
-          const element = event.currentTarget;
-          const movedTowardLatest = previousScrollTop.current !== undefined && element.scrollTop > previousScrollTop.current;
-          const movedAway = previousScrollTop.current !== undefined && element.scrollTop < previousScrollTop.current;
-          previousScrollTop.current = element.scrollTop;
-          if (!userScrollPending.current && programmaticTop.current !== undefined
-            && element.scrollTop === programmaticTop.current) { programmaticTop.current = undefined; return; }
           if (locatingTaskRef.current) return;
-          // Drawer/viewport shrink can clamp the old tail upward before its
-          // ResizeObserver runs. Moving upward while still exactly at the new
-          // physical tail is layout, not a reader leaving it. Explicit user
-          // input already releases following; a native drag below the tail does too.
-          if ((followLatestRef.current || selectionPausedFollow.current) && !userScrollPending.current && movedAway
-            && element.scrollTop === Math.max(0, element.scrollHeight - element.clientHeight)) {
-            programmaticTop.current = undefined;
-            return;
-          }
-          if (selectionPausedFollow.current && !movedAway && !movedTowardLatest) return;
-          if (movedAway || movedTowardLatest) selectionPausedFollow.current = false;
-          // Native scrollbar drags can arrive without a DOM pointerdown.
-          // Only our exact programmed position is suppressed above.
-          if (disclosureAnchor.current && (movedAway || movedTowardLatest)) {
-            disclosureAnchor.current = undefined;
-            locateRequest.current?.abort();
-          }
-          if (movedAway) olderReadIntent.current = true;
-          else if (movedTowardLatest) olderReadIntent.current = false;
-          userScrollPending.current = false;
-          // The small return zone applies only while moving toward the tail;
-          // it must never recapture an upward gesture, even a fractional one.
-          const nextAtBottom = currentHistory.current?.atLatest !== false
-            && !movedAway && (followLatestRef.current || movedTowardLatest)
-            && element.scrollHeight - element.scrollTop - element.clientHeight <= LATEST_FOLLOW_DISTANCE;
-          selectionPausedFollow.current = nextAtBottom && hasHistorySelection(element);
-          followLatestRef.current = nextAtBottom && !selectionPausedFollow.current;
-          setAtBottom(nextAtBottom);
-          readingAnchor.current = followLatestRef.current ? undefined : captureHistoryAnchor(element);
+          follow.scroll();
+          if (follow.intent === 'read' && !follow.hasViewProtection) olderReadIntent.current = true;
           checkOlderBoundary.current();
         }}
       >
@@ -3011,6 +2923,7 @@ export function WorkbenchView({
               onNotify={onNotify}
             />
           )}
+          <div data-thread-tail-end="" aria-hidden="true" />
         </div>
       </div>
 
@@ -3020,7 +2933,7 @@ export function WorkbenchView({
           interaction={interaction} toolDecisionPending={toolDecisionPending} onRead={onReadInteraction}
           onResolve={onResolveInteraction} onNotify={onNotify} />
       </section>}
-      {!welcome && (!atBottom || !atLatestHistory) && (
+      {!welcome && (!latestVisible || !atLatestHistory) && (
         <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} disabled={jumpingToLatest}
           onClick={() => { void jumpToLatest(); }}>
           <span className="jump-to-bottom__icon" aria-hidden="true">

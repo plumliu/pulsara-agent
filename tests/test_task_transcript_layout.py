@@ -78,6 +78,9 @@ def test_root_and_task_share_compact_tool_and_reply_styles(browser, width, theme
                 reasoningHeight: host.querySelector('.reasoning-row__summary').getBoundingClientRect().height,
                 bodyFont: style('.assistant-copy .assistant-markdown').fontSize,
                 bodyLine: style('.assistant-copy .assistant-markdown').lineHeight,
+                bodyWeight: style('.assistant-copy .assistant-markdown').fontWeight,
+                bodySpacing: style('.assistant-copy .assistant-markdown').letterSpacing,
+                bodyFamily: style('.assistant-copy .assistant-markdown').fontFamily,
                 headingFont: style('.assistant-copy h2').fontSize,
                 headingColor: style('.assistant-copy h2').color,
                 paragraphMargin: style('.assistant-copy p').marginBottom,
@@ -95,10 +98,14 @@ def test_root_and_task_share_compact_tool_and_reply_styles(browser, width, theme
         assert root["iconWidth"] == "22px"
         assert root["svgWidth"] == "12px"
         assert root["bodyFont"] == "16px"
-        assert float(root["bodyLine"].removesuffix("px")) == pytest.approx(16 * 1.52)
-        assert root["headingFont"] == "19px"
+        assert float(root["bodyLine"].removesuffix("px")) == pytest.approx(16 * 1.7)
+        assert root["bodyWeight"] == "400"
+        assert float(root["bodySpacing"].removesuffix("px")) == pytest.approx(0)
+        assert "Pulsara UI" in root["bodyFamily"]
+        assert "Pulsara Body" not in root["bodyFamily"]
+        assert root["headingFont"] == "21px"
         assert root["paragraphMargin"] == "5px"
-        assert root["headingMargin"] == "12px 5px"
+        assert root["headingMargin"] == "26px 10px"
         assert float(root["groupTopGap"].removesuffix("px")) <= 8
         assert root["taskHeight"] == root["toolHeight"]
         assert root["taskTitle"] == root["toolTitle"]

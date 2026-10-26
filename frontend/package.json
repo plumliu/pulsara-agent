@@ -7,6 +7,7 @@
   },
   "scripts": {
     "build:desktop": "vite build --config vite.desktop.config.ts",
+    "demo:follow": "vite --config vite.desktop.config.ts --host 127.0.0.1",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest"
