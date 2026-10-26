@@ -169,7 +169,37 @@
 .reasoning-row__chevron { grid-column: 4; justify-self: end; color: var(--faint); transition: transform .16s ease; }
 .reasoning-row.is-expanded .reasoning-row__chevron { transform: rotate(90deg); }
 .reasoning-row__body { max-height: 360px; overflow: auto; padding: 2px 12px 12px 34px; color: var(--muted); font-family: var(--serif); font-size: var(--type-small); line-height: 1.7; overflow-wrap: anywhere; }
-.reasoning-row__body.assistant-markdown { color: var(--muted); font-size: var(--type-small); line-height: 1.7; }
+/* Reasoning markdown has its own reading scale, independent of compact transcript spacing. */
+.conversation-transcript .reasoning-row__body.assistant-markdown {
+  --type-body: 14px;
+  --type-heading: 18px;
+  --type-title-large: 16px;
+  --type-title-small: 15px;
+  padding: 6px 16px 16px 34px;
+  color: var(--ink-soft);
+  font-family: var(--serif);
+  font-size: var(--type-body);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.75;
+}
+.conversation-transcript .reasoning-row__body.assistant-markdown p { margin: 0 0 10px; }
+.conversation-transcript .reasoning-row__body.assistant-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin-block: 18px 7px;
+  font-family: inherit;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.conversation-transcript .reasoning-row__body.assistant-markdown :is(h4, h5, h6) { font-size: 14px; }
+.conversation-transcript .reasoning-row__body.assistant-markdown :is(h1, h2, h3, h4, h5, h6) :is(strong, b) { font-weight: inherit; }
+.conversation-transcript .reasoning-row__body.assistant-markdown :is(ul, ol) { margin-block: 8px 12px; padding-left: 22px; }
+.conversation-transcript .reasoning-row__body.assistant-markdown li { margin-block: 4px; }
+.conversation-transcript .reasoning-row__body.assistant-markdown li > p { margin-bottom: 5px; }
+.conversation-transcript .reasoning-row__body.assistant-markdown :is(blockquote, .katex-display) { margin-block: 12px; }
+.conversation-transcript .reasoning-row__body.assistant-markdown > :first-child,
+.conversation-transcript .reasoning-row__body.assistant-markdown > .markdown-copy-surface > :first-child { margin-top: 0; }
+.conversation-transcript .reasoning-row__body.assistant-markdown > :last-child,
+.conversation-transcript .reasoning-row__body.assistant-markdown > .markdown-copy-surface > :last-child { margin-bottom: 0; }
 .assistant-copy { margin: 10px 0 18px 40px; --type-body: var(--conversation-font-size); --type-title-small: 19px; --type-title: 18px; --type-title-large: 21px; --type-heading: 24px; }
 /* Inline HTML retains a fixed reference viewport; only the crop shrinks. */
 .inline-visualization { --visualization-height: min(120dvh, 1200px); margin: 18px 0; font-family: var(--sans); user-select: none; }
@@ -200,10 +230,11 @@
 .inline-visualization__status-copy p { margin: 4px 0 0; font-size: var(--type-caption); line-height: 1.5; overflow-wrap: anywhere; }
 .inline-visualization__status-copy button { margin-top: 8px; padding: 5px 8px; border: 1px solid var(--line); background: var(--paper-solid); font-size: var(--type-caption); }
 
-.conversation-transcript > .assistant-turn:last-child,
-.conversation-transcript > [data-source-entry]:last-child > .assistant-turn { margin-bottom: 0; }
-.conversation-transcript > .assistant-turn:last-child > .assistant-copy:last-child,
-.conversation-transcript > [data-source-entry]:last-child > .assistant-turn > .assistant-copy:last-child { margin-bottom: 0; }
+/* The tail measurement marker is not message content; keep trimming the final message gap. */
+.conversation-transcript > .assistant-turn:nth-last-child(1 of :not([data-thread-tail-end])),
+.conversation-transcript > [data-source-entry]:nth-last-child(1 of :not([data-thread-tail-end])) > .assistant-turn { margin-bottom: 0; }
+.conversation-transcript > .assistant-turn:nth-last-child(1 of :not([data-thread-tail-end])) > .assistant-copy:last-child,
+.conversation-transcript > [data-source-entry]:nth-last-child(1 of :not([data-thread-tail-end])) > .assistant-turn > .assistant-copy:last-child { margin-bottom: 0; }
 .assistant-markdown { min-width: 0; overflow-wrap: anywhere; color: var(--ink-soft); font-size: var(--type-body); line-height: 1.78; }
 .assistant-markdown > :first-child, .assistant-markdown > .markdown-copy-surface > :first-child { margin-top: 0; }
 .assistant-markdown > :last-child, .assistant-markdown > .markdown-copy-surface > :last-child { margin-bottom: 0; }
@@ -972,7 +1003,7 @@
   --type-title-large: 17px;
   --type-heading: 20px;
 }
-.conversation-transcript > .conversation-run:last-child { margin-bottom: 0; }
+.conversation-transcript > .conversation-run:nth-last-child(1 of :not([data-thread-tail-end])) { margin-bottom: 0; }
 .conversation-transcript .assistant-markdown { line-height: 1.52; }
 .conversation-transcript .assistant-markdown p { margin-bottom: 5px; }
 .conversation-transcript .assistant-markdown hr { margin: 18px 0; border: 0; border-top: 1px solid var(--line-strong); }

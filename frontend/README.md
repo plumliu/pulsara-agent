@@ -42,6 +42,6 @@ npm run build:desktop
 
 ## 跟随最新的隔离体验
 
-生产滚动行为由 `lib/thread-follow-controller.ts` 统一协调，契约见仓库根目录的 `PULSARA_LATEST_FOLLOW_REDESIGN_PLAN.zh.md`。跟随意图、真实尾部可见性与临时查看/选区保护分别表示；向下返回吸附为 48 CSS 像素，按钮可见性的独立测量容差为 1.5 CSS 像素。
+生产滚动行为由 `lib/thread-follow-controller.ts` 统一协调，实现说明见归档文档 [PULSARA_LATEST_FOLLOW_REDESIGN_PLAN.zh.md](../archived_docs/PULSARA_LATEST_FOLLOW_REDESIGN_PLAN.zh.md)。跟随意图、真实尾部可见性与临时查看/选区保护分别表示；向下返回吸附为 48 CSS 像素，按钮可见性的独立测量容差为 1.5 CSS 像素。
 
 运行 `npm --prefix frontend run demo:follow -- --port 5175 --strictPort`，打开 `http://127.0.0.1:5175/follow-demo.html`。体验页引用生产 Workbench，提供长思考、流式输出、工具结果、历史区间、长队列和失败读取，不连接生产运行时；它只用于人工体验，不进入桌面默认构建入口。
