@@ -20,11 +20,13 @@ GitHub 的 Source code 压缩包是源码，不是安装包。
 
 **macOS：**将 DMG 中的 Pulsara 拖入“应用程序”，推出 DMG，再从“应用程序”启动。此预览版没有 Apple Developer ID 分发签名，也未经过 Apple 公证；首次打开可能被拦截。确认下载来源后，先尝试打开应用，再到“系统设置 → 隐私与安全性 → 仍要打开”允许该应用。[Apple 官方说明](https://support.apple.com/zh-cn/102445)
 
+**Windows：**先安装 WSL2 Ubuntu 并完成 Linux 用户创建，再运行 EXE 图形安装器并选择安装目录。首次启动时确认要使用的 Ubuntu 用户。安装包尚未签名，Windows 可能提示未知发布者。
+
 配置有效模型连接即可开始使用。应用自带运行所需的 Python、数据库、浏览器和搜索工具，不要求预先安装 uv 或 Docker；具体任务需要的软件可在对话中按需准备。
 
 ## 数据与更新
 
-配置、会话数据库及默认工作目录保存在 `~/.pulsara`；显式设置 `PULSARA_HOME` 时使用指定目录。卸载或替换应用不会主动删除这些用户数据。更新前请完全退出 Pulsara，再替换应用。开发构建和发行构建默认共用数据及 CLI，验收前请退出另一份应用。
+配置、会话数据库及默认工作目录保存在 `~/.pulsara`；显式设置 `PULSARA_HOME` 时使用指定目录。Windows 的这些数据位于所选 WSL 用户中。Windows 卸载器默认保留个人数据；选择“彻底卸载”会同时删除配置、会话、数据库和快速开始文件。更新前请完全退出 Pulsara，再运行新版安装器或替换 macOS 应用。开发构建和发行构建默认共用数据及 CLI，验收前请退出另一份应用。
 
 **从 alpha.5 或更早版本升级：**本版删除了记忆来源关联字段，更新了数据库基线，不提供旧数据库的自动迁移。请先备份 Pulsara 数据；旧数据库不能直接沿用，保留历史需要另行迁移。请勿通过删除整个 `~/.pulsara` 来处理升级。
 
@@ -32,9 +34,9 @@ macOS 首次启动会注册 `~/.local/bin/pulsara`。已有其他来源的同名
 
 ## 验证范围与已知限制
 
-- 本次使用本地增量构建，复用未变化的数据库、Python 依赖和浏览器组件；重新打包应用代码与前端。
-- 发布 macOS 15+ Apple Silicon DMG；Windows 下载仍可使用上一版 alpha.1，不提供本版 Windows 或 Ubuntu 安装包。
-- 运行桌面测试、资源冒烟与版本一致性检查；自动化检查不代替完整图形桌面验收。
+- macOS 使用本地增量构建；Windows 在本机 WSL2 Ubuntu 中构建 Linux 资源，再由 Windows 构建 Electron/NSIS 安装器。应用代码基于 v0.1.1-alpha.2，另有不改变运行行为的测试维护。
+- 发布 macOS 15+ Apple Silicon DMG 和 Windows 11 x64 + WSL2 Ubuntu EXE；不提供本版原生 Ubuntu 安装包。
+- Windows 相关桌面测试 83 项、WSL 桌面全量测试 121 项、Windows payload/构建平台检查 13 项通过；资源搬移后的 PostgreSQL、扩展、Python 与 Chromium 冒烟及版本一致性检查通过。未代用户执行图形安装与安装后验收。
 - 当前仅提供手动更新，不包含 AppImage 或 macOS Intel 安装包，也不承诺跨版本数据库迁移。
 
 问题反馈：[GitHub Issues](https://github.com/plumliu/pulsara-agent/issues)。请注明版本、系统、架构和复现步骤，不要附带 API Key 或 OAuth 令牌。

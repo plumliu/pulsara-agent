@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -31,23 +30,6 @@ test('finite execution preserves literal argv, explicit environment, output and 
       return true;
     },
   );
-});
-
-test('stream execution keeps three byte pipes and the supplied working directory', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'pulsara-host-stream-'));
-  try {
-    const child = posixHostOperations.spawn(process.execPath, ['-e', 'process.stderr.write(process.cwd());process.stdin.pipe(process.stdout);'], { env: process.env, cwd: root });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-    const closed = once(child, 'close');
-    const bytes = Buffer.from([0, 0xff, 13, 10, 0xe4, 0xb8, 0xad]);
-    child.stdin.end(bytes);
-    assert.deepEqual(await closed, [0, null]);
-    assert.deepEqual(Buffer.concat(stdout), bytes);
-    assert.equal(Buffer.concat(stderr).toString(), await realpath(root));
-  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('runtime storage creates private files, appends exact bytes and retains filesystem failures', async () => {

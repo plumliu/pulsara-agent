@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "npm run build && electron .",
     "test": "npm run build && node --test dist/*.test.js",
+    "test:windows": "npm run build && node --test dist/backend-paths.test.js dist/backend-session.test.js dist/host-wsl.test.js dist/wsl-setup.test.js dist/wsl-maintenance.test.js dist/postgres-wsl.test.js dist/runtime.test.js dist/browser-policy.test.js dist/oauth-return.test.js dist/ui-preferences.test.js dist/packaged-fonts.test.js && node --test --test-name-pattern \"^Windows \" dist/main.test.js",
     "prepare:resources": "../.venv/bin/python scripts/prepare_resources.py",
     "package:dir": "node scripts/linux-hooks.cjs && npm run build && electron-builder --dir",
     "package": "node scripts/linux-hooks.cjs && npm run build && electron-builder",

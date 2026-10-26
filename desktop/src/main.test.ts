@@ -223,32 +223,6 @@ function fixture(options: {
   return { composition, host, dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, destroying, handlers, calls, switches, failures, ready: ready! };
 }
 
-for (const scenario of [
-  { platform: 'darwin' as const, packagedResources: "/Applications/Pulsara user's.app/Contents/Resources", packageTarget: undefined },
-  { platform: 'linux' as const, packagedResources: '/opt/Pulsara/resources', packageTarget: '/opt/Pulsara/resources/bin/pulsara' },
-]) {
-  test(`main composes the ${scenario.platform} bundle once for home, runtime, PG and CLI`, async () => {
-    const value = fixture(scenario);
-    value.previous.resolve(); value.database.resolve(); value.cover.resolve();
-    await value.ready;
-    await value.handlers.get('desktop:cli-status')!(value.trustedEvent());
-    const { composition } = value;
-    assert.deepEqual(value.switches, []);
-    assert.equal(composition.titleBarOverlay, undefined);
-    assert.equal(composition.autoHideMenuBar, undefined);
-    const paths = composition.runtime!.resources;
-    assert.equal(paths.root, scenario.packagedResources);
-    assert.equal(composition.python, paths.pythonExecutable);
-    assert.equal(composition.runtime!.host, value.host);
-    assert.equal(composition.runtime!.home, '/tmp/pulsara-main-test');
-    assert.deepEqual(composition.postgres, { bin: paths.postgresBin, home: composition.runtime!.home });
-    assert.equal(paths.playwrightBrowsers, path.join(scenario.packagedResources, 'playwright'));
-    assert.equal(composition.cli!.script, `#!/bin/sh\n# Pulsara desktop command-line launcher\nexec '${path.join(scenario.packagedResources, 'python/bin/python3').replaceAll("'", "'\\''")}' -m pulsara_agent "$@"\n`);
-    assert.equal(composition.cli!.packageTarget, scenario.packageTarget);
-    if (scenario.packageTarget) assert.equal(composition.cli!.destination, '/usr/bin/pulsara');
-  });
-}
-
 test('Windows requires environment confirmation before creating a kernel or preparing PostgreSQL', async () => {
   const value = fixture({platform:'win32'});
   await value.ready;

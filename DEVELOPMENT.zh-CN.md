@@ -93,12 +93,14 @@ mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py d
 
 数据库夹具和原生 Linux 检查见 [tests/linux/README.md](tests/linux/README.md)。Windows 的 Python 命令改用 `.venv/Scripts/python.exe`。资源准备好后，运行 `mise exec -- npm --prefix desktop start` 启动开发界面。
 
+Windows 宿主的桌面测试使用 `mise exec -- npm --prefix desktop run test:windows`，与 Windows CI 共用入口，并检查实际 shell 字体打包。上面的桌面全量测试包含 POSIX 脚本、权限及符号链接行为，应在 macOS 或 WSL/Linux 中完整运行。
+
 Electron 壳只打包启动页需要的 Inter、Noto Sans SC 和 Gelasio。工作台字体（含 MiSans 全字重）随 Python 包的前端静态资源分发，Windows 将其放在 WSL payload 中。启动页必须独立于 WSL；工作台专用字体不再复制进 Electron archive。
 
 ## 发布
 
-0.1.1-alpha.2 在本地构建并发布 macOS ARM64 DMG，基于 `v0.1.1-alpha.2` 标签；Windows 下载保留 alpha.1。Python 版本为 `0.1.1a2`，设置页显示 `0.1.1`。
+0.1.1-alpha.2 提供本地构建的 macOS ARM64 DMG 和 Windows x64 EXE。应用代码基于 `v0.1.1-alpha.2` 标签；Windows 测试维护不改变运行行为。Python 版本为 `0.1.1a2`，设置页显示 `0.1.1`。
 
-GitHub Actions 仅手动触发。现有 Native Desktop Packages 工作流与 `release_artifacts.py` 汇总仍要求一个 DMG、两个 Ubuntu deb 和一个 Windows EXE，本次仅发布 macOS 安装包，不使用该汇总流程。将本地 DMG 上传到对应标签的 Release；已发布的标签保持不变。
+GitHub Actions 仅手动触发。现有 Native Desktop Packages 工作流与 `release_artifacts.py` 汇总仍要求一个 DMG、两个 Ubuntu deb 和一个 Windows EXE，本次 macOS/Windows 发布不使用该汇总流程。将各本地安装包上传到对应的 Release，不替换已有制品；已发布的标签保持不变。
 
 版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.1-alpha.2`。

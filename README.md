@@ -72,7 +72,7 @@ Save preferences, project constraints, and decisions in memory for later tasks t
 | Operating system | Quick download |
 | --- | --- |
 | macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-macos-arm64.dmg) |
-| Windows 11 x64 + WSL2 Ubuntu | [Download EXE 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-windows-x64.exe) |
+| Windows 11 x64 + WSL2 Ubuntu | [Download EXE 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-windows-x64.exe) |
 
 No Ubuntu installer is included in this release. For native Ubuntu builds, see the [development guide](DEVELOPMENT.md).
 

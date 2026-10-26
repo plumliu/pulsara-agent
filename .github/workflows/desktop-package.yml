@@ -141,9 +141,7 @@ jobs:
       - name: Verify payload, build helper and type-check the Windows shell
         run: |
           mise run desktop:windows-resources
-          npm --prefix desktop run build
-          node --test desktop/dist/backend-paths.test.js desktop/dist/backend-session.test.js desktop/dist/host-wsl.test.js desktop/dist/wsl-setup.test.js desktop/dist/postgres-wsl.test.js desktop/dist/runtime.test.js desktop/dist/browser-policy.test.js desktop/dist/oauth-return.test.js desktop/dist/ui-preferences.test.js
-          node --test --test-name-pattern "^Windows " desktop/dist/main.test.js
+          npm --prefix desktop run test:windows
       - name: Package the per-user installer without publication
         run: npm --prefix desktop run package -- --win --x64 --publish never
       - uses: actions/upload-artifact@v7
