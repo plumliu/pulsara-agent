@@ -794,7 +794,7 @@ async def _case_ui_native(
     row["decision_passed"] = bool(
         "|" in reply
         and str(deliverable) in reply
-        and "```pulsara-visualization" not in reply
+        and "```pulsara-viz" not in reply
     )
     await core.close_session(session.host_session_id)
     return row
@@ -806,10 +806,10 @@ async def _case_inline_visualization(*, core, runtime, connection, root, calls) 
         core=core, runtime=runtime, connection=connection, workspace=workspace, calls=calls,
         case_name="publish_inline_html",
         prompt=("Create two self-contained HTML files: chart.html with a working labeled slider "
-                "and one data-pulsara-visualization-root, and page.html as a whole-page layout without that marker. "
+                "and one pulsara-viz-root, and page.html as a whole-page layout without that marker. "
                 "Use window.PulsaraVisualization when available with standalone fallbacks. "
                 "Inspect both with view_image, then show two independent galleries in your reply: "
-                "the first top-level pulsara-visualization fence must contain chart.html and page.html, one per line; "
+                "the first top-level pulsara-viz fence must contain chart.html and page.html, one per line; "
                 "the second fence must contain only chart.html, with one paragraph before, between and after the galleries. "
                 "Do not inspect credentials."),
     )

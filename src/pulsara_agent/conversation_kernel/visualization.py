@@ -84,7 +84,7 @@ def visualization_paths(body: str) -> tuple[str, ...]:
         if (
             token.type != "fence"
             or token.level != 0
-            or token.info.strip(" \t") != "pulsara-visualization"
+            or token.info.strip(" \t") != "pulsara-viz"
             or not token.map
         ):
             continue

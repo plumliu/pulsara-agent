@@ -107,7 +107,7 @@ def test_sibling_branches_and_grandchild_use_one_effective_history(
                 visual_entry = _id("entry")
                 visual_entries[launch.task_start.task_id] = visual_entry
                 content = InlineContent.from_bytes(
-                    f"```pulsara-visualization\n{image.image_ref}\n```".encode()
+                    f"```pulsara-viz\n{image.image_ref}\n```".encode()
                 )
                 repo.commit_assistant_message(
                     lease.guard,

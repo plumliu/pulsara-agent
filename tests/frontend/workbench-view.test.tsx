@@ -47,7 +47,7 @@ describe('visualization occurrence layout', () => {
     const first = vi.fn().mockRejectedValue(Error('offline'));
     const latest = vi.fn(async () => '<p>restored</p>');
     const messages = [{id:'chart-answer',role:'assistant' as const,assistantKind:'terminal' as const,
-      status:'completed' as const,time:'13:04',body:'```pulsara-visualization\nchart.html\n```',
+      status:'completed' as const,time:'13:04',body:'```pulsara-viz\nchart.html\n```',
       visualizations:[{ordinal:0,state:'READY' as const,contentDigest:`sha256:${'a'.repeat(64)}`,contentSize:15}]}];
     const notify = vi.fn(), readTool = vi.fn();
     const view = render(<ConversationMessages messages={messages} artifactOwnerKey="session-one"
@@ -70,7 +70,7 @@ describe('visualization occurrence layout', () => {
     }));
     const view = render(<ConversationMessages canFork={true}
       messages={[{ id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
-        time: '13:04', body: '图表如下。\n\n```pulsara-visualization\nfirst.html\nsecond.html\n```\n\n图表之后的说明。', visualizations }]}
+        time: '13:04', body: '图表如下。\n\n```pulsara-viz\nfirst.html\nsecond.html\n```\n\n图表之后的说明。', visualizations }]}
       artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
     expect(screen.getAllByRole('region', { name: '可视化图集' })).toHaveLength(1);
     await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
@@ -1735,7 +1735,7 @@ describe('ROOT context compaction progress', () => {
 
 
 it('keeps child details and visualization reads in the sidebar, with compact navigation in the parent', () => {
-  const body = '```pulsara-visualization\nchart.html\n```';
+  const body = '```pulsara-viz\nchart.html\n```';
   const read = vi.fn();
   const present = vi.fn();
   const view = render(<PresentationContext.Provider value={present}><ConversationMessages messages={[{

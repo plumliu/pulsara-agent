@@ -91,19 +91,19 @@ def test_preview_frames_explicit_and_automatic_roots_and_keeps_ambiguous_pages()
                 b"<!doctype html><html><head><style>"
                 b"body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111}"
                 b"main{width:320px;height:180px;background:#abc}</style></head><body>"
-                b"<main data-pulsara-visualization-root>chart</main></body></html>"
+                b"<main pulsara-viz-root>chart</main></body></html>"
             )
             cropped = await owner.render(chart, deadline_monotonic=monotonic() + 20)
             assert unpack(">II", cropped[16:24]) == (320, 180)
             automatic = await owner.render(
-                chart.replace(b" data-pulsara-visualization-root", b""),
+                chart.replace(b" pulsara-viz-root", b""),
                 deadline_monotonic=monotonic() + 20,
             )
             assert unpack(">II", automatic[16:24]) == (320, 180)
             multiple = await owner.render(
                 chart.replace(
                     b"</main>",
-                    b"</main><div data-pulsara-visualization-root>other</div>",
+                    b"</main><div pulsara-viz-root>other</div>",
                 ),
                 deadline_monotonic=monotonic() + 20,
             )
@@ -252,7 +252,7 @@ def test_visualization_publication_fork_and_reference(
             AssistantTextBlock(
                 _id("block"),
                 InlineContent.from_bytes(
-                    ("```pulsara-visualization\n" + filename + "\n```").encode()
+                    ("```pulsara-viz\n" + filename + "\n```").encode()
                 ),
             ),
         ),
@@ -342,7 +342,7 @@ def test_visualization_publication_fork_and_reference(
     assert tuple(item.item_kind for item in owner_items) == (
         FrozenProviderInputItemKind.ASSISTANT,
     )
-    assert "```pulsara-visualization" in provider_input_item_text(owner_items[0])
+    assert "```pulsara-viz" in provider_input_item_text(owner_items[0])
     assert "pulsara_visualizations" not in provider_input_item_text(owner_items[0])
     child = fork(repo, lease.guard.session_id, final_id)
     assert child.created, child.public_code
@@ -379,7 +379,7 @@ def test_freeze_duplicate_paths_failures_and_edits(tmp_path, monkeypatch):
     path.write_text("<h1>original</h1>")
 
     def marker(value):
-        return f"```pulsara-visualization\n{value}\n```"
+        return f"```pulsara-viz\n{value}\n```"
 
     reads = []
     read = v.read_visualization_file

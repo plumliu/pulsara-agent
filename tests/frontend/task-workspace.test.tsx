@@ -381,7 +381,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
       disconnect() {}
     });
     vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
-    const body = '```pulsara-visualization\nchart.html\n```';
+    const body = '```pulsara-viz\nchart.html\n```';
     const read = vi.fn(async () => '<h1>worker chart</h1>');
     const view = render(<TaskGraphDetail onReadPromptImage={vi.fn()} tasks={[task({status:'completed', result:{id:'result',entryId:'child-answer',summary:'完成分析',diagnostics:[]}})]}
       initialTaskId="task-a" canControl={false} onCancel={vi.fn()} onNotify={vi.fn()}

@@ -39,7 +39,7 @@ export const visualizationFrameMeasurementScript = `<script>
       interactionPending = false;
       measuredViewport = viewport;
     }
-    const explicit = document.querySelector('[data-pulsara-visualization-root]');
+    const explicit = document.querySelector('[pulsara-viz-root]');
     // Live layout follows actual bounds, not animation presence. Color and
     // contained hover effects must not expand the host's display window.
     const candidate = (${visualizationRoot.toString()})(true);

@@ -440,6 +440,7 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         "references/explore-transform.md",
         "references/analysis-methods.md",
         "references/visualization-render.md",
+        "references/html-environment.md",
         "references/multi-view-analysis.md",
         "examples/analyze_csv.py",
     ):

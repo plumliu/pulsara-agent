@@ -2,7 +2,7 @@
 // geometry; this is a content-layout heuristic, not a painted-pixel guarantee.
 export default function visualizationRoot(includeAnimating = false) {
   const visible = element => element.checkVisibility({checkOpacity: true, checkVisibilityCSS: true});
-  const marked = document.querySelectorAll('[data-pulsara-visualization-root]');
+  const marked = document.querySelectorAll('[pulsara-viz-root]');
   // An explicit but invalid selection must not silently select another root.
   if (marked.length) return marked.length === 1 && visible(marked[0]) ? marked[0] : null;
   if (!includeAnimating && document.getAnimations().some(animation => animation.pending || animation.playState === 'running')) return null;

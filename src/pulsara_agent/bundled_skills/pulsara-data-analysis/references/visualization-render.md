@@ -1,76 +1,31 @@
-# Figures, file browsing and HTML review
+# Explain findings with charts
 
-Choose text or tables for simple results, publish saved figures inline with `pulsara-visualization`, use fenced `svg` or `mermaid` for static diagrams, and self-contained HTML for interaction. SVG and Mermaid display as images; ordinary HTML code blocks display source. Use `$...$` for inline formulas or `$$` on separate lines for display math; `\(...\)` and `\[...\]` are also supported.
+Choose each figure for the question it answers. A number or table may be enough; add a figure when its pattern, comparison or distribution makes the result easier to understand. Publish saved images or HTML through `pulsara-viz` using the conversation's display rules.
 
-Always enclose SVG, Mermaid and other source code in closed triple-backtick fences with the correct language label. Never emit bare SVG/XML or diagram source.
+## Match the view to the question
 
-For a static SVG diagram, put the SVG source directly in a `svg` fence:
+| Question | Useful views | Interpretation to carry into the figure |
+| --- | --- | --- |
+| When did the change occur? | Time series; aligned series for related measures | Label the period, frequency and comparison baseline. |
+| Where does the difference come from? | Ranked bars, contribution views or small multiples | Keep comparable scales and distinguish totals, shares and rates. |
+| What does the average conceal? | Histograms, boxplots or individual observations | Show group sizes, spread and unusual values; identify missing data separately. |
+| How do variables relate? | Scatterplots or grouped trends | Preserve units and relevant groups; describe association separately from causation. |
+| How uncertain or reliable is the comparison? | Effect estimates with intervals; residual or subgroup views for model results | State what the interval or error measure represents and which observations it covers. |
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40">
-  <rect width="160" height="40" rx="8" fill="#536fd3"/>
-</svg>
-```
+Use complementary views when they reveal distinct aspects of the same result. Keep category colors, units, denominators and comparison periods consistent. Pair a pattern with exact values when precision matters. [Multi-view analysis](multi-view-analysis.md) develops this approach with a customer-grouping example.
 
-## Open current files
+## Arrange the explanation
 
-Link a deliverable with `[label](/absolute/path)`. The desktop opens its current contents in a right-side browsing tab. Links between local HTML and Markdown documents navigate in that tab with back/forward history. Use this for document packages, Skill references and files the user should revisit after edits. In conversation replies, Markdown image syntax `![label](/absolute/plot.png)` creates a clickable image reference; it does not display the full figure inline.
+Organize figures around the questions they answer, with each explanation beside its evidence. Prefer compact figures across separate galleries over a long scrolling HTML page. Group alternative views together; keep linked views and shared controls in one HTML file. Views needed for simultaneous comparison belong side by side in one figure or beside consecutive explanations, rather than hidden on alternative gallery pages.
 
-## Create and publish
+Lead with the finding, then show the comparisons that explain it. Give each group a distinct purpose; omit views that only repeat an established result. Choose layout and chart count to match the question.
 
-Write responsive `.html`/`.htm` files, preferably in `.pulsara/visualizations/`. For simple visuals, consider a single HTML file. Local image paths may be absolute or relative to the file that references them. Embed animated SVG and SVG icons such as Lucide inside the HTML. Network resources are unavailable. Paths in publication fences resolve from the session workspace, not the terminal directory; absolute paths and `~` follow ordinary file access. Resources inside HTML/CSS resolve relative to the declaring file.
+## Make interaction informative
 
-In a tool-free reply, place explicitly closed, top-level `pulsara-visualization` fences beside the relevant prose. Each fence contains only existing file paths or known `image:` references copied unchanged, one per line. The only supported file extensions are **`.png`, `.jpg`, `.jpeg`, `.webp` (static only), `.html` and `.htm`**. Do not put `.svg` paths or SVG source in these fences; use a fenced `svg` code block or embed the SVG in an HTML file instead. Supported images do not need an HTML wrapper or a prior `view_image` call:
+Use a filter, selection or slider when it lets the reader explore a relevant comparison. Keep the current selection visible, provide a clear reset, and update labels, summaries and denominators with the plotted scope. Distinguish a filtered subset from a fixed population baseline. Separate HTML files have independent controls, even within one gallery.
 
-Compare the costs:
+Compute substantive results with Python or SQL and embed the data needed for the chosen interactions. Filtering existing results does not refit a model or rerun an analysis; a changed computation requires a new result. Label sampling or aggregation, and keep conclusions tied to the displayed evidence.
 
-```pulsara-visualization
-.pulsara/visualizations/cost.html
-.pulsara/visualizations/cost-breakdown.png
-```
+## Produce the figure
 
-Each fence creates an independent gallery. One path shows one figure; multiple paths share host-provided thumbnail navigation. Group alternatives together; use separate fences to show figures together. Views with shared controls belong in one file. Keep display fences outside lists and blockquotes.
-
-Prefer several compact HTML figures in separate fences beside their explanations over one long, internally scrolling dashboard. Several paths in one fence create gallery pages, not stacked inline figures. Keep shared filters or tightly coupled interactions together.
-
-Publication freezes each image or HTML together with its supported local resources. Later edits or deletion leave earlier replies unchanged; publishing the path again captures its current contents. Missing or unreadable files show an error at their display position. Opening a published figure in a tab still shows that snapshot. A frozen HTML snapshot does not include an entire linked document package; provide a current-file link when the user needs cross-file browsing.
-
-## Layout and review
-
-Use concise labels, readable axes and units, and compact layouts that fit narrow screens. Keep outer backgrounds transparent by default, with opaque surfaces where readability or the requested design needs them. Preserve contrast in light and dark themes.
-
-For compact content, mark exactly one visible container `data-pulsara-visualization-root`. Keep its content within its bounds for reliable fitting. Without a marker, a unique visible `main` containing all visible content may be fitted automatically; other layouts use page mode.
-
-Use `view_image` directly for SVG files; do not convert them with system thumbnail tools. Inspect saved images or current HTML with `view_image(path=...)` when useful. This gives the model pixels independently of the user’s tabs; publishing a figure does not mean you have seen it. An HTML screenshot checks the captured appearance, not clicks or other interactions. Describe exactly what you inspected, and inspect again after edits before claiming the updated version was reviewed.
-
-## Host environment
-
-The optional read-only `window.PulsaraVisualization` supplies `getSnapshot()` and `subscribe(callback)`. Read the initial snapshot before subscribing to later updates; subscription returns an unsubscribe function. Snapshots contain `theme` (`light`/`dark`), `visible`, `reducedMotion`, and `colors` (`background`, `foreground`, `muted`, `accent`, `border`, `soft`). Colors are also available as `--pulsara-*` CSS variables. Render with HTML/SVG/canvas or an inlined library, with standalone fallbacks.
-
-```css
-html, body { background: transparent; }
-body { margin: 0; color: var(--pulsara-foreground, #17191f); }
-[data-animated] { animation-play-state: var(--animation-state, paused); }
-```
-
-```js
-const environment = window.PulsaraVisualization;
-function apply(state) {
-  document.documentElement.style.setProperty(
-    '--animation-state', state.visible && !state.reducedMotion ? 'running' : 'paused'
-  );
-}
-if (environment) {
-  apply(environment.getSnapshot());
-  const unsubscribe = environment.subscribe(apply);
-  // Call unsubscribe when removing the component that owns this listener.
-} else {
-  const update = () => apply({visible: !document.hidden, reducedMotion: false});
-  update();
-  document.addEventListener('visibilitychange', update);
-}
-```
-
-The live host pauses ordinary `requestAnimationFrame`, function timers, CSS/WAAPI and SVG animations while hidden, without requiring this subscription. Use rAF timestamps or `performance.now()` for elapsed animation time; their activity clock excludes host pauses, while `Date` remains real wall time. Live displays keep `reducedMotion=false` regardless of OS motion preferences; do not disable live transitions with a reduced-motion media query. The separate still-image capture uses `reducedMotion=true` to request a stable frame. Hidden pages receive `visible=false`; a retained document keeps its controls, but reopening an unloaded page can reset local state. The environment API provides display context only; it grants no host-file, tool or messaging access.
-
-`examples/analyze_csv.py` provides an adaptable standalone HTML example.
+Use suitable plotting libraries for saved images or HTML, and choose the internal HTML layout and drawing technique to fit the task. [HTML environment](html-environment.md) describes optional host integration and screenshot behavior. The adaptable [analyze_csv.py](../examples/analyze_csv.py) example writes a standalone HTML figure; it is not a required chart template.

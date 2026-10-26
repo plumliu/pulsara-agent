@@ -107,7 +107,7 @@ summary {{ cursor: pointer; padding: 10px 0; }}
 table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
 th,td {{ border-bottom: 1px solid #ddd9ce; padding: 7px 12px; text-align: left; white-space: nowrap; }}
 @media(max-width: 500px) {{ main {{ padding: 12px; }} h1 {{ font-size: 19px; }} }}
-</style></head><body><main data-pulsara-visualization-root>
+</style></head><body><main pulsara-viz-root>
 <h1>Monthly totals</h1>
 <p class="note">Source: {escape(source.name)} · {len(frame):,} observations · {start} to {end}</p>
 <p class="note">Sum of observed values, in {escape(unit)}. Unobserved periods remain gaps.</p>
@@ -123,7 +123,7 @@ th,td {{ border-bottom: 1px solid #ddd9ce; padding: 7px 12px; text-align: left; 
         "input_rows": len(frame),
         "result_rows": len(summary),
         "period": [start, end],
-        "next_step": "Optionally inspect html_path with view_image, then display it in a top-level pulsara-visualization fence in a tool-free reply. One path shows one figure; add related HTML paths on separate lines in the same fence for a gallery, or use separate fences between paragraphs.",
+        "next_step": "Optionally inspect html_path with view_image, then display it in a top-level pulsara-viz fence in a tool-free reply. One path shows one figure; add related HTML paths on separate lines in the same fence for a gallery, or use separate fences between paragraphs.",
     }
 
 

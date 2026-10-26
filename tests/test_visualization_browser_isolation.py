@@ -95,7 +95,7 @@ def test_measurement_script_ignores_hidden_roots_and_remeasures_dynamic_marker()
                 }""",
                 {"html": (
                     "<!doctype html><html><body>"
-                    "<main data-pulsara-visualization-root "
+                    "<main pulsara-viz-root "
                     "style='visibility:hidden;width:200px;height:100px'></main>"
                     + script + "</body></html>"
                 )},
@@ -110,7 +110,7 @@ def test_measurement_script_ignores_hidden_roots_and_remeasures_dynamic_marker()
                   frame.srcdoc = `<!doctype html><html><body><div>page</div>
                     <script>setTimeout(() => {
                       const root = document.createElement('main');
-                      root.setAttribute('data-pulsara-visualization-root', '');
+                      root.setAttribute('pulsara-viz-root', '');
                       root.style.cssText = 'width:220px;height:120px;background:#abc';
                       document.body.append(root);
                       setTimeout(() => root.animate(
@@ -150,8 +150,9 @@ def test_automatic_main_requires_complete_unambiguous_visible_content() -> None:
         (base.replace('chart</main>', '<span style="white-space:nowrap">' + 'Long text ' * 40 + '</span></main>'), None),
         ('<style>main::after{content:"note";position:absolute;top:300px}</style>' + base, None),
         (base + '<aside style="visibility:hidden"><span style="visibility:visible">note</span></aside>', None),
-        (base + '<aside data-pulsara-visualization-root hidden>bad explicit root</aside>', None),
-        (base + '<aside id="explicit" data-pulsara-visualization-root>explicit choice</aside>', "explicit"),
+        (base + '<aside pulsara-viz-root hidden>bad explicit root</aside>', None),
+        (base + '<aside id="explicit" pulsara-viz-root>explicit choice</aside>', "explicit"),
+        (base + '<aside id="retired" data-pulsara-visualization-root>ordinary content</aside>', None),
         ('<div style="display:contents">' + base + '</div>', "chart"),
     ]
     with sync_playwright() as playwright:

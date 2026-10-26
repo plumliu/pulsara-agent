@@ -269,7 +269,7 @@ def test_publication_isolates_failed_items_and_cache_bases(tmp_path):
                 (folder / "index.html").symlink_to(shared)
                 (folder / "image.png").write_bytes(png(color))
             result = await materialize_visualizations(
-                "```pulsara-visualization\na/index.html\nb/index.html\na/index.html\nshared.html\n```",
+                "```pulsara-viz\na/index.html\nb/index.html\na/index.html\nshared.html\n```",
                 tool._read_access_path,
                 io=io,
                 validator=validator,
@@ -336,7 +336,7 @@ def test_screenshot_waits_for_data_script_and_uses_isolated_author_frame(tmp_pat
     (tmp_path / "app.js").write_text("""
 let isolated=false; try{parent.document.body.dataset.leaked='yes'}catch(e){isolated=true}
 let popup=window.open('about:blank');
-document.body.innerHTML='<main data-pulsara-visualization-root style="width:180px;height:90px;background:'+ (isolated && !popup?'rgb(255,0,0)':'rgb(0,0,255)')+'"></main>';
+document.body.innerHTML='<main pulsara-viz-root style="width:180px;height:90px;background:'+ (isolated && !popup?'rgb(255,0,0)':'rgb(0,0,255)')+'"></main>';
 """)
     frozen = asyncio.run(
         prepare(

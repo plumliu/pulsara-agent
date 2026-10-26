@@ -36,7 +36,7 @@ The heatmap and distributions describe features used to form the clusters; they 
 ### Compose an inspectable result
 
 - Use consistent cluster labels, colors and units across the views. Give profiles descriptive names only after checking their actual features; retain a stable label for cross-reference.
-- Compute features, assignments, coordinates and diagnostics in Python. Use static figures or interactive views as appropriate; follow [visualization-render.md](visualization-render.md) for HTML publication and grouping.
+- Compute features, assignments, coordinates and diagnostics in Python. Use static figures or interactive views as appropriate; follow [visualization-render.md](visualization-render.md) for chart communication and grouping.
 - Combine views in one HTML when linked selection or shared controls help. Within that HTML, a group selection can highlight related marks or update subgroup summaries; separate files do not automatically share selections, even within one gallery. Label fixed population baselines separately and provide a clear reset for interactive selections.
 - UI filtering inspects the existing fit; it does not silently refit clusters or PCA. Changing the model requires new computation. If the scatterplot uses a sample, label it and keep full-population counts identifiable; point selections describe that displayed sample.
 - Explain the important group differences, remaining ambiguity and what further evidence would support the user's intended action. Any conclusions, numbers and names must come from the supplied data.

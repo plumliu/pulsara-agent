@@ -22,7 +22,7 @@ beforeEach(() => {
 });
 afterEach(() => {cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks();});
 const item = {ordinal: 0, state: 'READY' as const, contentDigest: 'sha256:'+'a'.repeat(64), contentSize: 16, sourceFilename: 'chart.html'};
-const marker = '```pulsara-visualization\nchart.html\n```';
+const marker = '```pulsara-viz\nchart.html\n```';
 
 it('agrees with the backend marker corpus', () => {
   for (const example of examples) {
@@ -38,7 +38,7 @@ it('agrees with the backend marker corpus', () => {
 });
 it('renders only bound top-level assistant markers in place, including failures', async () => {
   const read = vi.fn(async () => '<h1>frozen</h1>');
-  const body = 'before\n\n```pulsara-visualization\n\n```\n\nbetween\n\n'+marker+'\n\nafter';
+  const body = 'before\n\n```pulsara-viz\n\n```\n\nbetween\n\n'+marker+'\n\nafter';
   const view = render(<MarkdownBody body={body} onNotify={() => {}} visualization={{entryId: 'a', items: [{ordinal:0,state:'FAILED',failureDetail:'bad path'}, {...item,ordinal:1}], onRead:read}}/>);
   await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
   const content = view.container.textContent!;
@@ -117,7 +117,7 @@ it('encloses fractional root bounds without a fractional iframe translation or v
 it('renders independent galleries and switches pages without reloading retained frames', async () => {
   const read = vi.fn(async () => '<input value="keep me">');
   const items = Array.from({length: 3}, (_, ordinal) => ({...item,ordinal,sourceFilename:`${ordinal}.html`}));
-  const view = render(<MarkdownBody body={'```pulsara-visualization\n0.html\n1.html\n```\n\nBetween\n\n```pulsara-visualization\n2.html\n```'} onNotify={() => {}} visualization={{entryId:'a',items,onRead:read}}/>);
+  const view = render(<MarkdownBody body={'```pulsara-viz\n0.html\n1.html\n```\n\nBetween\n\n```pulsara-viz\n2.html\n```'} onNotify={() => {}} visualization={{entryId:'a',items,onRead:read}}/>);
   await waitFor(() => expect(view.container.querySelectorAll('iframe')).toHaveLength(2));
   const original = view.container.querySelector('iframe');
   const other = view.container.querySelectorAll('iframe')[1];

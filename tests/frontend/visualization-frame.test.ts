@@ -18,7 +18,7 @@ describe('visualization frame geometry', () => {
   });
 
   it('selects a crop target and sends geometry, never content', () => {
-    expect(visualizationFrameMeasurementScript).toContain('[data-pulsara-visualization-root]');
+    expect(visualizationFrameMeasurementScript).toContain('[pulsara-viz-root]');
     expect(visualizationFrameMeasurementScript).toContain(visualizationLayoutMessageType);
     expect(visualizationFrameMeasurementScript).toContain('ResizeObserver');
     expect(visualizationFrameMeasurementScript).not.toContain('innerHTML');

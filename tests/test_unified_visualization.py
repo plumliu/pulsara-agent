@@ -79,7 +79,7 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
 
         try:
             result = await prepare(
-                f"```pulsara-visualization\nchart.html\nplot.png\n{image.image_ref}\n./plot.png\nmissing.png\nsha256:abcd\nimage:abcd\n```"
+                f"```pulsara-viz\nchart.html\nplot.png\n{image.image_ref}\n./plot.png\nmissing.png\nsha256:abcd\nimage:abcd\n```"
             )
             assert [x.state for x in result] == ["READY"] * 4 + ["FAILED"] * 3
             assert result[0].html == b"<h1>chart</h1>"
@@ -94,7 +94,7 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
             (tmp_path / "linked.html").symlink_to(tmp_path / "document")
             (tmp_path / "alias.png").symlink_to(tmp_path / "chart.html")
             linked = await prepare(
-                "```pulsara-visualization\nlinked.html\nchart.html\nalias.png\n```"
+                "```pulsara-viz\nlinked.html\nchart.html\nalias.png\n```"
             )
             assert linked[0].html == b"<h1>linked</h1>"
             assert linked[1].html == b"<h1>chart</h1>"
@@ -106,7 +106,7 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
             (tmp_path / "diagram.svg").write_text(svg)
             (tmp_path / "diagram.html").write_text(f"<main>{svg}</main>")
             vectors = await prepare(
-                "```pulsara-visualization\ndiagram.svg\ndiagram.html\n```"
+                "```pulsara-viz\ndiagram.svg\ndiagram.html\n```"
             )
             assert vectors[0].state is VisualizationOccurrenceState.FAILED
             assert vectors[0].failure_code == "IMAGE_DECODE_FAILED"
@@ -121,7 +121,7 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
 
             with pytest.raises(TimeoutError, match="watchdog"):
                 await materialize_visualizations(
-                    "```pulsara-visualization\nplot.png\n```",
+                    "```pulsara-viz\nplot.png\n```",
                     lambda x: tmp_path / x,
                     io=TimedIO(),
                     validator=validator,

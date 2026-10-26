@@ -1155,7 +1155,7 @@ def test_native_replay_preserves_inline_visualization_marker(
     api: str,
 ) -> None:
     assistant_entry_id = 'entry:blzvcxjwbvctrcbukdihh2ftim'
-    marker_text = "answer\n\n```pulsara-visualization\nchart.html\n```"
+    marker_text = "answer\n\n```pulsara-viz\nchart.html\n```"
     assistant = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.ASSISTANT,
         source_entry_id=assistant_entry_id,

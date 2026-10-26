@@ -94,7 +94,7 @@ def test_real_thumbnail_keeps_aspect_and_owner_cancellation_reaps_process():
         from PIL import Image
         owner = VisualizationScreenshotOwner()
         try:
-            result = await owner.render(b'<main data-pulsara-visualization-root style="width:400px;height:100px;background:orange">Test</main>', deadline_monotonic=monotonic()+20, thumbnail=True)
+            result = await owner.render(b'<main pulsara-viz-root style="width:400px;height:100px;background:orange">Test</main>', deadline_monotonic=monotonic()+20, thumbnail=True)
             image = Image.open(BytesIO(result))
             assert image.size == (320, 80)
             pending = asyncio.create_task(owner.render(b'<script>while(true){}</script>', deadline_monotonic=monotonic()+20, thumbnail=True))
