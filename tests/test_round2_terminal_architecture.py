@@ -27,6 +27,7 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     SubjectSlot,
 )
 from pulsara_agent.ports.terminal import (
+    _inline_schema_references,
     parse_terminal_input,
     parse_terminal_monitor_input,
     parse_terminal_process_input,
@@ -47,6 +48,35 @@ SRC = ROOT / "src" / "pulsara_agent"
 BASELINE = (
     SRC / "storage" / "migrations" / "sql" / "0000_conversation_kernel_baseline.sql"
 )
+
+
+def test_terminal_schema_titles_are_removed_only_at_schema_nodes():
+    schema = {
+        "type": "object",
+        "title": "Container",
+        "properties": {
+            "title": {"type": "string", "title": "Title field"},
+            "description": {"type": "string", "title": "Description field"},
+            "config": {"$ref": "#/$defs/Config"},
+        },
+        "$defs": {
+            "Config": {
+                "type": "object",
+                "title": "Config",
+                "default": {"title": "Keep data", "description": "Keep data"},
+                "properties": {"title": {"type": "string", "title": "Nested title"}},
+            }
+        },
+    }
+    result = _inline_schema_references(schema)
+    assert "title" not in result
+    assert result["properties"]["title"] == {"type": "string"}
+    assert result["properties"]["description"] == {"type": "string"}
+    config = result["properties"]["config"]
+    assert "title" not in config
+    assert config["properties"]["title"] == {"type": "string"}
+    assert config["default"] == {"title": "Keep data", "description": "Keep data"}
+    assert schema["title"] == "Container"
 
 
 def _repository_aggregate_source() -> str:

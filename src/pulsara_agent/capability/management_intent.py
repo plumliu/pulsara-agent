@@ -109,61 +109,6 @@ _FIELDS = {
 }
 
 
-# Keep operation guidance on the actual action property sent to the provider;
-# callers need not load an installer Skill to choose the correct owner.
-_ACTION_DESCRIPTIONS = {
-    CapabilityManagementAction.INSTALL_LOOSE_SKILL: (
-        "Install an independent Skill; existing destinations are not overwritten."
-    ),
-    CapabilityManagementAction.SET_LOOSE_SKILL_ENABLED: (
-        "Toggle an inspected, eligible independent Skill copy; Plugin and bundled Skills are excluded."
-    ),
-    CapabilityManagementAction.REMOVE_LOOSE_SKILL: (
-        "Remove an independent Skill directory after inspecting removal eligibility; "
-        "discovery alone does not imply removability. Plugin and bundled Skills are excluded."
-    ),
-    CapabilityManagementAction.TRUST_HOOK_SOURCE: (
-        "Request user review and trust of the full current Hook source; does not enable it or its Plugin."
-    ),
-    CapabilityManagementAction.REVOKE_HOOK_TRUST: (
-        "Revoke Hook source trust while keeping its definitions."
-    ),
-    CapabilityManagementAction.SET_HOOK_SOURCE_ENABLED: (
-        "Toggle a Hook source; does not grant trust, enable its Plugin or edit definitions."
-    ),
-    CapabilityManagementAction.ADD_LOCAL_MCP: (
-        "Add an independent MCP connection with a new server_id; not a Plugin declaration."
-    ),
-    CapabilityManagementAction.UPDATE_LOCAL_MCP: (
-        "Edit an existing independent MCP connection, including its enabled setting."
-    ),
-    CapabilityManagementAction.REMOVE_LOCAL_MCP: (
-        "Remove an independent MCP entry and dedicated local credentials/grants; "
-        "keeps other entries and the server program. Plugin declarations are excluded."
-    ),
-    CapabilityManagementAction.INSTALL_PLUGIN: (
-        "Install or replace a whole Plugin as disabled; enable separately with SET_PLUGIN_ENABLED."
-    ),
-    CapabilityManagementAction.SET_PLUGIN_ENABLED: (
-        "Toggle the whole Plugin; enabling requires user component/credential-destination review. "
-        "Hook trust remains separate."
-    ),
-    CapabilityManagementAction.REMOVE_PLUGIN: (
-        "Remove the whole Plugin and dedicated credentials; preserve Plugin data and the original source."
-    ),
-    CapabilityManagementAction.CONFIGURE_PLUGIN_MCP_CONNECTION: (
-        "Configure an existing Plugin MCP connection; execution fields remain package-owned."
-    ),
-    CapabilityManagementAction.AUTHORIZE_MCP: (
-        "Start interactive authorization for an already configured OAuth connection; "
-        "does not configure authentication or enable the source."
-    ),
-    CapabilityManagementAction.CLEAR_MCP_AUTHORIZATION: (
-        "Clear local OAuth grants; keep the connection configuration and remote tokens."
-    ),
-}
-
-
 def capability_management_input_schema() -> dict[str, object]:
     """Closed action union; nested candidates use the sole native parser."""
     properties = {
@@ -171,91 +116,108 @@ def capability_management_input_schema() -> dict[str, object]:
             "type": "string",
             "enum": [item.value for item in CapabilityManagementScope],
             "description": (
-                "USER: Host's home; WORKSPACE: GUI project directory, never terminal cwd. "
-                "Copy existing target scope; use the user's selected scope for installation."
+                'USER is the Host home; WORKSPACE is the GUI project directory. Copy an existing '
+                "target's scope; choose the requested scope for installation."
             ),
         },
         "server_id": {
             "type": "string", "minLength": 1,
             "description": (
-                "New ID for ADD; otherwise exact independent configuration or Plugin-local ID "
-                "from the installation target. Not runtime_server_id, tool name or ref."
+                "New ID for ADD_LOCAL_MCP; otherwise copy the installation target's independent or "
+                'Plugin-local server_id, not runtime_server_id.'
             ),
         },
         "plugin_id": {
             "type": "string", "minLength": 1,
             "description": (
-                "Exact Plugin ID from source target, install result or user, never paths/runtime IDs. "
-                "For OAuth actions, include for a Plugin connection; omit for an independent MCP."
+                'Plugin ID from the source target or install result. For OAuth actions, include only '
+                'for a Plugin connection.'
             ),
         },
         "source_path": {
             "type": "string", "minLength": 1,
             "description": (
-                "Absolute local source directory: Skill containing SKILL.md or Plugin distribution "
-                "root. Download separately; not an installation destination."
+                'Absolute local source directory containing SKILL.md or the Plugin distribution root; '
+                'download it first.'
             ),
         },
         "skill_path": {
             "type": "string", "minLength": 1,
-            "description": "Exact absolute installed SKILL.md path copied from list/inspect, not its directory or author source.",
+            "description": (
+                'Exact absolute installed SKILL.md path from list/inspect.'
+            ),
         },
         "name": {
             "type": "string", "minLength": 1,
-            "description": "Optional loose Skill metadata normalization; omit to retain the source's parsed name.",
+            "description": (
+                'Override the installed loose Skill name; omission keeps its source name.'
+            ),
         },
         "description": {
             "type": "string", "minLength": 1,
-            "description": "Optional loose Skill metadata normalization; omit to retain its source description.",
+            "description": (
+                'Override the installed loose Skill description; omission keeps its source description.'
+            ),
         },
         "expected_identity": {
             "type": "string", "minLength": 1,
-            "description": "Independent MCP guard; normally omit, never guess. OAuth actions allow it only without plugin_id.",
+            "description": (
+                'Optional observed independent-MCP guard; omit for automatic inspection. OAuth allows '
+                'it only without plugin_id.'
+            ),
         },
         "expected_package_install_id": {
             "type": "string", "minLength": 1,
-            "description": "Plugin guard; normally omit, never infer from manifest version. OAuth actions allow it only with plugin_id.",
+            "description": (
+                'Optional observed Plugin-install guard; omit for automatic inspection. OAuth allows it'
+                ' only with plugin_id.'
+            ),
         },
         "source_kind": {
             "type": "string", "enum": ["LOCAL", "PLUGIN"],
-            "description": "Hook owner: PLUGIN requires plugin_id; LOCAL forbids it. Copy from the source target.",
+            "description": (
+                'Hook source owner from its target: PLUGIN requires plugin_id; LOCAL omits it.'
+            ),
         },
         "enabled": {
             "type": "boolean",
-            "description": "Whether to enable the selected Skill, Plugin or Hook source.",
         },
         "replace": {
             "type": "boolean",
-            "description": "Plugin only: default false; true for user-requested replacement of that instance.",
+            "description": (
+                'Omitted means false; true replaces the Plugin instance when requested by the user.'
+            ),
         },
         "source_format": {
             "type": "string",
             "enum": ["native", "claude", "codex", "cursor"],
-            "description": "Plugin distribution format for the official importer; default native.",
+            "description": (
+                'Plugin distribution format; omitted means native.'
+            ),
         },
         "config": {
             "type": "object",
             "description": (
-                "Omit for the connection editor (UPDATE is prefilled). An object replaces the "
-                "complete native entry, not a patch; preserve existing settings. Public shapes "
-                "are in the MCP installer reference. Use the editor for credentials or unknown "
-                "settings; do not read private settings or implementation to construct config."
+                'Omit to open the connection editor, prefilled for UPDATE. An object replaces the '
+                'complete native entry. Public fields are documented in pulsara-mcp-installer; use the '
+                'editor for credentials or unknown settings.'
             ),
         },
         "overlay": {
             "type": ["object", "null"],
             "description": (
-                "Omit for the prefilled Plugin connection editor; null clears instance overrides, "
-                "restoring package/input defaults. An object replaces the complete native overlay, "
-                "not a patch or local MCP config. Only endpoint, public headers/environment and "
-                "authentication are configurable; command, args, cwd and transport kind stay "
-                "package-owned. Use the editor for unknown fields or credentials; the inspect "
-                "summary is not an overlay template."
+                'Omit for the prefilled Plugin connection editor; null restores package/input defaults.'
+                ' An object replaces the complete native overlay. It configures endpoint, public '
+                'headers/environment and authentication; package-owned command, args, cwd and transport'
+                ' stay fixed. Use the editor for credentials or unknown fields.'
             ),
         },
         "expected_overlay": {
             "type": ["object", "null"],
-            "description": "Prior overlay guard; normally omit. null asserts no existing override, not a request to clear it.",
+            "description": (
+                'Optional observed prior overlay guard; omit for automatic inspection. null asserts '
+                'that no override exists.'
+            ),
         },
     }
     return {
@@ -270,13 +232,6 @@ def capability_management_input_schema() -> dict[str, object]:
                     },
                     "action": {
                         "type": "string", "const": action.value,
-                        # Root-union lowering merges both required and allowed fields.
-                        # Keep the exact per-action signature beside its wire enum.
-                        "description": (
-                            f"Required: {', '.join(sorted(required)) or 'none'}. "
-                            f"Optional: {', '.join(sorted(optional)) or 'none'}. "
-                            + _ACTION_DESCRIPTIONS[action]
-                        ),
                     },
                 },
                 "required": sorted(required | {"action", "scope"}),

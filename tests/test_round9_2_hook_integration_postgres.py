@@ -947,7 +947,7 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
     old_config = _config(
         _command(driver, log_path, "OLD"),
         ("PreToolUse", "PostToolUse"),
-        tool_matcher="reload_hooks",
+        tool_matcher="reload_capabilities",
     )
     new_config = _config(
         _command(driver, log_path, "NEW"),
@@ -992,7 +992,7 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
                 expected_digest=user.trust.current_definition_digest,
             )
             source_changed = True
-            items = _tool_stream("reload_hooks", "call:reload-hooks", {})
+            items = _tool_stream("reload_capabilities", "call:reload-capabilities", {})
         elif index == 2:
             items = _tool_stream(
                 "read_file",
@@ -1090,8 +1090,8 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
         "NEW",
     ]
     assert [value["stdin"]["tool_use_id"] for value in tool_logs] == [  # type: ignore[index]
-        "call:reload-hooks",
-        "call:reload-hooks",
+        "call:reload-capabilities",
+        "call:reload-capabilities",
         "call:after-reload",
         "call:after-reload",
     ]

@@ -30,7 +30,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
         "cursor": {
             "type": "string",
             "minLength": 1,
-            "description": "Continue using only this returned cursor and optional page budgets.",
+            "description": "Exact next_cursor returned by this tool.",
         },
         "limit": {
             "type": "integer",
@@ -42,7 +42,11 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
     if name in {"search_sessions", "search_session_content"}:
         properties["query"] = {
             "type": "string",
-            "description": "Natural-language or technical-identifier relevance query. Required on the first content search.",
+            "description": (
+                "Nonblank natural-language or technical-identifier query; Chinese and English are supported."
+                if name == "search_session_content"
+                else "Title or message keywords; omission or blank text lists by activity."
+            ),
         }
         if name == "search_session_content":
             properties["query"].update(minLength=1, pattern=r"\S")
@@ -50,6 +54,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
         properties["lifecycle"] = {
             "type": "string",
             "enum": ["ALL", "OPEN", "ARCHIVED"],
+            "description": "Omit for ALL.",
         }
     else:
         properties.update(
@@ -57,11 +62,18 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
                 "session_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Omit for this session's earlier saved content.",
+                    "description": "Exact session_id; omit for this conversation.",
                 },
                 "include_tools": {
                     "type": "boolean",
-                    "description": "Include saved tool calls (names and arguments), public results and retained output; default false.",
+                    "description": (
+                        "Also search saved tool names, arguments and results, excluding "
+                        "the three session-query tools' own calls/results. Omit for false."
+                        if name == "search_session_content"
+                        else "Include historical tool names, arguments, public results and "
+                        "retained output. Results and retained output are labeled separately. "
+                        "Omit for false."
+                    ),
                 },
             }
         )
@@ -71,19 +83,22 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
                 "entry_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Start with this exact message, default direction newer.",
+                    "description": "Exact message entry_id in the selected session.",
                 },
                 "direction": {
                     "type": "string",
                     "enum": ["older", "newer"],
-                    "description": "Message direction; without an anchor default older, from latest.",
+                    "description": (
+                        "With entry_id, default newer; older reads preceding messages. "
+                        "Without entry_id, default older starts at latest; newer starts at earliest."
+                    ),
                 },
                 "max_chars": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": maximum_chars,
                     "default": default_chars,
-                    "description": "Total text characters for this page, across all entries.",
+                    "description": "Total text characters across this page's entries.",
                 },
             }
         )
@@ -94,15 +109,6 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
     }
     return {
         "type": "object",
-        "description": (
-            "First page: omit cursor; "
-            + (
-                "query is required and must contain non-whitespace text. "
-                if name == "search_session_content" else "all fields are optional. "
-            )
-            + f"Continue with only cursor and optional {', '.join(sorted(budgets))}; "
-            "omit all query/filter/anchor fields, even if unchanged. Do not use null placeholders."
-        ),
         "oneOf": [
             {
                 "type": "object",

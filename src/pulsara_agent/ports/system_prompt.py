@@ -168,8 +168,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "An empty recall does not prove no relevant memory exists.\n"
     "- Save durable information likely to help future conversations with remember. "
     "Runtime hints invite reconsideration; they neither require saving nor are needed "
-    "to save useful information. Follow the memory tools' field and result guidance.\n"
-    "- Verify recalled coding facts against the current workspace."
+    "to save useful information. Follow the memory tools' field and result guidance."
 )
 
 

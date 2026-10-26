@@ -24,79 +24,48 @@ MIN_TERMINAL_OUTPUT_CHARS = 512
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 
 TERMINAL_TOOL_DESCRIPTION = (
-    "Run one shell command on the local host when the current run permission allows "
-    "terminal access. workdir may be any existing local directory; relative paths "
-    "use the workspace root. Each command starts a new shell. The "
-    "workspace is the initial working directory, not a sandbox in an authorized "
-    "terminal run. Omit workdir to start at the workspace root. cd and export "
-    "inside one command do not affect later calls. The returned cwd is this "
-    "command's starting directory. Set "
-    "tty=true only for programs that need interactive terminal behavior, such as line "
-    "editing or a full-screen interface. yield_time_ms controls how long this call waits "
-    "initially (0-30000 ms); it does not stop or limit the command. If the response has "
-    "status=running, copy its process_id exactly into terminal_process to check status or "
-    "output now, wait briefly, send input, close input, or stop the command. In the main "
-    "conversation, use terminal_monitor when a long-running command should resume the "
-    "conversation later after completion or configured progress instead of repeatedly "
-    "checking it. If status is not running, the command has ended or could not start; "
-    "use the returned output. PROCESS_CAPACITY_EXHAUSTED means no command was "
-    "started; list processes and retry after capacity is released, without stopping "
-    "useful work. Even if list has no running item, child processes or output cleanup "
-    "may still occupy capacity. max_output_chars limits "
-    "this response, not the command. For needed omitted text, prefer artifact_read "
-    "pagination by default. Use artifact_export when available if repeated paging "
-    "would be cumbersome or complex extraction, aggregation or scripts are needed. "
-    "Prefer file tools for file reads and edits; "
-    "use terminal for tests, builds, git, scripts, package managers, network commands, "
-    "and external CLIs."
+    "Run one local shell command. Each call starts a new shell, so its directory "
+    "and environment changes stay within that call. A running command returns "
+    "process_id for terminal_process to inspect or interact with it. In the ROOT "
+    "conversation, terminal_monitor can resume work on completion or configured "
+    "progress. Response size and initial wait settings do not limit the command's"
+    " lifetime. Use artifact_read for omitted output or artifact_export for "
+    "extensive processing."
 )
 TERMINAL_PROCESS_TOOL_DESCRIPTION = (
-    "Follow commands started by terminal. list shows current records; poll reads status/output "
-    "now; wait waits up to timeout_seconds; write sends UTF-8 data unchanged; submit sends UTF-8 "
-    "text followed by a newline. After write/submit, yield_time_ms waits for the command and "
-    "children to exit, up to 1000 ms by default (0-30000; 0 returns immediately). Retained output "
-    "may repeat earlier text or PTY echo; it does not prove a complete reply. Never resend input "
-    "with an uncertain result. close_stdin ends input without stopping the command; kill stops "
-    "the command and children and waits for exit. Except list, copy the exact returned "
-    "process_id. IDs work only in their originating terminal environment until it closes or is "
-    "replaced. Finished records may be evicted; missing records do not prove a command never ran. "
-    "Tool success can contain process failure: inspect status and exit_code. For poll/wait, copy "
-    "since_cursor from the same process's output_cursor, or omit for currently available output. "
-    "GAP means earlier output was discarded; RETAINED_SNAPSHOT is only retained text. If "
-    "rejected, use that process's cursor or omit it. output_cursor points past all observed "
-    "output, including text omitted from a truncated response; it retrieves future output, not "
-    "that omitted text. Use artifact_read pagination for needed omitted text; artifact_export "
-    "when available for cumbersome paging, extraction, aggregation or scripts. Never rerun merely "
-    "to recover logs. poll/wait arrange no later update. Users may stop background commands "
-    "outside tool calls. An empty terminal_monitor list does not prove exit: query the exact "
-    "process_id for requested status or dependent work. Avoid repeated polling without a new "
-    "reason. User termination does not authorize restart; continue other useful work. For "
-    "long-running commands, use terminal_monitor in the main conversation when available or "
-    "continue independent work. max_output_chars limits this response, not the command."
+    "Control commands started by terminal. Set action to the operation below. "
+    "Fields listed for an action are required unless marked optional; use only "
+    "that action's fields.\n"
+    "list: optional include_running, include_finished.\n"
+    "poll: process_id; optional since_cursor, max_output_chars.\n"
+    "wait: process_id; optional since_cursor, timeout_seconds, max_output_chars.\n"
+    "write: process_id, data; optional yield_time_ms.\n"
+    "submit: process_id, data; optional yield_time_ms.\n"
+    "close_stdin: process_id.\n"
+    "kill: process_id.\n"
+    "poll reads now; wait waits up to timeout_seconds. write sends data "
+    "unchanged; submit adds one newline to data supplied without its final "
+    "newline. close_stdin closes input; kill stops the command and its children "
+    "and waits for exit. Omitted optional fields use their defaults; only "
+    "since_cursor accepts null. status and exit_code describe process completion;"
+    " output or echo alone does not establish completion. Use terminal_monitor in"
+    " the ROOT conversation for later updates, artifact_read for omitted logs, "
+    "and artifact_export for extensive retrieval."
 )
 TERMINAL_MONITOR_TOOL_DESCRIPTION = (
-    "Available only in the main conversation. Use this tool for a terminal command that "
-    "still has status=running when you want the conversation to resume later after "
-    "completion or configured progress instead of polling. Actions are register, list, "
-    "and cancel. register returns immediately: copy the running process_id exactly, then "
-    "copy the returned monitor_id exactly if later cancellation is needed. Omit "
-    "conditions to receive only a completion update; completion reporting remains "
-    "enabled while the monitor is active. Add an output condition or "
-    "heartbeat_interval_seconds only when progress updates are useful, because each "
-    "update may cause the agent to run again. delivery controls how much output a later "
-    "update includes and the minimum interval between progress updates; lifetime controls "
-    "how long monitoring remains active. list shows active monitors. Later output is "
-    "limited; use terminal_process with action=poll for more. PROCESS_ALREADY_TERMINAL "
-    "means poll that same process for its final state. PROCESS_NOT_FOUND does not "
-    "mean the command never ran. After register, continue "
-    "other independent work; when there is no other work, the current turn may end and "
-    "the monitor can resume the conversation later; do not poll merely to wait. An empty "
-    "monitor list does not prove that its process ended. cancel stops later updates but "
-    "does not stop the command; use "
-    "terminal_process with action=kill to stop it. Monitoring ends when its lifetime "
-    "expires (default 36000 seconds) or the current terminal environment closes or "
-    "is replaced. An EXPIRY observation is not process completion; poll and, if "
-    "still useful, register again for the same live process."
+    "ROOT only. Resume the conversation when a running command completes or meets"
+    " configured progress conditions. Set action as follows; fields are required "
+    "unless marked optional, and each action uses only its listed fields.\n"
+    "register: process_id; optional conditions, delivery, lifetime.\n"
+    "list: no other fields.\n"
+    "cancel: monitor_id.\n"
+    "register returns immediately; the current turn may end while monitoring "
+    "continues. Omitting conditions requests completion only; configured progress"
+    " updates also resume the conversation. list shows active monitors, not "
+    "process completion. cancel stops updates while the command continues. "
+    "Monitoring also ends on expiry or when its terminal environment closes. Use "
+    "terminal_process poll for current output or status, and kill to stop a "
+    "command."
 )
 
 
@@ -108,42 +77,32 @@ class TerminalInput(_StrictInput):
     command: str = Field(
         min_length=1,
         max_length=1_048_576,
-        description="Shell command to run.",
     )
     workdir: str | None = Field(
         default=None,
         min_length=1,
         max_length=4096,
         description=(
-            "Optional existing local working directory. Relative paths use the "
-            "workspace root; absolute paths and ~ are accepted within the current "
-            "permission scope. This directory applies only to this command."
+            "Existing directory for this call; workspace-relative, absolute and ~ paths "
+            "are supported. Omit for the workspace root."
         ),
     )
     yield_time_ms: int = Field(
         default=10_000,
         ge=0,
         le=30_000,
-        description=(
-            "How long this call waits initially. If the command is still running, the "
-            "response has status=running; this setting does not stop the command."
-        ),
+        description=("Initial observation wait; 0 returns immediately."),
     )
     tty: bool = Field(
         default=False,
         description=(
-            "Use interactive terminal behavior only when the program needs line editing, "
-            "a full-screen interface, or similar interaction."
+            "Enable terminal interaction for programs needing line editing or a full-screen interface."
         ),
     )
     max_output_chars: int = Field(
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
         le=DEFAULT_MAX_OUTPUT_CHARS,
-        description=(
-            "Maximum output characters to include in this response; this does not stop "
-            "or limit the command."
-        ),
     )
 
 
@@ -153,18 +112,17 @@ _TERMINAL_ADAPTER = TypeAdapter(TerminalInput)
 class TerminalProcessListInput(_StrictInput):
     action: Literal["list"]
     include_running: bool = Field(
-        default=True, description="Include processes that are still running."
+        default=True,
     )
     include_finished: bool = Field(
         default=True,
-        description="Include records still available for commands that have finished.",
     )
 
 
 class _ProcessInput(_StrictInput):
     process_id: str = Field(
         min_length=1,
-        description="Copy the exact process_id returned for this command.",
+        description="Exact process_id from this terminal environment.",
     )
 
 
@@ -173,15 +131,15 @@ class TerminalProcessPollInput(_ProcessInput):
     since_cursor: str | None = Field(
         default=None,
         description=(
-            "Optional output_cursor copied unchanged from an earlier response for this "
-            "exact process; requests output after that position."
+            "Exact output_cursor from this process, or omit for retained output. It "
+            "advances past observed text, including omitted output."
         ),
     )
     max_output_chars: int = Field(
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
         le=DEFAULT_MAX_OUTPUT_CHARS,
-        description="Maximum output characters to include in this response.",
+        description="Maximum returned output characters; does not limit the command.",
     )
 
 
@@ -190,49 +148,45 @@ class TerminalProcessWaitInput(_ProcessInput):
     since_cursor: str | None = Field(
         default=None,
         description=(
-            "Optional output_cursor copied unchanged from an earlier response for this "
-            "exact process; requests output after that position."
+            "Exact output_cursor from this process, or omit for retained output. It "
+            "advances past observed text, including omitted output."
         ),
     )
     timeout_seconds: int = Field(
         default=DEFAULT_WAIT_TIMEOUT_SECONDS,
         ge=1,
         le=30,
-        description=(
-            "How long this call waits for the command to finish. If it is still running, "
-            "the call returns without arranging a later update."
-        ),
     )
     max_output_chars: int = Field(
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
         le=DEFAULT_MAX_OUTPUT_CHARS,
-        description="Maximum output characters to include in this response.",
+        description="Maximum returned output characters; does not limit the command.",
     )
 
 
 class TerminalProcessWriteInput(_ProcessInput):
     action: Literal["write"]
-    data: str = Field(description="Exact text to send without adding a newline.")
+    data: str = Field(description="Exact UTF-8 text; an empty string is allowed.")
     yield_time_ms: int = Field(
-        default=1000, ge=0, le=30_000,
+        default=1000,
+        ge=0,
+        le=30_000,
         description=(
-            "Observation window after input is flushed; 0 returns immediately. "
-            "Returns early when the command exits; output or echo does not. "
-            "This does not prove that an interactive response is complete."
+            "Wait for process exit after input is flushed; 0 returns immediately."
         ),
     )
 
 
 class TerminalProcessSubmitInput(_ProcessInput):
     action: Literal["submit"]
-    data: str = Field(description="Line text to submit without the final newline.")
+    data: str = Field(description="Exact UTF-8 text; an empty string is allowed.")
     yield_time_ms: int = Field(
-        default=1000, ge=0, le=30_000,
+        default=1000,
+        ge=0,
+        le=30_000,
         description=(
-            "Observation window after input is flushed; 0 returns immediately. "
-            "Returns early when the command exits; output or echo does not. "
-            "This does not prove that an interactive response is complete."
+            "Wait for process exit after input is flushed; 0 returns immediately."
         ),
     )
 
@@ -264,33 +218,25 @@ class TerminalMonitorOutputCondition(_StrictInput):
         default=200,
         ge=1,
         le=65_536,
-        description="Minimum amount of new output before a progress update may be sent.",
+        description="New-output threshold for a progress update.",
     )
     quiet_period_ms: int = Field(
         default=500,
         ge=0,
         le=10_000,
-        description=(
-            "How long output must stop changing before a progress update may be sent."
-        ),
+        description=("Required pause in output before a progress update."),
     )
 
 
 class TerminalMonitorConditions(_StrictInput):
     output: TerminalMonitorOutputCondition | None = Field(
         default=None,
-        description=(
-            "Optional rule for sending output-progress updates before the command ends."
-        ),
     )
     heartbeat_interval_seconds: int | None = Field(
         default=None,
         ge=5,
         le=1800,
-        description=(
-            "Optional interval for progress updates even without enough new output. "
-            "Completion updates remain enabled."
-        ),
+        description=("Progress interval even when there is little new output."),
     )
 
 
@@ -299,13 +245,13 @@ class TerminalMonitorDelivery(_StrictInput):
         default=4000,
         ge=512,
         le=32_000,
-        description="Maximum command-output characters in each later update.",
+        description="Maximum command-output characters in each update.",
     )
     minimum_progress_observation_interval_seconds: int = Field(
         default=5,
         ge=5,
         le=1800,
-        description="Minimum interval between progress updates.",
+        description="Minimum spacing between progress updates.",
     )
 
 
@@ -314,11 +260,7 @@ class TerminalMonitorLifetime(_StrictInput):
         default=36_000,
         ge=1,
         le=36_000,
-        description=(
-            "Stop monitoring after this many seconds even if the command is still "
-            "running. Closing or replacing the current terminal environment may stop it "
-            "sooner."
-        ),
+        description=("Monitoring duration; expiry does not stop the command."),
     )
 
 
@@ -326,22 +268,19 @@ class TerminalMonitorRegisterInput(_StrictInput):
     action: Literal["register"]
     process_id: str = Field(
         min_length=1,
-        description="Exact process_id from a status=running terminal result.",
+        description="process_id from a running terminal command.",
     )
     conditions: TerminalMonitorConditions = Field(
         default=TerminalMonitorConditions(),
         description=(
-            "Rules for progress updates before the command ends. Omit both options to "
-            "receive only a completion update."
+            "Progress triggers in addition to completion; omit for completion only."
         ),
     )
     delivery: TerminalMonitorDelivery = Field(
         default=TerminalMonitorDelivery(),
-        description="Controls output size and minimum spacing for later updates.",
     )
     lifetime: TerminalMonitorLifetime = Field(
         default=TerminalMonitorLifetime(),
-        description="Controls how long this monitor remains active.",
     )
 
 
@@ -353,11 +292,8 @@ class TerminalMonitorCancelInput(_StrictInput):
     action: Literal["cancel"]
     monitor_id: str = Field(
         min_length=1,
-        description=(
-            "Copy the exact monitor_id returned by terminal_monitor with action=register."
-        ),
+        description=("monitor_id returned by register."),
     )
-
 
     @field_validator("monitor_id")
     @classmethod
@@ -433,8 +369,6 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
     definitions = root.pop("$defs", {})
 
     def resolve(value: object) -> object:
-        if isinstance(value, list):
-            return [resolve(item) for item in value]
         if not isinstance(value, dict):
             return value
         reference = value.get("$ref")
@@ -446,7 +380,37 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
             merged = deepcopy(target)
             merged.update({key: item for key, item in value.items() if key != "$ref"})
             return resolve(merged)
-        return {key: resolve(item) for key, item in value.items()}
+        resolved = {}
+        for key, item in value.items():
+            if key == "title":
+                continue
+            if key in {
+                "properties",
+                "patternProperties",
+                "$defs",
+                "definitions",
+                "dependentSchemas",
+            }:
+                resolved[key] = {name: resolve(child) for name, child in item.items()}
+            elif key in {"oneOf", "anyOf", "allOf", "prefixItems"}:
+                resolved[key] = [resolve(child) for child in item]
+            elif key in {
+                "items",
+                "additionalProperties",
+                "additionalItems",
+                "contains",
+                "propertyNames",
+                "not",
+                "if",
+                "then",
+                "else",
+                "unevaluatedProperties",
+                "unevaluatedItems",
+            }:
+                resolved[key] = resolve(item)
+            else:
+                resolved[key] = item
+        return resolved
 
     resolved = resolve(root)
     if not isinstance(resolved, dict):
@@ -457,19 +421,10 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
     # the closed action union; every accepted value must still match exactly
     # one of the strict branch schemas below it.
     resolved.setdefault("type", "object")
-    if "discriminator" in resolved:
-        # The provider flattens root action unions. Preserve allowed fields in
-        # the terminal contract itself; the Pydantic union remains authoritative.
-        signatures = []
-        for branch in resolved["oneOf"]:
-            properties = branch["properties"]
-            action = properties["action"]["const"]
-            fields = ", ".join(name for name in properties if name != "action")
-            signatures.append(f"{action}: {fields or 'none'}.")
-        resolved["description"] = (
-            "Allowed fields besides action (omit all others, including null placeholders): "
-            + " ".join(signatures)
-        )
+    # Action signatures live in the function description. Pydantic retains its
+    # discriminator for local parsing; exporting it would duplicate those lines
+    # in the provider lowerer's generated schema description.
+    resolved.pop("discriminator", None)
     return resolved
 
 

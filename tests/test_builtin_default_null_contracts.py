@@ -300,6 +300,7 @@ def test_scheduled_create_rejects_invalid_status(status):
 def test_scheduled_wire_keeps_required_and_optional_action_fields():
     canonical = schema("scheduled_tasks")
     wire = lower_openai_function_parameters(canonical)
+    description = builtin_tool_catalog_entry("scheduled_tasks").descriptor.description
     assert set(wire["properties"]["action"]["enum"]) == {
         branch["properties"]["action"]["const"] for branch in canonical["oneOf"]
     }
@@ -307,16 +308,17 @@ def test_scheduled_wire_keeps_required_and_optional_action_fields():
         action = branch["properties"]["action"]["const"]
         text = next(
             part
-            for part in wire["description"].split(". ")
+            for part in description.splitlines()
             if part.startswith(action + ": ")
         )
-        required, optional = (
-            text.removeprefix(action + ": required ")
-            .removesuffix(".")
-            .split("; optional ")
-        )
-        required_set = set() if required == "none" else set(required.split(", "))
-        optional_set = set() if optional == "none" else set(optional.split(", "))
+        fields = text.removeprefix(action + ": ").removesuffix(".")
+        if fields.startswith("optional "):
+            required_set = set()
+            optional_set = set(fields.removeprefix("optional ").split(", "))
+        else:
+            required, _, optional = fields.partition("; optional ")
+            required_set = set(required.split(", "))
+            optional_set = set(optional.split(", ")) if optional else set()
         assert required_set == set(branch["required"]) - {"action"}
         assert required_set | optional_set == set(branch["properties"]) - {"action"}
 
@@ -339,16 +341,27 @@ def test_scheduled_wire_keeps_required_and_optional_action_fields():
 def test_terminal_flattening_preserves_allowed_fields_guidance(name, parse, args):
     canonical = schema(name)
     wire = lower_openai_function_parameters(canonical)
+    description = builtin_tool_catalog_entry(name).descriptor.description
+    assert "description" not in wire
+    assert "discriminator" not in canonical
     for branch in canonical["oneOf"]:
         properties = branch["properties"]
         action = properties["action"]["const"]
-        signatures = wire["description"].split("): ", 1)[1]
         signature = next(
-            part for part in signatures.split(". ") if part.startswith(action + ": ")
+            part for part in description.splitlines() if part.startswith(action + ": ")
         )
         actual = signature.split(": ", 1)[1].rstrip(".")
-        allowed = set() if actual == "none" else set(actual.split(", "))
-        assert allowed == set(properties) - {"action"}
+        if actual == "no other fields":
+            required = optional = set()
+        elif actual.startswith("optional "):
+            required = set()
+            optional = set(actual.removeprefix("optional ").split(", "))
+        else:
+            required_text, _, optional_text = actual.partition("; optional ")
+            required = set(required_text.split(", "))
+            optional = set(optional_text.split(", ")) if optional_text else set()
+        assert required == set(branch["required"]) - {"action"}
+        assert required | optional == set(properties) - {"action"}
     assert_shape(name, args, False)
     with pytest.raises(ValueError):
         parse(args)

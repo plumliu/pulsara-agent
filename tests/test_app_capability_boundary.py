@@ -462,6 +462,19 @@ def test_source_change_during_skill_confirmation_is_a_conflict(tmp_path):
     asyncio.run(run())
 
 
+def test_capability_refresh_has_one_argumentless_model_entry():
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+    from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+
+    entry = builtin_tool_catalog_entry("reload_capabilities")
+    validator = Draft202012Validator(thaw_tool_json_object(entry.descriptor.input_schema))
+    assert validator.is_valid({})
+    assert not validator.is_valid({"target": "hooks"})
+    with pytest.raises(KeyError):
+        builtin_tool_catalog_entry("reload_hooks")
+
+
 def test_capability_refresh_publishes_local_hooks_and_reports_partial_parts():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock

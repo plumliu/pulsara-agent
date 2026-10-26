@@ -34,7 +34,6 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   inspect_capability: ['查看能力详情', '正在读取所选能力详情', '已读取能力详情'],
   manage_capability: ['管理扩展能力', '正在处理连接或插件配置', '已处理配置请求'],
   reload_capabilities: ['刷新扩展能力', '正在刷新技能、连接与自动操作', '已刷新技能、连接与自动操作'],
-  reload_hooks: ['刷新自动操作', '正在刷新自动操作配置', '已刷新自动操作配置'],
 };
 
 function object(value: unknown): Record<string, unknown> {
@@ -269,7 +268,6 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
         }
         break;
       case 'reload_capabilities':
-      case 'reload_hooks':
         if (status === 'partial') detail = '部分配置未能刷新';
         break;
     }

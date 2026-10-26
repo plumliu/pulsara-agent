@@ -43,7 +43,7 @@ describe('builtin tool summaries', () => {
     ['mark_memory_relation', { status: 'ALREADY_PRESENT', relation_kind: 'SUPERSEDES' }, {}, '标记记忆关系', '取代关系已存在'],
     ['manage_capability', { status: 'APPLIED', adoption: { status: 'PARTIAL' } }, {}, '管理扩展能力', '配置变更已保存，部分配置尚未生效'],
     ['reload_capabilities', { status: 'PARTIAL' }, {}, '刷新扩展能力', '部分配置未能刷新'],
-    ['reload_hooks', { status: 'RELOADED' }, {}, '刷新自动操作', '已刷新自动操作配置'],
+    ['reload_capabilities', { status: 'RELOADED' }, {}, '刷新扩展能力', '已刷新技能、连接与自动操作'],
   ])('%s explains the observed result without exposing raw payloads', (name, result, args, title, detail) => {
     const summary = builtinToolSummary(trace(name as string, result, args));
     expect(summary?.title).toBe(title);

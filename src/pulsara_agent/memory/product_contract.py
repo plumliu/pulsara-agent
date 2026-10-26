@@ -6,50 +6,38 @@ from __future__ import annotations
 MEMORY_KIND_PRODUCT_DEFINITIONS = (
     (
         "USER_PROFILE",
-        "who the user is, likes, tends to do, is working toward, or may prefer; "
-        "it may be a source-faithful lightweight inference and does not grant authority",
+        "who the user is, likes, tends to do, aims for or may prefer",
     ),
     (
         "RESPONSE_PREFERENCE",
-        "a soft default for how the Agent should usually answer, explain, format, or "
-        "express itself; it changes presentation, not permissions or execution policy",
+        "a soft default for answer style, explanation or formatting",
     ),
     (
         "FACT",
-        "attributed declarative context worth recalling, including safe ambiguous "
-        "explicit retention; it is advisory rather than a source of truth or executor",
+        "attributed declarative context, including explicit retention of uncertain information",
     ),
     (
         "DECISION",
-        "a source-supported choice, inclination, plan, goal, commitment, or adopted "
-        "high-level method; it does not execute, track, or guarantee completion",
+        "a source-supported choice, inclination, plan, goal, commitment or adopted high-level method",
     ),
 )
 
 MEMORY_CONTEXT_PRODUCT_GUIDE = (
-    "GLOBAL makes the item available in conversations that share this memory store; "
-    "it does not make a project-only claim universally true. CURRENT_PROJECT makes it "
-    "available only in this project. Put the real subject, date, and conditions in the "
-    "statement. Any kind may use either scope when the content warrants it."
+    "GLOBAL is available across conversations sharing this memory store; "
+    "CURRENT_PROJECT only within this project. Either scope accepts any kind. "
+    "Availability does not broaden the claim: keep its actual subject, date and "
+    "conditions in statement."
 )
 
 MEMORY_COHESIVE_UNIT_GUIDE = (
-    "Save one idea that makes sense to read and delete as a whole. It may have several "
-    "clauses when they naturally belong together; save unrelated claims separately."
+    "One self-contained idea that can be read and deleted as a whole; separate unrelated claims."
 )
 
 MEMORY_RETRIEVAL_AUTHORING_GUIDE = (
-    "Write a self-contained statement faithful to what was said or observed. Name the "
-    "subject and relevant project, time, conditions, quantities, negations, and "
-    "uncertainty when they matter. Distinguish a suggestion, tentative plan, adopted "
-    "choice, and completed action; preserve who said or did it. Resolve pronouns and "
-    "relative dates only when the available context makes them unambiguous. "
-    "Do not use template labels or invent details."
-)
-
-MEMORY_RELATION_COMPARISON_GUIDE = (
-    "Compare the same subject under the same conditions. Different dates or conditions "
-    "may explain a difference. A later save time alone does not justify SUPERSEDES."
+    "Preserve the subject, attribution, project, time, conditions, quantities, "
+    "negations and uncertainty that matter. Distinguish suggestions, tentative plans, "
+    "adopted choices and completed actions. Resolve pronouns and relative dates only "
+    "when unambiguous. Use natural prose without template labels or invented details."
 )
 
 

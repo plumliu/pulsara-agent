@@ -1643,7 +1643,7 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
                     "exact normalized command definitions only; scripts, PATH, "
                     "imports and dependencies are not recursively verified"
                 ),
-                "running_host_refresh": "reload_hooks or restart required",
+                "running_host_refresh": "reload_capabilities or restart required",
             }
         return result
     if command is None:
@@ -1677,7 +1677,7 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
     return {
         "status": "ok",
         "source": hook_snapshot_public(snapshot, inspect=False),
-        "notice": "running Hosts require reload_hooks or restart",
+        "notice": "running Hosts require reload_capabilities or restart",
     }
 
 

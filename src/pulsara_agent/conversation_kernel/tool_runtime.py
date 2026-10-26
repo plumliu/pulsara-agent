@@ -470,10 +470,6 @@ class KernelCapabilityReloadPort(Protocol):
         self, *, workspace_root: Path | None
     ) -> Mapping[str, object]: ...
 
-    async def reload_hooks(
-        self, *, deadline_monotonic: float | None
-    ) -> Mapping[str, object]: ...
-
     async def reload_capabilities(
         self, *, deadline_monotonic: float | None
     ) -> Mapping[str, object]: ...
@@ -759,7 +755,6 @@ class DirectKernelToolPort:
             _DirectPlanControlTool("enter_plan"),
             _DirectPlanControlTool("ask_plan_question"),
             _DirectPlanControlTool("exit_plan"),
-            _DirectCapabilityControlTool("reload_hooks"),
             _DirectCapabilityControlTool("reload_capabilities"),
             _DirectCapabilityControlTool("manage_capability"),
             _DirectMcpCatalogTool("list_capabilities"),
@@ -962,7 +957,6 @@ class DirectKernelToolPort:
                         "enter_plan",
                         "ask_plan_question",
                         "exit_plan",
-                        "reload_hooks",
                         "reload_capabilities",
                         "spawn_agent",
                         "create_agent_tasks",
@@ -1902,7 +1896,7 @@ class DirectKernelToolPort:
                     f"descriptor:{entry.descriptor.id}",
                     f"invalid tool arguments: {exc}",
                 )
-        if tool_name in {"reload_hooks", "reload_capabilities"}:
+        if tool_name == "reload_capabilities":
             access = surface_borrow.prepared.access
             if (
                 access.conversation_scope_kind is not ModelInputScopeKind.ROOT
@@ -3144,31 +3138,6 @@ class DirectKernelToolPort:
                 effect_class="read_only"
                 if call.prepared.effects.read_only
                 else "unknown_effect",
-                physical_observation=_freeze_physical_observation(
-                    invocation_started, observation_origin
-                ),
-            )
-        if tool_name == "reload_hooks":
-            if self._capability_reload is None:
-                raise RuntimeError("Hook reload port is unavailable")
-            values = await self._capability_reload.reload_hooks(
-                deadline_monotonic=self._deadlines.deadline(
-                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
-                )
-            )
-            safe_values = HookSecretScrubSet.capture().scrub_json(dict(values))
-            if not isinstance(safe_values, dict):
-                raise RuntimeError("Hook reload result lost its JSON object shape")
-            content = json.dumps(
-                safe_values,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            return KernelToolResult(
-                state="SUCCESS",
-                content=content,
-                effect_class="read_only",
                 physical_observation=_freeze_physical_observation(
                     invocation_started, observation_origin
                 ),

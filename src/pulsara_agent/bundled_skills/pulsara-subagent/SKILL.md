@@ -12,17 +12,14 @@ subagent is the worker that executes that task. Pulsara shows this delegated wor
 as a **task** in the UI. `task` is the instruction text; `task_id` identifies the
 delegation; optional `task_name` gives it a readable name.
 
-The main Agent assigns tasks; workers execute them and return results. Workers
-cannot delegate further. A follow-up creates a new task and worker execution,
-even when it inherits an earlier task's conversation. Use the returned task ID
-to wait, send guidance or cancel that specific execution. Use the tools available
-and authorized in your current scope; this guide does not grant permissions.
+The ROOT agent assigns tasks, and workers execute them and return results.
+Delegation tools belong to the ROOT agent. A follow-up creates a new task and
+worker execution, including when it inherits an earlier worker's conversation.
+Use the returned task_id to wait, send guidance or cancel that execution.
 
-Root orchestration requires effective_mode="bypass-permissions", including
-listing models/tasks and waiting. Check the run's effective mode before
-arranging delegation. If it does not meet the tools' precondition, continue
-available in-scope work or state the specific limitation when delegation is
-essential. A task request or Plan approval does not itself change that mode.
+ROOT orchestration tools, including lists and waits, are available when the
+current run's effective_mode is "bypass-permissions". Plan approval follows its
+own permission workflow and does not change this requirement.
 
 ## Choose the next action
 
@@ -36,7 +33,6 @@ essential. A task request or Plan approval does not itself change that mode.
 
 Finished tasks stay finished. A history-based follow-up gets a new task ID;
 describe it to the user as continuing from the previous worker's history.
-Do not conclude that further work is impossible merely because the old task ended.
 Two new tasks can branch from the same source independently; to build on one
 branch later, use that branch's returned task ID. Branches share the working
 directory, so conversation isolation does not isolate file changes.
@@ -51,8 +47,8 @@ Choose the smallest context that supports the work:
   this to combine findings, implement a reported fix or diagnose a failure when
   the outcome is enough. It does not bring their conversation or tool history.
 - **Default / `none`**: only the task and any explicitly selected materials.
-- **`last_n`**: add 1–3 recent main-conversation turns using `turns`. This does
-  not copy their tool calls/results; put required evidence in the task.
+- **`last_n`**: add 1–3 recent ROOT conversation turns using `turns`, excluding
+  their tool calls and results. Include required tool evidence in the task.
 - **`worker_history`**: use the exact `task_id` of a finished worker in this
   conversation. It must have started and have readable public history. Do not
   supply `turns`. The new branch continues the source
@@ -114,9 +110,10 @@ Recover from a failed task, using `spawn_agent`:
 {"task":"Inspect the supplied failure diagnosis and identify an in-scope fix. Check whether earlier operations had effects before repeating them.","material_task_ids":["<failed task_id>"]}
 ```
 
-Within one `create_agent_tasks` call, dependencies use another item's `task_key`. Names and keys preserve case; copy dependency keys exactly (`A` and `a` are different).
-For a prerequisite from an earlier call, use `"task:" + its exact task_id`.
-Task labels are not IDs. Recover lost IDs with `list_agents`.
+Within one `create_agent_tasks` call, dependencies use another item's exact
+`task_key`. Keys preserve case. For a prerequisite from an earlier call, copy
+its complete returned `task_id`, including its existing `task:` prefix.
+Labels are for display. Use `list_agents` to recover task IDs.
 
 ## Collect the outcome
 
