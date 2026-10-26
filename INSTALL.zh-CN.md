@@ -2,11 +2,11 @@
 
 [English](INSTALL.md) · [从源码构建](DEVELOPMENT.zh-CN.md)
 
-## 下载 0.1.1-alpha.1
+## 下载 0.1.1-alpha.2
 
 | 系统 | 安装包 |
 | --- | --- |
-| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-macos-arm64.dmg) |
+| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-macos-arm64.dmg) |
 | Windows 11 x64 + WSL2 Ubuntu | [下载 EXE](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-windows-x64.exe) |
 
 本版不提供原生 Ubuntu 安装包。amd64、arm64 的本地构建见[开发指南](DEVELOPMENT.zh-CN.md)；原生 Ubuntu 桌面验收仍延期。

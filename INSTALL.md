@@ -2,11 +2,11 @@
 
 [简体中文](INSTALL.zh-CN.md) · [Build from source](DEVELOPMENT.md)
 
-## Download 0.1.1-alpha.1
+## Download 0.1.1-alpha.2
 
 | System | Installer |
 | --- | --- |
-| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-macos-arm64.dmg) |
+| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-macos-arm64.dmg) |
 | Windows 11 x64 + WSL2 Ubuntu | [Download EXE](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.1/Pulsara-0.1.1-alpha.1-windows-x64.exe) |
 
 This release includes no native Ubuntu installer. For local amd64 or arm64 builds, follow the [development guide](DEVELOPMENT.md); native Ubuntu desktop acceptance remains deferred.

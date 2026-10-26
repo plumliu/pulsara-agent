@@ -1,6 +1,6 @@
 # 从源码构建 Pulsara
 
-[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.1.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.1)
+[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.1.1-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.2)
 
 修改代码前请阅读 [AGENTS.md](AGENTS.md)。原生资源在目标系统构建；Windows 使用 WSL2 Ubuntu 中构建的 Linux 资源，以及 Windows 中构建的 Electron 界面。
 
@@ -53,7 +53,7 @@ EXE 位于 `desktop/release/Pulsara-<版本>-windows-x64.exe`。构建会校验 
 
 ## 原生 Ubuntu
 
-0.1.1-alpha.1 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
+0.1.1-alpha.2 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
 
 ```sh
 sudo apt update
@@ -64,7 +64,7 @@ mise install
 mise run desktop:bootstrap
 mise exec -- .venv/bin/python -m playwright install-deps chromium
 mise run --jobs 1 desktop:package
-sudo apt install ./desktop/release/Pulsara-0.1.1-alpha.1-linux-amd64.deb
+sudo apt install ./desktop/release/Pulsara-0.1.1-alpha.2-linux-amd64.deb
 ```
 
 ARM64 用户换用 arm64 文件名。容器构建使用同一任务图：
@@ -95,8 +95,8 @@ mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py d
 
 ## 发布
 
-0.1.1-alpha.1 发布 macOS ARM64 DMG 和 Windows x64 EXE，均基于 `v0.1.1-alpha.1` 标签构建。Python 版本为 `0.1.1a1`，设置页显示 `0.1.1`。
+0.1.1-alpha.2 在本地构建并发布 macOS ARM64 DMG，基于 `v0.1.1-alpha.2` 标签；Windows 下载保留 alpha.1。Python 版本为 `0.1.1a2`，设置页显示 `0.1.1`。
 
-GitHub Actions 仅手动触发。现有 Native Desktop Packages 工作流与 `release_artifacts.py` 汇总仍要求一个 DMG、两个 Ubuntu deb 和一个 Windows EXE，本次两种安装包的发布没有使用该汇总流程。两端从同一标签构建，再上传到同一个 Release；已发布的标签保持不变。
+GitHub Actions 仅手动触发。现有 Native Desktop Packages 工作流与 `release_artifacts.py` 汇总仍要求一个 DMG、两个 Ubuntu deb 和一个 Windows EXE，本次仅发布 macOS 安装包，不使用该汇总流程。将本地 DMG 上传到对应标签的 Release；已发布的标签保持不变。
 
-版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.1-alpha.1`。
+版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.1-alpha.2`。

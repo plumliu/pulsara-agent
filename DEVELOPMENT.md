@@ -1,6 +1,6 @@
 # Build Pulsara
 
-[简体中文](DEVELOPMENT.zh-CN.md) · [Installation](INSTALL.md) · [Downloads: 0.1.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.1)
+[简体中文](DEVELOPMENT.zh-CN.md) · [Installation](INSTALL.md) · [Downloads: 0.1.1-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.2)
 
 Read [AGENTS.md](AGENTS.md) before changing code. Build native resources on the target OS; Windows uses a Linux payload built in WSL2 Ubuntu and an Electron shell built on Windows.
 
@@ -53,7 +53,7 @@ The EXE is written to `desktop/release/Pulsara-<version>-windows-x64.exe`. The b
 
 ## Native Ubuntu
 
-No Ubuntu deb is published for 0.1.1-alpha.1. Native x64/arm64 desktop acceptance remains deferred. To build locally, install mise and run as a normal user:
+No Ubuntu deb is published for 0.1.1-alpha.2. Native x64/arm64 desktop acceptance remains deferred. To build locally, install mise and run as a normal user:
 
 ```sh
 sudo apt update
@@ -64,7 +64,7 @@ mise install
 mise run desktop:bootstrap
 mise exec -- .venv/bin/python -m playwright install-deps chromium
 mise run --jobs 1 desktop:package
-sudo apt install ./desktop/release/Pulsara-0.1.1-alpha.1-linux-amd64.deb
+sudo apt install ./desktop/release/Pulsara-0.1.1-alpha.2-linux-amd64.deb
 ```
 
 Use the arm64 filename on ARM64. A container build uses the same task graph:
@@ -95,8 +95,8 @@ Database fixtures and native Linux checks: [tests/linux/README.md](tests/linux/R
 
 ## Releases
 
-Version 0.1.1-alpha.1 ships a macOS ARM64 DMG and a Windows x64 EXE, built from tag `v0.1.1-alpha.1`. Python uses version `0.1.1a1`; Settings displays `0.1.1`.
+Version 0.1.1-alpha.2 ships a locally built macOS ARM64 DMG from tag `v0.1.1-alpha.2`; the Windows download remains alpha.1. Python uses version `0.1.1a2`; Settings displays `0.1.1`.
 
-GitHub Actions are manual. The existing Native Desktop Packages workflow and `release_artifacts.py` assembly still require a DMG, two Ubuntu debs and a Windows EXE; they were not used for this two-installer release. Build both platforms from the same tag and upload their installers to the same Release. Keep the published tag fixed.
+GitHub Actions are manual. The existing Native Desktop Packages workflow and `release_artifacts.py` assembly still require a DMG, two Ubuntu debs and a Windows EXE; this macOS-only release does not use that assembly flow. Upload the local DMG to its matching tag. Keep published tags fixed.
 
-Check version consistency with `mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.1-alpha.1`.
+Check version consistency with `mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.1-alpha.2`.

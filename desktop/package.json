@@ -2,7 +2,7 @@
   "name": "pulsara-desktop",
   "productName": "Pulsara",
   "desktopName": "pulsara-desktop.desktop",
-  "version": "0.1.1-alpha.1",
+  "version": "0.1.1-alpha.2",
   "description": "Pulsara local agent workbench",
   "author": "Pulsara",
   "private": true,
