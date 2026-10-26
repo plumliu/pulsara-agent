@@ -1,4 +1,4 @@
-"""Product language shared by the ROOT memory prompt and tools."""
+"""Product language for memory tool descriptions and parameters."""
 
 from __future__ import annotations
 

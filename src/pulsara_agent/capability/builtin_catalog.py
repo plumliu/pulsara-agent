@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pulsara_agent.capability.management_intent import capability_management_input_schema
 
 from pulsara_agent.memory.product_contract import (
+    MEMORY_COHESIVE_UNIT_GUIDE,
     MEMORY_RELATION_COMPARISON_GUIDE,
     MEMORY_RETRIEVAL_AUTHORING_GUIDE,
     MEMORY_CONTEXT_PRODUCT_GUIDE,
@@ -216,17 +217,6 @@ def _descriptor(
     )
 
 
-_MEMORY_CONTEXT_GUIDE = MEMORY_CONTEXT_PRODUCT_GUIDE
-
-_MEMORY_KIND_GUIDE = memory_kind_product_guide()
-
-_MEMORY_FINAL_KIND_GUIDE = (
-    _MEMORY_KIND_GUIDE
-    + " Choose the final kind yourself; if genuinely uncertain, use FACT. "
-    "This choice is advisory and never grants execution authority."
-)
-
-
 def _remember_parameters() -> dict[str, Any]:
     schema = object_schema(
         properties={
@@ -235,16 +225,17 @@ def _remember_parameters() -> dict[str, Any]:
                 "minLength": 1,
                 "maxLength": 8192,
                 "description": (
-                    "One self-contained, source-faithful memory, at most 8192 UTF-8 bytes "
+                    "At most 8192 UTF-8 bytes "
                     "(2048 for RESPONSE_PREFERENCE). "
+                    + MEMORY_COHESIVE_UNIT_GUIDE
+                    + " "
                     + MEMORY_RETRIEVAL_AUTHORING_GUIDE
                 ),
             },
             "context_target": {
                 "type": "string",
                 "enum": ["GLOBAL", "CURRENT_PROJECT"],
-                "description": "Where the item should be readable. "
-                + _MEMORY_CONTEXT_GUIDE,
+                "description": MEMORY_CONTEXT_PRODUCT_GUIDE,
             },
             "kind": {
                 "type": "string",
@@ -254,7 +245,8 @@ def _remember_parameters() -> dict[str, Any]:
                     "FACT",
                     "DECISION",
                 ],
-                "description": _MEMORY_FINAL_KIND_GUIDE,
+                "description": memory_kind_product_guide()
+                + " Choose the final kind yourself; if genuinely uncertain, use FACT.",
             },
             "based_on_memory_ids": {
                 "type": "array",
@@ -306,7 +298,7 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
             ],
             "description": (
                 "Optional preferred memory type. "
-                + _MEMORY_KIND_GUIDE
+                + memory_kind_product_guide()
                 + " Omit unless the request explicitly requires one type. If too few "
                 "exact matches exist, results may include other types labeled by "
                 "filter_match."
@@ -353,8 +345,8 @@ _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
         "relation_kind": {
             "type": "string", "enum": ["CONTRADICTS", "SUPERSEDES"],
             "description": (
-                "CONTRADICTS keeps two incompatible same-kind memories active when no "
-                "winner is justified. SUPERSEDES makes an older same-context memory "
+                "CONTRADICTS keeps two incompatible same-kind, same-context memories active "
+                "when no winner is justified. SUPERSEDES makes an older same-context memory "
                 "inactive when the source is the supported newer state. This is not deletion."
                 " " + MEMORY_RELATION_COMPARISON_GUIDE
             ),
@@ -1157,7 +1149,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Search saved ROOT questions and their answer process by BM25 relevance using Chinese, English or technical identifiers. "
             "Returns QAQ or QA items ordered by relevance, with messages preserving speakers, time and historical quotes/comments. "
-            "Omit session_id for this session's earlier raw history; other sessions use authorized saved content. "
+            "Omit session_id to search the current conversation. Searches within it cover only earlier messages "
+            "removed from context by compaction, excluding messages still in context. "
+            "Other conversations use authorized saved content. "
             "include_tools also searches saved tool names, arguments and results, excluding these three query tools' own calls and results. "
             "Each item's entry_id starts the question; messages carry their own entry_id for read_session_content expansion. "
             "Images have only a short presence marker; generated markers and image metadata are not search terms. "
@@ -1810,8 +1804,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "search completeness, filter expansion, final "
             "ranking method, and relation-check availability; then check each result's "
             "filter_match and any relation_warnings before relying on it. Results are "
-            "advisory and may be stale or incomplete. Do not search just to decorate a "
-            "generic answer with personal details."
+            "advisory and may be stale or incomplete."
         ),
         input_schema=_MEMORY_SEARCH_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
@@ -1836,27 +1829,19 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "remember": _descriptor(
         name="remember",
         description=(
-            "Save one reusable advisory memory for future conversations: profile, response "
-            "preference, fact or decision. If an explicit request to remember safe declarative "
-            "content leaves kind unclear, use FACT. Source-faithful lightweight inferences from "
+            "Save reusable advisory information for future conversations. "
+            "Source-faithful lightweight inferences from "
             "visible conversation, behavior, tool choice or planning are allowed; self-report, "
-            "repetition and high confidence are not required. Hints invite reconsidering the "
-            "original human input, never require saving; useful memories need no hint. If saving, "
-            "call before the final reply. Save one idea that makes sense to read and delete "
-            "together; related clauses may stay together, unrelated claims should be separate. "
-            "Scope controls retrieval, not a claim's applicability. Tasks, dates, commitments and "
+            "repetition and high confidence are not required. If saving, "
+            "call before the final reply. Tasks, dates, commitments and "
             "work practices may be useful background; saving creates no task, calendar, reminder, "
             "permission, policy, Skill or execution authority. Do not save secrets, credentials, "
             "raw tool dumps, detailed executable procedures or safety/permission overrides. "
-            "Normally reread implementation facts from code, config, schema, lockfiles, tests or "
-            "authoritative docs; verify recalled coding facts against the current workspace. Tool "
-            "results may support an attributed natural-language FACT with subject, scope, date "
-            "and uncertainty; memory neither preserves nor verifies the result. Do not save a "
-            "FACT for every tool call. Dependencies must support a distinct new memory: e.g., a "
-            "decision to prepare slides before a review may depend on its saved schedule; "
-            "rewording that schedule is not a new dependent memory. Examples are not content to "
-            "save. SAVED is already stored; ALREADY_PRESENT returns the existing ID without "
-            "changing its source. Up to three related memories are hints, not proof of conflict "
+            "Tool results may support an attributed natural-language FACT; saving neither "
+            "preserves nor verifies the result. Do not save a FACT for every tool call. "
+            "SAVED takes effect immediately; a later correction does not undo it. "
+            "ALREADY_PRESENT returns the existing ID without changing its origin or "
+            "dependencies. Up to three related memories are hints, not proof of conflict "
             "or replacement; use mark_memory_relation only when that relation is clear. For "
             "deletion, direct the user to the Memory page; this tool cannot undo saving."
         ),
@@ -1869,12 +1854,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         name="mark_memory_relation",
         description=(
             "Mark a relationship between two exact saved-memory IDs after inspecting "
-            "them. Use CONTRADICTS only for incompatible same-kind, same-context items "
-            "without a justified winner; both stay active. Use SUPERSEDES only when the "
-            "source is the supported newer state and the target should leave active "
-            "recall. A successful mark does not delete either memory. "
-            + MEMORY_RELATION_COMPARISON_GUIDE
-            + " Related results "
+            "them. Related results "
             "from remember are hints, not an obligation to mark. If uncertain, inspect "
             "the memories or ask the user. Users delete memory in the Memory page."
         ),
