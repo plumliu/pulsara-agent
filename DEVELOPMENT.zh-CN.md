@@ -93,6 +93,8 @@ mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py d
 
 数据库夹具和原生 Linux 检查见 [tests/linux/README.md](tests/linux/README.md)。Windows 的 Python 命令改用 `.venv/Scripts/python.exe`。资源准备好后，运行 `mise exec -- npm --prefix desktop start` 启动开发界面。
 
+Electron 壳只打包启动页需要的 Inter、Noto Sans SC 和 Gelasio。工作台字体（含 MiSans 全字重）随 Python 包的前端静态资源分发，Windows 将其放在 WSL payload 中。启动页必须独立于 WSL；工作台专用字体不再复制进 Electron archive。
+
 ## 发布
 
 0.1.1-alpha.2 在本地构建并发布 macOS ARM64 DMG，基于 `v0.1.1-alpha.2` 标签；Windows 下载保留 alpha.1。Python 版本为 `0.1.1a2`，设置页显示 `0.1.1`。

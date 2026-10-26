@@ -1,0 +1,6 @@
+/* Fonts needed before the workbench is available, including Windows WSL setup.
+   Imported by fonts.css so the workbench uses these same face definitions. */
+@font-face { font-family:"Pulsara UI";font-style:normal;font-weight:100 900;font-display:block;src:url("./fonts/inter-roman.woff2") format("woff2"); }
+@font-face { font-family:"Pulsara UI";font-style:italic;font-weight:100 900;font-display:block;src:url("./fonts/inter-italic.woff2") format("woff2"); }
+@font-face { font-family:"Pulsara UI CJK";font-style:normal;font-weight:100 900;font-display:block;src:url("./fonts/noto-sans-sc.woff2") format("woff2"); }
+@font-face { font-family:"Pulsara Brand";font-style:normal;font-weight:400 700;font-display:block;src:url("./fonts/gelasio-roman.woff2") format("woff2"); }

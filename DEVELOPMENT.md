@@ -93,6 +93,8 @@ mise exec -- .venv/bin/python -m pytest -q desktop/scripts/test_build_cache.py d
 
 Database fixtures and native Linux checks: [tests/linux/README.md](tests/linux/README.md). Use `.venv/Scripts/python.exe` for Python commands on Windows. To run the development shell with prepared resources, use `mise exec -- npm --prefix desktop start`.
 
+The Electron archive includes only startup fonts (Inter, Noto Sans SC and Gelasio). Workbench fonts, including all MiSans weights, live in the Python package renderer assets; Windows carries these in its WSL payload. Keep the startup page independent of WSL, and do not add workbench-only fonts to the Electron archive.
+
 ## Releases
 
 Version 0.1.1-alpha.2 ships a locally built macOS ARM64 DMG from tag `v0.1.1-alpha.2`; the Windows download remains alpha.1. Python uses version `0.1.1a2`; Settings displays `0.1.1`.

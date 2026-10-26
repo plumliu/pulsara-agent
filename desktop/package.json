@@ -41,6 +41,8 @@
     "files": [
       "dist/**",
       "assets/**",
+      "!assets/fonts.css",
+      "!assets/fonts/!(inter-roman|inter-italic|noto-sans-sc|gelasio-roman).woff2",
       "package.json"
     ],
     "beforePack": "scripts/windows-package.cjs",
