@@ -35,7 +35,7 @@ jobs:
       - name: Ruff
         run: uv run --no-sync ruff check
       - name: Initialize PostgreSQL runtime role
-        run: docker exec -i "${{ job.services.postgres.id }}" bash -s < docker/postgres-init/001-runtime-role.sh
+        run: docker exec -i "${{ job.services.postgres.id }}" bash -s < tests/linux/postgres-init/001-runtime-role.sh
       - name: Advisory memory contract gate
         env:
           PULSARA_POSTGRES_ADMIN_DSN: "postgresql://pulsara_admin:pulsara_admin@127.0.0.1:5432/pulsara"

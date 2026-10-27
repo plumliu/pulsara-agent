@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
-import { watch, existsSync } from 'node:fs';
+import { watchFile, unwatchFile, existsSync } from 'node:fs';
 import { once } from 'node:events';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import os from 'node:os';
@@ -91,15 +91,41 @@ lines.on('line', line => {
   };
 }
 
-function waitForFile(filename: string): Promise<void> {
-  return new Promise(resolve => {
-    const changed = () => { if (existsSync(filename)) { watcher.close(); resolve(); } };
-    const watcher = watch(path.dirname(filename), changed);
+function waitForFile(filename: string, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const cleanup = () => {
+      unwatchFile(filename, changed);
+      signal.removeEventListener('abort', aborted);
+    };
+    const changed = () => { if (existsSync(filename)) { cleanup(); resolve(); } };
+    const aborted = () => { cleanup(); reject(signal.reason); };
+    // Native directory notifications can miss fixture writes on macOS. Node
+    // owns stat polling; the test's existing signal owns cancellation/cleanup.
+    watchFile(filename, {interval:10}, changed);
+    signal.addEventListener('abort', aborted, {once:true});
     changed();
   });
 }
 
 const wslOptions: WslRuntimeOptions = {distribution:'Ubuntu', user:'plumwsl', interopHelper:'/mnt/c/resources/pulsara-interop.exe', async openOAuthBrowser() {}};
+
+test('cancelled fixture observation rejects and lets cleanup join the child', {timeout:10000}, async () => {
+  const value = await fixture();
+  const cancellation = new AbortController();
+  const failure = new Error('fixture observation cancelled');
+  try {
+    await value.runtime.start(async () => settings, () => true);
+    const waiting = waitForFile(path.join(value.home, 'never-created'), cancellation.signal);
+    const rejected = assert.rejects(waiting, error => error === failure);
+    cancellation.abort(failure);
+    await rejected;
+    await assert.rejects(waitForFile(path.join(value.home, 'never-created'), cancellation.signal), error => error === failure);
+  } finally { await value.close(); }
+  assert.equal(value.runtime.running, false);
+  assert.equal(value.children[0].exitCode, 0);
+  assert.equal(value.children[0].signalCode, null);
+});
 
 test('WSL startup sends the fixed host identity and requires the current certificate', {timeout:10000}, async () => {
   const value = await fixture('wsl-normal', posixHostOperations, wslOptions);
@@ -141,12 +167,12 @@ for (const mode of ['pre-ready-failure', 'pre-ready-exit']) {
 }
 
 for (const mode of ['wsl-oauth', 'wsl-bad-oauth']) {
-  test(`OAuth bridge reports the real browser-open outcome: ${mode}`, {timeout:10000}, async () => {
+  test(`OAuth bridge reports the real browser-open outcome: ${mode}`, {timeout:10000}, async t => {
     const opened: string[] = [];
     const value = await fixture(mode, posixHostOperations, {...wslOptions, async openOAuthBrowser(url) {opened.push(url);}});
     try {
       await value.runtime.start(async () => settings, () => true);
-      await waitForFile(path.join(value.home, 'oauth-result'));
+      await waitForFile(path.join(value.home, 'oauth-result'), t.signal);
       const result = JSON.parse(await readFile(path.join(value.home, 'oauth-result'), 'utf8'));
       assert.deepEqual(result, {type:'open-oauth-browser-result', requestId:'oauth-1', opened:mode === 'wsl-oauth'});
       assert.deepEqual(opened, mode === 'wsl-oauth' ? ['https://example.com/authorize'] : []);
@@ -176,11 +202,11 @@ test('host uses one child, private startup frame and correlated quit inspection'
   } finally { await value.close(); }
 });
 
-test('stop waits for the child to finish settlement and permits concurrent stop callers', {timeout:10000}, async () => {
+test('stop waits for the child to finish settlement and permits concurrent stop callers', {timeout:10000}, async t => {
   const value = await fixture('drain');
   try {
     await value.runtime.start(async () => settings, () => true);
-    const closing = waitForFile(path.join(value.home, 'closing'));
+    const closing = waitForFile(path.join(value.home, 'closing'), t.signal);
     let stopped = false;
     const first = value.runtime.stop().then(() => { stopped = true; });
     const second = value.runtime.stop();
@@ -303,13 +329,13 @@ test('a child reaching ready while stop is joining still reports its failed exit
   } finally { await value.close(); }
 });
 
-test('child starts before PostgreSQL finishes, but start and inspection frames stay gated', {timeout:10000}, async () => {
+test('child starts before PostgreSQL finishes, but start and inspection frames stay gated', {timeout:10000}, async t => {
   const value = await fixture();
   let release!: () => void;
   const database = new Promise<void>(resolve => { release = resolve; });
   const started = value.runtime.start(async () => { await database; return settings; }, () => true);
   try {
-    await waitForFile(path.join(value.home, 'spawned'));
+    await waitForFile(path.join(value.home, 'spawned'), t.signal);
     assert.equal(value.runtime.running, true);
     assert.equal(existsSync(path.join(value.home, 'calls.jsonl')), false);
     assert.deepEqual(await value.runtime.inspectQuit(), {type:'inspect-quit', activeTasks:0, scheduledTasks:0});
@@ -325,7 +351,7 @@ test('child starts before PostgreSQL finishes, but start and inspection frames s
   } finally { release(); await value.close(); }
 });
 
-test('PostgreSQL failure sends no start frame and joins the unused child before rejection', {timeout:10000}, async () => {
+test('PostgreSQL failure sends no start frame and joins the unused child before rejection', {timeout:10000}, async t => {
   const value = await fixture();
   let release!: () => void;
   const database = new Promise<void>(resolve => { release = resolve; });
@@ -333,7 +359,7 @@ test('PostgreSQL failure sends no start frame and joins the unused child before 
   const started = value.runtime.start(async () => { await database; throw failure; }, () => true);
   const rejected = assert.rejects(started, error => error === failure);
   try {
-    await waitForFile(path.join(value.home, 'spawned'));
+    await waitForFile(path.join(value.home, 'spawned'), t.signal);
     release();
     await rejected;
     assert.equal(value.runtime.running, false);
@@ -342,14 +368,14 @@ test('PostgreSQL failure sends no start frame and joins the unused child before 
   } finally { release(); await value.close(); }
 });
 
-test('an early child exit is observed while PostgreSQL preparation is still settling', {timeout:10000}, async () => {
+test('an early child exit is observed while PostgreSQL preparation is still settling', {timeout:10000}, async t => {
   const value = await fixture('early-exit');
   let release!: () => void;
   const database = new Promise<void>(resolve => { release = resolve; });
   const started = value.runtime.start(async () => { await database; return settings; }, () => true);
   const rejected = assert.rejects(started, /内核在就绪前退出/);
   try {
-    await waitForFile(path.join(value.home, 'spawned'));
+    await waitForFile(path.join(value.home, 'spawned'), t.signal);
     // Observe physical pre-start exit before releasing PG. Sending into a live
     // child would instead be a submitted attempt with an unknown startup result.
     const child = value.children[0];

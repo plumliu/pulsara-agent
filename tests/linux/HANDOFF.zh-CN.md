@@ -101,7 +101,7 @@ sudo docker compose exec -T postgres psql -U pulsara_admin -d pulsara -c "SELECT
 若 5432 已被其他数据库占用，先明确其归属，不要杀掉未知服务。若复用了旧容器且缺少 runtime role，可运行仓库已有的幂等初始化脚本：
 
 ```bash
-sudo docker compose exec -T postgres bash -s < docker/postgres-init/001-runtime-role.sh
+sudo docker compose exec -T postgres bash -s < tests/linux/postgres-init/001-runtime-role.sh
 ```
 
 在未设置密码覆盖变量的新 Compose 实例中，开发连接为：

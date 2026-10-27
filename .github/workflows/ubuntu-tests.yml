@@ -43,7 +43,7 @@ jobs:
       - name: Prepare Chromium with Ubuntu dependencies
         run: uv run --no-sync python -m playwright install --with-deps chromium
       - name: Initialize PostgreSQL runtime role
-        run: docker exec -i "${{ job.services.postgres.id }}" bash -s < docker/postgres-init/001-runtime-role.sh
+        run: docker exec -i "${{ job.services.postgres.id }}" bash -s < tests/linux/postgres-init/001-runtime-role.sh
       - name: Ruff and complete Python test suite
         run: |
           uv run --no-sync ruff check
