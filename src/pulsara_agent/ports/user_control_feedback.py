@@ -245,8 +245,8 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
             )
         except (TypeError, KeyError, ValueError) as exc:
             raise ValueError("workspace recreation feedback is invalid") from exc
-        return json.dumps({"pulsara_user_control_feedback": fact.canonical_mapping(),
-                           "handling": "The user explicitly asked the Host to recreate an empty workspace at the original path. Original files were not recovered. Historical file content does not establish what currently exists on disk; inspect actual files before using them."},
+        return json.dumps({"pulsara_user_control_feedback": {"workspace_root": fact.workspace_root, "created_at": fact.created_at.isoformat()},
+                           "handling": "The user asked the Host to recreate an empty workspace at its original path and continue. Original files were not recovered. Inspect the disk before using historical file content."},
                           ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     fields = {
         "kind",
@@ -299,19 +299,18 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
     monitor = value["monitor"]
     if monitor is not None:
         _validate_monitor_mapping(monitor)
-    provider_value = {
-        field: field_value
-        for field, field_value in value.items()
-        if field != "schema_version"
-    }
+    provider_value = {field: value[field] for field in (
+        "process_id", "command", "cwd", "process", "public_code", "public_detail",
+    )}
+    provider_value["origin"] = "ROOT" if origin_subagent_task_id is None else {"subagent_task_id": origin_subagent_task_id}
+    provider_value["monitor_result"] = monitor
     return json.dumps(
         {
             "pulsara_user_control_feedback": provider_value,
             "handling": (
-                "This is a runtime-attributed fact about an explicit human control "
-                "of one background process. Other work was not stopped. Do not "
-                "interpret it as authorization to restart, retry, or control another "
-                "process."
+                "The user stopped this background process."
+                if value["process"]["disposition"] == "TERMINATION_COMPLETED"
+                else "The user requested this background process stop."
             ),
         },
         ensure_ascii=False,

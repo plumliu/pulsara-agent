@@ -36,7 +36,8 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     provider_input_item_canonical_expanded_bytes,
 )
 from pulsara_agent.llm.input import LLMTextPart
-from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.conversation_kernel.subagents.contracts import project_initial_context_material
+from pulsara_agent.primitives.context import context_fingerprint
 
 
 def validate_worker_history_source(
@@ -180,15 +181,7 @@ def worker_initial_material_items(connection, *, cut, floor):
             source_turn_id=cut.turn_id,
             content=(
                 LLMTextPart(
-                    canonical_json_bytes(
-                        {
-                            "pulsara_initial_context": {
-                                "source": kind,
-                                "content_semantics": "UNTRUSTED_COLLABORATION_DATA",
-                                "body": row[column],
-                            }
-                        }
-                    ).decode("utf-8")
+                    project_initial_context_material(kind, row[column])
                 ),
             ),
         )

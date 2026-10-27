@@ -3770,6 +3770,8 @@ def _known_mcp_system_failure(
             {
                 "error": error_code,
                 "retry_performed": False,
+                **({"guidance": "The remote request was not sent."}
+                   if error_code == "MCP_TRANSPORT_UNWRITTEN" else {}),
                 **({"message": message} if message is not None else {}),
             }
         ),

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pulsara_agent.capability.types import (
     ActiveSkillProjectionUnavailableReason,
     ActiveSkillInjection,
+    ActiveSkillReason,
     ResolvedSkillCatalogEntry,
     SkillDiagnostic,
     SkillDiagnosticCode,
@@ -88,7 +89,8 @@ def render_active_skill_prompt(
                 {
                     "name": item.name,
                     "location": item.location,
-                    "reason": item.reason.value,
+                    **({"reason": item.reason.value}
+                       if item.reason is ActiveSkillReason.EXPLICIT_USER_MENTION else {}),
                     "body": item.body,
                 }
                 for item in ordered

@@ -705,8 +705,8 @@ def test_pr03_feedback_projection_is_typed_and_preserves_literal_facts() -> None
     projection = project_user_control_feedback_for_provider(content.canonical_bytes())
     projected = json.loads(projection)["pulsara_user_control_feedback"]
     assert "python worker.py --literal 你好" in projection
-    assert '"source":"USER_CONTROL"' in projection
-    assert '"other_work_stopped":false' in projection
+    assert projected["origin"] == "ROOT"
+    assert projected["process"] == content.canonical_mapping()["process"]
     assert "schema_version" not in projected
     assert "user_control_feedback.v2" not in projection
     assert USER_CONTROL_FEEDBACK_MEDIA_TYPE.endswith("+json")

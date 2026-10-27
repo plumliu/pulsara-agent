@@ -8,7 +8,6 @@ renderer instead of copying its field list or byte formula.
 
 from __future__ import annotations
 
-from pulsara_agent.identity import require_id
 from pulsara_agent.primitives.permission import PermissionMode
 
 from dataclasses import dataclass
@@ -36,7 +35,7 @@ from pulsara_agent.primitives.tool_observation import (
 
 
 TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT = (
-    "pulsara.provider-visible-tool-result.logical-projection.v3"
+    "pulsara.provider-visible-tool-result.logical-projection.v4"
 )
 TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT = (
     "pulsara.tool-result-full-delivery-classifier.v1"
@@ -207,6 +206,26 @@ def project_tool_result_storage_body(
     return canonical_json_bytes(result).decode("utf-8")
 
 
+def preserved_tool_result_facts(body: str) -> dict[str, object]:
+    """Retain explicit failure facts when their diagnostic output is shortened."""
+    try:
+        value = json.loads(body)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    if not (
+        (isinstance(value.get("physical_outcome"), str)
+         and value["physical_outcome"] in {"UNKNOWN", "NO_RELIABLE_OBSERVATION"})
+        or value.get("remote_outcome") == "UNKNOWN"
+        or value.get("error") in ("MCP_TRANSPORT_UNWRITTEN", "TOOL_UNAVAILABLE")
+    ):
+        return {}
+    return {key: value[key] for key in (
+        "error", "physical_outcome", "remote_outcome", "retry_performed", "guidance",
+    ) if key in value}
+
+
 @dataclass(frozen=True, slots=True)
 class RenderedProviderToolResultLogicalMessage:
     message: LLMMessage
@@ -238,25 +257,26 @@ def render_provider_tool_result_logical_message(
     body.encode("utf-8")
     _validate_model_visible_memory_ids(model_visible_memory_ids)
 
+    observation = {
+        "duration_disposition": timing.duration_disposition.value,
+        "observed_at_utc": timing.observed_at_utc,
+    }
+    if timing.observation_duration_microseconds is not None:
+        observation["observation_duration_microseconds"] = timing.observation_duration_microseconds
+    if timing.tool_reported_duration_microseconds is not None:
+        key = ("process_elapsed_microseconds"
+               if timing.observation_origin is ToolObservationOrigin.TERMINAL_PROCESS
+               else "tool_reported_duration_microseconds")
+        observation[key] = timing.tool_reported_duration_microseconds
     payload = {
         "pulsara_tool_result": {
             "body": body,
-            "model_visible_memory_ids": list(model_visible_memory_ids),
-            "observation": {
-                "duration_disposition": timing.duration_disposition.value,
-                "observation_duration_microseconds": (
-                    timing.observation_duration_microseconds
-                ),
-                "observation_origin": timing.observation_origin.value,
-                "observed_at_utc": timing.observed_at_utc,
-                "source_turn_ref": timing.source_turn_ref,
-                "tool_reported_duration_microseconds": (
-                    timing.tool_reported_duration_microseconds
-                ),
-            },
+            "observation": observation,
             "result_state": result_state,
         }
     }
+    if model_visible_memory_ids:
+        payload["pulsara_tool_result"]["model_visible_memory_ids"] = list(model_visible_memory_ids)
     content = canonical_json_bytes(payload).decode("utf-8")
     decode_provider_tool_result_observation(content)
     if message_kind is ToolResultLogicalMessageKind.TOOL_RESULT:
@@ -404,33 +424,21 @@ def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
     if not isinstance(value, dict) or set(value) != {"pulsara_tool_result"}:
         raise ValueError("tool result observation outer contract is invalid")
     payload = value["pulsara_tool_result"]
-    if not isinstance(payload, dict) or set(payload) != {
-        "body",
-        "model_visible_memory_ids",
-        "observation",
-        "result_state",
-    }:
+    required = {"body", "observation", "result_state"}
+    if not isinstance(payload, dict) or not required.issubset(payload) or set(payload) - required - {"model_visible_memory_ids"}:
         raise ValueError("tool result observation member contract is invalid")
-    if not isinstance(payload["body"], str) or not isinstance(
-        payload["result_state"], str
-    ):
+    if not isinstance(payload["body"], str) or not isinstance(payload["result_state"], str):
         raise ValueError("tool result observation scalar contract is invalid")
-    memory_ids = payload["model_visible_memory_ids"]
-    if not isinstance(memory_ids, list):
-        raise ValueError("tool result memory provenance header is invalid")
-    _validate_model_visible_memory_ids(tuple(memory_ids))
+    if "model_visible_memory_ids" in payload:
+        memory_ids = payload["model_visible_memory_ids"]
+        if not isinstance(memory_ids, list) or not memory_ids:
+            raise ValueError("tool result memory provenance header is invalid")
+        _validate_model_visible_memory_ids(tuple(memory_ids))
     observation = payload["observation"]
-    if not isinstance(observation, dict) or set(observation) != {
-        "duration_disposition",
-        "observation_duration_microseconds",
-        "observation_origin",
-        "observed_at_utc",
-        "source_turn_ref",
-        "tool_reported_duration_microseconds",
-    }:
+    required_timing = {"duration_disposition", "observed_at_utc"}
+    optional_timing = {"observation_duration_microseconds", "tool_reported_duration_microseconds", "process_elapsed_microseconds"}
+    if not isinstance(observation, dict) or not required_timing.issubset(observation) or set(observation) - required_timing - optional_timing:
         raise ValueError("tool timing observation contract is invalid")
-    source_turn_ref = observation["source_turn_ref"]
-    require_id(source_turn_ref, "turn", "history")
     observed_at = observation["observed_at_utc"]
     if not isinstance(observed_at, str):
         raise ValueError("tool timing timestamp is invalid")
@@ -440,37 +448,16 @@ def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
         raise ValueError("tool timing timestamp is invalid") from exc
     if canonical_utc_timestamp(parsed) != observed_at:
         raise ValueError("tool timing timestamp is not canonical UTC")
-    disposition = ToolObservationDurationDisposition(
-        observation["duration_disposition"]
-    )
-    origin = ToolObservationOrigin(observation["observation_origin"])
-    duration = observation["observation_duration_microseconds"]
-    reported = observation["tool_reported_duration_microseconds"]
-    if duration is not None and (
-        not isinstance(duration, int)
-        or isinstance(duration, bool)
-        or not 0 <= duration <= MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS
-    ):
-        raise ValueError("tool timing duration is invalid")
-    if reported is not None and (
-        not isinstance(reported, int)
-        or isinstance(reported, bool)
-        or not 0 <= reported <= MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS
-    ):
-        raise ValueError("tool-reported duration is invalid")
-    if (disposition is ToolObservationDurationDisposition.MEASURED) != (
-        duration is not None
-    ):
+    disposition = ToolObservationDurationDisposition(observation["duration_disposition"])
+    for key in optional_timing & observation.keys():
+        duration = observation[key]
+        if not isinstance(duration, int) or isinstance(duration, bool) or not 0 <= duration <= MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS:
+            raise ValueError("tool timing duration is invalid")
+    measured = "observation_duration_microseconds" in observation
+    if (disposition is ToolObservationDurationDisposition.MEASURED) != measured:
         raise ValueError("tool timing disposition is inconsistent")
-    nonphysical = origin in {
-        ToolObservationOrigin.POLICY,
-        ToolObservationOrigin.PLAN_CONTROL,
-    }
-    if nonphysical != (
-        disposition is ToolObservationDurationDisposition.NO_PHYSICAL_ATTEMPT
-    ):
-        raise ValueError("tool timing origin is inconsistent")
-    if nonphysical and reported is not None:
+    reported = {"tool_reported_duration_microseconds", "process_elapsed_microseconds"} & observation.keys()
+    if len(reported) > 1 or (disposition is ToolObservationDurationDisposition.NO_PHYSICAL_ATTEMPT and reported):
         raise ValueError("nonphysical tool timing reports a duration")
     if canonical_json_bytes(value).decode("utf-8") != text:
         raise ValueError("tool result observation is not canonical JSON")

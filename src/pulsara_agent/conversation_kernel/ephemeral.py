@@ -27,32 +27,15 @@ TITLE_PROMPT = (
     "explanation, or quotation marks. Do not answer or carry out the user's request."
 )
 SUGGESTION_PROMPT = (
-    "Imagine you are the user writing their next message to the assistant, not "
-    "the assistant replying to or interviewing the user. Use the user's voice and "
-    "point of view: I/my refer to the user; you refers to the assistant. "
-    "Review the whole conversation for repeated constraints and unresolved tensions. "
-    "Find the unasked question about how those constraints fit together or what "
-    "should guide a tradeoff. Respect explicit decisions; do not invent problems, "
-    "restate requirements, or ask generically how to implement them. If the exchange "
-    "is already resolved or lacks such evidence, return empty text. Otherwise, write "
-    "one concise question as the user asking the assistant, in the user's language. "
-    "Output only that question on one line, without explanation or quotes. "
-    "Do not offer help, ask the user for their preferences, or begin with phrases "
-    "like 'Would you like me to'. Do not continue the task or call tools.\n\n"
-    "Examples of voice and format only; do not copy their topics:\n"
-    "Conversation: The user wants an agent to work independently, but also wants "
-    "to understand important tradeoffs without reading long logs.\n"
-    "Suggested user message: 我该怎么划定你可以自行决定、以及需要先问我的边界？\n\n"
-    "Conversation: The user wants to learn a subject thoroughly while having "
-    "only twenty minutes a day; the assistant has outlined several study methods.\n"
-    "Suggested user message: 我每天只有二十分钟，该怎么取舍学习进度和理解深度？\n\n"
-    "Now write the user's next question for the actual conversation above. "
-    "Never answer the user's previous question or repeat the assistant's answer. "
-    "If the assistant has already answered the question and there is no grounded "
-    "unresolved issue, return zero characters, not a placeholder such as 'none', "
-    "'（无）', or an explanation. Otherwise output only the user's question."
+    'Review the conversation for repeated constraints and unresolved tensions. You must '
+    "write one unasked question as the user, in the user's language and voice (I/my means "
+    'the user; you means the assistant), about how constraints fit together or what should'
+    ' guide a tradeoff. Respect decisions already made; do not invent problems, merely '
+    'restate requirements, or ask generically how to implement them. If no grounded '
+    'unresolved issue remains, return empty text. Otherwise output only the concise '
+    'question on one line, without quotes or explanation. Do not answer, continue the '
+    'task, or call tools.'
 )
-
 
 @dataclass(frozen=True, slots=True)
 class AcceptedUserOrigin:

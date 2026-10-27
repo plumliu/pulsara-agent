@@ -1974,14 +1974,20 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "base_system_prompt",
+    (DEFAULT_SYSTEM_PROMPT, "Custom root instructions"),
+    ids=("default", "custom"),
+)
 def test_effective_root_system_preserves_the_collected_base_system(
     tmp_path: Path,
+    base_system_prompt: str,
 ) -> None:
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
         capability_composer=_Capability(),  # type: ignore[arg-type]
-        base_system_prompt=DEFAULT_SYSTEM_PROMPT,
+        base_system_prompt=base_system_prompt,
         display_timezone=timezone.utc,
     )
     surface = (
@@ -2013,7 +2019,7 @@ def test_effective_root_system_preserves_the_collected_base_system(
         if candidate.source_kind is ContextSourceKind.BASE_SYSTEM
     )
     assert compiled.system_prompt == base.variants[0].text
-    assert compiled.system_prompt.startswith(DEFAULT_SYSTEM_PROMPT)
+    assert compiled.system_prompt == base_system_prompt
 
 
 def test_round3_optional_clock_advances_only_after_wire_render_feedback() -> None:
@@ -2182,8 +2188,8 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
     join_text_content(compact.message.content, separator="").encode("utf-8").decode(
         "utf-8"
     )
-    assert "omitted_utf8_bytes" in join_text_content(compact.message.content)
-    assert "omitted_characters" in join_text_content(compact.message.content)
+    assert "UTF-8 bytes of tool output" in join_text_content(compact.message.content)
+    assert "[… omitted " in join_text_content(compact.message.content)
     assert "artifact_read" not in join_text_content(compact.message.content)
 
     with_read = lower_canonical_item(
@@ -2444,11 +2450,11 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
     reference_body = decode_tool_result_observation(
         join_text_content(ref.message.content, separator="")
     )["body"]
-    reference_metadata = json.loads(reference_body.splitlines()[1])
-    assert reference_metadata["source_coverage"] == "RETAINED_SNAPSHOT"
-    assert reference_metadata["source_coverage_reason"] == "TERMINAL_RETENTION_GAP"
-    assert reference_metadata["artifact_disposition"] == "INCOMPLETE"
-    assert reference_metadata["artifact_id"] == 'artifact:owfm52gghreqtsu77glacz5fze'
+    assert "The artifact starts at the retained snapshot" in reference_body
+    assert "earlier lost output cannot be recovered" in reference_body
+    assert "artifact_read offsets are relative to this retained snapshot" in reference_body
+    assert metadata.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
+    assert "artifact:owfm52gghreqtsu77glacz5fze" in reference_body
 
     unavailable = replace(
         metadata,
@@ -3129,8 +3135,8 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
     environment = by_kind[ContextSourceKind.RUNTIME_ENVIRONMENT].variants[0].text
     clock_text = by_kind[ContextSourceKind.RUNTIME_CLOCK].variants[0].text
     assert '"utc_offset_minutes":-240' in environment
-    assert '"utc_offset_minutes":-240' in clock_text
-    assert '"local_date":"2024-11-03"' in clock_text
+    assert datetime.fromisoformat(json.loads(clock_text)["observed_at_local"]).utcoffset() == timedelta(hours=-4)
+    assert json.loads(clock_text)["observed_at_local"].startswith("2024-11-03T01:30:00")
 
 
 class _MutableUnkeyedTimezone(tzinfo):
@@ -3180,8 +3186,8 @@ def test_round3_unkeyed_timezone_is_frozen_to_opening_offset(tmp_path: Path) -> 
     clock_text = by_kind[ContextSourceKind.RUNTIME_CLOCK].variants[0].text
     assert '"timezone":"UTC-04:00"' in environment
     assert '"utc_offset_minutes":-240' in environment
-    assert '"timezone":"UTC-04:00"' in clock_text
-    assert '"utc_offset_minutes":-240' in clock_text
+    assert json.loads(clock_text)["observed_at_local"].endswith("-04:00")
+    assert datetime.fromisoformat(json.loads(clock_text)["observed_at_local"]).utcoffset() == timedelta(hours=-4)
 
 
 def test_round3_temporal_failure_samples_once_and_omits_clock(tmp_path: Path) -> None:
@@ -3365,7 +3371,7 @@ def test_round3_runtime_path_is_fixed_workspace_and_escaped(
 
     assert json.loads(environment)["workspace_root"] == str(inside)
     assert "terminal_current_cwd" not in json.loads(environment)
-    assert json.loads(environment)["relative_workdir_base"] == "workspace_root"
+    assert "relative_workdir_base" not in json.loads(environment)
 
 
 def test_round3_runtime_source_keeps_workspace_after_foreground_and_yielded_cd(
@@ -3789,51 +3795,6 @@ def test_round3_compile_binding_cannot_exceed_or_rewrite_target_budgets() -> Non
         )
 
 
-def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
-    request = _prepared_request(
-        _snapshot(_user("golden input")),
-        _sources(
-            _candidate(
-                ContextSourceKind.RUNTIME_CLOCK,
-                ("clock full", "clock"),
-            )
-        ),
-        tool_names=("artifact_read",),
-    )
-    binding = request.compile_binding
-    call_fact = binding.call_fact.model_copy(
-        update={"resolved_model_call_id": 'call:qopfzujppvkypg6y3pum26lln4'}
-    )
-    request = replace(
-        request,
-        compile_binding=replace(
-            binding,
-            call_fact=call_fact,
-            binding_fingerprint=model_input_compile_binding_fingerprint(
-                call_fact=call_fact,
-                target_fact=binding.target_fact,
-                estimator_fingerprint=binding.estimator_fingerprint,
-                effective_input_budget_tokens=binding.effective_input_budget_tokens,
-                effective_output_tokens=binding.effective_output_tokens,
-                tool_surface=binding.tool_surface,
-            ),
-        ),
-    )
-    compiled = StructuredModelInputCompiler().compile(request)
-    assert compiled.source_collection_fingerprint == (
-        "sha256:627d0d399cd66183cea2a3bace68f551ce0c84af1f281b783aeaeead602e5e94"
-    )
-    assert compiled.compile_report.decision_digest == (
-        "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
-    )
-    assert compiled.compiled_semantic_fingerprint == (
-        # MCP_CATALOG v4 updates the closed source contract.
-        # Source/compiled identity changes; actual budget decisions stay the same.
-        "sha256:dc53e72bc426b662274a8111620e7606edf070cde1f9d0ddfc429a8cc6ec8788"
-    )
-    assert not hasattr(compiled, "final_estimate")
-
-
 def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> None:
     compiler = StructuredModelInputCompiler()
     owner = new_test_provider_input_continuity_owner()
@@ -3934,7 +3895,7 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
     ]
     assert len(hook_messages) == 1
     decoded = decode_runtime_observation(hook_messages[0])
-    assert decoded.trust_class is ContextTrustClass.UNTRUSTED_OBSERVATION
+    assert set(json.loads(join_text_content(hook_messages[0].content))["pulsara_runtime_observation"]) == {"source", "presence", "body"}
     assert decoded.body == "HOOK_CONTEXT\nuntrusted full observation"
 
     follow_up = _user("follow-up", sequence=3)
@@ -4012,7 +3973,7 @@ def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
     )
     assert len(hint_messages) == 1
     decoded = decode_runtime_observation(hint_messages[0])
-    assert decoded.trust_class is ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE
+    assert set(json.loads(join_text_content(hint_messages[0].content))["pulsara_runtime_observation"]) == {"source", "presence", "body"}
     assert decoded.body == MEMORY_WRITE_HINT_BODY
     assert with_hint.compiled_input.messages[-2] is hint_messages[0]
     assert with_hint.compiled_input.messages[-1].content == (

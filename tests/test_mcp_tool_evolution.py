@@ -350,7 +350,7 @@ def test_catalog_is_sparse_and_ignores_meta_schema_churn_and_removed_server():
             removed.dispatch_view.planning_input.mcp.source_snapshots,
         )[0]
     )
-    assert value["servers"][0]["native_unavailable_tools"][0]["reason"] == "REMOVED"
+    assert value["servers"][0]["unavailable_direct_tools"][0]["reason"] == "REMOVED"
 
 
 def test_catalog_budget_prioritizes_native_exceptions_across_all_servers():
@@ -403,8 +403,8 @@ def test_catalog_budget_prioritizes_native_exceptions_across_all_servers():
         )
     )
     assert len(payload["servers"]) == 2
-    assert all(len(row["native_unavailable_tools"]) == 1 for row in payload["servers"])
-    assert payload["servers"][0]["omitted_meta_tool_count"] > 0
+    assert all(len(row["unavailable_direct_tools"]) == 1 for row in payload["servers"])
+    assert payload["servers"][0]["omitted_other_tool_count"] > 0
 
 
 @pytest.mark.parametrize("commit_old", [False, True])

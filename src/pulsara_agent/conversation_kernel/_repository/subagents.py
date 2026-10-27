@@ -2603,9 +2603,8 @@ class _SubagentOperations:
                         item.item_kind
                         is FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
                     ):
-                        body = json.loads(provider_input_item_text(item))[
-                            "pulsara_initial_context"
-                        ]["body"]
+                        projected = json.loads(provider_input_item_text(item))["pulsara_initial_context"]
+                        body = json.dumps({key: value for key, value in projected.items() if key != "source"}, ensure_ascii=False)
                         materials.append({"label": "初始上下文材料", "body": body})
                     elif item.source_entry_id is not None:
                         inherited_ids.append(item.source_entry_id)

@@ -378,7 +378,7 @@ _SOURCE_ABSENCE_POLICY = {
             ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         }
     ),
-    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset(),
+    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset({ContextSourceAbsenceKind.NOT_APPLICABLE}),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: frozenset(
         {
             ContextSourceAbsenceKind.NOT_APPLICABLE,
@@ -831,6 +831,7 @@ class StructuredModelInputCompiler:
             lowered = lower_canonical_item(
                 item,
                 artifact_read_available=artifact_read_available,
+                artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
                 limits=self._limits,
             )
             deadline.check()
@@ -933,6 +934,7 @@ class StructuredModelInputCompiler:
                 lower_canonical_item(
                     item,
                     artifact_read_available=artifact_read_available,
+                    artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
                     limits=self._limits,
                 )
             )
@@ -1374,6 +1376,7 @@ class StructuredModelInputCompiler:
                 lower_canonical_item(
                     item,
                     artifact_read_available=artifact_read_available,
+                    artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
                     limits=self._limits,
                 )
             )
@@ -1728,6 +1731,7 @@ class StructuredModelInputCompiler:
                 lower_canonical_item(
                     item,
                     artifact_read_available=artifact_read_available,
+                    artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
                     limits=self._limits,
                 )
             )
@@ -2354,7 +2358,6 @@ class StructuredModelInputCompiler:
             ContextSourceKind.BASE_SYSTEM,
             ContextSourceKind.RUNTIME_ENVIRONMENT,
             ContextSourceKind.RUN_PERMISSION,
-            ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
         }.issubset(present):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE

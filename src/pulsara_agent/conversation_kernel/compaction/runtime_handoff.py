@@ -285,7 +285,6 @@ def _payload(
         ),
         "todos": tuple(
             {
-                "ordinal": item.ordinal,
                 "status": item.status.value,
                 "text": item.text,
             }

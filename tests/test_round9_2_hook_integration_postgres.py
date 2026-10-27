@@ -37,7 +37,6 @@ from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
-    ContextTrustClass,
     ModelInputScopeKind,
 )
 from pulsara_agent.ports.live_agent_event import (
@@ -562,7 +561,7 @@ def test_round9_2_host_sources_stop_and_prefix_continuity(
         assert second.messages[: len(first.messages)] == first.messages
         observations = _hook_observations(model.requests[0])
         assert len(observations) == 1
-        assert observations[0].trust_class is ContextTrustClass.UNTRUSTED_OBSERVATION
+        assert observations[0].source_kind is ContextSourceKind.HOOK_CONTEXT
         assert "SESSION_START_CONTEXT:USER" in observations[0].body
         assert observations[0].body.index("USER_PROMPT_CONTEXT:USER") < (
             observations[0].body.index("USER_PROMPT_CONTEXT:WORKSPACE")

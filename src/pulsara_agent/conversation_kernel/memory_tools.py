@@ -37,6 +37,7 @@ from pulsara_agent.conversation_kernel.context_sources import (
     build_memory_context_source,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
+    memory_response_preference_item_payload,
     AutomaticMemoryTriggerDisposition,
     FrozenMemoryTriggerPolicy,
     MemoryFactKind,
@@ -45,7 +46,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     PreparedMemoryBasisReference,
     memory_basis_context_allowed,
     memory_context_product_label,
-    memory_response_preference_item_payload,
 )
 from pulsara_agent.conversation_kernel.memory.writes import (
     MemoryRelatedPreview,
@@ -826,24 +826,19 @@ class KernelMemoryToolPort:
                 texts=None,
                 absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             )
-        items = tuple(
-            memory_response_preference_item_payload(
-                memory_id=item.fact_id,
-                context_id=item.context_id,
-                statement=item.statement,
-                recorded_at=item.recorded_at,
-            )
-            for item in snapshot.facts
-        )
-        body = canonical_json_bytes(
-            {
-                "advisory": True,
-                "items": items,
-                "may_be_stale_or_incomplete": True,
-                "selection_incomplete": snapshot.selection_incomplete,
-                "conflicts_omitted": snapshot.conflicts_omitted,
-            }
-        )
+        items = tuple(memory_response_preference_item_payload(
+            memory_id=item.fact_id, context_id=item.context_id,
+            statement=item.statement, recorded_at=item.recorded_at,
+        ) for item in snapshot.facts)
+        payload = {"advisory": True, "items": items}
+        warnings = []
+        if snapshot.selection_incomplete:
+            warnings.append("Some preferences were omitted due to selection limits.")
+        if snapshot.conflicts_omitted:
+            warnings.append("Conflicting preferences were omitted.")
+        if warnings:
+            payload["warnings"] = warnings
+        body = canonical_json_bytes(payload)
         if len(body) > 16 * 1024:
             return build_memory_context_source(
                 kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
@@ -1103,8 +1098,7 @@ class KernelMemoryToolPort:
             return {
                 "memory_id": item.fact_id,
                 "kind": item.fact_kind,
-                "context_product_label": memory_context_product_label(item.context_id),
-                "current_context": item.context_id != CTX_GLOBAL,
+                "scope": "shared across conversations" if item.context_id == CTX_GLOBAL else "current project",
                 "statement": item.statement,
                 "recorded_at": item.recorded_at,
             }
@@ -1146,19 +1140,37 @@ class KernelMemoryToolPort:
             for relation in relations
         )
 
-        def render(items):
-            return canonical_json_bytes(
-                {
-                    "advisory": True,
-                    "items": items,
-                    "may_be_stale_or_incomplete": True,
-                    "relation_warnings": relation_warnings,
-                }
-            ).decode("utf-8")
+        def render(items, *, references=False):
+            payload = {"advisory": True}
+            if references:
+                if ref_items:
+                    payload["memory_refs"] = [item["memory_id"] for item in ref_items]
+                    payload["read_memory_with"] = "memory_get"
+                omitted_history = history
+                if len(presentation) > len(ref_items):
+                    payload["selected_memories_omitted"] = len(presentation) - len(ref_items)
+            else:
+                payload["items"] = [
+                    {k: v for k, v in item.items() if k != "historical_advisory"}
+                    for item in items
+                ]
+                shown_history = sum(item.get("source") == "session_history" for item in items)
+                omitted_history = history[shown_history:]
+                shown_memories = sum(item.get("source") == "memory" for item in items)
+                if len(presentation) > shown_memories:
+                    payload["selected_memories_omitted"] = len(presentation) - shown_memories
+            if omitted_history:
+                payload["omitted_conversations"] = [
+                    {"session_id": item.session_id, "entry_id": item.q1_entry_id,
+                     "read_with": "read_session_content"} for item in omitted_history
+                ]
+            if relation_warnings:
+                payload["relation_warnings"] = relation_warnings
+            return canonical_json_bytes(payload).decode("utf-8")
 
         return build_memory_context_source(
             kind=ContextSourceKind.MEMORY_RECALL,
-            texts=(render(full_items), render(compact_items), render(ref_items)),
+            texts=(render(full_items), render(compact_items), render(ref_items, references=True)),
             memory_fact_ids=exposed_ids,
             domain_identity={
                 "membership": membership,

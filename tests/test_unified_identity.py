@@ -176,12 +176,10 @@ def test_tool_result_source_roundtrip_keeps_imported_group_separate_from_executi
         timing=timing,
         model_visible_memory_ids=(),
     )
-    assert (
-        decode_provider_tool_result_observation(rendered.content)["observation"][
-            "source_turn_ref"
-        ]
-        == timing.source_turn_ref
-    )
+    observation = decode_provider_tool_result_observation(rendered.content)["observation"]
+    assert "source_turn_ref" not in observation
+    assert observation["observed_at_utc"] == timing.observed_at_utc
+    assert timing.source_turn_ref == derive_id(kind, "fixture", "source")
     assert maximum.source_turn_ref.startswith("history:")
     assert _minimum_full_projection_timing().source_turn_ref.startswith("turn:")
     assert len(timing.source_turn_ref) <= len(maximum.source_turn_ref)

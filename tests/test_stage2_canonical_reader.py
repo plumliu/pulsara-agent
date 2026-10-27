@@ -1539,7 +1539,7 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
         completion = envelope["content"]
         assert envelope["message_type"] == "FINAL_ANSWER"
         assert completion["status"] == "FAILED"
-        assert completion["result"] is None
+        assert "result" not in completion
         failure = completion["failure"]
         assert set(failure) == {
             "code", "detail", "failed_dependency_task_ids", "retryability", "next_action"

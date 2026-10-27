@@ -103,12 +103,9 @@ def memory_response_preference_item_payload(
     validate_canonical_memory_recorded_at(recorded_at)
     return {
         "memory_id": memory_id,
-        "kind": MemoryFactKind.RESPONSE_PREFERENCE.value,
-        "context_product_label": memory_context_product_label(context_id),
-        "current_context": context_id != CTX_GLOBAL,
+        "scope": "shared across conversations" if context_id == CTX_GLOBAL else "current project",
         "statement": statement,
         "recorded_at": recorded_at,
-        "advisory": True,
     }
 
 

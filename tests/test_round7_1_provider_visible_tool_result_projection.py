@@ -46,7 +46,6 @@ from pulsara_agent.primitives.tool_result_projection import (
     BEST_AVAILABLE_TOOL_RESULT_DELIVERY,
     FrozenToolResultDeliveryRequirement,
     MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES,
-    TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT,
     ToolResultDeliveryRequirement,
     ToolResultFullDeliveryReason,
     ToolResultLogicalMessageKind,
@@ -197,8 +196,8 @@ def test_round7_1_variant_validator_accepts_ordered_subsets_without_full() -> No
         ToolResultProviderRenderMode.REF_ONLY,
     ):
         text = by_mode[mode].message.content[0].text
-        assert "offset_chars=0" in text
-        assert "next_offset_chars" in text
+        assert "use artifact_read for pages" in text
+        assert "artifact_id=" in text
         assert "offset/limit" not in text
     ref_and_omitted = (
         by_mode[ToolResultProviderRenderMode.REF_ONLY],
@@ -516,7 +515,6 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
     assert len(CONVERSATION_KERNEL_RELATIONS) == 31
-    assert TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT.endswith(".v3")
 
     production = ROOT / "src/pulsara_agent"
     definitions: list[tuple[Path, int]] = []
@@ -563,3 +561,51 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
         production / "storage/migrations/sql/0000_conversation_kernel_baseline.sql"
     ).read_text(encoding="utf-8")
     assert "tool_result_delivery" not in migration
+
+
+@pytest.mark.parametrize("effect_class, expected_outcome", [
+    ("read_only", "NO_RELIABLE_OBSERVATION"),
+    ("filesystem_write", "UNKNOWN"),
+])
+def test_explicit_failure_facts_survive_preview_and_all_provider_variants(
+    effect_class, expected_outcome,
+) -> None:
+    from time import monotonic
+    from pulsara_agent.conversation_kernel.tool_execution import _tool_invocation_failure
+    from pulsara_agent.conversation_kernel.tool_artifacts import (
+        ToolOutputArtifactProcessor, KnownArtifactPublicationFailure,
+    )
+    from tests.test_round1_tool_output_artifact import _RecordingPublisher
+
+    result = _tool_invocation_failure(RuntimeError("connection closed " * 9000), effect_class)
+    original = json.loads(result.content)
+    processor = ToolOutputArtifactProcessor(
+        object(), publisher=_RecordingPublisher(failure=KnownArtifactPublicationFailure("unavailable")),
+    )
+    projection = processor.prepare(
+        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        workspace_id='workspace:336wrfwkamrr3up6kjtsgvgcte',
+        result_entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
+        public_output=result.content.decode(), candidate=None,
+        artifact_inline_result=False, deadline_monotonic=monotonic()+5,
+    )
+    preview = projection.canonical_preview.canonical_bytes.decode()
+    parsed = json.loads(preview)
+    assert parsed['physical_outcome'] == expected_outcome
+    assert parsed['retry_performed'] is False
+    assert parsed['guidance'] == original['guidance']
+    assert len(preview.encode()) < len(result.content)
+    item = _tool_result(preview, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
+    item = replace(item, tool_result_context=replace(
+        item.tool_result_context,
+        result_state='SYSTEM_ERROR', artifact_id=None,
+        artifact_disposition=projection.artifact_disposition,
+        artifact_unavailability_reason=projection.artifact_unavailability_reason,
+    ))
+    lowered = lower_canonical_item(item, artifact_read_available=False, limits=StructuredModelInputLimits())
+    assert any(v.mode is ToolResultProviderRenderMode.OMITTED_BODY for v in lowered.tool_result_variants)
+    for variant in lowered.tool_result_variants:
+        body = decode_provider_tool_result_observation(variant.message.content[0].text)['body']
+        assert f'"physical_outcome":"{expected_outcome}"' in body
+        assert '"retry_performed":false' in body
+        assert original['guidance'] in body

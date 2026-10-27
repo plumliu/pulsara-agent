@@ -1243,6 +1243,11 @@ class ToolBatchExecutor:
                             or authorization.kind.value.lower().replace("_", " ")
                         ).encode("utf-8"),
                     )
+                    if authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE:
+                        result = replace(result, content=json.dumps({
+                            "error": "TOOL_UNAVAILABLE",
+                            "guidance": result.content.decode("utf-8"),
+                        }, ensure_ascii=False).encode("utf-8"))
                     if (
                         machine_policy_kind
                         is KernelToolAuthorizationKind.PERMISSION_DENIED

@@ -41,6 +41,7 @@ from pulsara_agent.storage.postgres_connection_provider import (
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
 )
+from pulsara_agent.primitives.tool_result_projection import preserved_tool_result_facts
 
 
 ARTIFACT_ARCHIVE_THRESHOLD_BYTES = 8_000
@@ -305,7 +306,10 @@ def _build_final_preview(
             artifact_id=artifact_id,
             unavailable_reason=artifact_unavailability_reason,
         )
-        encoded = _render_envelope(envelope, complete_body)
+        encoded = _render_envelope(
+            envelope if candidate.source_format_hint is ToolOutputSourceFormatHint.JSON else None,
+            complete_body,
+        )
         if len(encoded) <= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES:
             return _RenderedPreview(
                 encoded,
@@ -362,7 +366,7 @@ def _preview_envelope(
     public_output: str, candidate: ToolOutputArtifactCandidate
 ) -> dict[str, object] | None:
     if candidate.source_format_hint is not ToolOutputSourceFormatHint.JSON:
-        return None
+        return preserved_tool_result_facts(public_output) or None
     try:
         value = json.loads(public_output)
     except json.JSONDecodeError as exc:
@@ -386,40 +390,16 @@ def _render_envelope(envelope: dict[str, object] | None, body: str) -> bytes:
 
 
 def _complete_footer(
-    *,
-    candidate: ToolOutputArtifactCandidate,
-    artifact_inline_result: bool,
-    disposition: ToolOutputArtifactDisposition,
-    artifact_id: str | None,
+    *, candidate: ToolOutputArtifactCandidate, artifact_inline_result: bool,
+    disposition: ToolOutputArtifactDisposition, artifact_id: str | None,
     unavailable_reason: ToolOutputArtifactUnavailabilityReason | None,
 ) -> str:
     if artifact_inline_result:
         return ""
-    parts: list[str] = []
-    if artifact_id is not None:
-        parts.append(
-            "\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as "
-            f"artifact_id={artifact_id}. If an exact reread is necessary for "
-            "the current task, prefer pagination with artifact_read("
-            f'{{"artifact_id":"{artifact_id}","offset_chars":0,'
-            '"max_chars":20000}); otherwise continue from the complete visible '
-            "result without opening the artifact. When repeated paging would be cumbersome "
-            "or complex extraction, aggregation or scripts are needed, use "
-            "artifact_export when available to create a local file "
-            "and process it with file tools or terminal.]"
-        )
-    elif disposition is ToolOutputArtifactDisposition.UNAVAILABLE:
-        reason = (
-            "" if unavailable_reason is None else f" reason={unavailable_reason.value}."
-        )
-        parts.append(
-            "\n\n[ARTIFACT UNAVAILABLE: the complete candidate output is shown "
-            "inline, but no separate readable artifact was retained. Do not "
-            f"retry the tool automatically.{reason}]"
-        )
-    parts.append(_coverage_warning(candidate))
-    return "".join(parts)
-
+    result = f"\nSaved output: artifact_id={artifact_id}." if artifact_id else ""
+    if disposition is ToolOutputArtifactDisposition.UNAVAILABLE:
+        result += "\nNo separate readable artifact was retained."
+    return result + _coverage_warning(candidate)
 
 def _head_tail_body(
     *,
@@ -450,38 +430,15 @@ def _head_tail_body(
 
 
 def _omission_marker(
-    *,
-    omitted: int,
-    head: int,
-    disposition: ToolOutputArtifactDisposition,
+    *, omitted: int, head: int, disposition: ToolOutputArtifactDisposition,
     artifact_id: str | None,
     unavailable_reason: ToolOutputArtifactUnavailabilityReason | None,
 ) -> str:
+    result = f"\n[… omitted {omitted} characters of tool output …]\n"
     if artifact_id is not None:
-        return (
-            f"\n\n[OUTPUT TRUNCATED / PREVIEW: omitted {omitted} chars from the middle.\n"
-            f"Full retained output: artifact_id={artifact_id}\n"
-            "Prefer artifact_read pagination when more content is needed. "
-            "For a small needed excerpt, read the "
-            f'retained artifact with artifact_read({{"artifact_id":"{artifact_id}",'
-            f'"offset_chars":{head},"max_chars":20000}}) '
-            "to inspect content after the visible head; otherwise continue from "
-            "the visible result without opening the artifact. When repeated paging would "
-            "be cumbersome or complex extraction, aggregation or scripts are needed, "
-            "use artifact_export when available to create "
-            "a local file, then use file tools or terminal; no prior page read is "
-            "required.]\n\n"
-        )
-    reason = (
-        "" if unavailable_reason is None else f" reason={unavailable_reason.value}."
-    )
-    return (
-        f"\n\n[OUTPUT TRUNCATED / PREVIEW: omitted {omitted} chars from the middle.\n"
-        "OUTPUT RETENTION UNAVAILABLE: the tool outcome is known and accepted, "
-        "but omitted output could not be retained. Do not retry the tool "
-        f"automatically.{reason}]\n\n"
-    )
-
+        return result + (f"Saved output: artifact_id={artifact_id}. "
+            f"For the next retained text after this visible head, use offset_chars={head}.\n")
+    return result + "No readable artifact was retained. Do not rerun the tool just to recover omitted output.\n"
 
 def _coverage_warning(candidate: ToolOutputArtifactCandidate) -> str:
     if candidate.source_coverage is ToolOutputSourceCoverage.COMPLETE:

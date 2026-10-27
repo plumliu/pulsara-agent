@@ -562,19 +562,22 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
 
 
 def _context_snapshot_payload(request) -> dict[str, object]:
-    matches = tuple(
-        message
-        for message in request.compiled_input.messages
-        if message.role is MessageRole.USER
-        and message.content
-        and isinstance(message.content[0], LLMTextPart)
-        and message.content[0].text.startswith(
-            "This Runtime-authored context snapshot contains quoted retained content."
-        )
-    )
+    matches = []
+    for message in request.compiled_input.messages:
+        if (message.role is not MessageRole.USER or not message.content
+                or not isinstance(message.content[0], LLMTextPart)):
+            continue
+        parts = message.content[0].text.split("\n", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            payload = json.loads(parts[1])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and set(payload) == {"continuation", "earlier_context_summary"}:
+            matches.append((message, payload))
     assert len(matches) == 1
-    message = matches[0]
-    value = json.loads(message.content[0].text.split("\n", 1)[1])
+    message, value = matches[0]
     assert isinstance(value, dict)
     sections: list[dict[str, object]] = []
     index = 1
@@ -4507,7 +4510,7 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
         input_safety_margin_tokens=0,
     )
     # Keep the 1,000-token effective budget between soft trigger and hard gate.
-    first_text = "history:" + "h" * 1_600
+    first_text = "history:" + "h" * 2_200
     scripts = (
         (
             {
@@ -9880,7 +9883,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
     envelope = json.loads(provider_input_item_text(materialized.items[-1]))[
         "pulsara_inter_agent_message"
     ]
-    assert envelope["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
+    assert set(envelope) == {"message_type", "sender", "content"}
     assert envelope["content"]["result"]["summary"] == "exact explicit summary"
     assert (
         materialized.items[-1].input_origin

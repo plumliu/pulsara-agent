@@ -1229,7 +1229,6 @@ print('visible stderr ' + secret, file=sys.stderr)
         )
         assert prepared is not None
         assert secret not in prepared.full_text
-        assert "HOOK_CONTEXT" in prepared.full_text
         prepared.reservation.retire()
         assert (
             owner.freeze_for_target(

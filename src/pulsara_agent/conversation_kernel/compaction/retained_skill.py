@@ -37,7 +37,6 @@ from pulsara_agent.ports.artifact import ToolResultDisplayKind
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
     ProviderRuntimeObservation,
-    SourceObservationLifecycle,
     SourceObservationPresence,
     decode_runtime_observation,
 )
@@ -362,10 +361,7 @@ def _historical_catalog_row(
     if not observations:
         return None
     _ordinal, latest = max(observations, key=lambda item: item[0])
-    if (
-        latest.lifecycle is not SourceObservationLifecycle.SNAPSHOT
-        or latest.presence is not SourceObservationPresence.VALUE
-    ):
+    if latest.presence is not SourceObservationPresence.VALUE:
         return None
     rows = _decode_catalog_rows(latest.body)
     if rows is None:

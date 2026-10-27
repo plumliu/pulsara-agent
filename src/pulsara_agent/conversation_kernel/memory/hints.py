@@ -8,11 +8,10 @@ import unicodedata
 
 
 MEMORY_WRITE_HINT_BODY = (
-    "The following human input may contain durable, reusable information. Apply the "
-    "memory contract independently. If appropriate, use remember before the final "
-    "reply; otherwise continue normally. This hint does not itself require storage."
+    'The following human input may contain durable, reusable information. Apply the memory'
+    ' contract independently. If appropriate, use remember before the final reply; '
+    'otherwise continue normally.'
 )
-
 
 _SEALED_WRITE_HINT_SIGNALS = (
     "从现在开始",

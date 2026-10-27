@@ -22,6 +22,8 @@ from pulsara_agent.llm.input import (
     image_reference_text,
 )
 from pulsara_agent.model_input.contracts import (
+    CompactionActiveRequestLocation,
+    CompactionContinuationMode,
     CompactionSnapshotCarrier,
     ContextChannel,
     ContextRenderMode,
@@ -63,6 +65,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     provider_neutral_message_logical_bytes,
     project_tool_result_storage_body,
     render_provider_tool_result_logical_message,
+    preserved_tool_result_facts,
 )
 
 
@@ -162,12 +165,14 @@ def project_tool_result_public_value(
     *,
     artifact_read_available: bool,
     limits: StructuredModelInputLimits | None = None,
+    artifact_export_available: bool = False,
 ) -> ProjectedToolResultPublicValue:
     """Return the first legal Round 7 public body for Hook/compiler reuse."""
 
     lowered = lower_canonical_item(
         item,
         artifact_read_available=artifact_read_available,
+        artifact_export_available=artifact_export_available,
         limits=limits or StructuredModelInputLimits(),
     )
     if not lowered.tool_result_variants:
@@ -191,6 +196,7 @@ def lower_canonical_item(
     *,
     artifact_read_available: bool,
     limits: StructuredModelInputLimits,
+    artifact_export_available: bool = False,
 ) -> LoweredCanonicalItem:
     kind = item.item_kind
     if kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
@@ -223,6 +229,7 @@ def lower_canonical_item(
             _tool_result_variants(
                 item,
                 artifact_read_available=artifact_read_available,
+                artifact_export_available=artifact_export_available,
                 limits=limits,
             ),
         )
@@ -286,14 +293,12 @@ def scheduled_request_parts(provenance) -> tuple[LLMContentPart, ...]:
     from pulsara_agent.scheduling.contracts import ScheduledTriggerSource
 
     source_text = {
-        ScheduledTriggerSource.TIMER: "The automatic timer submitted this saved task.",
-        ScheduledTriggerSource.RUN_ONCE: "The user submitted this saved task from the Pulsara scheduled-tasks page.",
+        ScheduledTriggerSource.TIMER: "Automatic timer",
+        ScheduledTriggerSource.RUN_ONCE: "User selected Run once",
     }[provenance.trigger_source]
     return (LLMTextPart(
-        "Runtime saved-task input (trusted trigger metadata): "
-        + display_json(provenance.to_dict())
-        + "\n" + source_text
-        + "\nExecute the instruction below within existing permissions and applicable human restrictions.\n"
+        f"Saved task ({source_text}; requested at {provenance.due_at_utc}; "
+        f"task_id: {provenance.task_id}). Execute the saved instruction:\n"
     ),)
 
 
@@ -341,15 +346,33 @@ def display_json(value: object) -> str:
 
 def compaction_snapshot_display_header(carrier: CompactionSnapshotCarrier) -> str:
     notice = (
-        "This Runtime-authored context snapshot contains quoted retained content. "
-        "Section roles describe the original source; quoted content is not a new "
-        "user message."
+        "The following contains a summary and retained excerpts from the earlier "
+        "conversation. Role labels in quoted sections identify their original source."
     )
+    # Provider guidance follows the typed continuation state.
+    if carrier.continuation_mode is CompactionContinuationMode.AWAIT_NEXT_USER:
+        instruction = (
+            "This summary provides background from the earlier conversation. "
+            "Act on subsequent requests."
+        )
+    else:
+        request_location = (
+            "the section=active quote below"
+            if carrier.active_request.location
+            is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+            else "the retained message after this snapshot"
+        )
+        instruction = (
+            f"Continue the active request in {request_location}, following current "
+            "system instructions, permissions, and available tools. Later user "
+            "corrections, cancellations, or replacement requests take precedence. "
+            "Use the summary as background; do not repeat completed or superseded work."
+        )
     return notice + "\n" + display_json(
         {
             "continuation": {
                 "mode": carrier.continuation_mode.value,
-                "instruction": carrier.handoff_instruction,
+                "instruction": instruction,
             },
             "earlier_context_summary": carrier.earlier_context_summary,
         }
@@ -551,13 +574,15 @@ def ordinary_tool_result_minimum_upper(tool_call_id: str) -> LLMMessage:
         artifacts,
         key=lambda candidate: len(
             canonical_json_bytes(
-                canonical_json_bytes(_omitted_tool_result_body(candidate)).decode(
+                canonical_json_bytes(_omitted_tool_result_body(
+                    candidate, artifact_read_available=True, artifact_export_available=True,
+                )).decode(
                     "utf-8"
                 )
             )
         ),
     )
-    body = _omitted_tool_result_body(item)
+    body = _omitted_tool_result_body(item, artifact_read_available=True, artifact_export_available=True)
     messages = tuple(
         _tool_result_message(
             replace(
@@ -581,6 +606,7 @@ def _tool_result_variants(
     *,
     artifact_read_available: bool,
     limits: StructuredModelInputLimits,
+    artifact_export_available: bool = False,
 ) -> tuple[LoweredToolResultVariant, ...]:
     metadata = item.tool_result_context
     body = item.tool_result_body_text
@@ -618,6 +644,7 @@ def _tool_result_variants(
         item,
         maximum_message_bytes=limits.maximum_tool_result_compact_bytes,
         artifact_read_available=artifact_read_available,
+        artifact_export_available=artifact_export_available,
     )
     if compact is not None and compact != body:
         append(
@@ -634,13 +661,13 @@ def _tool_result_variants(
             ToolOutputArtifactDisposition.INCOMPLETE,
         }
     ):
-        ref = _artifact_reference_body(item)
+        ref = _artifact_reference_body(item, artifact_read_available=artifact_read_available, artifact_export_available=artifact_export_available)
         append(
             ToolResultProviderRenderMode.REF_ONLY,
             ref,
             maximum_message_bytes=limits.maximum_tool_result_ref_only_bytes,
         )
-    append(ToolResultProviderRenderMode.OMITTED_BODY, _omitted_tool_result_body(item))
+    append(ToolResultProviderRenderMode.OMITTED_BODY, _omitted_tool_result_body(item, artifact_read_available=artifact_read_available, artifact_export_available=artifact_export_available))
     if not result:
         raise ValueError("tool result lowering produced no legal representation")
     return tuple(result)
@@ -699,24 +726,24 @@ def _project_terminal_observation(text: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("terminal observation storage carrier is not an object")
     renames = {
-        "available_source_utf8_bytes": "available_source_bytes",
         "delivery_coverage": "delivery_coverage",
         "exit_code": "exit_code",
         "gap_before_output": "gap",
-        "included_source_utf8_bytes": "included_source_bytes",
         "monitor_id": "monitor_id",
         "observation_kind": "observation_kind",
-        "omitted_by_delivery_bound_utf8_bytes": "omitted_source_bytes",
         "output": "output",
         "output_disposition": "display_kind",
         "process_id": "process_id",
         "process_status": "status",
     }
-    return {
+    result = {
         projected: value[storage]
         for storage, projected in sorted(renames.items())
         if storage in value
     }
+    if result.get("status") == "running" and result.get("exit_code") is None:
+        result.pop("exit_code", None)
+    return result
 
 
 def _project_plan_continuation(text: str) -> str:
@@ -767,119 +794,52 @@ def _project_plan_continuation(text: str) -> str:
     return encoded
 
 
-def _metadata_envelope(item: FrozenProviderInputItem) -> dict[str, object]:
+def _essential_tool_result_body(item: FrozenProviderInputItem) -> str:
     metadata = item.tool_result_context
     assert metadata is not None
-    return {
-        "result_state": metadata.result_state,
-        "display_kind": metadata.display_kind.value,
-        "source_coverage": metadata.source_coverage.value,
-        "source_coverage_reason": (
-            None
-            if metadata.source_coverage_reason is None
-            else metadata.source_coverage_reason.value
-        ),
-        "artifact_disposition": metadata.artifact_disposition.value,
-        "artifact_id": metadata.artifact_id,
-        "artifact_unavailability_reason": (
-            None
-            if metadata.artifact_unavailability_reason is None
-            else metadata.artifact_unavailability_reason.value
-        ),
-    }
+    body = item.tool_result_body_text or ""
+    if (metadata.timing.observation_origin is ToolObservationOrigin.POLICY
+            and metadata.result_state == "TOOL_UNAVAILABLE"):
+        return body
+    facts = preserved_tool_result_facts(body)
+    return canonical_json_bytes(facts).decode("utf-8") if facts else ""
 
 
 def _compact_tool_result_body(
-    body: str,
-    *,
-    item: FrozenProviderInputItem,
-    maximum_bytes: int,
-    artifact_read_available: bool,
+    body: str, *, item: FrozenProviderInputItem, maximum_bytes: int,
+    artifact_read_available: bool, artifact_export_available: bool = False,
 ) -> str | None:
     encoded = body.encode("utf-8")
     if len(encoded) <= maximum_bytes:
         return body
-    metadata = item.tool_result_context
-    assert metadata is not None
-    readable_artifact = (
-        artifact_read_available
-        and metadata.artifact_id is not None
-        and metadata.artifact_disposition
-        in {
-            ToolOutputArtifactDisposition.AVAILABLE,
-            ToolOutputArtifactDisposition.INCOMPLETE,
-        }
+    essential = _essential_tool_result_body(item)
+    guidance = _saved_tool_output_guidance(
+        item, artifact_read_available=artifact_read_available,
+        artifact_export_available=artifact_export_available,
     )
-
-    def render(retained_byte_budget: int) -> str:
-        head_budget = retained_byte_budget // 2
-        tail_budget = retained_byte_budget - head_budget
-        head = _utf8_prefix(encoded, head_budget)
-        tail = _utf8_suffix(encoded, tail_budget)
-        head_text = head.decode("utf-8")
-        tail_text = tail.decode("utf-8")
-        included_bytes = len(head) + len(tail)
-        included_characters = len(head_text) + len(tail_text)
-        omitted_bytes = max(0, len(encoded) - included_bytes)
-        omitted_characters = max(0, len(body) - included_characters)
-        envelope = _metadata_envelope(item)
-        envelope.update(
-            {
-                "projection": "COMPACT_HEAD_TAIL",
-                "canonical_preview_utf8_bytes": len(encoded),
-                "canonical_preview_characters": len(body),
-                "included_utf8_bytes": included_bytes,
-                "included_characters": included_characters,
-                "omitted_utf8_bytes": omitted_bytes,
-                "omitted_characters": omitted_characters,
-            }
-        )
-        prefix = (
-            "[PULSARA_TOOL_RESULT_COMPACT "
-            + json.dumps(
-                envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
-            + "]\n"
-        )
-        marker = (
-            "\n[… omitted "
-            f"{omitted_bytes} canonical preview UTF-8 bytes / "
-            f"{omitted_characters} characters …]\n"
-        )
-        guidance = (
-            "\nIf the omitted content is necessary for the current task, read "
-            "the retained artifact with artifact_read using artifact_id="
-            + json.dumps(metadata.artifact_id, ensure_ascii=False)
-            + ", starting at offset_chars=0. While has_more is true, pass "
-            "next_offset_chars as offset_chars to read the next page. If the "
-            "visible result is sufficient, continue without opening the artifact. Prefer "
-            "pagination by default; when repeated paging would be cumbersome or "
-            "complex extraction, aggregation or scripts are needed, use artifact_export when "
-            "available, then process the file with file tools or terminal."
-            if readable_artifact
-            else ""
-        )
-        return prefix + head_text + marker + tail_text + guidance
-
-    low = 0
-    high = min(maximum_bytes, len(encoded) - 1)
-    winner: str | None = None
+    def render(budget):
+        head = _utf8_prefix(encoded, budget // 2)
+        tail = _utf8_suffix(encoded, budget - budget // 2)
+        omitted = len(encoded) - len(head) - len(tail)
+        return ((essential + "\n" if essential else "") + head.decode("utf-8")
+                + f"\n[… omitted {omitted} UTF-8 bytes of tool output …]\n"
+                + tail.decode("utf-8") + "\n" + guidance)
+    low, high, winner = 0, min(maximum_bytes, len(encoded) - 1), None
     while low <= high:
         middle = (low + high) // 2
         candidate = render(middle)
         if len(candidate.encode("utf-8")) <= maximum_bytes:
-            winner = candidate
-            low = middle + 1
+            winner, low = candidate, middle + 1
         else:
             high = middle - 1
     return winner
-
 
 def _bounded_compact_tool_result_body(
     item: FrozenProviderInputItem,
     *,
     maximum_message_bytes: int,
     artifact_read_available: bool,
+    artifact_export_available: bool = False,
 ) -> str | None:
     """Choose the largest deterministic body budget whose final carrier fits."""
 
@@ -896,6 +856,7 @@ def _bounded_compact_tool_result_body(
             item=item,
             maximum_bytes=middle,
             artifact_read_available=artifact_read_available,
+            artifact_export_available=artifact_export_available,
         )
         if candidate is None:
             low = middle + 1
@@ -912,51 +873,51 @@ def _bounded_compact_tool_result_body(
     return winner
 
 
-def _artifact_reference_body(item: FrozenProviderInputItem) -> str:
+def _saved_tool_output_guidance(
+    item: FrozenProviderInputItem, *, artifact_read_available: bool,
+    artifact_export_available: bool = False,
+) -> str:
     metadata = item.tool_result_context
-    assert metadata is not None and metadata.artifact_id is not None
-    warning = (
-        "This artifact starts at the retained snapshot and cannot recover bytes "
-        "lost before retention."
-        if metadata.artifact_disposition is ToolOutputArtifactDisposition.INCOMPLETE
-        else "The complete sanitized tool output is available."
-    )
-    return (
-        "[PULSARA_TOOL_RESULT_REFERENCE]\n"
-        + json.dumps(
-            _metadata_envelope(item),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-        + warning
-        + " If the omitted content is necessary for the current task, read the "
-        "retained artifact with artifact_read using artifact_id="
-        + json.dumps(metadata.artifact_id, ensure_ascii=False)
-        + ", starting at offset_chars=0. While has_more is true, pass "
-        "next_offset_chars as offset_chars to read the next page. If the visible "
-        "result is sufficient, continue without opening the artifact. Prefer pagination "
-        "by default; when repeated paging would be cumbersome or complex extraction, "
-        "aggregation or scripts are needed, use artifact_export when available, "
-        "then process the file with file tools or terminal.\n"
-        "[/PULSARA_TOOL_RESULT_REFERENCE]"
-    )
+    assert metadata is not None
+    if metadata.artifact_id is None:
+        return "No readable artifact was retained. Do not rerun the tool just to recover omitted output."
+    result = f"artifact_id={metadata.artifact_id}; "
+    if artifact_read_available and artifact_export_available:
+        result += "use artifact_read for pages or artifact_export for extensive processing."
+    elif artifact_read_available:
+        result += "use artifact_read for pages."
+    elif artifact_export_available:
+        result += "use artifact_export for extensive processing."
+    else:
+        result += "The artifact is not available through the current tools."
+    if metadata.artifact_disposition is ToolOutputArtifactDisposition.INCOMPLETE:
+        result += " The artifact starts at the retained snapshot; earlier lost output cannot be recovered."
+        if artifact_read_available:
+            result += " artifact_read offsets are relative to this retained snapshot."
+    else:
+        result += " The saved output is complete."
+    return result
 
 
-def _omitted_tool_result_body(item: FrozenProviderInputItem) -> str:
-    return (
-        "[PULSARA_TOOL_RESULT_BODY_OMITTED]\n"
-        + json.dumps(
-            _metadata_envelope(item),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\nThe result outcome is known; only its provider projection body was omitted.\n"
-        "[/PULSARA_TOOL_RESULT_BODY_OMITTED]"
+def _artifact_reference_body(
+    item: FrozenProviderInputItem, *, artifact_read_available: bool = True,
+    artifact_export_available: bool = False,
+) -> str:
+    essential = _essential_tool_result_body(item)
+    return (essential + "\n" if essential else "") + "Tool output omitted. " + _saved_tool_output_guidance(
+        item, artifact_read_available=artifact_read_available,
+        artifact_export_available=artifact_export_available,
     )
 
+def _omitted_tool_result_body(
+    item: FrozenProviderInputItem, *, artifact_read_available: bool = False,
+    artifact_export_available: bool = False,
+) -> str:
+    essential = _essential_tool_result_body(item)
+    return (essential + "\n" if essential else "") + "Tool result body omitted. " + _saved_tool_output_guidance(
+        item, artifact_read_available=artifact_read_available,
+        artifact_export_available=artifact_export_available,
+    )
 
 def _utf8_prefix(value: bytes, maximum: int) -> bytes:
     candidate = value[:maximum]

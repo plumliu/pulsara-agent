@@ -129,12 +129,12 @@ def test_dirty_catalog_is_unknown_even_while_connection_is_ready(tmp_path):
                         unknown.dispatch_view.planning_input.mcp.source_snapshots,
                     )[0]
                 )["servers"][0]
-                assert value["public_status"] == "READY"
+                assert value["status"] == "READY"
                 assert value["catalog_complete"] is False
-                assert value["meta_tool_count"] is None
-                assert value["resource_count"] is None
+                assert "meta_tool_count" not in value
+                assert "resource_count" not in value
                 assert (
-                    value["native_unavailable_tools"][0]["reason"]
+                    value["unavailable_direct_tools"][0]["reason"]
                     == "SOURCE_UNAVAILABLE"
                 )
                 _, details, _ = runtime_rows(runtime, unknown, ModelInputScopeKind.ROOT)
